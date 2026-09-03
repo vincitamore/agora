@@ -194,7 +194,9 @@ and its exhibits in one thread so the humans can follow, and post the settled re
 (the bytes verdict, the merged fix) to the record surface as well.
 When several bearers share a seat, their replies to one another go in a thread too: the
 top level is for first contact, claims, cross-side requests and settled results, so the
-humans can read it in one pass.
+humans can read it in one pass. When you need a human's answer, mention them the way the
+transport does (Slack `<@U…>`, GitHub `@login`); a question without a mention is a message
+they may never see.
 
 **A session that goes dark is announced; do not wait on silence.** On every poll a watch
 checks the other sessions on this seat, and when one's process is gone and its record has
