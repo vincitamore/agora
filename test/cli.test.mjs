@@ -3,12 +3,17 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { existsSync } from "node:fs";
+import { setTimeout as delay } from "node:timers/promises";
 import { tmp } from "./helpers.mjs";
 
 const run = promisify(execFile);
 const BIN = new URL("../bin/agora.mjs", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
+
+/** The message lines of a `--json` watch: it ends with one watch-result line, fired or not. @param {string} stdout */
+const messages = (stdout) => stdout.trim().split(/\r?\n/).filter((l) => l.trim() && !l.includes('"type":"watch-result"'));
 
 /** @param {string[]} args @param {Record<string, string>} env */
 async function agora(args, env) {
@@ -63,7 +68,7 @@ test("cli end to end on a local room", async () => {
     r = await agora(["cursor", "down", "--reset"], env);
     r = await agora(["watch", "down", "--once", "--all", "--json"], env);
     assert.equal(r.code, 42, "--all delivers our own post");
-    assert.equal(JSON.parse(r.stdout.trim()).cursor, "1");
+    assert.equal(JSON.parse(messages(r.stdout)[0]).cursor, "1");
     r = await agora(["watch", "down", "--once"], env);
     assert.equal(r.code, 0, "cursor advanced; nothing re-delivered");
 
@@ -203,7 +208,7 @@ test("cli: a session with no position seeds once from the shared cursor and then
     assert.equal(JSON.parse(r.stdout).cursor, null);
     r = await agora(["watch", "down", "--once", "--json"], fresh);
     assert.equal(r.code, 42, "after a reset the watch reads from the start, not from the shared file");
-    assert.equal(r.stdout.trim().split("\n").length, 2);
+    assert.equal(messages(r.stdout).length, 2);
   } finally {
     await cleanup();
   }
@@ -218,6 +223,143 @@ test("cli refuses a config with an inline token and never echoes it", async () =
     assert.equal(r.code, 1);
     assert.match(r.stderr, /inline; use tokenEnv/);
     assert.doesNotMatch(r.stderr, /xoxb-secret/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("cli: every watch ends with one watch-result line, on stderr in human output and on stdout under --json", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const cfgPath = path.join(dir, "agora.json");
+    await writeFile(cfgPath, JSON.stringify({
+      actor: { name: "Grace", kind: "agent" },
+      rooms: { down: { transport: "local", path: path.join(dir, "down.ndjson") } },
+    }));
+    const env = { AGORA_CONFIG: cfgPath, AGORA_STATE: path.join(dir, "state"), AGORA_SESSION: "w", CLAUDE_PID: "" };
+
+    let r = await agora(["watch", "down", "--once"], env);
+    assert.equal(r.code, 0);
+    const quiet = JSON.parse(r.stderr.trim().split(/\r?\n/).at(-1) ?? "");
+    assert.deepEqual(quiet, { type: "watch-result", room: "down", session: "w", bearer: "Grace", fired: false, delivered: 0, skipped: 0, polls: 1, cursor: null, threads: {}, exit: 0 });
+    assert.equal(r.stdout, "", "nothing on stdout when nothing arrived");
+
+    await agora(["post", "down", "from them"], { ...env, AGORA_SESSION: "them" });
+    r = await agora(["watch", "down", "--once", "--json"], env);
+    assert.equal(r.code, 42);
+    const lines = r.stdout.trim().split(/\r?\n/);
+    const fired = JSON.parse(lines.at(-1) ?? "");
+    assert.equal(lines.length, 2, "the message, then the result line");
+    assert.equal(fired.type, "watch-result");
+    assert.deepEqual([fired.fired, fired.delivered, fired.exit, fired.cursor], [true, 1, 42, "1"]);
+    assert.doesNotMatch(r.stderr, /watch-result/, "under --json it is on stdout only");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("cli: a watch registers the cursor it holds while it runs, and a second watch on that key says so", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const cfgPath = path.join(dir, "agora.json");
+    await writeFile(cfgPath, JSON.stringify({
+      actor: { name: "Grace", kind: "agent" },
+      rooms: { down: { transport: "local", path: path.join(dir, "down.ndjson") } },
+    }));
+    const root = path.join(dir, "state");
+    const env = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "w", CLAUDE_PID: "" };
+    const armed = path.join(root, "sessions", "w", "armed", "down.json");
+
+    const running = agora(["watch", "down", "--stream", "--for", "3", "--interval", "1"], env);
+    let held;
+    for (let i = 0; i < 60 && !held; i++) {
+      if (existsSync(armed)) held = JSON.parse(await readFile(armed, "utf8"));
+      else await delay(50);
+    }
+    assert.ok(held, "the registration is there while the watch is");
+    assert.equal(held.room, "down");
+    assert.equal(held.interval, 1);
+    assert.ok(held.pid > 0);
+    await running;
+    assert.equal(existsSync(armed), false, "and gone when it leaves");
+
+    // this process is alive, so a watch finding it registered warns and carries on
+    await writeFile(armed, JSON.stringify({ room: "down", interval: 15, pid: process.pid, startedAt: new Date().toISOString() }));
+    const r = await agora(["watch", "down", "--once"], env);
+    assert.equal(r.code, 0, "a warning, never a refusal");
+    assert.match(r.stderr, /another watch holds this cursor \(pid \d+\); two watches on one key double-deliver/);
+    assert.equal(existsSync(armed), false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("cli: posting in a thread follows it, and --follow reads it; --follow with --thread is a usage error", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const cfgPath = path.join(dir, "agora.json");
+    await writeFile(cfgPath, JSON.stringify({
+      actor: { name: "Grace", kind: "agent" },
+      rooms: { down: { transport: "local", path: path.join(dir, "down.ndjson"), followCap: 8, threadInterval: 60 } },
+    }));
+    const root = path.join(dir, "state");
+    const A = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "a", CLAUDE_PID: "", AGORA_ACTOR: "Grace/watch" };
+    const B = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "b", CLAUDE_PID: "", AGORA_ACTOR: "Codex" };
+
+    let r = await agora(["post", "down", "the request"], A);
+    const parent = /posted (\S+)/.exec(r.stdout)?.[1];
+    assert.ok(parent);
+    await agora(["post", "down", "--thread", parent, "on it"], A);
+    const set = JSON.parse(await readFile(path.join(root, "sessions", "a", "follow", "down.json"), "utf8"));
+    assert.deepEqual(Object.keys(set.threads), [parent], "a threaded post joins the follow set");
+
+    await agora(["cursor", "down", "--now"], A);
+    await agora(["post", "down", "--thread", parent, "the exhibit"], B);
+    r = await agora(["watch", "down", "--once", "--follow", "--json"], A);
+    assert.equal(r.code, 42);
+    const result = JSON.parse(r.stdout.trim().split(/\r?\n/).at(-1) ?? "");
+    assert.equal(result.threads[parent], 1, "the reply came in on the followed thread");
+    assert.equal(result.delivered, 1, "and once, not twice");
+
+    r = await agora(["watch", "down", "--follow", "--thread", parent, "--once"], A);
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /cannot be combined with --thread/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("cli: doctor adds up the reads a minute this seat's live watches are spending", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const cfgPath = path.join(dir, "agora.json");
+    await writeFile(cfgPath, JSON.stringify({
+      actor: { name: "Grace", kind: "agent" },
+      rooms: { down: { transport: "local", path: path.join(dir, "down.ndjson"), pollBudget: 6 } },
+    }));
+    const root = path.join(dir, "state");
+    const env = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "a", CLAUDE_PID: "" };
+    const armedDir = path.join(root, "sessions", "a", "armed");
+    await agora(["session", "--as", "Grace/watch"], env);
+    await mkdir(armedDir, { recursive: true });
+    await writeFile(path.join(armedDir, "down.json"), JSON.stringify({ room: "down", interval: 15, threadInterval: 60, follow: true, pid: process.pid, startedAt: new Date().toISOString() }));
+    await mkdir(path.join(root, "sessions", "a", "follow"), { recursive: true });
+    await writeFile(path.join(root, "sessions", "a", "follow", "down.json"), JSON.stringify({ threads: { T1: new Date().toISOString(), T2: new Date().toISOString() } }));
+
+    let r = await agora(["doctor", "--offline"], env);
+    assert.equal(r.code, 0, "a rate over its budget is a warning, never an exit code");
+    assert.match(r.stdout, /seat poll rate {2}~6 reads\/min on local \(budget 6, 1 watch\)/, "four room reads a minute plus one for each followed thread");
+    assert.doesNotMatch(r.stdout, /WARNING this seat reads/);
+
+    await writeFile(path.join(armedDir, "down.json"), JSON.stringify({ room: "down", interval: 5, pid: process.pid, startedAt: new Date().toISOString() }));
+    r = await agora(["doctor", "--offline", "--json"], env);
+    const rate = r.stdout.trim().split(/\r?\n/).map((/** @type {string} */ l) => JSON.parse(l)).find((/** @type {any} */ o) => o.type === "poll-rate");
+    assert.deepEqual(rate, { type: "poll-rate", transport: "local", rate: 12, budget: 6, watches: 1, over: true });
+
+    // a registration whose process is gone is a leftover, and counts for nothing
+    await writeFile(path.join(armedDir, "down.json"), JSON.stringify({ room: "down", interval: 5, pid: 2 ** 30, startedAt: new Date().toISOString() }));
+    r = await agora(["doctor", "--offline"], env);
+    assert.doesNotMatch(r.stdout, /seat poll rate/);
   } finally {
     await cleanup();
   }

@@ -9,6 +9,10 @@ import {
   cursorKey,
   loadConfig,
   redact,
+  roomInterval,
+  roomNumber,
+  roomPollBudget,
+  roomThreadInterval,
   sign,
   stateDir,
   writeCursor,
@@ -20,17 +24,23 @@ import {
   appendPosted,
   harnessPid,
   identityLine,
+  listArmed,
   listRecords,
+  pidAlive,
+  readArmed,
   readCursorSeeded,
   readPosted,
   readRecord,
+  removeArmed,
   removeSession,
   resolveBearer,
   resolveSession,
   sessionDir,
   touchRecord,
+  writeArmed,
   writeRecord,
 } from "../src/session.mjs";
+import { FOLLOW_CAP, FOLLOW_IDLE_MINUTES, followThreads, readFollow, threadsOf } from "../src/follow.mjs";
 
 const require = createRequire(import.meta.url);
 const { version } = require("../package.json");
@@ -60,13 +70,15 @@ const SCHEMA = {
       args: ["<room>"],
       options: {
         "--thread <id>": "watch one thread",
+        "--follow": "also read the threads this session has posted in, at the slower thread interval",
         "--once": "one poll, then exit",
         "--stream": "keep delivering until --for elapses",
-        "--interval <s>": "seconds between polls (default 15)",
+        "--interval <s>": "seconds between room polls (default: the room's interval, else 15)",
+        "--thread-interval <s>": "seconds between reads of one followed thread (default: the room's threadInterval, else 60)",
         "--for <s>": "give up after this many seconds (default: never)",
         "--all": "deliver this side's own posts too (skipped by default)",
       },
-      does: "deliver new messages since this session's saved cursor and advance it after delivery, skipping what this session posted; exit 42 when something arrived, 0 when nothing did",
+      does: "deliver new messages since this session's saved cursor and advance it after delivery, skipping what this session posted; exit 42 when something arrived, 0 when nothing did; always ends with one watch-result line",
     },
     cursor: {
       args: ["<room>"],
@@ -98,6 +110,8 @@ const OPTIONS = /** @type {const} */ ({
   file: { type: "string" },
   stdin: { type: "boolean", default: false },
   "no-sign": { type: "boolean", default: false },
+  follow: { type: "boolean", default: false },
+  "thread-interval": { type: "string" },
   once: { type: "boolean", default: false },
   stream: { type: "boolean", default: false },
   all: { type: "boolean", default: false },
@@ -148,6 +162,29 @@ function num(s, what, fallback) {
   return n;
 }
 
+/**
+ * Reads a minute this seat is spending, per transport: every registered watch whose process is
+ * still there, at its own room interval, plus one read per followed thread at its thread interval.
+ * A registration whose pid is gone is a leftover from a killed process and counts for nothing.
+ * @param {import('../src/core.mjs').Config} cfg @param {string} stateRoot
+ * @returns {Promise<Map<string, { rate: number, budget: number, watches: number }>>}
+ */
+async function pollRates(cfg, stateRoot) {
+  /** @type {Map<string, { rate: number, budget: number, watches: number }>} */
+  const out = new Map();
+  for (const { dir, key, armed } of await listArmed(stateRoot)) {
+    if (!pidAlive(armed.pid)) continue;
+    const room = cfg.rooms[armed.room];
+    if (!room) continue;
+    const followed = armed.follow ? Object.keys((await readFollow(dir, key)).threads).length : 0;
+    const rate = 60 / roomInterval(room, armed.interval) + followed * (60 / roomThreadInterval(room, armed.threadInterval));
+    const budget = roomPollBudget(room);
+    const prev = out.get(room.transport) ?? { rate: 0, budget, watches: 0 };
+    out.set(room.transport, { rate: prev.rate + rate, budget: Math.max(prev.budget, budget), watches: prev.watches + 1 });
+  }
+  return out;
+}
+
 function usage() {
   const lines = [`agora ${version}: ${SCHEMA.description}`, "", "usage: agora <verb> [args] [options]", ""];
   for (const [verb, v] of Object.entries(SCHEMA.verbs)) {
@@ -190,6 +227,22 @@ async function main(argv) {
     else if (json) console.log(JSON.stringify({ ...rec, dir: sdir }));
     else console.log(line);
     return rec;
+  }
+
+  /**
+   * Note activity on threads in a room's follow set and return the set, oldest activity first.
+   * An eviction is announced: a thread that leaves the set stops reaching this session.
+   * @param {string} dir @param {string} alias @param {import('../src/core.mjs').RoomConfig} r @param {string[]} ids
+   */
+  async function follow(dir, alias, r, ids) {
+    const cap = roomNumber(r, "followCap", FOLLOW_CAP);
+    const res = await followThreads(dir, cursorKey(alias), ids, {
+      cap,
+      idleMinutes: roomNumber(r, "followIdleMinutes", FOLLOW_IDLE_MINUTES),
+    });
+    for (const id of res.evicted)
+      console.error(`agora: no longer following thread ${id} in ${alias}; the set holds ${cap}, oldest activity first`);
+    return res.threads;
   }
 
   if (verb === "session") {
@@ -260,6 +313,15 @@ async function main(argv) {
         if (cfg.sign === false && live.length > 1) console.log(`WARNING signing is off and ${live.length} sessions are live: no line in the room can be attributed to a bearer.`);
       }
     }
+    for (const [kind, r] of await pollRates(cfg, stateRoot)) {
+      const rate = Math.round(r.rate * 10) / 10;
+      const over = rate > r.budget;
+      if (json) console.log(JSON.stringify({ type: "poll-rate", transport: kind, rate, budget: r.budget, watches: r.watches, over }));
+      else {
+        console.log(`\nseat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} watch${r.watches === 1 ? "" : "es"})`);
+        if (over) console.log(`WARNING this seat reads ${kind} ~${rate} times a minute against a budget of ${r.budget}; raise the intervals or follow fewer threads.`);
+      }
+    }
     return bad ? EXIT.error : EXIT.ok;
   }
 
@@ -301,29 +363,83 @@ async function main(argv) {
       await identity();
       const r = await transport.post(body, { thread });
       await appendPosted(sdir, r.id);
+      if (thread) await follow(sdir, roomAlias, room, [thread]);
       console.log(json ? JSON.stringify({ ...r, room: transport.room, thread }) : `posted ${r.id}${r.url ? `  ${r.url}` : ""}  cursor ${r.cursor}`);
       return EXIT.ok;
     }
     case "watch": {
+      if (values.follow && thread)
+        throw new AgoraError(`--follow watches the room and the threads this session posted in; it cannot be combined with --thread`, EXIT.usage);
       const mode = values.once ? "once" : values.stream ? "stream" : "until-new";
       const key = cursorKey(roomAlias, thread);
+      const interval = roomInterval(room, num(values.interval, "interval"));
+      const threadInterval = roomThreadInterval(room, num(values["thread-interval"], "thread-interval"));
       await identity();
       const seeded = await readCursorSeeded(sdir, stateRoot, key);
       if (seeded.seeded) console.error(`agora: no position saved for this session yet; seeded from the shared ${key}.cursor (${seeded.cursor})`);
       else if (seeded.cursor === undefined) console.error(`agora: no position saved for ${key}; reading from the start (run \`agora cursor ${roomAlias}${thread ? ` --thread ${thread}` : ""} --now\` to start from the latest message)`);
-      const result = await watch(transport, {
-        stateDir: sdir,
-        key,
+
+      const held = await readArmed(sdir, key);
+      if (held && pidAlive(held.pid)) console.error(`agora: another watch holds this cursor (pid ${held.pid}); two watches on one key double-deliver`);
+      await writeArmed(sdir, key, {
+        room: roomAlias,
         thread,
-        cursor: seeded.cursor,
-        mode,
-        own: values.all ? undefined : () => readPosted(sdir),
-        interval: num(values.interval, "interval", 15),
-        forSeconds: num(values.for, "for", 0),
-        onBatch: (msgs) => printMessages(msgs, json),
+        interval,
+        threadInterval,
+        follow: values.follow,
+        pid: process.pid,
+        ...(harnessPid(cfg, process.env).pid !== undefined ? { harnessPid: harnessPid(cfg, process.env).pid } : {}),
+        since: seeded.cursor ?? null,
+        startedAt: new Date().toISOString(),
       });
+
+      /** @type {import('../src/watch.mjs').FollowedThreads | undefined} */
+      const threads = values.follow
+        ? {
+            ids: () => follow(sdir, roomAlias, room, []),
+            key: (id) => cursorKey(roomAlias, id),
+            cursor: async (id) => (await readCursorSeeded(sdir, stateRoot, cursorKey(roomAlias, id))).cursor,
+            interval: threadInterval,
+            note: async (msgs) => void (await follow(sdir, roomAlias, room, threadsOf(msgs))),
+          }
+        : undefined;
+
+      let result;
+      try {
+        result = await watch(transport, {
+          stateDir: sdir,
+          key,
+          thread,
+          cursor: seeded.cursor,
+          mode,
+          own: values.all ? undefined : () => readPosted(sdir),
+          interval,
+          forSeconds: num(values.for, "for", 0),
+          threads,
+          onBatch: (msgs) => printMessages(msgs, json),
+        });
+      } finally {
+        await removeArmed(sdir, key); // a thrown delivery must not leave the key registered
+      }
+      const exit = result.fired && mode !== "stream" ? EXIT.fired : EXIT.ok;
       if (!json && !result.fired) console.error(`nothing new after ${result.polls} poll${result.polls === 1 ? "" : "s"}${result.skipped ? ` (${result.skipped} of our own skipped)` : ""}`);
-      return result.fired && mode !== "stream" ? EXIT.fired : EXIT.ok;
+      // one machine-readable line, fired or not: an exit code does not survive a wrapper
+      const line = JSON.stringify({
+        type: "watch-result",
+        room: roomAlias,
+        session: session.slug,
+        bearer: bearer.name,
+        fired: result.fired,
+        delivered: result.delivered,
+        skipped: result.skipped,
+        polls: result.polls,
+        cursor: result.cursor ?? null,
+        threads: result.threads,
+        exit,
+      });
+      if (json) console.log(line);
+      else console.error(line);
+      return exit;
     }
     case "cursor": {
       const key = cursorKey(roomAlias, thread);

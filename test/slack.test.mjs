@@ -12,7 +12,7 @@ const history = [
   { ts: "1756900000.000100", user: "U2", text: "parent", thread_ts: "1756900000.000100", reply_count: 1 },
 ];
 
-function make({ rateLimitOnce = false } = {}) {
+function make({ rateLimitOnce = false, random = Math.random } = {}) {
   let limited = rateLimitOnce;
   /** @type {number[]} */
   const slept = [];
@@ -33,7 +33,7 @@ function make({ rateLimitOnce = false } = {}) {
     ["conversations.replies", () => ({ body: { ok: true, messages: [history[4], history[2]], has_more: false } })],
     ["chat.postMessage", (_url, init) => ({ body: { ok: true, ts: "1756900001.000000", channel: "C1", echo: JSON.parse(String(init?.body)) } })],
   ]);
-  const t = slackTransport({ transport: "slack", channel: "C0123ABC" }, { token: "xoxb-1", fetch, sleep: async (ms) => { slept.push(ms); } });
+  const t = slackTransport({ transport: "slack", channel: "C0123ABC" }, { token: "xoxb-1", fetch, random, sleep: async (ms) => { slept.push(ms); } });
   return { t, calls, slept };
 }
 
@@ -99,11 +99,20 @@ test("slack post carries thread_ts and returns ts as cursor", async () => {
   assert.equal(/** @type {any} */ (calls.at(-1)?.init?.headers).authorization, "Bearer xoxb-1");
 });
 
-test("slack 429 waits retry-after and retries", async () => {
+test("slack 429 waits retry-after and retries, jittered so limited callers do not all come back together", async () => {
   const { t, slept } = make({ rateLimitOnce: true });
   const msgs = await t.read();
   assert.equal(msgs.length, 3);
-  assert.deepEqual(slept, [1000]);
+  assert.equal(slept.length, 1);
+  assert.ok(slept[0] >= 900 && slept[0] <= 1100, `${slept[0]} is not within a tenth of the 1000 asked for`);
+
+  // with the randomness injected, both ends of the spread are exact
+  const low = make({ rateLimitOnce: true, random: () => 0 });
+  await low.t.read();
+  assert.deepEqual(low.slept, [900]);
+  const high = make({ rateLimitOnce: true, random: () => 1 });
+  await high.t.read();
+  assert.deepEqual(high.slept, [1100]);
 });
 
 test("slack whoami and api errors", async () => {

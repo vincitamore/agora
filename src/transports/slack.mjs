@@ -1,5 +1,5 @@
 // @ts-check
-import { AgoraError, parseSignature, sleep as defaultSleep } from "../core.mjs";
+import { AgoraError, jitter, parseSignature, sleep as defaultSleep } from "../core.mjs";
 
 const SKIP_SUBTYPES = new Set(["channel_join", "channel_leave", "group_join", "group_leave"]);
 
@@ -9,10 +9,10 @@ const SKIP_SUBTYPES = new Set(["channel_join", "channel_leave", "group_join", "g
  * The token is a bot token (xoxb-…) whose app has been invited to the channel.
  * Scopes: channels:history, channels:read, chat:write, groups:history, groups:read, users:read.
  * @param {import('../core.mjs').RoomConfig} room
- * @param {{ token: string, fetch?: typeof fetch, sleep?: (ms: number) => Promise<void> }} deps
+ * @param {{ token: string, fetch?: typeof fetch, sleep?: (ms: number) => Promise<void>, random?: () => number }} deps
  * @returns {import('../core.mjs').Transport}
  */
-export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep = defaultSleep }) {
+export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep = defaultSleep, random = Math.random }) {
   const channel = String(room.channel ?? "");
   if (!/^[A-Z][A-Z0-9]+$/.test(channel)) throw new AgoraError(`slack room needs a channel id (like C0123ABC), not a name`);
   const api = String(room.api ?? "https://slack.com/api").replace(/\/$/, "");
@@ -30,8 +30,10 @@ export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep
           })
         : await f(`${api}/${method}?${new URLSearchParams(params)}`, { headers: { authorization: `Bearer ${token}` } });
       if (res.status === 429) {
+        // every rate-limited watcher is handed the same retry-after, so the wait is jittered:
+        // without it a loose herd comes back as a tight one and limits itself again
         const wait = Number(res.headers.get("retry-after") ?? "2");
-        await sleep(Math.max(1, wait) * 1000);
+        await sleep(jitter(Math.max(1, wait) * 1000, random));
         continue;
       }
       /** @type {any} */
