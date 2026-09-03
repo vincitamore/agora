@@ -16,9 +16,9 @@ import path from "node:path";
  * suppression exists exactly as long as the watch does and is never a thing a
  * session has to remember to arm or to clear.
  *
- * The transcript lives at `~/.claude/projects/<slug of cwd>/<session id>.jsonl`,
- * the slug being the cwd with every character outside [A-Za-z0-9] replaced by
- * `-`. The sentinel is written only when that transcript exists: a wrong slug
+ * The transcript lives at `~/.claude/projects/<slug of the project root>/<session id>.jsonl`,
+ * the slug being the path with every character outside [A-Za-z0-9] replaced by
+ * `-`; the project root is the nearest ancestor of cwd that holds it. The sentinel is written only when that transcript exists: a wrong slug
  * or a foreign harness gets nothing, never a stray file.
  */
 
@@ -40,8 +40,20 @@ export function claudeProjectSlug(cwd) {
 export function watchModeSentinel(env, cwd, home = os.homedir()) {
   const id = env.CLAUDE_CODE_SESSION_ID;
   if (!id || !SESSION_ID.test(id)) return null;
-  const dir = path.join(home, ".claude", "projects", claudeProjectSlug(cwd));
-  return { dir, transcript: path.join(dir, `${id}.jsonl`), sentinel: path.join(dir, `${id}.watch-mode`) };
+  // The transcript is filed under the project the session was started in, and a
+  // watch is usually armed from a subdirectory of it (a repo inside the tree, a
+  // worktree). Walk up from cwd and take the first ancestor that has this
+  // session's transcript; with none found, fall back to cwd so touch writes nothing.
+  const candidates = [];
+  for (let dir = path.resolve(cwd); ; dir = path.dirname(dir)) {
+    candidates.push(dir);
+    if (path.dirname(dir) === dir) break;
+  }
+  const targets = candidates.map((root) => {
+    const dir = path.join(home, ".claude", "projects", claudeProjectSlug(root));
+    return { dir, transcript: path.join(dir, `${id}.jsonl`), sentinel: path.join(dir, `${id}.watch-mode`) };
+  });
+  return targets.find((t) => existsSync(t.transcript)) ?? targets[0];
 }
 
 /**

@@ -21,11 +21,15 @@ test("touch writes only beside an existing transcript; clear removes it; absent 
   const home = await mkdtemp(path.join(os.tmpdir(), "agora-harness-"));
   try {
     const env = { CLAUDE_CODE_SESSION_ID: "abcdef12-0000-4000-8000-000000000000" };
-    const target = watchModeSentinel(env, "/some/where", home);
+    let target = watchModeSentinel(env, "/some/where", home);
     assert.ok(target);
     assert.equal(await touchWatchMode(target), false, "no transcript, nothing written");
     await mkdir(target.dir, { recursive: true });
     await writeFile(target.transcript, "", "utf8");
+    const fromSubdir = watchModeSentinel(env, "/some/where/projects/agora", home);
+    assert.ok(fromSubdir);
+    assert.equal(fromSubdir.transcript, target.transcript, "a watch armed from a subdirectory finds the project root's transcript");
+    target = fromSubdir;
     const now = new Date("2026-09-03T23:40:00.000Z");
     assert.equal(await touchWatchMode(target, { now }), true);
     assert.equal(await readFile(target.sentinel, "utf8"), "2026-09-03T23:40:00.000Z\n");
