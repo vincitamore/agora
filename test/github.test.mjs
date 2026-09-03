@@ -11,10 +11,16 @@ const comments = [
   { id: 13, created_at: "2026-09-03T06:30:00Z", updated_at: "2026-09-03T06:30:00Z", body: "bot says", user: { login: "app[bot]", type: "Bot" }, html_url: "u13" },
 ];
 
-function make() {
+/** @param {{ etag?: string, cache?: any }} [opts] */
+function make(opts = {}) {
   const { fetch, calls } = fakeFetch([
     ["/user", () => ({ body: { id: 7, login: "vincitamore" } })],
     ["/issues/3/comments", (url, init) => {
+      if (opts.etag) {
+        const sent = /** @type {any} */ (init?.headers ?? {})["if-none-match"];
+        if (sent === opts.etag) return { status: 304 };
+        return { body: comments, headers: { etag: opts.etag } };
+      }
       if (init?.method === "POST") {
         const body = JSON.parse(String(init.body));
         return { status: 201, body: { id: 99, created_at: "2026-09-03T08:00:00Z", body: body.body, user: { login: "vincitamore", type: "User" }, html_url: "u99" } };
@@ -23,8 +29,15 @@ function make() {
       return { body: since ? comments.filter((c) => c.updated_at >= since) : comments };
     }],
   ]);
-  const t = githubTransport({ transport: "github", repo: "example-org/example-repo", issue: 3 }, { token: "ghp_x", fetch });
-  return { t, calls };
+  const t = githubTransport({ transport: "github", repo: "example-org/example-repo", issue: 3 }, { token: "ghp_x", fetch, cache: opts.cache });
+  return { t, calls, fetch };
+}
+
+/** A validator store that outlives a transport instance, as the file under a session does. */
+function memoryCache() {
+  /** @type {Map<string, string>} */
+  const m = new Map();
+  return { m, get: async (/** @type {string} */ k) => m.get(k), set: async (/** @type {string} */ k, /** @type {string} */ v) => void m.set(k, v) };
 }
 
 test("github room validates config", () => {
@@ -68,4 +81,24 @@ test("github room surfaces API errors with status and message", async () => {
   const { fetch } = fakeFetch([["/issues/3/comments", () => ({ status: 403, body: { message: "Resource not accessible" } })]]);
   const t = githubTransport({ transport: "github", repo: "a/b", issue: 3 }, { token: "t", fetch });
   await assert.rejects(() => t.read(), /403 Resource not accessible/);
+});
+
+test("github room sends the validator it was given last and reads a not-modified answer as an empty batch", async () => {
+  const cache = memoryCache();
+  const first = make({ etag: 'W/"abc123"', cache });
+  assert.equal((await first.t.read()).length, 4);
+  assert.equal(/** @type {any} */ (first.calls[0].init?.headers)["if-none-match"], undefined, "nothing to send the first time");
+  assert.equal(cache.m.size, 1, "and the validator is kept where a later process can find it");
+
+  const again = await first.t.read();
+  assert.deepEqual(again, [], "not modified is no messages, not an error");
+  assert.equal(/** @type {any} */ (first.calls.at(-1)?.init?.headers)["if-none-match"], 'W/"abc123"');
+
+  // a fresh instance holds nothing of its own: the store is what makes this survive a re-arm
+  const fresh = make({ etag: 'W/"abc123"', cache });
+  assert.deepEqual(await fresh.t.read(), []);
+  assert.equal(/** @type {any} */ (fresh.calls.at(-1)?.init?.headers)["if-none-match"], 'W/"abc123"');
+
+  const uncached = make({ etag: 'W/"abc123"' });
+  assert.equal((await uncached.t.read()).length, 4, "with no store the first read of each process is unconditional");
 });

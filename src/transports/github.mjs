@@ -13,15 +13,23 @@ function decodeCursor(cursor) {
   return { ts, id: Number(id ?? 0) };
 }
 
+/** What a read returns when the record has not changed since the validator we sent. */
+const NOT_MODIFIED = Symbol("not-modified");
+
 /**
  * A room that is one GitHub issue: comments are the messages, and there are no threads.
  * Config: { transport: "github", repo: "owner/name", issue: 3, tokenEnv | tokenFile }.
  * Without a token reference the GitHub CLI's signed-in token is used.
+ *
+ * Reads are conditional: the validator from each response is kept and sent back on the next
+ * request for that URL, and a not-modified answer is an empty batch that costs nothing against
+ * the rate limit. `cache` makes the validators outlive the process, which is the only way they
+ * help a watch that re-arms; without one they last as long as this transport instance.
  * @param {import('../core.mjs').RoomConfig} room
- * @param {{ token: string, fetch?: typeof fetch }} deps
+ * @param {{ token: string, fetch?: typeof fetch, cache?: { get: (key: string) => Promise<string | undefined>, set: (key: string, value: string) => Promise<void> } }} deps
  * @returns {import('../core.mjs').Transport}
  */
-export function githubTransport(room, { token, fetch: f = globalThis.fetch }) {
+export function githubTransport(room, { token, fetch: f = globalThis.fetch, cache }) {
   const repo = String(room.repo ?? "");
   const issue = Number(room.issue);
   if (!REPO_RE.test(repo)) throw new AgoraError(`github room needs repo as "owner/name"`);
@@ -29,10 +37,23 @@ export function githubTransport(room, { token, fetch: f = globalThis.fetch }) {
   const api = String(room.api ?? "https://api.github.com").replace(/\/$/, "");
   const roomName = `${repo}#${issue}`;
 
-  /** @param {string} pathname @param {{ method?: string, body?: unknown, params?: Record<string, string> }} [opts] */
-  async function call(pathname, { method = "GET", body, params } = {}) {
+  /** @type {Map<string, string>} */
+  const validators = new Map();
+
+  /** @param {string} key */
+  async function validator(key) {
+    if (validators.has(key)) return validators.get(key);
+    const v = await cache?.get(key);
+    if (v) validators.set(key, v);
+    return v;
+  }
+
+  /** @param {string} pathname @param {{ method?: string, body?: unknown, params?: Record<string, string>, conditional?: boolean }} [opts] */
+  async function call(pathname, { method = "GET", body, params, conditional = false } = {}) {
     const url = new URL(`${api}${pathname}`);
     for (const [k, v] of Object.entries(params ?? {})) url.searchParams.set(k, v);
+    const key = url.toString();
+    const etag = conditional ? await validator(key) : undefined;
     const res = await f(url, {
       method,
       headers: {
@@ -40,10 +61,19 @@ export function githubTransport(room, { token, fetch: f = globalThis.fetch }) {
         accept: "application/vnd.github+json",
         "x-github-api-version": "2022-11-28",
         "user-agent": "agora",
+        ...(etag ? { "if-none-match": etag } : {}),
         ...(body !== undefined ? { "content-type": "application/json" } : {}),
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
+    if (conditional && res.status === 304) return NOT_MODIFIED;
+    if (conditional) {
+      const tag = res.headers.get("etag");
+      if (tag && validators.get(key) !== tag) {
+        validators.set(key, tag);
+        await cache?.set(key, tag);
+      }
+    }
     const text = await res.text();
     /** @type {any} */
     let json = undefined;
@@ -93,7 +123,8 @@ export function githubTransport(room, { token, fetch: f = globalThis.fetch }) {
         /** @type {Record<string, string>} */
         const params = { per_page: "100", page: String(page) };
         if (from) params.since = from.ts;
-        const batch = await call(`/repos/${repo}/issues/${issue}/comments`, { params });
+        const batch = await call(`/repos/${repo}/issues/${issue}/comments`, { params, conditional: true });
+        if (batch === NOT_MODIFIED) break; // the record has not changed: an empty batch, not an error
         if (!Array.isArray(batch) || batch.length === 0) break;
         for (const c of batch) {
           const created = String(c.created_at);

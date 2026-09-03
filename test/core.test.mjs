@@ -1,7 +1,7 @@
 // @ts-check
 import test from "node:test";
 import assert from "node:assert/strict";
-import { cursorKey, parseSignature, readCursor, redact, sign, validateConfig, writeCursor } from "../src/core.mjs";
+import { cursorKey, fragilePath, jitter, parseSignature, readCursor, redact, roomInterval, roomThreadInterval, sign, validateConfig, writeCursor } from "../src/core.mjs";
 import { actor, tmp } from "./helpers.mjs";
 
 test("validateConfig accepts a minimal config", () => {
@@ -52,4 +52,35 @@ test("cursor round trip and key sanitising", async () => {
   } finally {
     await cleanup();
   }
+});
+
+test("a room's poll interval: the flag, then the room, then what the transport is for", () => {
+  const slack = { transport: "slack", channel: "C1" };
+  const issue = { transport: "github", repo: "a/b", issue: 3 };
+  assert.equal(roomInterval(slack), 15, "a chat is read at chat latency");
+  assert.equal(roomInterval(issue), 300, "a record is not");
+  assert.equal(roomInterval({ ...issue, interval: 60 }), 60, "the room says so");
+  assert.equal(roomInterval(issue, 30), 30, "the flag says so");
+  assert.equal(roomInterval({ ...issue, interval: 0 }), 300, "a value that is not a positive number is not a value");
+  assert.equal(roomThreadInterval(slack), 60);
+  assert.equal(roomThreadInterval({ ...slack, threadInterval: 120 }), 120);
+  assert.equal(roomThreadInterval(slack, 15), 15);
+});
+
+test("jitter spreads a wait by a tenth either way", () => {
+  assert.equal(jitter(1000, () => 0.5), 1000);
+  assert.equal(jitter(1000, () => 0), 900);
+  assert.equal(jitter(1000, () => 1), 1100);
+  for (let i = 0; i < 200; i++) {
+    const ms = jitter(15000);
+    assert.ok(ms >= 13500 && ms <= 16500, `${ms}`);
+  }
+});
+
+test("a room path that loses lines is named by what is wrong with it", () => {
+  assert.equal(fragilePath("/mnt/c/agora/room.ndjson"), "a filesystem translation layer");
+  assert.equal(fragilePath("C:/Users/a/OneDrive/room.ndjson"), "a syncing folder (OneDrive)");
+  assert.equal(fragilePath("/home/a/Google Drive/room.ndjson"), "a syncing folder (Google Drive)");
+  assert.equal(fragilePath("/home/a/rooms/room.ndjson"), undefined);
+  assert.equal(fragilePath("C:/Users/a/Documents/room.ndjson"), undefined);
 });

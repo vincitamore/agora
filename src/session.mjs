@@ -320,6 +320,45 @@ export function ageHours(rec, now = new Date()) {
   return (now.getTime() - new Date(rec.lastSeen).getTime()) / 3_600_000;
 }
 
+const ETAG_MAX = 64;
+const ETAG_KEEP = 32;
+const etagPath = (/** @type {string} */ dir) => path.join(dir, "etags.json");
+
+/**
+ * Where a transport keeps its cache validators between processes: one small JSON map under the
+ * session, written when a value changes. A validator that does not survive a re-arm buys nothing,
+ * because a watch is a fresh process every time.
+ * @param {string} dir
+ * @returns {{ get: (key: string) => Promise<string | undefined>, set: (key: string, value: string) => Promise<void> }}
+ */
+export function etagCache(dir) {
+  /** @returns {Promise<Record<string, string>>} */
+  const read = async () => {
+    try {
+      const m = JSON.parse(await readFile(etagPath(dir), "utf8"));
+      return m && typeof m === "object" ? m : {};
+    } catch {
+      return {};
+    }
+  };
+  return {
+    async get(key) {
+      const v = (await read())[key];
+      return typeof v === "string" ? v : undefined;
+    },
+    async set(key, value) {
+      const map = await read();
+      if (map[key] === value) return;
+      delete map[key]; // re-inserted last, so the oldest entry is the first key
+      map[key] = value;
+      const keys = Object.keys(map);
+      const kept = keys.length > ETAG_MAX ? Object.fromEntries(keys.slice(-ETAG_KEEP).map((k) => [k, map[k]])) : map;
+      await mkdir(dir, { recursive: true });
+      await writeFile(etagPath(dir), JSON.stringify(kept, null, 2) + "\n", "utf8");
+    },
+  };
+}
+
 /**
  * Does this pid answer a signal? A process this user may not signal (EPERM) is still a process;
  * only ESRCH means gone. Used for a watch's own pid, which carries no boot epoch of its own.

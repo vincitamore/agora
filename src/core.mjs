@@ -277,10 +277,14 @@ export function roomNumber(room, field, fallback) {
   return Number.isFinite(v) && v > 0 ? v : fallback;
 }
 
-/** Seconds between room polls: the flag, then the room's own `interval`, then the default. @param {RoomConfig} room @param {number} [override] */
+/**
+ * Seconds between room polls: the flag, then the room's own `interval`, then the transport's
+ * default. A room that is a record rather than a chat does not need fifteen-second latency.
+ * @param {RoomConfig} room @param {number} [override]
+ */
 export function roomInterval(room, override) {
   if (override !== undefined) return override;
-  return roomNumber(room, "interval", 15);
+  return roomNumber(room, "interval", room.transport === "github" ? 300 : 15);
 }
 
 /** Seconds between reads of one followed thread. @param {RoomConfig} room @param {number} [override] */
