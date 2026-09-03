@@ -40,6 +40,30 @@ test("Codex queue sends each delivery in order to the current Desktop task", asy
   assert.match(calls[1].args[4], /from Fable\/review/);
 });
 
+test("Codex queue serializes a burst instead of starting later deliveries concurrently", async () => {
+  /** @type {() => void} */
+  let releaseFirst = () => {};
+  /** @type {Promise<void>} */
+  const firstHeld = new Promise((resolve) => { releaseFirst = () => resolve(); });
+  /** @type {string[]} */
+  const started = [];
+  const second = { ...message, id: "m2", cursor: "2", text: "next" };
+  const queued = queueCodex("slopcannon", [message, second], {
+    env: { CODEX_THREAD_ID: "task-123" },
+    run: /** @type {any} */ (async (/** @type {string} */ _file, /** @type {string[]} */ args) => {
+      started.push(args[4]);
+      if (started.length === 1) await firstHeld;
+      return { stdout: "", stderr: "" };
+    }),
+  });
+  assert.equal(started.length, 1, "the second delivery waits for the first queue call");
+  releaseFirst();
+  await queued;
+  assert.equal(started.length, 2);
+  assert.match(started[0], /cursor 1788475881\.165359/);
+  assert.match(started[1], /cursor 2/);
+});
+
 test("Codex queue fails before consuming a delivery when no Desktop task id exists", async () => {
   await assert.rejects(() => queueCodex("slopcannon", [message], { env: {} }), /CODEX_THREAD_ID or CODEX_SESSION_ID/);
 });
