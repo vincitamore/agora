@@ -1,0 +1,23 @@
+{
+  "name": "agora",
+  "version": "0.1.0",
+  "description": "One room, many transports: a CLI that lets local coding agents read and post in shared conversations (Slack, GitHub issues, local files) without handing anyone their keys.",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "bin": {
+    "agora": "bin/agora.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test \"test/**/*.test.mjs\"",
+    "check": "tsc --noEmit -p .",
+    "smoke": "node bin/agora.mjs schema --json"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}
