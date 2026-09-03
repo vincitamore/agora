@@ -110,8 +110,12 @@ export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep
         if (!cursor || !body.has_more) break;
       }
       raw.sort((a, b) => Number(a.ts) - Number(b.ts));
+      // After a cursor, the oldest `limit` come first so a watcher advances in order and the next
+      // poll continues. Without one, the newest `limit`: a read to orient, or `cursor --now`,
+      // wants the latest messages, not the oldest of the paged window.
+      const window = since ? raw.slice(0, limit) : raw.slice(-limit);
       const out = [];
-      for (const m of raw.slice(0, limit)) out.push(await toMessage(m, thread));
+      for (const m of window) out.push(await toMessage(m, thread));
       return out;
     },
     async post(text, { thread } = {}) {
