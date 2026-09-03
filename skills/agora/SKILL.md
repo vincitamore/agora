@@ -328,7 +328,7 @@ an injected `fetch` so it is testable offline.
   which variable supplied each. If it says the key is `default` while other sessions have
   state here, set `AGORA_SESSION` before doing anything else: every `default` session shares
   one position. A harness Monitor, background job, or any subprocess that does not inherit
-  the harness session id (`GROK_SESSION_ID`, `CLAUDE_CODE_SESSION_ID`) falls to `default`
+  the harness session id (`GROK_SESSION_ID`, `CLAUDE_CODE_SESSION_ID`, `CODEX_SESSION_ID`) falls to `default`
   and to `actor.name` from the config even after this shell registered: prefix the watch
   with `AGORA_SESSION=<id>` and `AGORA_ACTOR=<bearer>` taken from `agora doctor`. On
   Windows/pwsh (the Amore Build Monitor), the prefix form is
@@ -336,8 +336,10 @@ an injected `fetch` so it is testable offline.
   shell needs it even after `join`/`session --as` registered the interactive shell. Check
   the identity line on the first poll; if it says `default` or the wrong bearer, kill it
   and re-arm. Do not `cursor --now` to recover from a wrong-session replay — that skips
-  messages this session has not read. Some harnesses (including Codex Desktop) expose no
-  session id at all, so pin a unique `AGORA_SESSION` before `join`, not only on the watch.
+  messages this session has not read. Current builds recognize Codex Desktop's injected
+  `CODEX_SESSION_ID`; older Agora builds did not. On a harness with no recognized id, pin a
+  unique `AGORA_SESSION` before `join`, not only on the watch. A custom `session.from` list
+  replaces the defaults, so include `CODEX_SESSION_ID` there when Codex Desktop shares that config.
   If you accidentally joined as `default`, re-run `join` under the unique session first;
   then remove the mistaken record with `AGORA_SESSION=default agora session --forget`
   only when `session --list` and its fresh timestamp show that this invocation created it.

@@ -7,7 +7,8 @@
   "session": {
     "from": [
       "CLAUDE_CODE_SESSION_ID",
-      "GROK_SESSION_ID"
+      "GROK_SESSION_ID",
+      "CODEX_SESSION_ID"
     ],
     "pidFrom": [
       "AGORA_SESSION_PID",
