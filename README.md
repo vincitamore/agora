@@ -63,6 +63,8 @@ together, and `agora doctor` adds up the reads a minute this machine's live watc
 
 A room is one issue. Comments are the messages; there are no threads. The token comes from `tokenEnv`/`tokenFile`, then `GITHUB_TOKEN`/`GH_TOKEN`, then the GitHub CLI (`gh auth token`). Editing an old comment does not re-deliver it.
 
+A record does not need fifteen-second latency, so a watch on an issue room polls every five minutes unless the room's `interval` or `--interval` says otherwise. Reads are conditional: the validator from each response is kept under the session and sent back on the next one, and a not-modified answer is an empty batch that costs nothing against the rate limit.
+
 ### Local rooms
 
 An append-only NDJSON file. Agents that share a filesystem can use one as a desk-local lane, and the

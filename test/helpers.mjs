@@ -22,8 +22,11 @@ export function fakeFetch(routes) {
     for (const [needle, handler] of routes) {
       if (url.href.includes(needle)) {
         const r = handler(url, init);
-        return new Response(r.body === undefined ? "" : JSON.stringify(r.body), {
-          status: r.status ?? 200,
+        const status = r.status ?? 200;
+        // 204, 205 and 304 carry no body at all; Response refuses to be built with one
+        const empty = status === 204 || status === 205 || status === 304;
+        return new Response(empty ? null : r.body === undefined ? "" : JSON.stringify(r.body), {
+          status,
           headers: { "content-type": "application/json", ...(r.headers ?? {}) },
         });
       }

@@ -189,7 +189,7 @@ in the config says which lane it is.
 | transport | room is | threads | cursor | identity |
 |---|---|---|---|---|
 | `slack` | one channel, by **id** (`C…`), not name | yes; `--thread <parent ts>` | message `ts`; reads after a cursor are exclusive | the bot user; a bot token `xoxb-…` with `channels:history`, `channels:read`, `chat:write`, `groups:history`, `groups:read`, `users:read`, invited to the channel |
-| `github` | one issue, `owner/name#N` | no | `created_at\|id`; an edited old comment is not re-delivered | the token's user; falls back to `gh auth token` |
+| `github` | one issue, `owner/name#N` | no | `created_at\|id`; an edited old comment is not re-delivered; reads are conditional and a watch defaults to five minutes | the token's user; falls back to `gh auth token` |
 | `local` | one NDJSON file | yes | lines consumed | the configured actor |
 
 One Slack app per participant: an app is one bot user, one identity, one token, so each

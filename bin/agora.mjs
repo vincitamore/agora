@@ -24,6 +24,7 @@ import { watch } from "../src/watch.mjs";
 import {
   ageHours,
   appendPosted,
+  etagCache,
   harnessPid,
   identityLine,
   listArmed,
@@ -421,7 +422,7 @@ async function main(argv) {
   if (!roomAlias) throw new AgoraError(`${verb} needs a room (one of: ${Object.keys(cfg.rooms).join(", ")})`, EXIT.usage);
   const room = cfg.rooms[roomAlias];
   if (!room) throw new AgoraError(`no room "${roomAlias}" (have: ${Object.keys(cfg.rooms).join(", ")})`, EXIT.usage);
-  const transport = await createTransport(roomAlias, room, cfg);
+  const transport = await createTransport(roomAlias, room, cfg, { cache: etagCache(sdir) });
   const thread = values.thread;
   if (thread && !transport.threads) throw new AgoraError(`${transport.kind} rooms have no threads`, EXIT.usage);
 

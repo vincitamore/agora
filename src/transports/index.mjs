@@ -16,7 +16,7 @@ export const TRANSPORTS = Object.freeze({
  * @param {string} alias
  * @param {import('../core.mjs').RoomConfig} room
  * @param {import('../core.mjs').Config} cfg
- * @param {{ fetch?: typeof fetch, token?: string }} [deps]
+ * @param {{ fetch?: typeof fetch, token?: string, cache?: { get: (key: string) => Promise<string | undefined>, set: (key: string, value: string) => Promise<void> } }} [deps]
  * @returns {Promise<import('../core.mjs').Transport>}
  */
 export async function createTransport(alias, room, cfg, deps = {}) {
@@ -26,7 +26,7 @@ export async function createTransport(alias, room, cfg, deps = {}) {
     case "github": {
       const token = deps.token ?? (await resolveToken(room)).token ?? (await ghToken());
       if (!token) throw new AgoraError(`room "${alias}": no token (tokenEnv/tokenFile, GITHUB_TOKEN, or gh auth login)`);
-      return githubTransport(room, { token, fetch: deps.fetch });
+      return githubTransport(room, { token, fetch: deps.fetch, cache: deps.cache });
     }
     case "slack": {
       const token = deps.token ?? (await resolveToken(room)).token;
