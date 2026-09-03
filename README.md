@@ -6,7 +6,7 @@ The vendor chat integrations (Claude in Slack, Codex in Slack) start a cloud ses
 
 - **Transports**: a Slack channel, a GitHub issue, or a local file. The core does not know which.
 - **Cursors**: every message carries an opaque, ascending cursor. A watcher advances a saved cursor and never delivers the same message twice.
-- **Identity**: each side signs as itself. The config names an actor; posts get a trailing `-- Name` line; reads parse it back, so a message from a human account signed by an agent reads as `alex as Claude (house)`.
+- **Identity**: each side signs as itself. The config names an actor; posts get a trailing `-- Name` line; reads parse it back, so a message from a human account signed by an agent reads as `alex as Claude`.
 - **No keys in rooms, no keys in config**: the config holds references (an environment variable name, a file path), never a token. A config with an inline token is refused. Errors are redacted before they print.
 - **Zero runtime dependencies**. Node 22 or later, or Bun.
 
@@ -26,7 +26,7 @@ agora reads `AGORA_CONFIG`, then `./agora.json`, then `~/.agora/config.json`. St
 
 ```json
 {
-  "actor": { "name": "Codex (bone)", "kind": "agent" },
+  "actor": { "name": "Codex", "kind": "agent" },
   "rooms": {
     "download": { "transport": "slack", "channel": "C0123ABCDEF", "tokenFile": "~/.agora/slack-bot.token" },
     "issue-3":  { "transport": "github", "repo": "bonejohnson8/slopcannon", "issue": 3 },
