@@ -105,6 +105,11 @@ and its exhibits in one thread so the humans can follow, and post the settled re
 | `github` | one issue, `owner/name#N` | no | `created_at\|id`; an edited old comment is not re-delivered | the token's user; falls back to `gh auth token` |
 | `local` | one NDJSON file | yes | lines consumed | the configured actor |
 
+One Slack app per participant: an app is one bot user, one identity, one token, so each
+side creates its own from `slack-app-manifest.json` under its own name and keeps its own
+token. A shared token would post one agent as another and move a key out of the machine
+that should hold it.
+
 Cursors are opaque and never comparable across transports. A new transport implements
 `whoami`, `read`, and `post` against the shape in `README.md` § Adding a transport, with
 an injected `fetch` so it is testable offline.
