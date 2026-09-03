@@ -7,7 +7,9 @@ import {
   AgoraError,
   EXIT,
   cursorKey,
+  fragilePath,
   loadConfig,
+  resolvePath,
   redact,
   roomInterval,
   roomNumber,
@@ -354,7 +356,12 @@ async function main(argv) {
   if (verb === "rooms") {
     for (const [alias, room] of Object.entries(cfg.rooms)) {
       const where = room.transport === "github" ? `${room.repo}#${room.issue}` : room.transport === "slack" ? String(room.channel) : String(room.path ?? "");
-      console.log(json ? JSON.stringify({ alias, transport: room.transport, room: where }) : `${alias.padEnd(16)} ${room.transport.padEnd(8)} ${where}`);
+      const note = typeof room.note === "string" ? room.note : undefined;
+      if (json) console.log(JSON.stringify({ alias, transport: room.transport, room: where, ...(note ? { note } : {}) }));
+      else {
+        console.log(`${alias.padEnd(16)} ${room.transport.padEnd(8)} ${where}`);
+        if (note) console.log(`${"".padEnd(16)} note: ${note}`);
+      }
     }
     return EXIT.ok;
   }
@@ -364,6 +371,11 @@ async function main(argv) {
     for (const [alias, room] of Object.entries(cfg.rooms)) {
       /** @type {Record<string, unknown>} */
       const report = { alias, transport: room.transport, token: await tokenSource(room) };
+      if (typeof room.note === "string") report.note = room.note;
+      if (room.transport === "local" && typeof room.path === "string") {
+        const why = fragilePath(room.path) ?? fragilePath(resolvePath(room.path));
+        if (why) report.warning = `this room's file sits behind ${why}: a local room there loses lines silently, because every surviving line still parses and every id is still unique. Every writer must reach it through the same native filesystem.`;
+      }
       if (report.token === "missing" && TRANSPORTS[/** @type {keyof typeof TRANSPORTS} */ (room.transport)]?.needsToken) bad++;
       if (!values.offline && report.token !== "missing") {
         try {
@@ -374,7 +386,12 @@ async function main(argv) {
           bad++;
         }
       }
-      console.log(json ? JSON.stringify(report) : `${alias.padEnd(16)} ${String(report.transport).padEnd(8)} token=${report.token}` + (report.identity ? `  as ${/** @type {any} */ (report.identity).name}` : "") + (report.error ? `  ERROR ${report.error}` : ""));
+      if (json) console.log(JSON.stringify(report));
+      else {
+        console.log(`${alias.padEnd(16)} ${String(report.transport).padEnd(8)} token=${report.token}` + (report.identity ? `  as ${/** @type {any} */ (report.identity).name}` : "") + (report.error ? `  ERROR ${report.error}` : ""));
+        if (report.note) console.log(`${"".padEnd(16)} note: ${report.note}`);
+        if (report.warning) console.log(`${"".padEnd(16)} WARNING ${report.warning}`);
+      }
     }
     if (!json) {
       console.log(`config  ${cfg.path}\nstate   ${sdir}\nsession ${session.slug} (from ${session.source})${record ? "" : "  (unregistered: run `agora session --as <bearer>`)"}\nbearer  ${bearer.name} (${cfg.actor.kind}, from ${bearer.source})`);

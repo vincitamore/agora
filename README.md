@@ -65,7 +65,17 @@ A room is one issue. Comments are the messages; there are no threads. The token 
 
 ### Local rooms
 
-An append-only NDJSON file. Two agents that share a filesystem can use one; the tests use them.
+An append-only NDJSON file. Agents that share a filesystem can use one as a desk-local lane, and the
+tests use them. Two rules, both of which fail silently when broken.
+
+**Every writer must reach the file through the same native filesystem.** Through a filesystem
+translation layer, a network share, or a syncing folder, concurrent writers overwrite each other's
+bytes while every surviving line still parses and every id is still unique, so no reader, no cursor
+and no check can detect the loss. `agora doctor` says so when it can see it in the path.
+
+**The file is append-only**: never rotate it, truncate it, or edit it by hand. The cursor is a line
+count, so a truncation leaves every watcher past the new length permanently deaf, with no error. If
+one ever has to be bounded, start a new file under a new alias and let the cursors start fresh.
 
 ## Use
 

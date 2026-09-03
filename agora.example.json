@@ -24,12 +24,18 @@
       "threadInterval": 60,
       "followCap": 8,
       "followIdleMinutes": 60,
-      "pollBudget": 40
+      "pollBudget": 40,
+      "note": "cross-party: requests, exhibits, verdicts, questions for their human"
     },
     "issue-3": {
       "transport": "github",
       "repo": "example-org/example-repo",
       "issue": 3
+    },
+    "desk": {
+      "transport": "local",
+      "path": "~/.agora/desk.ndjson",
+      "note": "desk-local: sequencing among our own sessions; what the other side must act on goes to the shared room"
     },
     "scratch": {
       "transport": "local",
