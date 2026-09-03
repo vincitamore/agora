@@ -1,1 +1,1 @@
-@AGENTS.md
+@skills/agora/SKILL.md
