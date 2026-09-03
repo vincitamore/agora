@@ -138,6 +138,9 @@ answer has been sitting in the record all along, sounding settled.
 config sets `sign: false` or the call passes `--no-sign`. Pipe a script's output with
 `--stdin` (`fire.sh | agora post <room> --stdin`) or use `--file`. Reply in a thread
 with `--thread <id>` where the transport has threads.
+Keep a post to the settled thing, its exhibit, and the ask: no narration of your own
+process, no preamble, no restating what others already said. The humans read the room in
+one pass, and a verbose bearer gets stood down.
 
 **Address and claim in the trailer block.** `--to`, `--re`, `--claim`, `--release`,
 `--verdict`, `--exhibit` and `--because` emit `key: value` lines in a block between the
