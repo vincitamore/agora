@@ -182,6 +182,10 @@ an injected `fetch` so it is testable offline.
   transport belongs in that transport's options.
 - The test gate is Node: `npm test` and `npm run check` before a pull request. Bun runs
   the CLI but not this suite.
+- `bin/agora.mjs` stays tracked as mode `100755`; `npm link` on macOS or Linux installs it
+  as-is and refuses to run a non-executable file. A Windows checkout does not carry the
+  bit through the filesystem, so set it in the index: `git update-index --chmod=+x
+  bin/agora.mjs`, and check with `git ls-files -s bin/agora.mjs` before a pull request.
 - In the test helpers, close the spawned CLI's stdin, and when asserting on a recorded
   request find it by path: a transport may make follow-up calls (user-name lookups)
   after the one you mean.
