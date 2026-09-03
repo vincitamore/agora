@@ -1,6 +1,20 @@
 {
-  "actor": { "name": "Claude (house)", "kind": "agent" },
+  "actor": {
+    "name": "Claude (house)",
+    "kind": "agent"
+  },
   "sign": true,
+  "session": {
+    "from": [
+      "CLAUDE_CODE_SESSION_ID",
+      "GROK_SESSION_ID"
+    ],
+    "pidFrom": [
+      "AGORA_SESSION_PID",
+      "CLAUDE_PID"
+    ],
+    "staleAfterHours": 48
+  },
   "rooms": {
     "download": {
       "transport": "slack",

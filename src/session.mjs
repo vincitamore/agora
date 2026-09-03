@@ -1,6 +1,7 @@
 // @ts-check
-import { appendFile, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { AgoraError, EXIT, readCursorFile, writeCursor } from "./core.mjs";
 
@@ -77,13 +78,17 @@ export async function listSessions(stateRoot) {
 }
 
 /**
- * --as on the call, then AGORA_ACTOR, then the shared config's actor.name.
+ * --as on the call, then AGORA_ACTOR, then this session's record, then the shared config's actor.name.
  * @param {import('./core.mjs').Config} cfg
- * @param {{ as?: string, env: NodeJS.ProcessEnv }} opts
+ * @param {{ as?: string, env: NodeJS.ProcessEnv, record?: { bearer: string } }} opts
  * @returns {Bearer}
  */
-export function resolveBearer(cfg, { as, env }) {
-  const pick = as !== undefined ? { name: as, source: "--as" } : env.AGORA_ACTOR !== undefined ? { name: env.AGORA_ACTOR, source: "AGORA_ACTOR" } : { name: cfg.actor.name, source: "config" };
+export function resolveBearer(cfg, { as, env, record }) {
+  const pick =
+    as !== undefined ? { name: as, source: "--as" }
+    : env.AGORA_ACTOR !== undefined ? { name: env.AGORA_ACTOR, source: "AGORA_ACTOR" }
+    : record ? { name: record.bearer, source: "session" }
+    : { name: cfg.actor.name, source: "config" };
   const name = pick.name.trim();
   if (pick.source !== "config" && (!BEARER_RE.test(name) || name.length > BEARER_MAX))
     throw new AgoraError(`${pick.source} must be a bearer path like Grace or Grace/watch (letters, digits, . _ -; segments joined by /; at most ${BEARER_MAX} characters)`, EXIT.usage);
@@ -181,4 +186,136 @@ export async function identityLine(bearer, session, stateRoot) {
 /** @param {string} stateRoot */
 export function hasLegacyState(stateRoot) {
   return existsSync(stateRoot);
+}
+
+/**
+ * The session record: who this session is, written once by `session --as` and touched on every
+ * later call. It is the one registry of sessions on a seat; liveness is derived from it, never
+ * kept anywhere else.
+ * @typedef {object} SessionRecord
+ * @property {string} slug
+ * @property {string} source
+ * @property {string} [label]
+ * @property {string} bearer
+ * @property {number} [pid]
+ * @property {string} [pidSource]
+ * @property {number} bootEpoch
+ * @property {string} startedAt
+ * @property {string} lastSeen
+ */
+
+export const DEFAULT_PID_FROM = Object.freeze(["AGORA_SESSION_PID", "CLAUDE_PID"]);
+const recordPath = (/** @type {string} */ dir) => path.join(dir, "session.json");
+
+/** Seconds since the epoch at which this machine booted; a pid is meaningless across a reboot. */
+export function bootEpoch() {
+  return Math.round(Date.now() / 1000 - os.uptime());
+}
+
+/**
+ * The process that outlives this command: the harness, named by the first set variable in
+ * `session.pidFrom`. The command's own pid is a fresh one every call and is never used.
+ * @param {import('./core.mjs').Config} cfg @param {NodeJS.ProcessEnv} env
+ */
+export function harnessPid(cfg, env) {
+  const from = Array.isArray(cfg.session?.pidFrom) ? cfg.session.pidFrom.map(String) : [...DEFAULT_PID_FROM];
+  for (const name of from) {
+    const v = Number(env[name]);
+    if (Number.isInteger(v) && v > 0) return { pid: v, pidSource: name };
+  }
+  return { pid: undefined, pidSource: undefined };
+}
+
+/** @param {string} dir @returns {Promise<SessionRecord | undefined>} */
+export async function readRecord(dir) {
+  try {
+    const rec = JSON.parse(await readFile(recordPath(dir), "utf8"));
+    return rec && typeof rec.bearer === "string" ? rec : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Write or update this session's record (idempotent). `bearer` and `label` replace what is there;
+ * `startedAt` is kept from the first write.
+ * @param {string} dir @param {Session} session
+ * @param {{ bearer: string, label?: string, pid?: number, pidSource?: string, now?: Date }} fields
+ */
+export async function writeRecord(dir, session, fields) {
+  const now = (fields.now ?? new Date()).toISOString();
+  const prev = await readRecord(dir);
+  /** @type {SessionRecord} */
+  const rec = {
+    slug: session.slug,
+    source: session.source,
+    ...(fields.label !== undefined ? { label: fields.label } : prev?.label !== undefined ? { label: prev.label } : {}),
+    bearer: fields.bearer,
+    ...(fields.pid !== undefined ? { pid: fields.pid, pidSource: fields.pidSource } : prev?.pid !== undefined ? { pid: prev.pid, pidSource: prev.pidSource } : {}),
+    bootEpoch: prev?.bootEpoch ?? bootEpoch(),
+    startedAt: prev?.startedAt ?? now,
+    lastSeen: now,
+  };
+  await mkdir(dir, { recursive: true });
+  await writeFile(recordPath(dir), JSON.stringify(rec, null, 2) + "\n", "utf8");
+  return rec;
+}
+
+/** Mark the record as seen now, if there is one. @param {string} dir */
+export async function touchRecord(dir) {
+  const rec = await readRecord(dir);
+  if (!rec) return undefined;
+  rec.lastSeen = new Date().toISOString();
+  await writeFile(recordPath(dir), JSON.stringify(rec, null, 2) + "\n", "utf8");
+  return rec;
+}
+
+/** @param {string} dir */
+export async function removeRecord(dir) {
+  await rm(recordPath(dir), { force: true });
+}
+
+/** @param {string} dir remove a session directory entirely (cursors, ledger, record) */
+export async function removeSession(dir) {
+  await rm(dir, { recursive: true, force: true });
+}
+
+/**
+ * live: the record's boot epoch matches this boot and its pid answers a signal (EPERM counts as
+ * alive: a process this user cannot signal is still a process). gone: the pid is not there, or
+ * the machine rebooted. unknown: the record carries no pid.
+ * @param {SessionRecord} rec
+ * @param {{ kill?: (pid: number, sig: 0) => void, boot?: number }} [deps]
+ * @returns {'live' | 'gone' | 'unknown'}
+ */
+export function liveness(rec, deps = {}) {
+  if (rec.pid === undefined) return "unknown";
+  const boot = deps.boot ?? bootEpoch();
+  if (Math.abs(boot - rec.bootEpoch) > 2) return "gone";
+  try {
+    (deps.kill ?? ((pid, sig) => process.kill(pid, sig)))(rec.pid, 0);
+    return "live";
+  } catch (e) {
+    return /** @type {NodeJS.ErrnoException} */ (e).code === "ESRCH" ? "gone" : "live";
+  }
+}
+
+/**
+ * Every session with a record under this root, with its liveness.
+ * @param {string} stateRoot @param {{ kill?: (pid: number, sig: 0) => void, boot?: number }} [deps]
+ */
+export async function listRecords(stateRoot, deps) {
+  /** @type {Array<{ slug: string, dir: string, record: SessionRecord | undefined, state: 'live' | 'gone' | 'unknown' | 'unregistered' }>} */
+  const out = [];
+  for (const slug of await listSessions(stateRoot)) {
+    const dir = path.join(stateRoot, "sessions", slug);
+    const record = await readRecord(dir);
+    out.push({ slug, dir, record, state: record ? liveness(record, deps) : "unregistered" });
+  }
+  return out;
+}
+
+/** Hours since the record was last touched. @param {SessionRecord} rec @param {Date} [now] */
+export function ageHours(rec, now = new Date()) {
+  return (now.getTime() - new Date(rec.lastSeen).getTime()) / 3_600_000;
 }

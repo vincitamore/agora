@@ -15,7 +15,22 @@ import {
 } from "../src/core.mjs";
 import { TRANSPORTS, createTransport, tokenSource } from "../src/transports/index.mjs";
 import { watch } from "../src/watch.mjs";
-import { appendPosted, identityLine, readCursorSeeded, readPosted, resolveBearer, resolveSession, sessionDir } from "../src/session.mjs";
+import {
+  ageHours,
+  appendPosted,
+  harnessPid,
+  identityLine,
+  listRecords,
+  readCursorSeeded,
+  readPosted,
+  readRecord,
+  removeSession,
+  resolveBearer,
+  resolveSession,
+  sessionDir,
+  touchRecord,
+  writeRecord,
+} from "../src/session.mjs";
 
 const require = createRequire(import.meta.url);
 const { version } = require("../package.json");
@@ -58,6 +73,16 @@ const SCHEMA = {
       options: { "--thread <id>": "", "--reset": "forget (next watch reads from the start)", "--now": "skip to the latest message", "--set <cursor>": "set explicitly" },
       does: "show or move this session's saved cursor",
     },
+    session: {
+      args: [],
+      options: { "--as <bearer>": "register this session as this bearer (idempotent)", "--label <name>": "a human label for the record", "--list": "every session with state here, with liveness", "--prune": "remove sessions whose process is gone and whose last write is older than session.staleAfterHours", "--dry-run": "with --prune: name them, remove nothing", "--forget": "remove this session's record and state" },
+      does: "this session's record: who it is, written once, read on every later call",
+    },
+    join: {
+      args: ["<room>"],
+      options: { "--as <bearer>": "register this session as this bearer", "--label <name>": "", "--limit <n>": "how many recent messages to show (default 20)" },
+      does: "register, start this session's cursor at the latest message, and show the recent messages: session --as, cursor --now, read, in one call",
+    },
     doctor: { args: [], options: { "--offline": "skip the identity check" }, does: "config, token presence per room, identity per room, this session and bearer and where each came from" },
     schema: { args: [], options: { "--json": "" }, does: "this description" },
   },
@@ -82,8 +107,20 @@ const OPTIONS = /** @type {const} */ ({
   now: { type: "boolean", default: false },
   set: { type: "string" },
   offline: { type: "boolean", default: false },
+  label: { type: "string" },
+  list: { type: "boolean", default: false },
+  prune: { type: "boolean", default: false },
+  "dry-run": { type: "boolean", default: false },
+  forget: { type: "boolean", default: false },
   help: { type: "boolean", short: "h", default: false },
 });
+
+/** @param {import('../src/session.mjs').SessionRecord} rec @param {'live' | 'gone' | 'unknown' | 'unregistered'} state */
+function recordLine(rec, state) {
+  const age = ageHours(rec);
+  const seen = age < 1 ? `${Math.round(age * 60)}m ago` : age < 48 ? `${Math.round(age)}h ago` : `${Math.round(age / 24)}d ago`;
+  return `${rec.bearer.padEnd(18)} ${rec.slug.padEnd(30)} ${state.padEnd(6)} pid ${String(rec.pid ?? "-").padEnd(7)} seen ${seen}${rec.label ? `  "${rec.label}"` : ""}`;
+}
 
 /** @param {string} s */
 const indent = (s) => s.split(/\r?\n/).map((l) => `    ${l}`).join("\n");
@@ -137,11 +174,53 @@ async function main(argv) {
   const cfg = await loadConfig(values.config);
   const json = Boolean(values.json);
   const session = resolveSession(cfg, process.env, (line) => console.error(`agora: ${line}`));
-  const bearer = resolveBearer(cfg, { as: values.as, env: process.env });
-  cfg.actor = { ...cfg.actor, name: bearer.name }; // one string: the signature, the local transport's identity
   const stateRoot = stateDir(cfg);
   const sdir = sessionDir(stateRoot, session);
+  const record = verb === "session" || verb === "join" ? await readRecord(sdir) : await touchRecord(sdir);
+  const bearer = resolveBearer(cfg, { as: values.as, env: process.env, record });
+  cfg.actor = { ...cfg.actor, name: bearer.name }; // one string: the signature, the local transport's identity
   const identity = () => identityLine(bearer, session, stateRoot).then((l) => console.error(l));
+
+  /** Register this session: write the record with the bearer given, and say so (on stderr when stdout carries messages). */
+  async function register(toStderr = false) {
+    if (values.as === undefined) throw new AgoraError(`${verb} needs --as <bearer> (a path like Grace or Grace/watch)`, EXIT.usage);
+    const rec = await writeRecord(sdir, session, { bearer: bearer.name, label: values.label, ...harnessPid(cfg, process.env) });
+    const line = `registered ${rec.bearer} as session ${session.slug} (from ${session.source})${rec.pid ? `  pid ${rec.pid} from ${rec.pidSource}` : "  no harness pid found; liveness unknown"}`;
+    if (toStderr) console.error(`agora: ${line}`);
+    else if (json) console.log(JSON.stringify({ ...rec, dir: sdir }));
+    else console.log(line);
+    return rec;
+  }
+
+  if (verb === "session") {
+    if (values.list) {
+      const rows = await listRecords(stateRoot);
+      for (const r of rows) {
+        if (json) console.log(JSON.stringify({ slug: r.slug, state: r.state, ...(r.record ?? {}), here: r.slug === session.slug }));
+        else console.log(`${r.slug === session.slug ? "*" : " "} ${r.record ? recordLine(r.record, r.state) : `${"(unregistered)".padEnd(18)} ${r.slug.padEnd(30)} ${r.state}`}`);
+      }
+      if (!rows.length && !json) console.log("no sessions have state here");
+      return EXIT.ok;
+    }
+    if (values.prune) {
+      const stale = cfg.session?.staleAfterHours ?? 48;
+      const rows = (await listRecords(stateRoot)).filter((r) => r.slug !== session.slug && r.record && r.state === "gone" && ageHours(r.record) > stale);
+      for (const r of rows) {
+        if (!values["dry-run"]) await removeSession(r.dir);
+        console.log(json ? JSON.stringify({ slug: r.slug, removed: !values["dry-run"] }) : `${values["dry-run"] ? "would remove" : "removed"} ${r.slug} (${r.record?.bearer}, gone, last seen ${Math.round(ageHours(/** @type {any} */ (r.record)))}h ago)`);
+      }
+      if (!rows.length && !json) console.log(`nothing to prune (gone and last seen more than ${stale}h ago)`);
+      return EXIT.ok;
+    }
+    if (values.forget) {
+      await removeSession(sdir);
+      console.log(json ? JSON.stringify({ slug: session.slug, removed: true }) : `forgot session ${session.slug}: its record, cursors and ledger are gone`);
+      return EXIT.ok;
+    }
+    await register();
+    await identity();
+    return EXIT.ok;
+  }
 
   if (verb === "rooms") {
     for (const [alias, room] of Object.entries(cfg.rooms)) {
@@ -168,7 +247,19 @@ async function main(argv) {
       }
       console.log(json ? JSON.stringify(report) : `${alias.padEnd(16)} ${String(report.transport).padEnd(8)} token=${report.token}` + (report.identity ? `  as ${/** @type {any} */ (report.identity).name}` : "") + (report.error ? `  ERROR ${report.error}` : ""));
     }
-    if (!json) console.log(`config  ${cfg.path}\nstate   ${sdir}\nsession ${session.slug} (from ${session.source})\nbearer  ${bearer.name} (${cfg.actor.kind}, from ${bearer.source})`);
+    if (!json) {
+      console.log(`config  ${cfg.path}\nstate   ${sdir}\nsession ${session.slug} (from ${session.source})${record ? "" : "  (unregistered: run `agora session --as <bearer>`)"}\nbearer  ${bearer.name} (${cfg.actor.kind}, from ${bearer.source})`);
+      const rows = await listRecords(stateRoot);
+      if (rows.length) {
+        console.log("\nsessions with state here");
+        for (const r of rows) console.log(`${r.slug === session.slug ? "*" : " "} ${r.record ? recordLine(r.record, r.state) : `${"(unregistered)".padEnd(18)} ${r.slug.padEnd(30)} ${r.state}`}`);
+        const live = rows.filter((r) => r.record && r.state !== "gone");
+        const byBearer = new Map();
+        for (const r of live) byBearer.set(r.record?.bearer, (byBearer.get(r.record?.bearer) ?? 0) + 1);
+        for (const [b, n] of byBearer) if (n > 1) console.log(`WARNING ${n} live sessions carry the bearer ${b}; the room cannot tell them apart. Give each a role segment (${b}/watch, ${b}/review).`);
+        if (cfg.sign === false && live.length > 1) console.log(`WARNING signing is off and ${live.length} sessions are live: no line in the room can be attributed to a bearer.`);
+      }
+    }
     return bad ? EXIT.error : EXIT.ok;
   }
 
@@ -180,6 +271,16 @@ async function main(argv) {
   if (thread && !transport.threads) throw new AgoraError(`${transport.kind} rooms have no threads`, EXIT.usage);
 
   switch (verb) {
+    case "join": {
+      await register(true);
+      const key = cursorKey(roomAlias, thread);
+      const msgs = await transport.read({ thread });
+      await writeCursor(sdir, key, msgs.length ? msgs[msgs.length - 1].cursor : undefined);
+      await identity();
+      console.error(`agora: ${key} cursor set to ${msgs.length ? msgs[msgs.length - 1].cursor : "the start (the room is empty)"}; the recent messages follow`);
+      printMessages(msgs.slice(-(num(values.limit, "limit", 20) ?? 20)), json);
+      return EXIT.ok;
+    }
     case "whoami": {
       const me = await transport.whoami();
       console.log(json ? JSON.stringify({ ...me, transport: transport.kind, room: transport.room }) : `${me.name} (${me.id}) on ${transport.kind} ${transport.room}`);
