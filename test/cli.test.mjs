@@ -415,3 +415,40 @@ test("cli: the trailer block is emitted above the signature, rendered above the 
     await cleanup();
   }
 });
+
+test("cli: a room's note is printed with it, and doctor says when a local room sits somewhere that loses lines", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const cfgPath = path.join(dir, "agora.json");
+    await writeFile(cfgPath, JSON.stringify({
+      actor: { name: "Fable", kind: "agent" },
+      rooms: {
+        desk: { transport: "local", path: path.join(dir, "desk.ndjson"), note: "desk-local: sequencing among our own sessions" },
+        shared: { transport: "local", path: "/mnt/c/agora/shared.ndjson" },
+      },
+    }));
+    const env = { AGORA_CONFIG: cfgPath, AGORA_STATE: path.join(dir, "state"), AGORA_SESSION: "a", CLAUDE_PID: "" };
+
+    let r = await agora(["rooms"], env);
+    assert.equal(r.code, 0);
+    assert.match(r.stdout, /desk {13}local {4}.*\n {17}note: desk-local: sequencing among our own sessions/);
+    assert.doesNotMatch(r.stdout, /shared.*\n {17}note:/, "a room with no note gets no line");
+    r = await agora(["rooms", "--json"], env);
+    const [desk, shared] = r.stdout.trim().split(/\r?\n/).map((/** @type {string} */ l) => JSON.parse(l));
+    assert.equal(desk.note, "desk-local: sequencing among our own sessions");
+    assert.equal("note" in shared, false);
+
+    // the room need not exist: this is a fact about where it is, not about what is in it
+    r = await agora(["doctor", "--offline"], env);
+    assert.equal(r.code, 0, "a warning, never an exit code");
+    assert.match(r.stdout, /WARNING this room's file sits behind a filesystem translation layer/);
+    assert.match(r.stdout, /Every writer must reach it through the same native filesystem/);
+    assert.match(r.stdout, /note: desk-local/);
+    r = await agora(["doctor", "--offline", "--json"], env);
+    const rows = r.stdout.trim().split(/\r?\n/).map((/** @type {string} */ l) => JSON.parse(l));
+    assert.equal(rows.find((/** @type {any} */ o) => o.alias === "shared").warning.includes("translation layer"), true);
+    assert.equal("warning" in rows.find((/** @type {any} */ o) => o.alias === "desk"), false);
+  } finally {
+    await cleanup();
+  }
+});

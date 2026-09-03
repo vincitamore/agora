@@ -2,7 +2,7 @@
 import { appendFile, readFile, mkdir } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import path from "node:path";
-import { AgoraError, expandHome, parseSignature } from "../core.mjs";
+import { AgoraError, parseSignature, resolvePath } from "../core.mjs";
 
 /**
  * A room that is an append-only NDJSON file. For tests, and for two agents that share a
@@ -13,7 +13,7 @@ import { AgoraError, expandHome, parseSignature } from "../core.mjs";
  */
 export function localTransport(room, { actor, now = () => new Date() }) {
   if (typeof room.path !== "string") throw new AgoraError(`local room needs a path`);
-  const file = path.resolve(expandHome(room.path));
+  const file = resolvePath(room.path);
 
   async function lines() {
     try {

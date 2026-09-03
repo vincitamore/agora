@@ -189,6 +189,30 @@ export function redact(s) {
   return out;
 }
 
+/** A room path as the filesystem will see it. @param {string} p */
+export function resolvePath(p) {
+  return path.resolve(expandHome(p));
+}
+
+/** Folders whose contents are synced by an agent that rewrites files behind the writer. */
+const SYNCED_FOLDERS = new Set(["onedrive", "dropbox", "google drive", "iclouddrive", "icloud drive"]);
+
+/**
+ * Why a path is a bad place for a room, or nothing. Concurrent writers behind a filesystem
+ * translation layer, a network share or a syncing folder overwrite each other while every
+ * surviving line still parses and every id stays unique, so no reader, cursor or check can
+ * detect the loss.
+ * Test the path as configured and as resolved: a WSL path is a `/mnt/` prefix as it was written,
+ * and resolving it on a Windows host silently gives it a drive letter instead.
+ * @param {string} resolved a room path, as configured or as resolved
+ */
+export function fragilePath(resolved) {
+  if (resolved.startsWith("/mnt/")) return "a filesystem translation layer";
+  if (resolved.startsWith("\\\\")) return "a network share";
+  for (const seg of resolved.split(/[/\\]+/)) if (SYNCED_FOLDERS.has(seg.toLowerCase())) return `a syncing folder (${seg})`;
+  return undefined;
+}
+
 /** @param {Config} cfg */
 export function stateDir(cfg) {
   if (cfg.state) return expandHome(cfg.state);

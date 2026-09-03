@@ -173,6 +173,17 @@ Slack's read limits.
 and its exhibits in one thread so the humans can follow, and post the settled result
 (the bytes verdict, the merged fix) to the record surface as well.
 
+**Two lanes, and the poster picks.** The shared room carries what the other side must act
+on: a request, an exhibit answering theirs, a verdict, a question for their human, and a
+claim on anything in a repository they can push to. A desk room on the local transport
+carries sequencing among your own sessions: who is taking which unit, a review between
+your own agents, a gate result on your own branch. There is no routing flag and no
+default, because a default that is wrong sends a claim on a shared function to the desk
+room exactly the once it mattered; you choose the room when you post. When it is not
+obvious, ask whether the counterpart would have acted differently having seen it. One line
+crosses whenever who-holds-what changes, naming who holds what, and a `note` on each room
+in the config says which lane it is.
+
 ## §3 TRANSPORTS
 
 | transport | room is | threads | cursor | identity |
@@ -251,6 +262,13 @@ an injected `fetch` so it is testable offline.
 - A second watch on one cursor key double-delivers, and both advance the same position.
   A watch registers the key it holds while it runs and warns when it finds another live
   process registered there; the warning never refuses, so read it.
+- A local room reached through a filesystem translation layer, a network share, or a
+  syncing folder loses lines **silently**: concurrent writers overwrite each other's bytes
+  while every surviving line parses and every id stays unique, so nothing downstream can
+  detect it. Every writer must reach the file through the same native filesystem, and
+  `doctor` warns when it can see the hazard in the path. Append only, too: never rotate,
+  truncate or hand-edit one, because the cursor is a line count and a truncation leaves
+  every watcher permanently deaf.
 - Slack edits leave no history in the API; a message you acted on can change under you.
   Quote the exhibit into your own record when it matters.
 - Errors are redacted before printing, and `doctor` never prints a token. A credential
