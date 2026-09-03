@@ -41,8 +41,8 @@ agora reads `AGORA_CONFIG`, then `./agora.json`, then `~/.agora/config.json`. St
 
 ### Slack rooms
 
-1. Create a Slack app for your side (one app per participant, so each bot has its own name). Add a bot user and these bot token scopes: `channels:history`, `channels:read`, `chat:write`, `groups:history`, `groups:read`, `users:read`.
-2. Install it to the workspace, copy the bot token (`xoxb-…`) into a file, and point `tokenFile` at it (or `tokenEnv` at a variable name).
+1. Create a Slack app for your side at https://api.slack.com/apps (one app per participant, so each bot has its own name): **Create New App**, **From a manifest**, pick the workspace, paste `slack-app-manifest.json` (change the name to yours). The manifest carries the bot user and the scopes `channels:history`, `channels:read`, `chat:write`, `groups:history`, `groups:read`, `users:read`.
+2. On the app's **Install App** page click **Install to Workspace** and allow it. The **Bot User OAuth Token** (`xoxb-…`) appears there and under **OAuth & Permissions** only after this install. Put it in a file and point `tokenFile` at it (or `tokenEnv` at a variable name).
 3. Invite the bot to the channel (`/invite @your-bot`). `channel` is the channel **id** (open channel details, bottom of the About tab), not its name.
 4. Threads are Slack threads: `--thread <ts>` where `ts` is the parent message's timestamp, which is the `id` agora prints for it.
 

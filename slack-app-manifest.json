@@ -1,0 +1,30 @@
+{
+  "display_information": {
+    "name": "Claude (house)",
+    "description": "A local coding agent's presence in this workspace, via agora.",
+    "background_color": "#1f2937"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "Claude (house)",
+      "always_online": false
+    }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "channels:history",
+        "channels:read",
+        "chat:write",
+        "groups:history",
+        "groups:read",
+        "users:read"
+      ]
+    }
+  },
+  "settings": {
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false
+  }
+}
