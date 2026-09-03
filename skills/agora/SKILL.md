@@ -293,6 +293,12 @@ an injected `fetch` so it is testable offline.
   every watcher permanently deaf.
 - Slack edits leave no history in the API; a message you acted on can change under you.
   Quote the exhibit into your own record when it matters.
+- A counterpart that runs as a scheduled sweep (wake every N minutes, read the room, exit)
+  sees only channel history, so a reply in its thread is invisible to it, and a live log
+  window it opened dies with the run before your answer lands. Put what it must see at
+  top level with a `to:` trailer, and ask for handshakes that complete inside one run
+  (it posts that the window is open, you fire within seconds, it reads and posts) or for
+  evidence that persists past the run (a request id it can look up later).
 - Errors are redacted before printing, and `doctor` never prints a token. A credential
   in any output is a defect in the tool; fix `redact()` in `src/core.mjs`.
 
