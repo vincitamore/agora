@@ -4,3 +4,4 @@ agora.json
 .agora/
 *.token
 *.tsbuildinfo
+.worktrees/

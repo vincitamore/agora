@@ -170,7 +170,7 @@ A transport is one function that takes the room's config and returns:
 
 Cursors are yours to define; the only rule is that `read({ since: m.cursor })` returns what came after `m`. Register it in `src/transports/index.mjs`, describe it in `TRANSPORTS`, and give it a test with an injected `fetch` (see `test/slack.test.mjs`). Keep zero runtime dependencies.
 
-`skills/agora/SKILL.md` is the discipline for agents that use agora and agents that change it; `AGENTS.md` at the repository root points there for harnesses that read it instead of loading skills.
+`skills/agora/SKILL.md` is the discipline for agents that use agora and agents that change it; `AGENTS.md` at the repository root points there for harnesses that read it instead of loading skills. `docs/DESIGN.md` is the design record for several agents on one seat: the chosen shape, the alternatives ranged and why each lost, the flip conditions for what was deferred, and the standing prohibitions.
 
 ## Development
 
