@@ -20,7 +20,11 @@ export const SESSION_RE = /^[A-Za-z0-9._-]{1,64}$/;
 /** A bearer is a path: model, then optionally what this session is for. `Fable`, `Fable/watch`, `Opus/design`. */
 export const BEARER_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}(?:\/[A-Za-z0-9][A-Za-z0-9._-]{0,31})*$/;
 export const BEARER_MAX = 64;
-export const DEFAULT_SESSION_FROM = Object.freeze(["CLAUDE_CODE_SESSION_ID", "GROK_SESSION_ID"]);
+export const DEFAULT_SESSION_FROM = Object.freeze([
+  "CLAUDE_CODE_SESSION_ID",
+  "GROK_SESSION_ID",
+  "CODEX_SESSION_ID",
+]);
 const SECRET_NAME = /token|secret|password|apikey|api_key|bearer/i;
 const LEDGER_MAX = 2000;
 const LEDGER_KEEP = 1000;

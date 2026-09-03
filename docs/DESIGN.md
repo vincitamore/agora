@@ -73,8 +73,8 @@ A **session** is the unit of state, and it is not the bearer. The session key is
     "default"                                        when the harness supplies none
 
 `session.from` is a list of environment-variable names in the config, not code. Its default
-names the two variables known to be injected into every command: `CLAUDE_CODE_SESSION_ID` and
-`GROK_SESSION_ID`. A contributor on another harness adds the name its harness injects, or sets
+names the three variables known to be injected into every command: `CLAUDE_CODE_SESSION_ID`,
+`GROK_SESSION_ID`, and `CODEX_SESSION_ID`. A contributor on another harness adds the name its harness injects, or sets
 `AGORA_SESSION` explicitly; a harness that injects nothing keeps working, as one `default`
 session, which is what a first-time contributor sees. A value is accepted only if it satisfies
 the same rule as `AGORA_SESSION`; a name that looks like a credential is never read. The tag is

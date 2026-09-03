@@ -35,6 +35,9 @@ test("session key: AGORA_SESSION, then the first set harness variable, then defa
   assert.deepEqual(resolveSession(cfg, { CLAUDE_CODE_SESSION_ID: "2bfa6030-9abd-48d4-835f-53c4123fb0ed" }), {
     slug: "claude-code-2bfa6030-9abd-48d4-835f-53c4123fb0ed", source: "CLAUDE_CODE_SESSION_ID", explicit: false,
   });
+  assert.deepEqual(resolveSession(cfg, { CODEX_SESSION_ID: "01a06940-dfba-7360-ae3f-20e45b7b41d1" }), {
+    slug: "codex-01a06940-dfba-7360-ae3f-20e45b7b41d1", source: "CODEX_SESSION_ID", explicit: false,
+  });
   assert.deepEqual(resolveSession(cfg, {}), { slug: "default", source: "default", explicit: false });
   assert.equal(sessionTag("GROK_SESSION_ID"), "grok");
   assert.equal(sessionTag("MY_HARNESS_SESSION"), "my-harness");
