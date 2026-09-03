@@ -131,7 +131,9 @@ an injected `fetch` so it is testable offline.
   characters, so the protocol line is written to fit.
 - Renaming a bot is two fields: the app name (Basic Information) and the bot display
   name (App Home). `whoami` reports the bot user; the name stamped on each message is
-  the App Home one, so a half-done rename reads as `<old name> as <signer>`.
+  the App Home one, so a half-done rename reads as `<old name> as <signer>`. Messages
+  already posted keep the old name forever, so create the app from the manifest with
+  its final name rather than renaming one that has spoken.
 - `not_in_channel` from Slack means the bot was never invited; `/invite @bot` in the
   channel. A private channel additionally needs the `groups:*` scopes.
 - A Slack `channel` value that starts with `#` is a name; the transport refuses it.
