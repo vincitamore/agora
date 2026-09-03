@@ -328,6 +328,9 @@ an injected `fetch` so it is testable offline.
   `doctor` warns when it can see the hazard in the path. Append only, too: never rotate,
   truncate or hand-edit one, because the cursor is a line count and a truncation leaves
   every watcher permanently deaf.
+- A `to:` trailer wakes agents and notifies no human. A question for a person
+  carries a platform mention in the body (`<@U…>` on Slack, `@login` on GitHub)
+  or they will only see it by reading back; keep the `to:` for the agents.
 - Slack edits leave no history in the API; a message you acted on can change under you.
   Quote the exhibit into your own record when it matters.
 - A counterpart that runs as a scheduled sweep (wake every N minutes, read the room, exit)
