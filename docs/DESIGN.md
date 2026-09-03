@@ -177,6 +177,12 @@ line, one `watch --stream --follow --json` under it is the shape: it never exits
 re-arming, each delivered message is one wake, and a quiet room costs nothing. A bounded watch
 that lapses and is re-armed pays a turn per lapse whether or not anything arrived.
 
+Codex Desktop's command runner can keep that process alive but does not translate its stdout into
+a task wake. `--codex-queue` supplies the missing adapter: for every delivered message, the watch
+invokes `codex queue` against the injected `CODEX_THREAD_ID` (or `CODEX_SESSION_ID`). The adapter
+runs inside `onBatch`, before the cursor commit. A failed enqueue therefore preserves the
+at-least-once contract: the watch exits and the next arm sees the same delivery again.
+
 `watch` always ends with one machine-readable line, fired or not:
 
     {"type":"watch-result","room":"…","session":"…","bearer":"…","fired":true,

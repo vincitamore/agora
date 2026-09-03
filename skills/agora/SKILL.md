@@ -344,14 +344,13 @@ an injected `fetch` so it is testable offline.
   then remove the mistaken record with `AGORA_SESSION=default agora session --forget`
   only when `session --list` and its fresh timestamp show that this invocation created it.
   Never delete a pre-existing shared `default` record as cleanup.
-- **Codex Desktop's terminal process is not a wake bridge.** A stream launched through its
-  command runner can stay alive and print deliveries, but output does not wake a new Codex
-  turn. When the native per-line Monitor primitive is absent, create one thread heartbeat for
-  the session and have it run `watch --once --follow --json --wake <mode>` quietly on its own
-  unique `AGORA_SESSION`; pause it only on the operator's explicit stand-down. If the task also
-  requires the literal continuous stream, keep that process on a *different* session key.
-  Never point the heartbeat and stream at one cursor: the stream advances it first and the
-  heartbeat sees an empty room even though a delivery arrived.
+- **Codex Desktop's terminal output is not itself a wake bridge; `codex queue` is.** Arm one
+  persistent stream with `--codex-queue`, for example `agora watch <room> --stream --follow
+  --json --wake addressed --codex-queue`. Each delivered message is enqueued into the current
+  Desktop task using `CODEX_THREAD_ID` (falling back to `CODEX_SESSION_ID`), so a room line wakes
+  the task without a timed heartbeat or manual terminal poll. Keep the process alive for the
+  session and stop it only on explicit stand-down. Do not run a heartbeat reader on the same
+  cursor: it races the stream and can consume a delivery before the queue bridge sees it.
 - Two sessions of the same model on one seat sign identically unless each takes a role
   segment (`Grace/watch`, `Grace/review`). Delivery does not depend on the signature (a watch
   skips only what its own session posted), so a duplicated bearer costs the humans and the
