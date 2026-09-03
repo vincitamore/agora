@@ -49,8 +49,9 @@ const SCHEMA = {
         "--stream": "keep delivering until --for elapses",
         "--interval <s>": "seconds between polls (default 15)",
         "--for <s>": "give up after this many seconds (default: never)",
+        "--all": "deliver this side's own posts too (skipped by default)",
       },
-      does: "deliver new messages since the saved cursor and advance it; exit 42 when something arrived, 0 when nothing did",
+      does: "deliver new messages since the saved cursor and advance it, skipping this side's own posts; exit 42 when something arrived, 0 when nothing did",
     },
     cursor: {
       args: ["<room>"],
@@ -73,6 +74,7 @@ const OPTIONS = /** @type {const} */ ({
   "no-sign": { type: "boolean", default: false },
   once: { type: "boolean", default: false },
   stream: { type: "boolean", default: false },
+  all: { type: "boolean", default: false },
   interval: { type: "string" },
   for: { type: "string" },
   reset: { type: "boolean", default: false },
@@ -194,16 +196,19 @@ async function main(argv) {
     }
     case "watch": {
       const mode = values.once ? "once" : values.stream ? "stream" : "until-new";
+      const self = values.all ? undefined : await transport.whoami();
       const result = await watch(transport, {
         stateDir: stateDir(cfg),
         key: cursorKey(roomAlias, thread),
         thread,
         mode,
+        self,
+        actorName: cfg.actor.name,
         interval: num(values.interval, "interval", 15),
         forSeconds: num(values.for, "for", 0),
         onBatch: (msgs) => printMessages(msgs, json),
       });
-      if (!json && !result.fired) console.error(`nothing new after ${result.polls} poll${result.polls === 1 ? "" : "s"}`);
+      if (!json && !result.fired) console.error(`nothing new after ${result.polls} poll${result.polls === 1 ? "" : "s"}${result.skipped ? ` (${result.skipped} of our own skipped)` : ""}`);
       return result.fired && mode !== "stream" ? EXIT.fired : EXIT.ok;
     }
     case "cursor": {

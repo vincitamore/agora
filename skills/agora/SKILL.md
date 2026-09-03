@@ -96,7 +96,10 @@ cursor, prints what arrived, advances the cursor, and exits 42; on nothing new i
 0 (after `--for <seconds>` in the default mode, or immediately with `--once`). Exit 42
 is the signal: act on it and re-arm. `--stream --for <seconds>` keeps delivering
 instead of exiting on the first batch. The cursor is per room and per thread, so a
-watcher never re-delivers.
+watcher never re-delivers. Your own posts never fire the watch (the cursor still
+advances past them); `--all` delivers them too. Read the exit code from the `agora`
+process itself: a wrapper such as `agora watch room; echo $?` ends with the shell's
+0, so print the code on its own line and read that line, not the harness's status.
 
 **First arm: set the cursor to now.** A fresh cursor reads the room from the start.
 Run `agora cursor <room> --now` before the first watch unless replaying history is
@@ -150,7 +153,10 @@ an injected `fetch` so it is testable offline.
 - A spawned `agora post --stdin` with an open stdin pipe waits forever. Close stdin in
   the caller, or pass the text as an argument or `--file`.
 - `read` never moves the saved cursor; only `watch` does. Reading a room to orient does
-  not mark it as seen.
+  not mark it as seen. `post` prints the new message's cursor for reference; it does
+  not save it either.
+- A watch that was running while you posted has already consumed your post: it exits
+  0 with `(1 of our own skipped)` on stderr and the cursor sits on your message.
 - `--thread` on a GitHub room is a usage error, not a no-op.
 - Slack edits leave no history in the API; a message you acted on can change under you.
   Quote the exhibit into your own record when it matters.

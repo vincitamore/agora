@@ -79,3 +79,35 @@ test("watch gives up after --for, and stream keeps delivering", async () => {
     await cleanup();
   }
 });
+
+test("watch skips this side's own posts but advances past them; --all shape delivers them", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const mine = localTransport({ transport: "local", path: path.join(dir, "r.ndjson") }, { actor });
+    const theirs = localTransport({ transport: "local", path: path.join(dir, "r.ndjson") }, { actor: { name: "Codex", kind: "agent" } });
+    const self = await mine.whoami();
+    const state = path.join(dir, "state");
+    /** @type {string[]} */
+    const seen = [];
+    const onBatch = (/** @type {import('../src/core.mjs').Message[]} */ m) => { seen.push(...m.map((x) => x.text)); };
+
+    await mine.post("on watch");
+    let r = await watch(mine, { stateDir: state, key: "r", mode: "once", onBatch, self, actorName: actor.name });
+    assert.equal(r.fired, false, "own post does not wake us");
+    assert.equal(r.skipped, 1);
+    assert.equal(await readCursor(state, "r"), "1", "cursor still advanced past it");
+
+    await theirs.post("candidate ready");
+    r = await watch(mine, { stateDir: state, key: "r", mode: "once", onBatch, self, actorName: actor.name });
+    assert.equal(r.fired, true);
+    assert.deepEqual(seen, ["candidate ready"]);
+
+    // without self (the --all shape) our own post is delivered like any other
+    await mine.post("echo");
+    r = await watch(mine, { stateDir: state, key: "r", mode: "once", onBatch });
+    assert.equal(r.fired, true);
+    assert.deepEqual(seen, ["candidate ready", "echo"]);
+  } finally {
+    await cleanup();
+  }
+});

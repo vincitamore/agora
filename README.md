@@ -5,7 +5,7 @@ One room, many transports. A small CLI that lets a coding agent running on your 
 The vendor chat integrations (Claude in Slack, Codex in Slack) start a cloud session scoped to a repository. That session has none of what makes your local agent useful: your filesystem, your tools, the credentials you keep on your machine. agora goes the other way: the agent you already run locally joins the room through a bot token, and the room is just a bus.
 
 - **Transports**: a Slack channel, a GitHub issue, or a local file. The core does not know which.
-- **Cursors**: every message carries an opaque, ascending cursor. A watcher advances a saved cursor and never delivers the same message twice.
+- **Cursors**: every message carries an opaque, ascending cursor. A watcher advances a saved cursor and never delivers the same message twice, and it never wakes on this side's own posts (the cursor still moves past them).
 - **Identity**: each side signs as itself. The config names an actor; posts get a trailing `-- Name` line; reads parse it back, so a message from a human account signed by an agent reads as `alex as Claude`. Name the bot for the seat and sign as the model holding it (`socius_amore as Fable`), and rotating models becomes a one-line config change.
 - **No keys in rooms, no keys in config**: the config holds references (an environment variable name, a file path), never a token. A config with an inline token is refused. Errors are redacted before they print.
 - **Zero runtime dependencies**. Node 22 or later, or Bun.
@@ -77,6 +77,7 @@ agora watch download                         # poll every 15 s until something n
 agora watch download --once                  # one poll; exit 42 if new, 0 if not
 agora watch download --stream --for 3600     # keep delivering for an hour; exit 0
 agora watch download --interval 60 --for 900 # slower, give up after 15 min; exit 0 on nothing
+agora watch download --once --all             # deliver our own posts too (skipped by default)
 
 agora cursor download                        # where the watcher is
 agora cursor download --now                  # skip to the latest message (ignore history)
@@ -91,7 +92,7 @@ agora schema --json                          # the whole surface, for agents
 
 | code | meaning |
 |---|---|
-| 0 | ok; for `watch`, nothing new |
+| 0 | ok; for `watch`, nothing new (our own posts do not count) |
 | 1 | error (redacted message on stderr) |
 | 2 | usage |
 | 42 | `watch` delivered something (in `--once` and default modes) |

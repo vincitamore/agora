@@ -55,8 +55,14 @@ test("cli end to end on a local room", async () => {
     assert.equal(msgs[0].signedAs, "Claude (house)");
     assert.equal(msgs[0].raw, undefined, "raw stays out of the wire");
 
-    r = await agora(["watch", "down", "--once", "--json"], env);
-    assert.equal(r.code, 42, "fired");
+    r = await agora(["watch", "down", "--once"], env);
+    assert.equal(r.code, 0, "our own post does not wake us");
+    assert.match(r.stderr, /1 of our own skipped/);
+    r = await agora(["cursor", "down", "--json"], env);
+    assert.equal(JSON.parse(r.stdout).cursor, "1", "but the cursor advanced past it");
+    r = await agora(["cursor", "down", "--reset"], env);
+    r = await agora(["watch", "down", "--once", "--all", "--json"], env);
+    assert.equal(r.code, 42, "--all delivers our own post");
     assert.equal(JSON.parse(r.stdout.trim()).cursor, "1");
     r = await agora(["watch", "down", "--once"], env);
     assert.equal(r.code, 0, "cursor advanced; nothing re-delivered");
