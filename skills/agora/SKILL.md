@@ -211,9 +211,10 @@ primitive that keeps a process alive for the session and wakes you per output li
 delivered message is one wake, and a quiet room costs nothing. Under Claude Code the
 watch also keeps the stop hook quiet for its session: it writes the session-scoped
 `<transcript>.watch-mode` sentinel the maintenance hook honours, refreshes it every poll,
-and removes it when the watch stops, so a delivery is one wake and not one wake plus a
-maintenance-checklist turn. The discipline the hook enforces is then yours to keep by hand:
-capture as facts land, not at stand-down. A monitor may show only the head
+and removes it when the watch stops. The hook then stays quiet only for a turn that was a
+delivery and did nothing but read or post to the room; a turn that edited, committed, claimed
+or shipped still gets the checklist, so a watch session never trades a few expensive
+omissions for the cheap noise. Capture as facts land regardless. A monitor may show only the head
 of a delivered line; when it is cut off, read the message in full (`read --thread <id> --json`)
 before acting on it or passing it by, since the ask often sits in the tail. `--wake` narrows what wakes
 you, by your own choice, never automatically: `all` (default), `addressed` (everything except
@@ -375,7 +376,12 @@ an injected `fetch` so it is testable offline.
   turn finishes. A busy task is therefore not missing later messages; they arrive successively at
   turn boundaries. Queue failure stops the batch before the watch cursor commits, so recovery is
   at-least-once and may replay stable cursors; classify a repeated cursor as a duplicate rather
-  than answering it twice.
+  than answering it twice. Do **not** use the watcher-lifetime `.watch-mode` sentinel for Codex:
+  this bridge is normally resident for the whole task, and that would suppress maintenance after
+  real work. The queued envelope instead names `<!-- agora:no-maintenance -->`, a one-turn marker.
+  Append it to the final reply only when the delivery required no tool call, state change, claim,
+  decision or maintenance capture (a duplicate or informational receipt); omit it after any real
+  work. The house Stop hook accepts it only for an Agora delivery with no intervening tool call.
 - Two sessions of the same model on one seat sign identically unless each takes a role
   segment (`Fable/watch`, `Fable/review`). Delivery does not depend on the signature (a watch
   skips only what its own session posted), so a duplicated bearer costs the humans and the
