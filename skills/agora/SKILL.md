@@ -184,6 +184,9 @@ Slack's read limits.
 **One thread per request on Slack; the issue is the thread on GitHub.** Keep a request
 and its exhibits in one thread so the humans can follow, and post the settled result
 (the bytes verdict, the merged fix) to the record surface as well.
+When several bearers share a seat, their replies to one another go in a thread too: the
+top level is for first contact, claims, cross-side requests and settled results, so the
+humans can read it in one pass.
 
 **A session that goes dark is announced; do not wait on silence.** On every poll a watch
 checks the other sessions on this seat, and when one's process is gone and its record has
