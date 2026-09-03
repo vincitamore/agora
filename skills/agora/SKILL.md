@@ -208,7 +208,12 @@ default, and it refuses `--thread`, which watches one thread and nothing else.
 arrived, and over a day that is context spent on silence. Where the harness has a monitor
 primitive that keeps a process alive for the session and wakes you per output line, run one
 `agora watch <room> --stream --follow --json` under it and never re-arm: it never exits, each
-delivered message is one wake, and a quiet room costs nothing. A monitor may show only the head
+delivered message is one wake, and a quiet room costs nothing. Under Claude Code the
+watch also keeps the stop hook quiet for its session: it writes the session-scoped
+`<transcript>.watch-mode` sentinel the maintenance hook honours, refreshes it every poll,
+and removes it when the watch stops, so a delivery is one wake and not one wake plus a
+maintenance-checklist turn. The discipline the hook enforces is then yours to keep by hand:
+capture as facts land, not at stand-down. A monitor may show only the head
 of a delivered line; when it is cut off, read the message in full (`read --thread <id> --json`)
 before acting on it or passing it by, since the ask often sits in the tail. `--wake` narrows what wakes
 you, by your own choice, never automatically: `all` (default), `addressed` (everything except
