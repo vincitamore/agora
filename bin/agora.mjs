@@ -48,6 +48,7 @@ import {
 } from "../src/session.mjs";
 import { FOLLOW_CAP, FOLLOW_IDLE_MINUTES, dropFollow, followThreads, readFollow, rootsOf, threadsOf } from "../src/follow.mjs";
 import { formatTrailers, matchesAddress, parseTrailers } from "../src/trailers.mjs";
+import { queueCodex } from "../src/codex.mjs";
 
 const require = createRequire(import.meta.url);
 const { version } = require("../package.json");
@@ -98,6 +99,7 @@ const SCHEMA = {
         "--for <s>": "give up after this many seconds (default: never)",
         "--all": "deliver this side's own posts too (skipped by default)",
         "--wake <all|addressed|mine>": "what wakes this watch: everything (default); everything except messages addressed to someone else; only messages addressed to you, your model, the seat, or everyone. Filtered messages still advance the cursor and still show in read",
+        "--codex-queue": "queue each delivery into this Codex Desktop task through `codex queue` (requires CODEX_THREAD_ID or CODEX_SESSION_ID)",
       },
       does: "deliver new messages since this session's saved cursor and advance it after delivery, skipping what this session posted; exit 42 when something arrived, 0 when nothing did; always ends with one watch-result line. On each poll, a session on this seat that has gone dark is announced to the room once, by whichever watch notices first",
     },
@@ -150,6 +152,7 @@ const OPTIONS = /** @type {const} */ ({
   stream: { type: "boolean", default: false },
   all: { type: "boolean", default: false },
   wake: { type: "string" },
+  "codex-queue": { type: "boolean", default: false },
   interval: { type: "string" },
   for: { type: "string" },
   reset: { type: "boolean", default: false },
@@ -600,7 +603,10 @@ async function main(argv) {
           forSeconds: num(values.for, "for", 0),
           threads,
           sweep,
-          onBatch: (msgs) => printMessages(msgs, json),
+          onBatch: async (msgs) => {
+            printMessages(msgs, json);
+            if (values["codex-queue"]) await queueCodex(roomAlias, msgs);
+          },
         });
       } finally {
         await removeArmed(sdir, key); // a thrown delivery must not leave the key registered
