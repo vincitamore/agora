@@ -8,7 +8,6 @@ import {
   EXIT,
   cursorKey,
   loadConfig,
-  readCursor,
   redact,
   sign,
   stateDir,
@@ -16,6 +15,7 @@ import {
 } from "../src/core.mjs";
 import { TRANSPORTS, createTransport, tokenSource } from "../src/transports/index.mjs";
 import { watch } from "../src/watch.mjs";
+import { appendPosted, identityLine, readCursorSeeded, readPosted, resolveBearer, resolveSession, sessionDir } from "../src/session.mjs";
 
 const require = createRequire(import.meta.url);
 const { version } = require("../package.json");
@@ -24,9 +24,9 @@ const SCHEMA = {
   name: "agora",
   version,
   description: "One room, many transports: local agents read and post in shared conversations.",
-  config: "AGORA_CONFIG, ./agora.json, or ~/.agora/config.json; state under AGORA_STATE or ~/.agora/state",
+  config: "AGORA_CONFIG, ./agora.json, or ~/.agora/config.json; state under AGORA_STATE or ~/.agora/state, in sessions/<session>/; the session key from AGORA_SESSION, else the first set variable in session.from, else default; the bearer from --as, AGORA_ACTOR, or actor.name",
   exit: { ok: 0, error: 1, usage: 2, fired: 42 },
-  global: { "--config <path>": "config file", "--json": "machine-readable output (NDJSON for messages)" },
+  global: { "--config <path>": "config file", "--json": "machine-readable output (NDJSON for messages)", "--as <bearer>": "sign this call as this bearer (a path like Grace or Grace/watch)" },
   transports: TRANSPORTS,
   verbs: {
     rooms: { args: [], options: {}, does: "list configured rooms" },
@@ -51,20 +51,21 @@ const SCHEMA = {
         "--for <s>": "give up after this many seconds (default: never)",
         "--all": "deliver this side's own posts too (skipped by default)",
       },
-      does: "deliver new messages since the saved cursor and advance it, skipping this side's own posts; exit 42 when something arrived, 0 when nothing did",
+      does: "deliver new messages since this session's saved cursor and advance it after delivery, skipping what this session posted; exit 42 when something arrived, 0 when nothing did",
     },
     cursor: {
       args: ["<room>"],
       options: { "--thread <id>": "", "--reset": "forget (next watch reads from the start)", "--now": "skip to the latest message", "--set <cursor>": "set explicitly" },
-      does: "show or move the saved cursor",
+      does: "show or move this session's saved cursor",
     },
-    doctor: { args: [], options: { "--offline": "skip the identity check" }, does: "config, token presence per room, identity per room" },
+    doctor: { args: [], options: { "--offline": "skip the identity check" }, does: "config, token presence per room, identity per room, this session and bearer and where each came from" },
     schema: { args: [], options: { "--json": "" }, does: "this description" },
   },
 };
 
 const OPTIONS = /** @type {const} */ ({
   config: { type: "string" },
+  as: { type: "string" },
   json: { type: "boolean", default: false },
   thread: { type: "string" },
   since: { type: "string" },
@@ -135,6 +136,12 @@ async function main(argv) {
 
   const cfg = await loadConfig(values.config);
   const json = Boolean(values.json);
+  const session = resolveSession(cfg, process.env, (line) => console.error(`agora: ${line}`));
+  const bearer = resolveBearer(cfg, { as: values.as, env: process.env });
+  cfg.actor = { ...cfg.actor, name: bearer.name }; // one string: the signature, the local transport's identity
+  const stateRoot = stateDir(cfg);
+  const sdir = sessionDir(stateRoot, session);
+  const identity = () => identityLine(bearer, session, stateRoot).then((l) => console.error(l));
 
   if (verb === "rooms") {
     for (const [alias, room] of Object.entries(cfg.rooms)) {
@@ -161,7 +168,7 @@ async function main(argv) {
       }
       console.log(json ? JSON.stringify(report) : `${alias.padEnd(16)} ${String(report.transport).padEnd(8)} token=${report.token}` + (report.identity ? `  as ${/** @type {any} */ (report.identity).name}` : "") + (report.error ? `  ERROR ${report.error}` : ""));
     }
-    if (!json) console.log(`config ${cfg.path}\nstate  ${stateDir(cfg)}\nactor  ${cfg.actor.name} (${cfg.actor.kind})`);
+    if (!json) console.log(`config  ${cfg.path}\nstate   ${sdir}\nsession ${session.slug} (from ${session.source})\nbearer  ${bearer.name} (${cfg.actor.kind}, from ${bearer.source})`);
     return bad ? EXIT.error : EXIT.ok;
   }
 
@@ -190,20 +197,26 @@ async function main(argv) {
       if (!text.trim()) throw new AgoraError(`nothing to post (give text, --file, or --stdin)`, EXIT.usage);
       const signIt = cfg.sign !== false && !values["no-sign"];
       const body = signIt ? sign(text, cfg.actor) : text;
+      await identity();
       const r = await transport.post(body, { thread });
+      await appendPosted(sdir, r.id);
       console.log(json ? JSON.stringify({ ...r, room: transport.room, thread }) : `posted ${r.id}${r.url ? `  ${r.url}` : ""}  cursor ${r.cursor}`);
       return EXIT.ok;
     }
     case "watch": {
       const mode = values.once ? "once" : values.stream ? "stream" : "until-new";
-      const self = values.all ? undefined : await transport.whoami();
+      const key = cursorKey(roomAlias, thread);
+      await identity();
+      const seeded = await readCursorSeeded(sdir, stateRoot, key);
+      if (seeded.seeded) console.error(`agora: no position saved for this session yet; seeded from the shared ${key}.cursor (${seeded.cursor})`);
+      else if (seeded.cursor === undefined) console.error(`agora: no position saved for ${key}; reading from the start (run \`agora cursor ${roomAlias}${thread ? ` --thread ${thread}` : ""} --now\` to start from the latest message)`);
       const result = await watch(transport, {
-        stateDir: stateDir(cfg),
-        key: cursorKey(roomAlias, thread),
+        stateDir: sdir,
+        key,
         thread,
+        cursor: seeded.cursor,
         mode,
-        self,
-        actorName: cfg.actor.name,
+        own: values.all ? undefined : () => readPosted(sdir),
         interval: num(values.interval, "interval", 15),
         forSeconds: num(values.for, "for", 0),
         onBatch: (msgs) => printMessages(msgs, json),
@@ -212,16 +225,17 @@ async function main(argv) {
       return result.fired && mode !== "stream" ? EXIT.fired : EXIT.ok;
     }
     case "cursor": {
-      const dir = stateDir(cfg);
       const key = cursorKey(roomAlias, thread);
-      if (values.reset) await writeCursor(dir, key, undefined);
-      else if (values.set) await writeCursor(dir, key, values.set);
+      if (values.reset) await writeCursor(sdir, key, undefined);
+      else if (values.set) await writeCursor(sdir, key, values.set);
       else if (values.now) {
         const msgs = await transport.read({ thread });
-        await writeCursor(dir, key, msgs.length ? msgs[msgs.length - 1].cursor : undefined);
+        await writeCursor(sdir, key, msgs.length ? msgs[msgs.length - 1].cursor : undefined);
       }
-      const cur = await readCursor(dir, key);
-      console.log(json ? JSON.stringify({ room: roomAlias, thread, cursor: cur ?? null }) : `${key}: ${cur ?? "(none: next watch reads from the start)"}`);
+      const seeded = await readCursorSeeded(sdir, stateRoot, key);
+      const cur = seeded.cursor;
+      const note = seeded.seeded ? " (seeded from the shared cursor)" : "";
+      console.log(json ? JSON.stringify({ room: roomAlias, thread, cursor: cur ?? null, session: session.slug }) : `${key}: ${cur ?? "(none: next watch reads from the start)"}${note}`);
       return EXIT.ok;
     }
     default:

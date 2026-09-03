@@ -40,7 +40,8 @@ const execFileAsync = promisify(execFile);
  */
 /** @typedef {{ name: string, kind: ActorKind }} Actor */
 /** @typedef {{ transport: string, tokenEnv?: string, tokenFile?: string, [k: string]: unknown }} RoomConfig */
-/** @typedef {{ actor: Actor, rooms: Record<string, RoomConfig>, state?: string, sign?: boolean, path?: string }} Config */
+/** @typedef {{ from?: string[], staleAfterHours?: number }} SessionConfig */
+/** @typedef {{ actor: Actor, rooms: Record<string, RoomConfig>, state?: string, sign?: boolean, path?: string, session?: SessionConfig }} Config */
 
 export class AgoraError extends Error {
   /** @param {string} message @param {number} [exitCode] */
@@ -201,26 +202,36 @@ export function cursorKey(alias, thread) {
   return raw.replace(/[^A-Za-z0-9._#-]+/g, "_");
 }
 
-/** @param {string} dir @param {string} key @returns {Promise<string | undefined>} */
-export async function readCursor(dir, key) {
+/**
+ * A cursor file that exists with `cursor: null` is a position ("read from the start"), distinct from
+ * a file that is absent (no position saved here yet). `cursor --reset` writes the former.
+ * @param {string} dir @param {string} key @returns {Promise<{ exists: boolean, cursor: string | undefined }>}
+ */
+export async function readCursorFile(dir, key) {
   try {
     const raw = await readFile(path.join(dir, `${key}.cursor`), "utf8");
     const parsed = JSON.parse(raw);
-    return typeof parsed.cursor === "string" ? parsed.cursor : undefined;
+    return { exists: true, cursor: typeof parsed.cursor === "string" ? parsed.cursor : undefined };
   } catch {
-    return undefined;
+    return { exists: false, cursor: undefined };
   }
 }
 
-/** @param {string} dir @param {string} key @param {string | undefined} cursor */
+/** @param {string} dir @param {string} key @returns {Promise<string | undefined>} */
+export async function readCursor(dir, key) {
+  return (await readCursorFile(dir, key)).cursor;
+}
+
+/** @param {string} dir @param {string} key @param {string | undefined} cursor undefined records "from the start" */
 export async function writeCursor(dir, key, cursor) {
   await mkdir(dir, { recursive: true });
   const file = path.join(dir, `${key}.cursor`);
-  if (cursor === undefined) {
-    await rm(file, { force: true });
-    return;
-  }
-  await writeFile(file, JSON.stringify({ cursor, at: new Date().toISOString() }) + "\n", "utf8");
+  await writeFile(file, JSON.stringify({ cursor: cursor ?? null, at: new Date().toISOString() }) + "\n", "utf8");
+}
+
+/** Remove a saved cursor file entirely, so a session may seed again from the legacy file. @param {string} dir @param {string} key */
+export async function forgetCursor(dir, key) {
+  await rm(path.join(dir, `${key}.cursor`), { force: true });
 }
 
 /** @param {number} ms */

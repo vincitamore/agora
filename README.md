@@ -5,8 +5,8 @@ One room, many transports. A small CLI that lets a coding agent running on your 
 The vendor chat integrations (Claude in Slack, Codex in Slack) start a cloud session scoped to a repository. That session has none of what makes your local agent useful: your filesystem, your tools, the credentials you keep on your machine. agora goes the other way: the agent you already run locally joins the room through a bot token, and the room is just a bus.
 
 - **Transports**: a Slack channel, a GitHub issue, or a local file. The core does not know which.
-- **Cursors**: every message carries an opaque, ascending cursor. A watcher advances a saved cursor and never delivers the same message twice, and it never wakes on this side's own posts (the cursor still moves past them).
-- **Identity**: each side signs as itself. The config names an actor; posts get a trailing `-- Name` line; reads parse it back, so a message from a human account signed by an agent reads as `alex as Claude`. Name the bot for the seat and sign as the model holding it (`example_bot as Grace`), and rotating models becomes a one-line config change.
+- **Cursors**: every message carries an opaque, ascending cursor. A watcher advances a saved position and never wakes on what this session posted (the position still moves past it). Positions are **per session**, so several agents on one machine each see everything; they are written **after** a batch is delivered, which makes delivery at-least-once with a stable message id: a process that dies mid-batch re-delivers rather than losing the batch.
+- **Identity**: each side signs as itself. The config names an actor; posts get a trailing `-- Name` line; reads parse it back, so a message from a human account signed by an agent reads as `alex as Claude`. Name the bot for the seat and sign as the model holding it (`example_bot as Grace`), and rotating models changes nothing on the other side. When several agents hold one seat at once, each signs a bearer path (`Grace/watch`, `Opus/design`) whose second segment names what that session is for, set with `--as` or `AGORA_ACTOR` rather than by editing the shared config.
 - **No keys in rooms, no keys in config**: the config holds references (an environment variable name, a file path), never a token. A config with an inline token is refused. Errors are redacted before they print.
 - **Zero runtime dependencies**. Node 22 or later, or Bun.
 
@@ -39,7 +39,8 @@ agora reads `AGORA_CONFIG`, then `./agora.json`, then `~/.agora/config.json`. St
 
 - `actor.name` is what this side signs as. `actor.kind` is `human`, `agent`, or `unknown`.
 - `sign: false` turns the signature line off for every post; `--no-sign` does it for one.
-- Saved cursors live under `AGORA_STATE` or `~/.agora/state`.
+- State lives under `AGORA_STATE` or `~/.agora/state`, in one directory per **session**: `sessions/<session>/` holds that session's cursors and the ids it posted. The session key is `AGORA_SESSION` if set (letters, digits, `. _ -`), else the first set variable named in `session.from` (by default `CLAUDE_CODE_SESSION_ID`, then `GROK_SESSION_ID`; the key is the variable's name minus its `_SESSION_ID` suffix, then its value), else `default`, which every unkeyed session shares. A session with no saved position for a room seeds once from the file of the same name at the state root (the single-session layout) and writes forward; that root file is never written again. Every `post` and `watch` prints one line to stderr naming the bearer, the session, and which variable supplied each.
+- The bearer this process signs as is `--as <bearer>` on the call, else `AGORA_ACTOR`, else `actor.name`. A bearer is a path: a model name, optionally followed by `/` and what this session is for.
 
 ### Slack rooms
 
@@ -79,9 +80,12 @@ agora watch download --stream --for 3600     # keep delivering for an hour; exit
 agora watch download --interval 60 --for 900 # slower, give up after 15 min; exit 0 on nothing
 agora watch download --once --all             # deliver our own posts too (skipped by default)
 
-agora cursor download                        # where the watcher is
-agora cursor download --now                  # skip to the latest message (ignore history)
-agora cursor download --reset                # next watch reads from the start
+agora cursor download                        # where this session's watcher is
+agora cursor download --now                  # skip this session to the latest message (ignore history)
+agora cursor download --reset                # this session's next watch reads from the start
+
+AGORA_ACTOR=Opus/design agora post download "taking the settlement pass"   # sign as a second bearer on the seat
+agora --as Grace/review watch download --once                             # the same, for one call
 
 agora schema --json                          # the whole surface, for agents
 ```
@@ -92,7 +96,7 @@ agora schema --json                          # the whole surface, for agents
 
 | code | meaning |
 |---|---|
-| 0 | ok; for `watch`, nothing new (our own posts do not count) |
+| 0 | ok; for `watch`, nothing new (what this session posted does not count) |
 | 1 | error (redacted message on stderr) |
 | 2 | usage |
 | 42 | `watch` delivered something (in `--once` and default modes) |

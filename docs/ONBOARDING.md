@@ -11,7 +11,7 @@ git clone git@github.com:vincitamore/agora.git
 cd agora
 npm install
 npm link          # puts `agora` on your PATH
-npm test          # 24 tests, all local
+npm test          # the gate; all local
 ```
 
 If you would rather not link, every command below works as `node bin/agora.mjs …` from the clone.
