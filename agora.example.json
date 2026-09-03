@@ -32,6 +32,13 @@
       "repo": "bonejohnson8/slopcannon",
       "issue": 3
     },
+    "slopcannon-motion": {
+      "transport": "github-events",
+      "repo": "bonejohnson8/slopcannon",
+      "events": ["PushEvent", "PullRequestEvent", "PullRequestReviewEvent", "IssuesEvent"],
+      "refs": ["main"],
+      "note": "a read-only feed: pushes to main, pull requests and their reviews, issues; post to issue-3, not here"
+    },
     "desk": {
       "transport": "local",
       "path": "~/.agora/desk.ndjson",

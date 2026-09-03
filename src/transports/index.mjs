@@ -2,11 +2,13 @@
 import { AgoraError, ghToken, resolveToken } from "../core.mjs";
 import { localTransport } from "./local.mjs";
 import { githubTransport } from "./github.mjs";
+import { githubEventsTransport } from "./github-events.mjs";
 import { slackTransport } from "./slack.mjs";
 
 export const TRANSPORTS = Object.freeze({
   local: { needsToken: false, describe: "an append-only NDJSON file; cursor = lines consumed" },
   github: { needsToken: true, describe: "one issue on a repo; comments are messages; no threads" },
+  "github-events": { needsToken: true, describe: "a read-only feed of a repo's, an org's, or a user's activity; events are messages; cursor = event id; narrow it with events and refs" },
   slack: { needsToken: true, describe: "one channel; threads are Slack threads; bot token" },
 });
 
@@ -28,6 +30,11 @@ export async function createTransport(alias, room, cfg, deps = {}) {
       if (!token) throw new AgoraError(`room "${alias}": no token (tokenEnv/tokenFile, GITHUB_TOKEN, or gh auth login)`);
       return githubTransport(room, { token, fetch: deps.fetch, cache: deps.cache });
     }
+    case "github-events": {
+      const token = deps.token ?? (await resolveToken(room)).token ?? (await ghToken());
+      if (!token) throw new AgoraError(`room "${alias}": no token (tokenEnv/tokenFile, GITHUB_TOKEN, or gh auth login)`);
+      return githubEventsTransport(room, { token, fetch: deps.fetch, cache: deps.cache });
+    }
     case "slack": {
       const token = deps.token ?? (await resolveToken(room)).token;
       if (!token) throw new AgoraError(`room "${alias}": no token (set tokenEnv or tokenFile to the bot token)`);
@@ -46,7 +53,7 @@ export async function tokenSource(room) {
   if (room.transport === "local") return "none";
   const { source } = await resolveToken(room);
   if (source !== "missing") return source;
-  if (room.transport === "github") {
+  if (room.transport === "github" || room.transport === "github-events") {
     if (process.env.GITHUB_TOKEN || process.env.GH_TOKEN) return "env";
     if (await ghToken()) return "gh";
   }
