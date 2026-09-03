@@ -372,12 +372,15 @@ export async function claimDeparture(dir, roomKey, by) {
  * named as such rather than dropped: a roster that silently omits it tells the counterpart
  * a live bearer is gone.
  * @param {SessionRecord} gone @param {string[]} live bearers of sessions provably live on this seat
- * @param {string[]} [unknown] bearers registered here whose liveness could not be probed
+ * @param {Array<string | { bearer: string, lastSeen?: string }>} [unknown] bearers registered here whose
+ *   liveness could not be probed; each is printed with when it last wrote, so a reader can weigh a
+ *   session that was active a minute ago against one quiet for hours
  */
 export function departureLine(gone, live, unknown = []) {
   const seen = new Date(gone.lastSeen).toISOString().replace(/\.\d{3}Z$/, "Z");
   const others = live.length ? `Still here on this seat: ${live.join(", ")}.` : "No other session is provably live on this seat.";
-  const maybe = unknown.length ? ` Also registered here, liveness not provable from this process: ${unknown.join(", ")}.` : "";
+  const named = unknown.map((u) => typeof u === "string" ? u : u.lastSeen ? `${u.bearer} (last seen ${new Date(u.lastSeen).toISOString().replace(/\.\d{3}Z$/, "Z")})` : u.bearer);
+  const maybe = named.length ? ` Also registered here, liveness not provable from this process: ${named.join(", ")}.` : "";
   return `${gone.bearer} is no longer running (last seen ${seen}). Requests addressed to it will not be answered; re-address them. ${others}${maybe}`;
 }
 

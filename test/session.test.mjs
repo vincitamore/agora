@@ -197,6 +197,7 @@ test("departures: gone past the grace and within the stale horizon, not yet anno
     assert.match(departureLine(gone[0].record, ["Fable/watch", "Codex"]), /^Opus\/design is no longer running \(last seen .*Z\)\. Requests addressed to it will not be answered; re-address them\. Still here on this seat: Fable\/watch, Codex\.$/);
     assert.match(departureLine(gone[0].record, []), /No other session is provably live/);
     assert.match(departureLine(gone[0].record, ["Fable/watch"], ["Grok-4.6/general"]), /Still here on this seat: Fable\/watch\. Also registered here, liveness not provable from this process: Grok-4\.6\/general\./, "an unprobeable bearer is named, never dropped");
+    assert.match(departureLine(gone[0].record, [], [{ bearer: "Grok-4.6/general", lastSeen: "2026-09-03T22:09:25.559Z" }]), /liveness not provable from this process: Grok-4\.6\/general \(last seen 2026-09-03T22:09:25Z\)\./, "an unprobeable bearer carries when it last wrote");
 
     assert.equal(await claimDeparture(gone[0].dir, "r", "me"), true, "first announcer wins");
     assert.equal(await claimDeparture(gone[0].dir, "r", "other"), false, "second does not");

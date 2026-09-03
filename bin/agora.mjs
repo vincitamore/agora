@@ -568,8 +568,14 @@ async function main(argv) {
           const records = (await listRecords(stateRoot)).filter((r) => r.record && r.slug !== d.slug);
           const live = records.filter((r) => r.state === "live").map((r) => /** @type {any} */ (r.record).bearer);
           // a session this process cannot probe (another harness, another OS user) is named, never dropped
-          const unknown = records.filter((r) => r.state === "unknown").map((r) => /** @type {any} */ (r.record).bearer).filter((b) => !live.includes(b));
-          const text = departureLine(d.record, [...new Set(live)], [...new Set(unknown)]);
+          // named with its last write, and only inside the stale horizon: a record quiet for days is pruned, not listed
+          const staleHours = cfg.session?.staleAfterHours ?? 48;
+          const seenUnknown = new Set();
+          const unknown = records
+            .filter((r) => r.state === "unknown" && ageHours(/** @type {any} */ (r.record)) <= staleHours && !live.includes(/** @type {any} */ (r.record).bearer))
+            .map((r) => ({ bearer: /** @type {any} */ (r.record).bearer, lastSeen: /** @type {any} */ (r.record).lastSeen }))
+            .filter((u) => !seenUnknown.has(u.bearer) && seenUnknown.add(u.bearer));
+          const text = departureLine(d.record, [...new Set(live)], unknown);
           try {
             const r = await transport.post(cfg.sign !== false ? sign(text, cfg.actor) : text, { thread });
             await appendPosted(sdir, r.id);
