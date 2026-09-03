@@ -4,7 +4,9 @@ import path from "node:path";
 
 /**
  * The threads one session follows in one room, and when each last carried activity.
- * A thread joins when this session posts into it or when a delivered message carries it;
+ * A thread joins when this session posts into it or answers a message with `re:`, when a
+ * delivered message carries it, or when a delivered message roots it (the thread under a
+ * top-level message that woke this session);
  * it leaves after `idleMinutes` without activity, and the set is capped, oldest first.
  * Reading a thread is not activity: a thread nobody is talking in ages out even while it
  * is being polled.
@@ -57,6 +59,23 @@ export function threadsOf(msgs) {
   /** @type {string[]} */
   const out = [];
   for (const m of msgs) if (m.thread && !out.includes(m.thread)) out.push(m.thread);
+  return out;
+}
+
+/**
+ * The thread each delivered message belongs to, or the one it would root: a reply names its
+ * thread, a top-level message names itself. A reader that was woken by a message wants the
+ * answers to it, and on Slack those land in the thread under it, which a channel-history read
+ * never shows. Only meaningful where the transport has threads; the caller checks that.
+ * @param {import('./core.mjs').Message[]} msgs
+ */
+export function rootsOf(msgs) {
+  /** @type {string[]} */
+  const out = [];
+  for (const m of msgs) {
+    const id = m.thread ?? m.id;
+    if (id && !out.includes(id)) out.push(id);
+  }
   return out;
 }
 

@@ -46,7 +46,7 @@ import {
   writeArmed,
   writeRecord,
 } from "../src/session.mjs";
-import { FOLLOW_CAP, FOLLOW_IDLE_MINUTES, dropFollow, followThreads, readFollow, threadsOf } from "../src/follow.mjs";
+import { FOLLOW_CAP, FOLLOW_IDLE_MINUTES, dropFollow, followThreads, readFollow, rootsOf, threadsOf } from "../src/follow.mjs";
 import { formatTrailers, matchesAddress, parseTrailers } from "../src/trailers.mjs";
 
 const require = createRequire(import.meta.url);
@@ -497,6 +497,9 @@ async function main(argv) {
       const r = await transport.post(body, { thread });
       await appendPosted(sdir, r.id);
       if (thread) await follow(sdir, roomAlias, room, [thread]);
+      // an answer with re: joins the thread under the message it answers: that is where the
+      // humans reply, and a channel-history read never shows it
+      else if (values.re && transport.threads) await follow(sdir, roomAlias, room, [String(values.re)]);
       console.log(json ? JSON.stringify({ ...r, room: transport.room, thread }) : `posted ${r.id}${r.url ? `  ${r.url}` : ""}  cursor ${r.cursor}`);
       return EXIT.ok;
     }
@@ -533,7 +536,8 @@ async function main(argv) {
             key: (id) => cursorKey(roomAlias, id),
             cursor: async (id) => (await readCursorSeeded(sdir, stateRoot, cursorKey(roomAlias, id))).cursor,
             interval: threadInterval,
-            note: async (msgs) => void (await follow(sdir, roomAlias, room, threadsOf(msgs))),
+            // what woke this session roots a followed thread: the answers to it land there
+            note: async (msgs) => void (await follow(sdir, roomAlias, room, transport.threads ? rootsOf(msgs) : threadsOf(msgs))),
             drop: async (id) => { await dropFollow(sdir, cursorKey(roomAlias), id); },
           }
         : undefined;

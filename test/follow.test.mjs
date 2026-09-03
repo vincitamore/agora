@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { dropFollow, followThreads, readFollow, threadsOf } from "../src/follow.mjs";
+import { dropFollow, followThreads, readFollow, rootsOf, threadsOf } from "../src/follow.mjs";
 import { tmp } from "./helpers.mjs";
 
 /** @param {string} id @param {string} [thread] @returns {import('../src/core.mjs').Message} */
@@ -87,4 +87,11 @@ test("dropFollow removes one thread so a 404 follow does not rejoin on the next 
   } finally {
     await cleanup();
   }
+});
+
+test("rootsOf names the thread a reply is in and the thread a top-level message would root", () => {
+  /** @param {string} id @param {string} [thread] */
+  const msg = (id, thread) => /** @type {import("../src/core.mjs").Message} */ ({ id, room: "r", author: { id: "x", name: "x", kind: "agent" }, text: "", ts: "", cursor: id, ...(thread ? { thread } : {}) });
+  assert.deepEqual(rootsOf([msg("a", "T2"), msg("b"), msg("c", "T2"), msg("d", "T3")]), ["T2", "b", "T3"]);
+  assert.deepEqual(rootsOf([]), []);
 });
