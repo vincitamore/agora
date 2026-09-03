@@ -241,7 +241,10 @@ the ordering, and the holder may hand the other a disjoint part.
 checks the other sessions on this seat, and when one's process is gone and its record has
 been quiet past a short grace, the first watch to notice posts one line to the room it is
 watching, signed as itself: who is gone, when it was last seen, that requests addressed to
-it will not be answered, and who is still here. It is posted through the normal path, so it
+it will not be answered, who is provably still here, and, named separately, any bearer
+registered on the seat whose liveness this process cannot probe (another harness's session,
+another OS user): an unprobeable bearer is named, never dropped, because a roster that omits
+it tells the counterpart a live bearer is gone. It is posted through the normal path, so it
 reaches every other watcher, including one that was waiting on the departed session, and
 it is claimed by an exclusive create so several watchers post it once. A harness that
 restarts gives its session a new process and touches the record on its next command, which

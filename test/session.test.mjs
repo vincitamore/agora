@@ -195,7 +195,8 @@ test("departures: gone past the grace and within the stale horizon, not yet anno
     let gone = await departures(dir, { selfSlug: "me", roomKey: "r", kill, boot });
     assert.deepEqual(gone.map((g) => g.slug), ["quiet"]);
     assert.match(departureLine(gone[0].record, ["Grace/watch", "Codex"]), /^Opus\/design is no longer running \(last seen .*Z\)\. Requests addressed to it will not be answered; re-address them\. Still here on this seat: Grace\/watch, Codex\.$/);
-    assert.match(departureLine(gone[0].record, []), /No other session is live/);
+    assert.match(departureLine(gone[0].record, []), /No other session is provably live/);
+    assert.match(departureLine(gone[0].record, ["Grace/watch"], ["Grok-4.6/general"]), /Still here on this seat: Grace\/watch\. Also registered here, liveness not provable from this process: Grok-4\.6\/general\./, "an unprobeable bearer is named, never dropped");
 
     assert.equal(await claimDeparture(gone[0].dir, "r", "me"), true, "first announcer wins");
     assert.equal(await claimDeparture(gone[0].dir, "r", "other"), false, "second does not");

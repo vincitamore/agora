@@ -565,8 +565,11 @@ async function main(argv) {
         const gone = await departures(stateRoot, { selfSlug: session.slug, roomKey: key, staleHours: cfg.session?.staleAfterHours ?? 48 });
         for (const d of gone) {
           if (!(await claimDeparture(d.dir, key, session.slug))) continue;
-          const live = (await listRecords(stateRoot)).filter((r) => r.record && r.state === "live" && r.slug !== d.slug).map((r) => /** @type {any} */ (r.record).bearer);
-          const text = departureLine(d.record, [...new Set(live)]);
+          const records = (await listRecords(stateRoot)).filter((r) => r.record && r.slug !== d.slug);
+          const live = records.filter((r) => r.state === "live").map((r) => /** @type {any} */ (r.record).bearer);
+          // a session this process cannot probe (another harness, another OS user) is named, never dropped
+          const unknown = records.filter((r) => r.state === "unknown").map((r) => /** @type {any} */ (r.record).bearer).filter((b) => !live.includes(b));
+          const text = departureLine(d.record, [...new Set(live)], [...new Set(unknown)]);
           try {
             const r = await transport.post(cfg.sign !== false ? sign(text, cfg.actor) : text, { thread });
             await appendPosted(sdir, r.id);
