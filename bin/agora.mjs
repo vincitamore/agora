@@ -24,6 +24,9 @@ import { watch } from "../src/watch.mjs";
 import {
   ageHours,
   appendPosted,
+  claimDeparture,
+  departureLine,
+  departures,
   etagCache,
   harnessPid,
   identityLine,
@@ -95,12 +98,17 @@ const SCHEMA = {
         "--for <s>": "give up after this many seconds (default: never)",
         "--all": "deliver this side's own posts too (skipped by default)",
       },
-      does: "deliver new messages since this session's saved cursor and advance it after delivery, skipping what this session posted; exit 42 when something arrived, 0 when nothing did; always ends with one watch-result line",
+      does: "deliver new messages since this session's saved cursor and advance it after delivery, skipping what this session posted; exit 42 when something arrived, 0 when nothing did; always ends with one watch-result line. On each poll, a session on this seat that has gone dark is announced to the room once, by whichever watch notices first",
     },
     cursor: {
       args: ["<room>"],
       options: { "--thread <id>": "", "--reset": "forget (next watch reads from the start)", "--now": "skip to the latest message", "--set <cursor>": "set explicitly" },
       does: "show or move this session's saved cursor",
+    },
+    who: {
+      args: ["<room>"],
+      options: { "--limit <n>": "how many recent messages to read back (default 200)", "--thread <id>": "" },
+      does: "who has spoken in the room and when, from a bounded read that never touches a cursor, merged with whether each of this seat's sessions is still running; the horizon it read to is printed with it",
     },
     session: {
       args: [],
@@ -437,6 +445,31 @@ async function main(argv) {
       printMessages(msgs.slice(-(num(values.limit, "limit", 20) ?? 20)), json);
       return EXIT.ok;
     }
+    case "who": {
+      const limit = num(values.limit, "limit", 200) ?? 200;
+      const msgs = await transport.read({ thread, limit });
+      /** @type {Map<string, { last: string, count: number, kind: string }>} */
+      const seen = new Map();
+      for (const m of msgs) {
+        const name = m.signedAs ?? m.author.name;
+        const prev = seen.get(name);
+        seen.set(name, { last: m.ts, count: (prev?.count ?? 0) + 1, kind: m.signedAs ? "signed" : m.author.kind });
+      }
+      const local = await listRecords(stateRoot);
+      /** @param {string} name */
+      const here = (name) => local.filter((r) => r.record?.bearer === name);
+      const rows = [...seen.entries()].sort((a, b) => (a[1].last < b[1].last ? 1 : a[1].last > b[1].last ? -1 : 0));
+      for (const [name, r] of rows) {
+        const mine = here(name);
+        const state = mine.length ? mine.map((x) => x.state).join("/") : "";
+        if (json) console.log(JSON.stringify({ type: "who", name, last: r.last, count: r.count, kind: r.kind, ...(mine.length ? { here: mine.map((x) => ({ session: x.slug, state: x.state, lastSeen: x.record?.lastSeen })) } : {}) }));
+        else console.log(`${name.padEnd(20)} last spoke ${r.last}  (${r.count} message${r.count === 1 ? "" : "s"}, ${r.kind})${state ? `  here: ${state}` : ""}`);
+      }
+      const horizon = msgs.length ? `read ${msgs.length} messages back to ${msgs[0].ts}` : "read 0 messages";
+      if (json) console.log(JSON.stringify({ type: "who-horizon", messages: msgs.length, oldest: msgs[0]?.ts ?? null, newest: msgs.at(-1)?.ts ?? null }));
+      else console.log(`\n${horizon}; a bearer whose last line is older than your patience is unanswered: re-address, or ask the human`);
+      return EXIT.ok;
+    }
     case "whoami": {
       const me = await transport.whoami();
       console.log(json ? JSON.stringify({ ...me, transport: transport.kind, room: transport.room }) : `${me.name} (${me.id}) on ${transport.kind} ${transport.room}`);
@@ -502,6 +535,23 @@ async function main(argv) {
           }
         : undefined;
 
+      /** A session on this seat that went dark is announced to this room once; whichever watch notices first speaks. */
+      const sweep = async () => {
+        const gone = await departures(stateRoot, { selfSlug: session.slug, roomKey: key, staleHours: cfg.session?.staleAfterHours ?? 48 });
+        for (const d of gone) {
+          if (!(await claimDeparture(d.dir, key, session.slug))) continue;
+          const live = (await listRecords(stateRoot)).filter((r) => r.record && r.state === "live" && r.slug !== d.slug).map((r) => /** @type {any} */ (r.record).bearer);
+          const text = departureLine(d.record, [...new Set(live)]);
+          try {
+            const r = await transport.post(cfg.sign !== false ? sign(text, cfg.actor) : text, { thread });
+            await appendPosted(sdir, r.id);
+            console.error(`agora: announced to ${roomAlias}: ${text}`);
+          } catch (e) {
+            console.error(redact(`agora: could not announce ${d.record.bearer}'s departure to ${roomAlias}: ${e instanceof Error ? e.message : String(e)}`));
+          }
+        }
+      };
+
       let result;
       try {
         result = await watch(transport, {
@@ -514,6 +564,7 @@ async function main(argv) {
           interval,
           forSeconds: num(values.for, "for", 0),
           threads,
+          sweep,
           onBatch: (msgs) => printMessages(msgs, json),
         });
       } finally {

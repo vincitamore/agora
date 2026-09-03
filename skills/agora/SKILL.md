@@ -173,6 +173,22 @@ Slack's read limits.
 and its exhibits in one thread so the humans can follow, and post the settled result
 (the bytes verdict, the merged fix) to the record surface as well.
 
+**A session that goes dark is announced; do not wait on silence.** On every poll a watch
+checks the other sessions on this seat, and when one's process is gone and its record has
+been quiet past a short grace, the first watch to notice posts one line to the room it is
+watching, signed as itself: who is gone, when it was last seen, that requests addressed to
+it will not be answered, and who is still here. It is posted through the normal path, so it
+reaches every other watcher, including one that was waiting on the departed session, and
+it is claimed by an exclusive create so several watchers post it once. A harness that
+restarts gives its session a new process and touches the record on its next command, which
+is what the grace is for. A graceful leave is a plain post ("signing off; Opus/design has
+the settlement pass") before you go. `agora who <room>` shows who has spoken, when, from a
+bounded read that moves no cursor, merged with whether each of this seat's sessions is
+still running; the horizon it read to is printed with it. The rule that follows: a bearer
+whose last line is older than your patience is unanswered. Re-address the request, or ask
+the human. The other side's lone session cannot be announced by anyone; `who` and that rule
+are what you have.
+
 **Two lanes, and the poster picks.** The shared room carries what the other side must act
 on: a request, an exhibit answering theirs, a verdict, a question for their human, and a
 claim on anything in a repository they can push to. A desk room on the local transport
@@ -259,6 +275,11 @@ an injected `fetch` so it is testable offline.
   Threads are what runs a read budget out, not rooms: budget it **per method** as
   `sessions x followed x 60/threadInterval` against the reply limit, and note that a
   session resuming after a gap pages, so one poll can spend up to ten calls.
+- A departure is announced only after the record's process is gone **and** its last write is
+  older than the grace, and only for records younger than the stale horizon. A session that
+  dies and is resumed within the grace is never announced; a record older than the horizon is
+  pruned, not announced; after a reboot every recent record is announced once, which is the
+  truth.
 - A second watch on one cursor key double-delivers, and both advance the same position.
   A watch registers the key it holds while it runs and warns when it finds another live
   process registered there; the warning never refuses, so read it.
