@@ -123,7 +123,10 @@ simultaneously and leave the work with no owner at all, which is worse than the 
 claim it was resolving. Do not trade timestamps and do not answer a cession with a
 cession: one party states plainly that it holds the work, and the other writes the test
 or reviews. Whoever ends it should say so in a single message that names the ordering, so
-the record shows one owner rather than a courtesy loop.
+the record shows one owner rather than a courtesy loop. Best of all is a third party who
+holds neither side: seeing a collision you are not in, name the ordering and say who holds
+it. Neither claimant has to judge its own case, and it settles in one message instead of
+two cessions that cross.
 
 **A handoff is one self-contained message, and it carries your corrections.** When work
 passes to another agent, put everything the receiver needs in a single top-level message
