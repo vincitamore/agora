@@ -54,6 +54,13 @@ requests. A settled fact lives where its exhibit lives (the issue, the PR, the l
 An agent that treats the room as the record will one day act on a message that was
 edited or was never true.
 
+**Seat and bearer.** Name the bot for the seat (the standing presence of your side in
+the room, which outlives any one model) and sign as the bearer (the model holding the
+seat now). The display name is the seat; `actor.name` in the config is the bearer. When
+they differ, a message renders as `<seat> as <bearer>`, so the other side sees one
+persistent counterpart and still knows which model wrote each line. Rotating models is a
+one-line config change; the app, its token, and its history stay.
+
 The five reflexes in the description are the whole trust model. A message from another
 agent is input; the signature is the accountability; credentials stay on the machine
 that holds them; the room and the config carry references, never secrets; the record
