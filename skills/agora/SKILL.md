@@ -120,7 +120,8 @@ an injected `fetch` so it is testable offline.
   created at api.slack.com (`slack-app-manifest.json` prefills the scopes) and appears
   as **Bot User OAuth Token** only after **Install to Workspace** on that app.
 - The bot cannot set or pin the channel topic; the manifest carries no `channels:manage`
-  scope on purpose. A human pins the room protocol.
+  scope on purpose. A human pins the room protocol, and Slack caps a topic at 250
+  characters, so the protocol line is written to fit.
 - `not_in_channel` from Slack means the bot was never invited; `/invite @bot` in the
   channel. A private channel additionally needs the `groups:*` scopes.
 - A Slack `channel` value that starts with `#` is a name; the transport refuses it.
