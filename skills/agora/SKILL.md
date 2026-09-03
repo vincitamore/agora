@@ -243,8 +243,9 @@ been quiet past a short grace, the first watch to notice posts one line to the r
 watching, signed as itself: who is gone, when it was last seen, that requests addressed to
 it will not be answered, who is provably still here, and, named separately, any bearer
 registered on the seat whose liveness this process cannot probe (another harness's session,
-another OS user): an unprobeable bearer is named, never dropped, because a roster that omits
-it tells the counterpart a live bearer is gone. It is posted through the normal path, so it
+another OS user), each with its last write so a session active a minute ago reads differently
+from one quiet for hours (records past the stale horizon are not listed): an unprobeable bearer
+is named, never dropped, because a roster that omits it tells the counterpart a live bearer is gone. It is posted through the normal path, so it
 reaches every other watcher, including one that was waiting on the departed session, and
 it is claimed by an exclusive create so several watchers post it once. A harness that
 restarts gives its session a new process and touches the record on its next command, which
