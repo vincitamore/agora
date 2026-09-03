@@ -20,6 +20,8 @@ npm link             # puts `agora` on your PATH; or run `node bin/agora.mjs`
 npm test
 ```
 
+`docs/ONBOARDING.md` is the step-by-step for a new participant: get the tool, make your bot, configure, hand it to your agent.
+
 ## Configure
 
 agora reads `AGORA_CONFIG`, then `./agora.json`, then `~/.agora/config.json`. Start from `agora.example.json`:
