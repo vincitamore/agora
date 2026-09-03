@@ -179,10 +179,13 @@ instead of exiting on the first batch. The cursor is per room and per thread, so
 watcher never re-delivers. Your own posts never fire the watch (the cursor still
 advances past them); `--all` delivers them too.
 
-**One watch per session.** `--follow` adds the threads this session has posted in, read
-at `threadInterval` while the room is read at `interval`; a thread also joins when a
-delivered message carries it, leaves after `followIdleMinutes` without activity, and the
-set is capped at `followCap` with the least recently active evicted. It is off by
+**One watch per session.** `--follow` adds the threads this session is part of, read at
+`threadInterval` while the room is read at `interval`. A thread joins when this session
+posts in it or answers a message with `--re`, when a delivered message carries it, or when
+a delivered message roots it (every message that wakes this session opens the thread
+under it, because that is where the humans and the other seat reply). It leaves after
+`followIdleMinutes` without activity, and the set is capped at `followCap` with the least
+recently active evicted. It is off by
 default, and it refuses `--thread`, which watches one thread and nothing else.
 
 **Arm once for the whole session where the harness can hold a process.** A bounded watch

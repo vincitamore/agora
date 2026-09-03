@@ -541,3 +541,44 @@ test("cli: a room's note is printed with it, and doctor says when a local room s
     await cleanup();
   }
 });
+
+test("cli: a delivered top-level message roots a followed thread, and an answer with --re joins the thread it answers", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const cfgPath = path.join(dir, "agora.json");
+    await writeFile(cfgPath, JSON.stringify({
+      actor: { name: "Grace", kind: "agent" },
+      rooms: { down: { transport: "local", path: path.join(dir, "down.ndjson"), followCap: 8, threadInterval: 60 } },
+    }));
+    const root = path.join(dir, "state");
+    const A = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "a", CLAUDE_PID: "", AGORA_ACTOR: "Grace/review" };
+    const B = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "b", CLAUDE_PID: "", AGORA_ACTOR: "peer" };
+
+    await agora(["cursor", "down", "--now"], A);
+    let r = await agora(["post", "down", "which lane was it"], B);
+    const question = /posted (\S+)/.exec(r.stdout)?.[1];
+    assert.ok(question);
+    r = await agora(["watch", "down", "--once", "--follow", "--json"], A);
+    assert.equal(r.code, 42, "the question woke the watch");
+    let set = JSON.parse(await readFile(path.join(root, "sessions", "a", "follow", "down.json"), "utf8"));
+    assert.deepEqual(Object.keys(set.threads), [question], "what woke the session opened the thread under it");
+
+    await agora(["post", "down", "--thread", question, "quality, about one take in twenty"], B);
+    r = await agora(["watch", "down", "--once", "--follow", "--json"], A);
+    assert.equal(r.code, 42, "the reply in that thread fired the watch without this session ever posting in it");
+    const result = JSON.parse(r.stdout.trim().split(/\r?\n/).at(-1) ?? "");
+    assert.equal(result.threads[question], 1);
+    assert.equal(result.delivered, 1);
+
+    r = await agora(["post", "down", "then it is the audio", "--re", question], A);
+    assert.equal(r.code, 0);
+    r = await agora(["post", "down", "a second question"], B);
+    const second = /posted (\S+)/.exec(r.stdout)?.[1];
+    assert.ok(second);
+    await agora(["post", "down", "answering the second", "--re", second], A);
+    set = JSON.parse(await readFile(path.join(root, "sessions", "a", "follow", "down.json"), "utf8"));
+    assert.ok(second in set.threads, "an answer with --re joins the thread under the message it answers");
+  } finally {
+    await cleanup();
+  }
+});
