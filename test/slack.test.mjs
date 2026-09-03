@@ -54,6 +54,25 @@ test("slack history: ascending, pages, skips joins and thread replies, names use
   assert.equal(calls.filter((c) => c.url.pathname.endsWith("conversations.history")).length, 2, "paged once");
 });
 
+test("slack history without a cursor returns the newest messages up to the limit; with one, the oldest after it", async () => {
+  const many = Array.from({ length: 9 }, (_, i) => ({ ts: `1756900000.00${i + 1}000`, user: "U2", text: `m${i + 1}` }));
+  const { fetch } = fakeFetch([
+    ["auth.test", () => ({ body: { ok: true, user_id: "UBOT", user: "b" } })],
+    ["users.info", () => ({ body: { ok: true, user: { id: "U2", real_name: "bone" } } })],
+    ["conversations.history", (url) => {
+      const oldest = Number(url.searchParams.get("oldest") ?? 0);
+      const filtered = [...many].reverse().filter((m) => Number(m.ts) > oldest);
+      const page = url.searchParams.get("cursor");
+      if (!page) return { body: { ok: true, messages: filtered.slice(0, 5), has_more: filtered.length > 5, response_metadata: { next_cursor: filtered.length > 5 ? "p2" : "" } } };
+      return { body: { ok: true, messages: filtered.slice(5), has_more: false } };
+    }],
+  ]);
+  const t = slackTransport({ transport: "slack", channel: "C1" }, { token: "x", fetch });
+  assert.deepEqual((await t.read({ limit: 3 })).map((m) => m.text), ["m7", "m8", "m9"], "the newest three, ascending");
+  assert.deepEqual((await t.read({ limit: 3, since: "1756900000.002000" })).map((m) => m.text), ["m3", "m4", "m5"], "the oldest three after the cursor");
+  assert.deepEqual((await t.read()).map((m) => m.text).length, 9);
+});
+
 test("slack history since a cursor is exclusive", async () => {
   const { t, calls } = make();
   const msgs = await t.read({ since: "1756900000.000300" });
