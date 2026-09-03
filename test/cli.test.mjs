@@ -3,7 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmp } from "./helpers.mjs";
 
@@ -79,6 +79,83 @@ test("cli end to end on a local room", async () => {
     r = await agora(["read", "nope"], env);
     assert.equal(r.code, 2);
     assert.match(r.stderr, /no room "nope"/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("cli: two sessions in one state root each keep their own position and see each other's posts", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const cfgPath = path.join(dir, "agora.json");
+    await writeFile(cfgPath, JSON.stringify({
+      actor: { name: "Fable", kind: "agent" },
+      rooms: { down: { transport: "local", path: path.join(dir, "down.ndjson") } },
+    }));
+    const root = path.join(dir, "state");
+    const A = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "fable-a", AGORA_ACTOR: "Fable/watch" };
+    const B = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "fable-b", AGORA_ACTOR: "Fable/review" };
+
+    let r = await agora(["post", "down", "from a"], A);
+    assert.equal(r.code, 0);
+    assert.match(r.stderr, /^agora: Fable\/watch \(from AGORA_ACTOR\) · session fable-a \(from AGORA_SESSION\)/m, "the identity line is on stderr");
+    r = await agora(["watch", "down", "--once", "--json"], B);
+    assert.equal(r.code, 42, "B sees A's post");
+    assert.equal(JSON.parse(r.stdout.trim().split("\n")[0]).signedAs, "Fable/watch");
+    r = await agora(["watch", "down", "--once"], A);
+    assert.equal(r.code, 0, "A does not see its own post");
+    assert.match(r.stderr, /1 of our own skipped/);
+
+    r = await agora(["post", "down", "from b"], B);
+    r = await agora(["watch", "down", "--once", "--json"], A);
+    assert.equal(r.code, 42, "A sees B's post: B's watch did not consume it for A");
+    assert.equal(JSON.parse(r.stdout.trim().split("\n")[0]).signedAs, "Fable/review");
+    r = await agora(["watch", "down", "--once"], A);
+    assert.equal(r.code, 0, "nothing re-delivered");
+    r = await agora(["watch", "down", "--once"], B);
+    assert.equal(r.code, 0, "B skips its own post");
+
+    r = await agora(["cursor", "down", "--json"], A);
+    assert.deepEqual(JSON.parse(r.stdout), { room: "down", cursor: "2", session: "fable-a" });
+    r = await agora(["doctor", "--offline"], A);
+    assert.match(r.stdout, /session fable-a \(from AGORA_SESSION\)/);
+    assert.match(r.stdout, /bearer  Fable\/watch \(agent, from AGORA_ACTOR\)/);
+
+    // a third session with a bad key is a usage error, not a silent default
+    r = await agora(["read", "down"], { ...A, AGORA_SESSION: "not/ok" });
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /AGORA_SESSION must match/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("cli: a session with no position seeds once from the shared cursor and then keeps its own", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const cfgPath = path.join(dir, "agora.json");
+    await writeFile(cfgPath, JSON.stringify({
+      actor: { name: "Fable", kind: "agent" },
+      rooms: { down: { transport: "local", path: path.join(dir, "down.ndjson") } },
+    }));
+    const root = path.join(dir, "state");
+    const legacy = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "old" };
+    const fresh = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "new" };
+    // the single-session layout: a shared cursor file at the state root, as an older version wrote it
+    await agora(["post", "down", "one"], legacy);
+    await agora(["post", "down", "two"], legacy);
+    await writeFile(path.join(root, "down.cursor"), JSON.stringify({ cursor: "1" }) + "\n");
+
+    let r = await agora(["watch", "down", "--once", "--json"], fresh);
+    assert.equal(r.code, 42);
+    assert.match(r.stderr, /seeded from the shared down\.cursor \(1\)/);
+    assert.equal(JSON.parse(r.stdout.trim().split("\n")[0]).text, "two\n\n-- Fable", "resumed after the shared position, not from the start");
+    assert.equal(JSON.parse(await readFile(path.join(root, "down.cursor"), "utf8")).cursor, "1", "the shared file is untouched");
+    r = await agora(["cursor", "down", "--reset", "--json"], fresh);
+    assert.equal(JSON.parse(r.stdout).cursor, null);
+    r = await agora(["watch", "down", "--once", "--json"], fresh);
+    assert.equal(r.code, 42, "after a reset the watch reads from the start, not from the shared file");
+    assert.equal(r.stdout.trim().split("\n").length, 2);
   } finally {
     await cleanup();
   }

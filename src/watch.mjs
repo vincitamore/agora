@@ -6,31 +6,34 @@ import { readCursor, writeCursor, sleep as defaultSleep } from "./core.mjs";
  *  - once:      one read; fired if anything new
  *  - until-new: poll every `interval` seconds until something new or `forSeconds` elapses
  *  - stream:    keep polling and delivering until `forSeconds` elapses (0 = forever)
- * The cursor advances after each read batch, so a watcher never re-delivers.
- * With `self` (the transport's `whoami`) the watcher skips this side's own posts:
- * a message whose author is `self` and is either an agent or signed `actorName`.
- * The cursor still advances past them, so a side never wakes on its own echo.
+ *
+ * A message is this side's own if, and only if, this session posted it: `own` returns the ids this
+ * session recorded at post time, re-read on every poll so a sibling process of the same session is
+ * seen. Nothing else is consulted: not the author, not the kind, not the signature. When the tool
+ * cannot tell whose a message is, it delivers it; a missed peer message is silent and permanent, a
+ * duplicated echo of your own line is visible and cheap.
+ *
+ * The cursor is written AFTER the batch is delivered, so delivery is at-least-once: a process that
+ * dies mid-batch re-delivers next time instead of losing the batch. An all-own batch still advances
+ * the cursor. `readCursor`/`writeCursor` here are the plain per-key file functions; the caller
+ * chooses the directory (a session's own).
  * @param {import('./core.mjs').Transport} transport
  * @param {{
- *   stateDir: string, key: string, thread?: string,
+ *   stateDir: string, key: string, thread?: string, cursor?: string,
  *   mode?: 'once' | 'until-new' | 'stream', interval?: number, forSeconds?: number,
  *   onBatch: (msgs: import('./core.mjs').Message[]) => void | Promise<void>,
- *   self?: { id: string, name: string }, actorName?: string,
+ *   own?: () => Promise<Set<string>> | Set<string>,
  *   sleep?: (ms: number) => Promise<void>, now?: () => number,
  * }} opts
- * @returns {Promise<{ fired: boolean, cursor?: string, polls: number, skipped: number }>}
+ * @returns {Promise<{ fired: boolean, cursor?: string, polls: number, skipped: number, delivered: number }>}
  */
 export async function watch(transport, opts) {
-  const { stateDir, key, thread, mode = "until-new", interval = 15, forSeconds = 0, onBatch, self, actorName } = opts;
+  const { stateDir, key, thread, mode = "until-new", interval = 15, forSeconds = 0, onBatch, own } = opts;
   const sleep = opts.sleep ?? defaultSleep;
   const now = opts.now ?? Date.now;
   let skipped = 0;
-  /** @param {import('./core.mjs').Message} m */
-  const own = (m) =>
-    !!self &&
-    (m.author.id === self.id || m.author.name === self.name) &&
-    (m.author.kind === "agent" || (actorName !== undefined && m.signedAs === actorName));
-  let cursor = await readCursor(stateDir, key);
+  let delivered = 0;
+  let cursor = opts.cursor !== undefined ? opts.cursor : await readCursor(stateDir, key);
   const start = now();
   let fired = false;
   let polls = 0;
@@ -38,19 +41,21 @@ export async function watch(transport, opts) {
     polls++;
     const msgs = await transport.read({ thread, since: cursor });
     if (msgs.length) {
-      cursor = msgs[msgs.length - 1].cursor;
-      await writeCursor(stateDir, key, cursor);
-      const fresh = msgs.filter((m) => !own(m));
+      const posted = own ? await own() : new Set();
+      const fresh = msgs.filter((m) => !posted.has(m.id));
       skipped += msgs.length - fresh.length;
       if (fresh.length) {
         await onBatch(fresh);
+        delivered += fresh.length;
         fired = true;
-        if (mode !== "stream") return { fired, cursor, polls, skipped };
       }
+      cursor = msgs[msgs.length - 1].cursor;
+      await writeCursor(stateDir, key, cursor);
+      if (fired && mode !== "stream") return { fired, cursor, polls, skipped, delivered };
     }
-    if (mode === "once") return { fired, cursor, polls, skipped };
+    if (mode === "once") return { fired, cursor, polls, skipped, delivered };
     // give up when the next poll would land past the deadline, rather than after one poll too many
-    if (forSeconds > 0 && now() - start + interval * 1000 > forSeconds * 1000) return { fired, cursor, polls, skipped };
+    if (forSeconds > 0 && now() - start + interval * 1000 > forSeconds * 1000) return { fired, cursor, polls, skipped, delivered };
     await sleep(interval * 1000);
   }
 }

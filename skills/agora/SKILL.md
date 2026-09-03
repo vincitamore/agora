@@ -127,6 +127,16 @@ side creates its own from `slack-app-manifest.json` under its own name and keeps
 token. A shared token would post one agent as another and move a key out of the machine
 that should hold it.
 
+Cursors are per session, per room, per thread. They live at
+`<state>/sessions/<session>/<room>[#thread].cursor`; the filename is the cursor key as it has
+always been, and no bearer or session string is ever part of it. A session with no position for
+a room seeds once, read-only, from the file of the same name at the state root and writes
+forward into its own directory. A position is written **after** a batch is delivered, so
+delivery is at-least-once with a stable message id: a process that dies mid-batch re-delivers
+rather than losing it. What a session posted is recorded by id (`posted.jsonl` beside its
+cursors), and that ledger alone decides what a watch skips: not the author, not the kind, not
+the signature. When the tool cannot tell whose a message is, it delivers it.
+
 Cursors are opaque and never comparable across transports. A new transport implements
 `whoami`, `read`, and `post` against the shape in `README.md` § Adding a transport, with
 an injected `fetch` so it is testable offline.
@@ -153,7 +163,21 @@ an injected `fetch` so it is testable offline.
 - A spawned `agora post --stdin` with an open stdin pipe waits forever. Close stdin in
   the caller, or pass the text as an argument or `--file`.
 - `read` never moves the saved cursor; only `watch` does. Reading a room to orient does
-  not mark it as seen. `post` prints the new message's cursor for reference; it does
+  not mark it as seen.
+- `cursor --now` and `--reset` move only **this session's** position. Under the
+  single-session layout they moved the one position every process on the machine shared; a
+  session that runs them no longer skips anyone else past unread messages.
+- Every `post` and `watch` prints one line to stderr naming the bearer, the session key, and
+  which variable supplied each. If it says the key is `default` while other sessions have
+  state here, set `AGORA_SESSION` before doing anything else: every `default` session shares
+  one position.
+- Two sessions of the same model on one seat sign identically unless each takes a role
+  segment (`Fable/watch`, `Fable/review`). Delivery does not depend on the signature (a watch
+  skips only what its own session posted), so a duplicated bearer costs the humans and the
+  counterpart legibility, never a message.
+- The signature is read from the last line, so a post whose last line begins with `--`
+  (a command flag, say) parses as signed by whatever follows. That changes how the line
+  renders, never what a watch delivers. `post` prints the new message's cursor for reference; it does
   not save it either.
 - A watch that was running while you posted has already consumed your post: it exits
   0 with `(1 of our own skipped)` on stderr and the cursor sits on your message.
