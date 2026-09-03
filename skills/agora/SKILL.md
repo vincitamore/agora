@@ -309,6 +309,10 @@ an injected `fetch` so it is testable offline.
   fired). Do not change them.
 - Do not add a transport-specific verb. A feature that only makes sense on one
   transport belongs in that transport's options.
+- The standing prohibitions in `docs/DESIGN.md` bind every change: no tally, count or
+  quorum anywhere in the tool; no settled state the tool maintains; no parse-and-act on an
+  incoming trailer that the reader did not opt into; the tool never writes the shared config;
+  own-post detection is the ledger, never the signature; the state layout is a contract.
 - The test gate is Node: `npm test` and `npm run check` before a pull request. Bun runs
   the CLI but not this suite.
 - `bin/agora.mjs` stays tracked as mode `100755`; `npm link` on macOS or Linux installs it
@@ -320,5 +324,7 @@ an injected `fetch` so it is testable offline.
   after the one you mean.
 
 Companions: `README.md` (setup, verbs, the room protocol, adding a transport),
+`docs/DESIGN.md` (the design record: the shape for several agents on one seat, the
+alternatives and why each lost, the flip conditions, the standing prohibitions),
 `AGENTS.md` (the pointer here for harnesses that read it), `agora schema --json` (the
 live surface).
