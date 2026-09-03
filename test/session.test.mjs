@@ -8,6 +8,9 @@ import {
   BEARER_RE,
   appendPosted,
   bootEpoch,
+  claimDeparture,
+  departureLine,
+  departures,
   harnessPid,
   identityLine,
   listRecords,
@@ -169,6 +172,39 @@ test("listRecords: every session with state, registered or not, with its livenes
     assert.equal(harnessPid(cfg, { CLAUDE_PID: "77" }).pid, 77);
     assert.deepEqual(harnessPid(cfg, { CLAUDE_PID: "nope" }), { pid: undefined, pidSource: undefined });
     assert.equal(harnessPid({ ...cfg, session: { pidFrom: ["MY_PID"] } }, { MY_PID: "5", CLAUDE_PID: "6" }).pidSource, "MY_PID");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("departures: gone past the grace and within the stale horizon, not yet announced in this room, never oneself; one announcer wins", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const mk = async (/** @type {string} */ slug, /** @type {string} */ bearer, /** @type {number} */ minutesAgo, /** @type {number} */ pid) => {
+      const s = { slug, source: "x", explicit: true };
+      await writeRecord(sessionDir(dir, s), s, { bearer, pid, pidSource: "TEST", now: new Date(Date.now() - minutesAgo * 60_000) });
+    };
+    const dead = () => { const e = /** @type {NodeJS.ErrnoException} */ (new Error("gone")); e.code = "ESRCH"; throw e; };
+    await mk("me", "Grace/watch", 1, 1);
+    await mk("quiet", "Opus/design", 30, 2); // gone, quiet for 30 minutes: announce
+    await mk("blip", "Grace/review", 1, 3); // gone but touched a minute ago: a restart, not a departure
+    await mk("ancient", "Grok/build", 80 * 60, 4); // gone for days: pruned, never announced
+    await mk("alive", "Codex", 30, process.pid); // still running
+    const kill = (/** @type {number} */ pid) => { if (pid !== process.pid) dead(); };
+    const boot = bootEpoch();
+    let gone = await departures(dir, { selfSlug: "me", roomKey: "r", kill, boot });
+    assert.deepEqual(gone.map((g) => g.slug), ["quiet"]);
+    assert.match(departureLine(gone[0].record, ["Grace/watch", "Codex"]), /^Opus\/design is no longer running \(last seen .*Z\)\. Requests addressed to it will not be answered; re-address them\. Still here on this seat: Grace\/watch, Codex\.$/);
+    assert.match(departureLine(gone[0].record, []), /No other session is live/);
+
+    assert.equal(await claimDeparture(gone[0].dir, "r", "me"), true, "first announcer wins");
+    assert.equal(await claimDeparture(gone[0].dir, "r", "other"), false, "second does not");
+    gone = await departures(dir, { selfSlug: "me", roomKey: "r", kill, boot });
+    assert.deepEqual(gone, [], "announced in this room: not again");
+    gone = await departures(dir, { selfSlug: "me", roomKey: "another", kill, boot });
+    assert.deepEqual(gone.map((g) => g.slug), ["quiet"], "another room has not been told");
+    gone = await departures(dir, { selfSlug: "quiet", roomKey: "third", kill, boot });
+    assert.deepEqual(gone, [], "a session never announces itself");
   } finally {
     await cleanup();
   }

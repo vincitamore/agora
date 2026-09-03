@@ -42,12 +42,13 @@ import { jitter, readCursor, writeCursor, sleep as defaultSleep } from "./core.m
  *   onBatch: (msgs: import('./core.mjs').Message[]) => void | Promise<void>,
  *   own?: () => Promise<Set<string>> | Set<string>,
  *   threads?: FollowedThreads,
+ *   sweep?: () => Promise<void> | void,
  *   sleep?: (ms: number) => Promise<void>, now?: () => number, random?: () => number,
  * }} opts
  * @returns {Promise<{ fired: boolean, cursor?: string, polls: number, skipped: number, delivered: number, threads: Record<string, number> }>}
  */
 export async function watch(transport, opts) {
-  const { stateDir, key, thread, mode = "until-new", interval = 15, forSeconds = 0, onBatch, own, threads } = opts;
+  const { stateDir, key, thread, mode = "until-new", interval = 15, forSeconds = 0, onBatch, own, threads, sweep } = opts;
   const sleep = opts.sleep ?? defaultSleep;
   const now = opts.now ?? Date.now;
   const random = opts.random ?? Math.random;
@@ -64,6 +65,10 @@ export async function watch(transport, opts) {
   const result = () => ({ fired, cursor, polls, skipped, delivered, threads: perThread });
   for (;;) {
     polls++;
+    // the seat's own housekeeping rides on the poll: a sibling that went dark is announced here,
+    // before the read, so the announcement is in the room for everyone else's next poll and in
+    // this session's ledger for its own
+    if (sweep) await sweep();
     /** @type {Array<{ m: import('./core.mjs').Message, thread?: string }>} */
     const batch = [];
     const roomMsgs = await transport.read({ thread, since: cursor });

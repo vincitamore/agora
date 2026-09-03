@@ -320,6 +320,62 @@ export function ageHours(rec, now = new Date()) {
   return (now.getTime() - new Date(rec.lastSeen).getTime()) / 3_600_000;
 }
 
+export const DEPART_GRACE_MINUTES = 5;
+const departedDir = (/** @type {string} */ dir) => path.join(dir, "departed");
+
+/**
+ * Sessions on this seat that have gone dark and that this room has not been told about: the
+ * record's process is gone, its last write is older than the grace (a harness that restarts
+ * gives its session a new pid and touches the record on its next command, so a few quiet
+ * minutes are required before anyone is declared gone) and newer than the stale horizon
+ * (older than that, the record is pruned, not announced). The caller announces each one
+ * after winning `claimDeparture`, so several watchers on the seat post one line, not one each.
+ * @param {string} stateRoot
+ * @param {{ selfSlug: string, roomKey: string, graceMinutes?: number, staleHours?: number, now?: Date, kill?: (pid: number, sig: 0) => void, boot?: number }} opts
+ */
+export async function departures(stateRoot, opts) {
+  const grace = (opts.graceMinutes ?? DEPART_GRACE_MINUTES) / 60;
+  const stale = opts.staleHours ?? 48;
+  const now = opts.now ?? new Date();
+  /** @type {Array<{ slug: string, dir: string, record: SessionRecord }>} */
+  const out = [];
+  for (const r of await listRecords(stateRoot, { kill: opts.kill, boot: opts.boot })) {
+    if (r.slug === opts.selfSlug || !r.record || r.state !== "gone") continue;
+    const age = ageHours(r.record, now);
+    if (age < grace || age > stale) continue;
+    if (existsSync(path.join(departedDir(r.dir), `${opts.roomKey}.json`))) continue;
+    out.push({ slug: r.slug, dir: r.dir, record: r.record });
+  }
+  return out;
+}
+
+/**
+ * Take the right to announce a departure in one room: an exclusive create, so of several
+ * watchers noticing at once exactly one speaks. True for the winner.
+ * @param {string} dir the departed session's directory @param {string} roomKey @param {string} by the announcing session's slug
+ */
+export async function claimDeparture(dir, roomKey, by) {
+  await mkdir(departedDir(dir), { recursive: true });
+  try {
+    await writeFile(path.join(departedDir(dir), `${roomKey}.json`), JSON.stringify({ roomKey, by, at: new Date().toISOString() }) + "\n", { encoding: "utf8", flag: "wx" });
+    return true;
+  } catch (e) {
+    if (/** @type {NodeJS.ErrnoException} */ (e).code === "EEXIST") return false;
+    throw e;
+  }
+}
+
+/**
+ * The line a sibling posts for a session that went dark. It names who is still here so a
+ * request can be re-addressed rather than re-sent into silence.
+ * @param {SessionRecord} gone @param {string[]} live bearers of sessions still live on this seat
+ */
+export function departureLine(gone, live) {
+  const seen = new Date(gone.lastSeen).toISOString().replace(/\.\d{3}Z$/, "Z");
+  const others = live.length ? `Still here on this seat: ${live.join(", ")}.` : "No other session is live on this seat.";
+  return `${gone.bearer} is no longer running (last seen ${seen}). Requests addressed to it will not be answered; re-address them. ${others}`;
+}
+
 const ETAG_MAX = 64;
 const ETAG_KEEP = 32;
 const etagPath = (/** @type {string} */ dir) => path.join(dir, "etags.json");

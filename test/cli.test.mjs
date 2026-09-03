@@ -183,6 +183,56 @@ test("cli: session --as registers once and every later call signs as the record;
   }
 });
 
+test("cli: a session that went dark is announced to the room once by the first watch that notices; who shows it", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const cfgPath = path.join(dir, "agora.json");
+    await writeFile(cfgPath, JSON.stringify({
+      actor: { name: "Grace", kind: "agent" },
+      rooms: { down: { transport: "local", path: path.join(dir, "down.ndjson") } },
+    }));
+    const root = path.join(dir, "state");
+    const A = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "a", AGORA_ACTOR: "Grace/watch", CLAUDE_PID: String(process.pid) };
+    const B = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "b", AGORA_ACTOR: "Grace/review", CLAUDE_PID: String(process.pid) };
+    // a third session whose process is gone and whose record is old: registered with a pid nothing answers,
+    // then its record's lastSeen pushed back past the grace by hand (the tool never writes the past)
+    const G = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "g", AGORA_ACTOR: "Opus/design", CLAUDE_PID: "999999" };
+    let r = await agora(["session", "--as", "Opus/design"], G);
+    assert.equal(r.code, 0);
+    await agora(["session", "--as", "Grace/watch"], A);
+    await agora(["session", "--as", "Grace/review"], B);
+    const recPath = path.join(root, "sessions", "g", "session.json");
+    const rec = JSON.parse(await readFile(recPath, "utf8"));
+    rec.lastSeen = new Date(Date.now() - 20 * 60_000).toISOString();
+    await writeFile(recPath, JSON.stringify(rec));
+
+    r = await agora(["post", "down", "hello from a"], A);
+    r = await agora(["watch", "down", "--once", "--json"], B);
+    assert.equal(r.code, 42);
+    assert.match(r.stderr, /announced to down: Opus\/design is no longer running/);
+    const texts = messages(r.stdout).map((/** @type {string} */ l) => JSON.parse(l).text);
+    assert.equal(texts.length, 1, "B receives A's post; its own announcement is in its ledger and is not echoed to it");
+    assert.match(texts[0], /hello from a/);
+    r = await agora(["watch", "down", "--once", "--json"], A);
+    assert.equal(r.code, 42, "A receives the announcement B posted");
+    assert.match(JSON.parse(messages(r.stdout)[0]).text, /Opus\/design is no longer running .* Still here on this seat: Grace\/watch, Grace\/review\./);
+    assert.doesNotMatch(r.stderr, /announced to down/, "announced once, not by every watcher");
+    r = await agora(["watch", "down", "--once"], B);
+    assert.equal(r.code, 0, "nothing new; not announced again");
+
+    r = await agora(["who", "down"], A);
+    assert.match(r.stdout, /Grace\/review\s+last spoke .*here: live/);
+    assert.match(r.stdout, /Grace\/watch\s+last spoke .*here: live/);
+    assert.match(r.stdout, /read 2 messages back to/);
+    r = await agora(["who", "down", "--json"], A);
+    const rows = r.stdout.trim().split("\n").map((/** @type {string} */ l) => JSON.parse(l));
+    assert.equal(rows.at(-1).type, "who-horizon");
+    assert.ok(rows.some((/** @type {any} */ x) => x.name === "Grace/review" && x.here?.[0]?.state === "live"));
+  } finally {
+    await cleanup();
+  }
+});
+
 test("cli: a session with no position seeds once from the shared cursor and then keeps its own", async () => {
   const { dir, cleanup } = await tmp();
   try {
