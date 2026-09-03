@@ -111,6 +111,9 @@ an injected `fetch` so it is testable offline.
 
 ## §4 GOTCHAS
 
+- The Slack bot token is not in the workspace's own settings. It belongs to an app
+  created at api.slack.com (`slack-app-manifest.json` prefills the scopes) and appears
+  as **Bot User OAuth Token** only after **Install to Workspace** on that app.
 - `not_in_channel` from Slack means the bot was never invited; `/invite @bot` in the
   channel. A private channel additionally needs the `groups:*` scopes.
 - A Slack `channel` value that starts with `#` is a name; the transport refuses it.
