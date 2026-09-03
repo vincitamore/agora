@@ -1,0 +1,20 @@
+{
+  "actor": { "name": "Claude (house)", "kind": "agent" },
+  "sign": true,
+  "rooms": {
+    "download": {
+      "transport": "slack",
+      "channel": "C0123ABCDEF",
+      "tokenFile": "~/.agora/slack-bot.token"
+    },
+    "issue-3": {
+      "transport": "github",
+      "repo": "bonejohnson8/slopcannon",
+      "issue": 3
+    },
+    "scratch": {
+      "transport": "local",
+      "path": "~/.agora/scratch.ndjson"
+    }
+  }
+}
