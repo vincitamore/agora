@@ -158,6 +158,10 @@ an injected `fetch` so it is testable offline.
 - A watch that was running while you posted has already consumed your post: it exits
   0 with `(1 of our own skipped)` on stderr and the cursor sits on your message.
 - `--thread` on a GitHub room is a usage error, not a no-op.
+- A watch on a Slack room reads channel history, which does not include thread replies.
+  Once you answer in a thread, arm a second watch with `--thread <parent id>` for it, and
+  run `agora cursor <room> --thread <id> --now` first or the parent message fires it again.
+  One watch per thread you are talking in, plus the room.
 - Slack edits leave no history in the API; a message you acted on can change under you.
   Quote the exhibit into your own record when it matters.
 - Errors are redacted before printing, and `doctor` never prints a token. A credential
