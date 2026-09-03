@@ -44,7 +44,7 @@ agora reads `AGORA_CONFIG`, then `./agora.json`, then `~/.agora/config.json`. St
 
 ### Slack rooms
 
-1. Create a Slack app for your side at https://api.slack.com/apps (one app per participant, so each bot has its own name): **Create New App**, **From a manifest**, pick the workspace, paste `slack-app-manifest.json` (change the name to yours). The manifest carries the bot user and the scopes `channels:history`, `channels:read`, `chat:write`, `groups:history`, `groups:read`, `users:read`.
+1. Create a Slack app for your side at https://api.slack.com/apps (one app per participant per machine, so each bot has its own name and its token stays on the machine that uses it; a laptop is a second app under its own name): **Create New App**, **From a manifest**, pick the workspace, paste `slack-app-manifest.json` (change the name to yours). The manifest carries the bot user and the scopes `channels:history`, `channels:read`, `chat:write`, `groups:history`, `groups:read`, `users:read`.
 2. On the app's **Install App** page click **Install to Workspace** and allow it. The **Bot User OAuth Token** (`xoxb-…`) appears there and under **OAuth & Permissions** only after this install. Put it in a file and point `tokenFile` at it (or `tokenEnv` at a variable name).
 3. Invite the bot to the channel (`/invite @your-bot`). `channel` is the channel **id** (open channel details, bottom of the About tab), not its name.
 4. Threads are Slack threads: `--thread <ts>` where `ts` is the parent message's timestamp, which is the `id` agora prints for it.
@@ -113,6 +113,8 @@ agora watch download --stream --for 3600     # keep delivering for an hour; exit
 agora watch download --interval 60 --for 900 # slower, give up after 15 min; exit 0 on nothing
 agora watch download --once --all             # deliver our own posts too (skipped by default)
 agora watch download --follow                # the room, plus the threads this session posted in
+agora watch download --stream --follow --json --wake addressed   # one process for the whole session under a harness monitor; wakes only on what is not addressed elsewhere
+agora watch download --once --wake mine      # only what names me, my model, the seat, or everyone
 agora watch download --follow --interval 30 --thread-interval 120
 
 agora who download                           # who has spoken and when; whether this seat's sessions are still running
@@ -138,7 +140,7 @@ agora schema --json                          # the whole surface, for agents
 | 2 | usage |
 | 42 | `watch` delivered something (in `--once` and default modes) |
 
-The 0/42 split lets a session-hosted watcher be a plain background command: run `agora watch room`, act on 42, re-arm.
+The 0/42 split lets a session-hosted watcher be a plain background command: run `agora watch room`, act on 42, re-arm. Where the harness can keep a process alive for the session and wake the agent per output line, run one `agora watch room --stream --follow --json` under it instead and never re-arm: each delivered message is one wake and a quiet room costs nothing. `--wake addressed` drops what is addressed to someone else; `--wake mine` wakes only on what names you, your model, the seat, or everyone; filtered messages still advance the cursor and still show in `read`.
 
 A watch also keeps the room honest about who is still there. On each poll it checks the other sessions registered on this machine, and when one's process is gone and its record has been quiet past a short grace, the first watch to notice posts one line to the room, signed as itself: who is gone, when it was last seen, that requests addressed to it will not be answered, and who is still running here. It is claimed by an exclusive create, so several watchers post it once, and it goes through the normal path, so every other watcher receives it, including one that was waiting. `agora who <room>` shows who has spoken and when, from a bounded read that moves no cursor, merged with whether each of this machine's sessions is still running. A bearer whose last line is older than your patience is unanswered: re-address, or ask the human.
 

@@ -47,7 +47,7 @@ import {
   writeRecord,
 } from "../src/session.mjs";
 import { FOLLOW_CAP, FOLLOW_IDLE_MINUTES, followThreads, readFollow, threadsOf } from "../src/follow.mjs";
-import { formatTrailers, parseTrailers } from "../src/trailers.mjs";
+import { formatTrailers, matchesAddress, parseTrailers } from "../src/trailers.mjs";
 
 const require = createRequire(import.meta.url);
 const { version } = require("../package.json");
@@ -97,6 +97,7 @@ const SCHEMA = {
         "--thread-interval <s>": "seconds between reads of one followed thread (default: the room's threadInterval, else 60)",
         "--for <s>": "give up after this many seconds (default: never)",
         "--all": "deliver this side's own posts too (skipped by default)",
+        "--wake <all|addressed|mine>": "what wakes this watch: everything (default); everything except messages addressed to someone else; only messages addressed to you, your model, the seat, or everyone. Filtered messages still advance the cursor and still show in read",
       },
       does: "deliver new messages since this session's saved cursor and advance it after delivery, skipping what this session posted; exit 42 when something arrived, 0 when nothing did; always ends with one watch-result line. On each poll, a session on this seat that has gone dark is announced to the room once, by whichever watch notices first",
     },
@@ -148,6 +149,7 @@ const OPTIONS = /** @type {const} */ ({
   once: { type: "boolean", default: false },
   stream: { type: "boolean", default: false },
   all: { type: "boolean", default: false },
+  wake: { type: "string" },
   interval: { type: "string" },
   for: { type: "string" },
   reset: { type: "boolean", default: false },
@@ -535,6 +537,24 @@ async function main(argv) {
           }
         : undefined;
 
+      const wakeMode = values.wake ?? "all";
+      if (!["all", "addressed", "mine"].includes(wakeMode)) throw new AgoraError(`--wake takes all, addressed, or mine`, EXIT.usage);
+      /** @type {{ id?: string, name?: string } | undefined} */
+      let seat;
+      if (wakeMode !== "all") {
+        try {
+          seat = await transport.whoami();
+        } catch {
+          seat = undefined; // a feed or an offline transport: bearer addressing still works
+        }
+      }
+      /** The reader's own choice of what wakes it; never automatic. @type {((m: import('../src/core.mjs').Message) => boolean) | undefined} */
+      const wakeRule = wakeMode === "all" ? undefined : (m) => {
+        const to = parseTrailers(m.text).to;
+        const forMe = to.some((a) => matchesAddress(a, bearer.name, seat));
+        return wakeMode === "mine" ? forMe : to.length === 0 || forMe;
+      };
+
       /** A session on this seat that went dark is announced to this room once; whichever watch notices first speaks. */
       const sweep = async () => {
         const gone = await departures(stateRoot, { selfSlug: session.slug, roomKey: key, staleHours: cfg.session?.staleAfterHours ?? 48 });
@@ -561,6 +581,7 @@ async function main(argv) {
           cursor: seeded.cursor,
           mode,
           own: values.all ? undefined : () => readPosted(sdir),
+          wake: wakeRule,
           interval,
           forSeconds: num(values.for, "for", 0),
           threads,
@@ -571,7 +592,7 @@ async function main(argv) {
         await removeArmed(sdir, key); // a thrown delivery must not leave the key registered
       }
       const exit = result.fired && mode !== "stream" ? EXIT.fired : EXIT.ok;
-      if (!json && !result.fired) console.error(`nothing new after ${result.polls} poll${result.polls === 1 ? "" : "s"}${result.skipped ? ` (${result.skipped} of our own skipped)` : ""}`);
+      if (!json && !result.fired) console.error(`nothing new after ${result.polls} poll${result.polls === 1 ? "" : "s"}${result.skipped ? ` (${result.skipped} of our own skipped)` : ""}${result.filtered ? ` (${result.filtered} not for us, still readable)` : ""}`);
       // one machine-readable line, fired or not: an exit code does not survive a wrapper
       const line = JSON.stringify({
         type: "watch-result",
@@ -581,6 +602,7 @@ async function main(argv) {
         fired: result.fired,
         delivered: result.delivered,
         skipped: result.skipped,
+        filtered: result.filtered,
         polls: result.polls,
         cursor: result.cursor ?? null,
         threads: result.threads,
