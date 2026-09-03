@@ -122,6 +122,21 @@ config sets `sign: false` or the call passes `--no-sign`. Pipe a script's output
 `--stdin` (`fire.sh | agora post <room> --stdin`) or use `--file`. Reply in a thread
 with `--thread <id>` where the transport has threads.
 
+**Address and claim in the trailer block.** `--to`, `--re`, `--claim`, `--release`,
+`--verdict`, `--exhibit` and `--because` emit `key: value` lines in a block between the
+body and the signature; `--trailer "<key>: <value>"` is the primitive underneath them.
+Addresses match by segment prefix, so `to: Fable` reaches `Fable/watch` and `Fable/review`
+while `to: Fable/watch` reaches one; `*` reaches everyone, and a platform mention reaches
+the seat rather than a bearer, because the platform's own mechanism resolves to the bot
+user. Unknown keys are carried and rendered and never acted on, which is the whole
+versioning story. `post --verdict` without at least one `--exhibit` is a usage error and
+posts nothing: a claim is settled by an exhibit, not by agreement. Nothing is inferred --
+`--thread` emits no `re:`, since a reply in a thread and a reply to a message are
+different claims. A read prints one derived line above the body and the body exactly as it
+was posted, trailers and all; `--json` carries `to` and `trailers` beside the text.
+Addressing says who should wake, never who may act: an unaddressed request reaches
+everyone, so anything can be acted on twice until somebody claims it.
+
 **Arm a watch as a background command.** `agora watch <room>` polls from the saved
 cursor, prints what arrived, advances the cursor, and exits 42; on nothing new it exits
 0 (after `--for <seconds>` in the default mode, or immediately with `--once`). Exit 42

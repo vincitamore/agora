@@ -41,6 +41,7 @@ import {
   writeRecord,
 } from "../src/session.mjs";
 import { FOLLOW_CAP, FOLLOW_IDLE_MINUTES, followThreads, readFollow, threadsOf } from "../src/follow.mjs";
+import { formatTrailers, parseTrailers } from "../src/trailers.mjs";
 
 const require = createRequire(import.meta.url);
 const { version } = require("../package.json");
@@ -63,8 +64,21 @@ const SCHEMA = {
     },
     post: {
       args: ["<room>", "[text]"],
-      options: { "--thread <id>": "reply in a thread", "--file <path>": "text from a file", "--stdin": "text from stdin", "--no-sign": "omit the signature line" },
-      does: "post one message signed as the configured actor; prints id and cursor",
+      options: {
+        "--thread <id>": "reply in a thread",
+        "--file <path>": "text from a file",
+        "--stdin": "text from stdin",
+        "--no-sign": "omit the signature line",
+        "--trailer <key: value>": "one trailer line, repeatable (the primitive under the rest)",
+        "--to <addr>": "address a bearer, a seat or *, repeatable",
+        "--re <id>": "the message this answers",
+        "--claim <subject>": "announce you are working on it, repeatable",
+        "--release <subject>": "hand it back, repeatable",
+        "--verdict <line>": "a settled result; needs at least one --exhibit",
+        "--exhibit <locator>": "what settles it, repeatable",
+        "--because <text>": "the reasoning behind it",
+      },
+      does: "post one message signed as this session's bearer, with any trailers in a block above the signature; prints id and cursor",
     },
     watch: {
       args: ["<room>"],
@@ -108,6 +122,14 @@ const OPTIONS = /** @type {const} */ ({
   since: { type: "string" },
   limit: { type: "string" },
   file: { type: "string" },
+  trailer: { type: "string", multiple: true },
+  to: { type: "string", multiple: true },
+  re: { type: "string" },
+  claim: { type: "string", multiple: true },
+  release: { type: "string", multiple: true },
+  verdict: { type: "string" },
+  exhibit: { type: "string", multiple: true },
+  because: { type: "string" },
   stdin: { type: "boolean", default: false },
   "no-sign": { type: "boolean", default: false },
   follow: { type: "boolean", default: false },
@@ -139,18 +161,47 @@ function recordLine(rec, state) {
 /** @param {string} s */
 const indent = (s) => s.split(/\r?\n/).map((l) => `    ${l}`).join("\n");
 
-/** @param {import('../src/core.mjs').Message} m */
+/**
+ * A message with its trailer block read off it. The text is never rewritten: the block stays in
+ * the body it was posted in, and this only says what is in there.
+ * @param {import('../src/core.mjs').Message} m
+ */
+function decorate(m) {
+  const { trailers, to } = parseTrailers(m.text);
+  return {
+    ...m,
+    ...(to.length ? { to } : {}),
+    ...(trailers.length ? { trailers } : {}),
+  };
+}
+
+/** The one derived line above a body: what the trailers say, in the emitter's order. @param {ReturnType<typeof decorate>} m */
+function trailerLine(m) {
+  if (!m.trailers?.length) return "";
+  /** @type {string[]} */
+  const parts = [];
+  if (m.to?.length) parts.push(`to ${m.to.join(", ")}`);
+  for (const t of formatTrailers(m.trailers).split("\n")) {
+    const at = t.indexOf(": ");
+    const key = t.slice(0, at);
+    if (key === "to") continue;
+    parts.push(`${key} ${t.slice(at + 2)}`);
+  }
+  return parts.length ? `  → ${parts.join(" · ")}\n` : "";
+}
+
+/** @param {ReturnType<typeof decorate>} m */
 function human(m) {
   const who = m.signedAs && m.signedAs !== m.author.name ? `${m.author.name} as ${m.signedAs}` : m.author.name;
   const where = m.thread ? `  thread ${m.thread}` : "";
-  return `[${m.ts}] ${who} (${m.author.kind})${where}  cursor ${m.cursor}\n${indent(m.text)}`;
+  return `[${m.ts}] ${who} (${m.author.kind})${where}  cursor ${m.cursor}\n${trailerLine(m)}${indent(m.text)}`;
 }
 
 /** @param {import('../src/core.mjs').Message[]} msgs @param {boolean} json */
 function printMessages(msgs, json) {
   for (const m of msgs) {
-    const { raw: _raw, ...rest } = m;
-    console.log(json ? JSON.stringify(rest) : human(m) + "\n");
+    const { raw: _raw, ...rest } = decorate(m);
+    console.log(json ? JSON.stringify(rest) : human(rest) + "\n");
   }
 }
 
@@ -181,6 +232,31 @@ async function pollRates(cfg, stateRoot) {
     const budget = roomPollBudget(room);
     const prev = out.get(room.transport) ?? { rate: 0, budget, watches: 0 };
     out.set(room.transport, { rate: prev.rate + rate, budget: Math.max(prev.budget, budget), watches: prev.watches + 1 });
+  }
+  return out;
+}
+
+/**
+ * The trailer entries a `post` call asked for: `--trailer` is the primitive and the named flags are
+ * sugar on it. Nothing is inferred -- `--thread` does not emit a `re:`, because a reply in a thread
+ * and a reply to a message are different claims and only the author knows which was meant.
+ * @param {Record<string, unknown>} values
+ * @returns {import('../src/trailers.mjs').Trailer[]}
+ */
+function trailerEntries(values) {
+  /** @type {import('../src/trailers.mjs').Trailer[]} */
+  const out = [];
+  for (const raw of /** @type {string[]} */ (values.trailer ?? [])) {
+    const at = raw.indexOf(":");
+    const key = at < 0 ? "" : raw.slice(0, at).trim().toLowerCase();
+    const value = at < 0 ? "" : raw.slice(at + 1).trim();
+    if (!/^[a-z][a-z0-9-]{0,23}$/.test(key) || !value || value.length > 200)
+      throw new AgoraError(`--trailer takes "<key>: <value>" (a lower-case key of up to 24 characters, a value of up to 200)`, EXIT.usage);
+    out.push({ key, value });
+  }
+  for (const key of ["to", "re", "claim", "release", "verdict", "exhibit", "because"]) {
+    const v = values[key];
+    for (const value of Array.isArray(v) ? v : v === undefined ? [] : [String(v)]) out.push({ key, value: String(value).trim() });
   }
   return out;
 }
@@ -354,10 +430,14 @@ async function main(argv) {
       return EXIT.ok;
     }
     case "post": {
+      const entries = trailerEntries(values);
+      if (entries.some((t) => t.key === "verdict") && !entries.some((t) => t.key === "exhibit"))
+        throw new AgoraError(`--verdict needs at least one --exhibit: a claim is settled by an exhibit, not by agreement`, EXIT.usage);
       let text = rest.join(" ");
       if (values.file) text = await readFile(values.file, "utf8");
       else if (values.stdin || text === "-") text = await readStdin();
       if (!text.trim()) throw new AgoraError(`nothing to post (give text, --file, or --stdin)`, EXIT.usage);
+      if (entries.length) text = `${text.replace(/\s+$/, "")}\n\n${formatTrailers(entries)}`;
       const signIt = cfg.sign !== false && !values["no-sign"];
       const body = signIt ? sign(text, cfg.actor) : text;
       await identity();
