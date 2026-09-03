@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { followThreads, readFollow, threadsOf } from "../src/follow.mjs";
+import { dropFollow, followThreads, readFollow, threadsOf } from "../src/follow.mjs";
 import { tmp } from "./helpers.mjs";
 
 /** @param {string} id @param {string} [thread] @returns {import('../src/core.mjs').Message} */
@@ -72,6 +72,18 @@ test("the set is capped, and the thread with the oldest activity is the one evic
     const two = await followThreads(dir, "down", ["T4", "T5"], { cap: 3, now: new Date(t0.getTime() + 6000) });
     assert.deepEqual(two.evicted, ["T2", "T0"], "a cap breached by two evicts two");
     assert.deepEqual(two.threads, ["T3", "T4", "T5"]);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("dropFollow removes one thread so a 404 follow does not rejoin on the next poll", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    await followThreads(dir, "down", ["keep", "1788459640.1197"]);
+    assert.equal(await dropFollow(dir, "down", "1788459640.1197"), true);
+    assert.deepEqual(Object.keys((await readFollow(dir, "down")).threads), ["keep"]);
+    assert.equal(await dropFollow(dir, "down", "missing"), false);
   } finally {
     await cleanup();
   }

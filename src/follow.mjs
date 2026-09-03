@@ -43,6 +43,15 @@ export async function writeFollow(dir, key, set) {
   await writeFile(file, JSON.stringify(set, null, 2) + "\n", "utf8");
 }
 
+/** Drop one thread from the set. A truncated Slack ts that 404s must leave, or the next poll puts it back. @param {string} dir @param {string} key @param {string} id */
+export async function dropFollow(dir, key, id) {
+  const set = await readFollow(dir, key);
+  if (!(id in set.threads)) return false;
+  delete set.threads[id];
+  await writeFollow(dir, key, set);
+  return true;
+}
+
 /** The threads a batch of messages came from, in order, without repeats. @param {import('./core.mjs').Message[]} msgs */
 export function threadsOf(msgs) {
   /** @type {string[]} */

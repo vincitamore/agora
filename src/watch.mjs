@@ -11,6 +11,7 @@ import { jitter, readCursor, writeCursor, sleep as defaultSleep } from "./core.m
  * @property {(thread: string) => Promise<string | undefined>} cursor its saved position
  * @property {number} interval seconds between reads of one thread
  * @property {(msgs: import('./core.mjs').Message[]) => Promise<void> | void} [note] record activity from a delivered batch
+ * @property {(id: string) => Promise<void> | void} [drop] remove a thread the transport can no longer read
  */
 
 /**
@@ -92,7 +93,18 @@ export async function watch(transport, opts) {
         const st = followed.get(id);
         if (!st || now() - st.lastRead < threads.interval * 1000) continue;
         st.lastRead = now();
-        const replies = await transport.read({ thread: id, since: st.cursor });
+        /** @type {import('./core.mjs').Message[]} */
+        let replies = [];
+        try {
+          replies = await transport.read({ thread: id, since: st.cursor });
+        } catch (err) {
+          // one unreadable follow (truncated Slack ts → thread_not_found) must not kill the room watch
+          const why = err instanceof Error ? err.message : String(err);
+          console.error(`agora: dropped follow ${id}: ${why}`);
+          followed.delete(id);
+          if (threads.drop) await threads.drop(id);
+          continue;
+        }
         if (!replies.length) continue;
         advanced.set(id, replies[replies.length - 1].cursor);
         for (const m of replies) batch.push({ m, thread: id });

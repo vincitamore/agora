@@ -46,7 +46,7 @@ import {
   writeArmed,
   writeRecord,
 } from "../src/session.mjs";
-import { FOLLOW_CAP, FOLLOW_IDLE_MINUTES, followThreads, readFollow, threadsOf } from "../src/follow.mjs";
+import { FOLLOW_CAP, FOLLOW_IDLE_MINUTES, dropFollow, followThreads, readFollow, threadsOf } from "../src/follow.mjs";
 import { formatTrailers, matchesAddress, parseTrailers } from "../src/trailers.mjs";
 
 const require = createRequire(import.meta.url);
@@ -534,6 +534,7 @@ async function main(argv) {
             cursor: async (id) => (await readCursorSeeded(sdir, stateRoot, cursorKey(roomAlias, id))).cursor,
             interval: threadInterval,
             note: async (msgs) => void (await follow(sdir, roomAlias, room, threadsOf(msgs))),
+            drop: async (id) => { await dropFollow(sdir, cursorKey(roomAlias), id); },
           }
         : undefined;
 
