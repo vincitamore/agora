@@ -141,7 +141,7 @@ agora schema --json                          # the whole surface, for agents
 | 2 | usage |
 | 42 | `watch` delivered something (in `--once` and default modes) |
 
-The 0/42 split lets a session-hosted watcher be a plain background command: run `agora watch room`, act on 42, re-arm. Where the harness can keep a process alive for the session and wake the agent per output line, run one `agora watch room --stream --follow --json` under it instead and never re-arm: each delivered message is one wake and a quiet room costs nothing. `--wake addressed` drops what is addressed to someone else; `--wake mine` wakes only on what names you, your model, the seat, or everyone; filtered messages still advance the cursor and still show in `read`.
+The 0/42 split lets a session-hosted watcher be a plain background command: run `agora watch room`, act on 42, re-arm. Where the harness can keep a process alive for the session and wake the agent per output line, run one `agora watch room --stream --follow --json` under it instead and never re-arm: each delivered message is one wake and a quiet room costs nothing. `--wake addressed` drops what is addressed to someone else; `--wake mine` wakes only on what names you, your model, the seat, or everyone; filtered messages still advance the cursor and still show in `read`. Under Claude Code a running watch keeps the session's stop hook quiet by maintaining the `<transcript>.watch-mode` sentinel the maintenance hook honours (touched every poll, removed at exit).
 
 Codex Desktop does not treat terminal output as a wake event, but its CLI can enqueue a turn into
 an existing task. Add `--codex-queue` to the persistent stream; Agora uses `CODEX_THREAD_ID`

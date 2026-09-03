@@ -49,6 +49,7 @@ import {
 import { FOLLOW_CAP, FOLLOW_IDLE_MINUTES, dropFollow, followThreads, readFollow, rootsOf, threadsOf } from "../src/follow.mjs";
 import { formatTrailers, matchesAddress, parseTrailers } from "../src/trailers.mjs";
 import { queueCodex } from "../src/codex.mjs";
+import { clearWatchMode, touchWatchMode, watchModeSentinel } from "../src/harness.mjs";
 
 const require = createRequire(import.meta.url);
 const { version } = require("../package.json");
@@ -520,6 +521,12 @@ async function main(argv) {
 
       const held = await readArmed(sdir, key);
       if (held && pidAlive(held.pid)) console.error(`agora: another watch holds this cursor (pid ${held.pid}); two watches on one key double-deliver`);
+      // Under Claude Code a persistent watch would otherwise turn every delivery into a
+      // maintenance-checklist turn; the stop hook honours a sentinel beside the transcript
+      // while the watch runs. Touched on every poll (the hook treats it stale after 12 h),
+      // removed with the armed record. Only written beside an existing transcript.
+      const watchMode = watchModeSentinel(process.env, process.cwd());
+      if (await touchWatchMode(watchMode)) console.error(`agora: watch-mode sentinel ${watchMode?.sentinel} (the stop hook stays quiet while this watch runs)`);
       await writeArmed(sdir, key, {
         room: roomAlias,
         thread,
@@ -565,6 +572,7 @@ async function main(argv) {
 
       /** A session on this seat that went dark is announced to this room once; whichever watch notices first speaks. */
       const sweep = async () => {
+        await touchWatchMode(watchMode).catch(() => undefined);
         const gone = await departures(stateRoot, { selfSlug: session.slug, roomKey: key, staleHours: cfg.session?.staleAfterHours ?? 48 });
         for (const d of gone) {
           if (!(await claimDeparture(d.dir, key, session.slug))) continue;
@@ -610,6 +618,7 @@ async function main(argv) {
         });
       } finally {
         await removeArmed(sdir, key); // a thrown delivery must not leave the key registered
+        await clearWatchMode(watchMode).catch(() => undefined);
       }
       const exit = result.fired && mode !== "stream" ? EXIT.fired : EXIT.ok;
       if (!json && !result.fired) console.error(`nothing new after ${result.polls} poll${result.polls === 1 ? "" : "s"}${result.skipped ? ` (${result.skipped} of our own skipped)` : ""}${result.filtered ? ` (${result.filtered} not for us, still readable)` : ""}`);
