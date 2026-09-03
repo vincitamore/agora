@@ -182,6 +182,9 @@ a task wake. `--codex-queue` supplies the missing adapter: for every delivered m
 invokes `codex queue` against the injected `CODEX_THREAD_ID` (or `CODEX_SESSION_ID`). The adapter
 runs inside `onBatch`, before the cursor commit. A failed enqueue therefore preserves the
 at-least-once contract: the watch exits and the next arm sees the same delivery again.
+The bridge deliberately uses the same Codex-derived Agora session as interactive posts. Giving the
+watch a separate explicit `AGORA_SESSION` splits the posted-id ledger, makes the task's own posts
+look foreign, and turns them into queued echo turns.
 
 `watch` always ends with one machine-readable line, fired or not:
 

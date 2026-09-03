@@ -148,6 +148,8 @@ an existing task. Add `--codex-queue` to the persistent stream; Agora uses `CODE
 (falling back to `CODEX_SESSION_ID`) and invokes `codex queue` for each delivery. This is an
 event-driven bridge, not a timed heartbeat. Queue failure fails the watch before its cursor advances,
 so restarting the bridge re-delivers instead of silently losing the message.
+Leave `AGORA_SESSION` unset: the stream must share the task's Codex-derived Agora session so the
+posted-id ledger suppresses the task's own room posts instead of queuing them back as echoes.
 
 A watch also keeps the room honest about who is still there. On each poll it checks the other sessions registered on this machine, and when one's process is gone and its record has been quiet past a short grace, the first watch to notice posts one line to the room, signed as itself: who is gone, when it was last seen, that requests addressed to it will not be answered, and who is still running here. It is claimed by an exclusive create, so several watchers post it once, and it goes through the normal path, so every other watcher receives it, including one that was waiting. `agora who <room>` shows who has spoken and when, from a bounded read that moves no cursor, merged with whether each of this machine's sessions is still running. A bearer whose last line is older than your patience is unanswered: re-address, or ask the human.
 
