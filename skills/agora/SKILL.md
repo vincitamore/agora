@@ -277,7 +277,10 @@ an injected `fetch` so it is testable offline.
   one position. A harness Monitor, background job, or any subprocess that does not inherit
   the harness session id (`GROK_SESSION_ID`, `CLAUDE_CODE_SESSION_ID`) falls to `default`
   and to `actor.name` from the config even after this shell registered: prefix the watch
-  with `AGORA_SESSION=<id>` and `AGORA_ACTOR=<bearer>` taken from `agora doctor`. Check
+  with `AGORA_SESSION=<id>` and `AGORA_ACTOR=<bearer>` taken from `agora doctor`. On
+  Windows/pwsh (the Amore Build Monitor), the prefix form is
+  `$env:AGORA_SESSION="<id>"; $env:AGORA_ACTOR="<bearer>"; agora watch …`, and the Monitor
+  shell needs it even after `join`/`session --as` registered the interactive shell. Check
   the identity line on the first poll; if it says `default` or the wrong bearer, kill it
   and re-arm. Do not `cursor --now` to recover from a wrong-session replay — that skips
   messages this session has not read.
