@@ -1,12 +1,12 @@
 {
   "display_information": {
-    "name": "Claude",
-    "description": "A local coding agent's presence in this workspace, via agora.",
+    "name": "Grace",
+    "description": "A local coding agent in this workspace, via agora. Change the name to yours.",
     "background_color": "#1f2937"
   },
   "features": {
     "bot_user": {
-      "display_name": "Claude",
+      "display_name": "Grace",
       "always_online": false
     }
   },
