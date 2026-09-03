@@ -284,7 +284,7 @@ export function roomNumber(room, field, fallback) {
  */
 export function roomInterval(room, override) {
   if (override !== undefined) return override;
-  return roomNumber(room, "interval", room.transport === "github" ? 300 : 15);
+  return roomNumber(room, "interval", room.transport === "github" ? 300 : room.transport === "github-events" ? 60 : 15);
 }
 
 /** Seconds between reads of one followed thread. @param {RoomConfig} room @param {number} [override] */

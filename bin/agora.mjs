@@ -364,7 +364,7 @@ async function main(argv) {
 
   if (verb === "rooms") {
     for (const [alias, room] of Object.entries(cfg.rooms)) {
-      const where = room.transport === "github" ? `${room.repo}#${room.issue}` : room.transport === "slack" ? String(room.channel) : String(room.path ?? "");
+      const where = room.transport === "github" ? `${room.repo}#${room.issue}` : room.transport === "github-events" ? `${room.repo ?? (room.org ? `org:${room.org}` : `user:${room.user}`)} events${Array.isArray(room.events) ? ` [${room.events.join(", ")}]` : ""}${Array.isArray(room.refs) ? ` refs ${room.refs.join(", ")}` : ""}` : room.transport === "slack" ? String(room.channel) : String(room.path ?? "");
       const note = typeof room.note === "string" ? room.note : undefined;
       if (json) console.log(JSON.stringify({ alias, transport: room.transport, room: where, ...(note ? { note } : {}) }));
       else {

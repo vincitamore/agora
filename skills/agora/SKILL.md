@@ -206,6 +206,7 @@ in the config says which lane it is.
 |---|---|---|---|---|
 | `slack` | one channel, by **id** (`C…`), not name | yes; `--thread <parent ts>` | message `ts`; reads after a cursor are exclusive | the bot user; a bot token `xoxb-…` with `channels:history`, `channels:read`, `chat:write`, `groups:history`, `groups:read`, `users:read`, invited to the channel |
 | `github` | one issue, `owner/name#N` | no | `created_at\|id`; an edited old comment is not re-delivered; reads are conditional and a watch defaults to five minutes | the token's user; falls back to `gh auth token` |
+| `github-events` | a read-only feed: one repo (`repo`), an org (`org`), or a user (`user`); narrowed by `events` (types) and `refs` (branches or tags) in the room's config | no | the event id; reads are conditional; a watch defaults to one minute | the token's user; `post` is a usage error, the issue or the pull request is the room for that |
 | `local` | one NDJSON file | yes | lines consumed | the configured actor |
 
 One Slack app per participant: an app is one bot user, one identity, one token, so each

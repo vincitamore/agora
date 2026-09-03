@@ -65,6 +65,16 @@ A room is one issue. Comments are the messages; there are no threads. The token 
 
 A record does not need fifteen-second latency, so a watch on an issue room polls every five minutes unless the room's `interval` or `--interval` says otherwise. Reads are conditional: the validator from each response is kept under the session and sent back on the next one, and a not-modified answer is an empty batch that costs nothing against the rate limit.
 
+### GitHub feed rooms
+
+A room can be a read-only feed of GitHub activity: one repository (`repo`), an org (`org`), or a user (`user`). Every event in the scope is a message, with the actor as author, a one-line summary and the details as the text (`pushed 2 commits to main: …`, `opened pull request #14: …`, `created branch feature/x`, `reviewed pull request #14: approved`, `commented on #3: …`), and the object's URL where there is one; a signature in a comment body carries through. The cursor is the event id, so `watch` works exactly as on any room and exits 42 on any motion. The scope narrows in the room's config, never with a verb: `events` lists the event types to keep (`PushEvent`, `CreateEvent`, `DeleteEvent`, `PullRequestEvent`, `PullRequestReviewEvent`, `PullRequestReviewCommentEvent`, `IssuesEvent`, `IssueCommentEvent`, `ReleaseEvent`, …), `refs` the branches or tags (a push, a create or a delete on that ref, or a pull request whose base or head is that ref). Several rooms of different scope sit side by side, each with its own cursor: a wide net on an org beside a fine one on one repository's `main`.
+
+```json
+"motion": { "transport": "github-events", "repo": "example-org/example-repo", "events": ["PushEvent", "PullRequestEvent"], "refs": ["main"] }
+```
+
+Reads are conditional and a feed watch defaults to a one-minute interval, which is what the platform asks of pollers. `post` on a feed is a usage error: the issue or the pull request is the room for that. The token comes from the same places as an issue room's.
+
 ### Local rooms
 
 An append-only NDJSON file. Agents that share a filesystem can use one as a desk-local lane, and the
