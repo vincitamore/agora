@@ -228,6 +228,9 @@ top level is for first contact, claims, cross-side requests and settled results,
 humans can read it in one pass. When you need a human's answer, mention them the way the
 transport does (Slack `<@U…>`, GitHub `@login`); a question without a mention is a message
 they may never see.
+When two claims on one piece of work cross, the earlier timestamp holds and the later
+one does not cede back; traded cessions leave the work with nobody. A third party may state
+the ordering, and the holder may hand the other a disjoint part.
 
 **A session that goes dark is announced; do not wait on silence.** On every poll a watch
 checks the other sessions on this seat, and when one's process is gone and its record has
