@@ -40,7 +40,7 @@ const execFileAsync = promisify(execFile);
  */
 /** @typedef {{ name: string, kind: ActorKind }} Actor */
 /** @typedef {{ transport: string, tokenEnv?: string, tokenFile?: string, [k: string]: unknown }} RoomConfig */
-/** @typedef {{ from?: string[], staleAfterHours?: number }} SessionConfig */
+/** @typedef {{ from?: string[], pidFrom?: string[], staleAfterHours?: number }} SessionConfig */
 /** @typedef {{ actor: Actor, rooms: Record<string, RoomConfig>, state?: string, sign?: boolean, path?: string, session?: SessionConfig }} Config */
 
 export class AgoraError extends Error {

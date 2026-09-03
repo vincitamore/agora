@@ -130,6 +130,54 @@ test("cli: two sessions in one state root each keep their own position and see e
   }
 });
 
+test("cli: session --as registers once and every later call signs as the record; join is register + cursor --now + read", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const cfgPath = path.join(dir, "agora.json");
+    await writeFile(cfgPath, JSON.stringify({
+      actor: { name: "Fable", kind: "agent" },
+      rooms: { down: { transport: "local", path: path.join(dir, "down.ndjson") } },
+    }));
+    const root = path.join(dir, "state");
+    const A = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "a", CLAUDE_PID: String(process.pid) };
+    const B = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "b", CLAUDE_PID: "" }; // no harness pid: the runner's own must not leak in
+
+    let r = await agora(["session"], A);
+    assert.equal(r.code, 2, "registering needs --as");
+    r = await agora(["session", "--as", "Fable/watch", "--label", "the watch"], A);
+    assert.equal(r.code, 0);
+    assert.match(r.stdout, /registered Fable\/watch as session a \(from AGORA_SESSION\)  pid \d+ from CLAUDE_PID/);
+    r = await agora(["post", "down", "hello"], A);
+    assert.match(r.stderr, /^agora: Fable\/watch \(from session\)/m, "the record supplies the bearer with no env and no flag");
+    r = await agora(["read", "down", "--json"], A);
+    assert.equal(JSON.parse(r.stdout.trim()).signedAs, "Fable/watch");
+
+    await agora(["post", "down", "one more"], A);
+    r = await agora(["join", "down", "--as", "Fable/review", "--limit", "1", "--json"], B);
+    assert.equal(r.code, 0);
+    assert.match(r.stderr, /registered|cursor set to 2/);
+    assert.equal(r.stdout.trim().split("\n").length, 1, "shows the last message only");
+    r = await agora(["watch", "down", "--once"], B);
+    assert.equal(r.code, 0, "joined at the latest message, so nothing is new");
+    r = await agora(["cursor", "down", "--json"], B);
+    assert.equal(JSON.parse(r.stdout).cursor, "2");
+
+    r = await agora(["session", "--list"], B);
+    assert.match(r.stdout, /Fable\/watch\s+a\s+live/);
+    assert.match(r.stdout, /\* Fable\/review\s+b\s+unknown/, "b registered with no harness pid: liveness unknown");
+    r = await agora(["session", "--prune", "--dry-run"], B);
+    assert.match(r.stdout, /nothing to prune/);
+    r = await agora(["session", "--forget"], B);
+    assert.match(r.stdout, /forgot session b/);
+    r = await agora(["session", "--list", "--json"], A);
+    assert.deepEqual(r.stdout.trim().split("\n").map((/** @type {string} */ l) => JSON.parse(l).slug), ["a"]);
+    r = await agora(["doctor", "--offline"], A);
+    assert.match(r.stdout, /sessions with state here/);
+  } finally {
+    await cleanup();
+  }
+});
+
 test("cli: a session with no position seeds once from the shared cursor and then keeps its own", async () => {
   const { dir, cleanup } = await tmp();
   try {
