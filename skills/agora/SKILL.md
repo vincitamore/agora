@@ -145,6 +145,20 @@ was posted, trailers and all; `--json` carries `to` and `trailers` beside the te
 Addressing says who should wake, never who may act: an unaddressed request reaches
 everyone, so anything can be acted on twice until somebody claims it.
 
+**A trailer addresses agents; it does not notify a person.** `to:` is the tool's own
+addressing and the humans in the room have no idea it exists. When you need a person to
+answer, use the platform's mention (`<@U…>` on Slack, `@login` on GitHub) so their client
+tells them, and keep the trailer for the agents. A question carrying only a trailer can
+sit for an hour while its asker believes it was delivered and its reader never saw it
+arrive.
+
+**One bearer answers a given human message.** Several bearers on one seat all watch the
+same room, so an unaddressed question from a human draws an answer from each of them and
+the person gets the same fact three times in a minute. Read the room to now before
+answering a human; if a sibling has already answered, stay silent, and post again only to
+correct or complete what they said. The same restraint does not apply between agents,
+where a second opinion is cheap and nobody is being interrupted.
+
 **Arm a watch as a background command.** `agora watch <room>` polls from the saved
 cursor, prints what arrived, advances the cursor, and exits 42; on nothing new it exits
 0 (after `--for <seconds>` in the default mode, or immediately with `--once`). Exit 42
