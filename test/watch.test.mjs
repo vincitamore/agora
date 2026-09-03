@@ -47,7 +47,9 @@ test("watch until-new polls, sleeps, fires on arrival", async () => {
     });
     assert.equal(r.fired, true);
     assert.equal(r.polls, 2);
-    assert.deepEqual(slept, [7000]);
+    // the sleep is jittered a tenth either way, so watches armed together do not stay in lockstep
+    assert.equal(slept.length, 1);
+    assert.ok(slept[0] >= 6300 && slept[0] <= 7700, `${slept[0]} is not within a tenth of 7000`);
   } finally {
     await cleanup();
   }
@@ -227,6 +229,171 @@ test("a streaming watch re-reads the ledger each poll, so a post from the same s
       sleep: async (ms) => { clock += ms; n++; if (n === 1) posted.add((await t.post("mine, mid-stream")).id); else await t.post(`theirs ${n}`); },
     });
     assert.deepEqual(seen, ["theirs 2"]);
+  } finally {
+    await cleanup();
+  }
+});
+
+/**
+ * A room with threads, counting what each poll asked for. The room read never carries a thread
+ * reply (which is the platform behaviour that makes `--follow` necessary), so a reply is reachable
+ * only by asking for its thread by name.
+ */
+function countingRoom() {
+  /** @type {Map<string, import('../src/core.mjs').Message[]>} */
+  const lists = new Map([["", []]]);
+  /** @type {{ room: number, threads: Record<string, number> }} */
+  const reads = { room: 0, threads: {} };
+  let clock = 0;
+
+  /** @param {string} thread @param {string} text @param {number} ts */
+  function say(thread, text, ts) {
+    const list = lists.get(thread) ?? [];
+    lists.set(thread, list);
+    list.push({
+      id: `${thread || "room"}-${list.length + 1}`,
+      room: "r",
+      thread: thread || undefined,
+      author: { id: "them", name: "them", kind: "agent" },
+      text,
+      ts: new Date(ts * 1000).toISOString(),
+      cursor: String(list.length + 1),
+    });
+  }
+
+  /** @type {import('../src/core.mjs').Transport} */
+  const transport = {
+    kind: "fake",
+    room: "r",
+    threads: true,
+    whoami: async () => ({ id: "seat", name: "seat" }),
+    async read({ thread, since } = {}) {
+      if (thread) reads.threads[thread] = (reads.threads[thread] ?? 0) + 1;
+      else reads.room++;
+      const list = lists.get(thread ?? "") ?? [];
+      const from = since ? Number(since) : 0;
+      return list.filter((m) => Number(m.cursor) > from);
+    },
+    async post() {
+      return { id: "posted", cursor: "0" };
+    },
+  };
+  return { transport, reads, say, now: () => clock, tick: (/** @type {number} */ ms) => (clock += ms) };
+}
+
+/** The follow set a test hands the watch: fixed ids, cursors in a Map, no disk. @param {string[]} ids @param {number} interval */
+function followed(ids, interval) {
+  return {
+    ids: () => ids,
+    key: (/** @type {string} */ id) => `r#${id}`,
+    cursor: async () => undefined,
+    interval,
+  };
+}
+
+test("--follow reaches a thread reply, reads the room every poll and each thread at its own cadence", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const room = countingRoom();
+    room.say("", "in the channel", 100);
+    room.say("T1", "the reply the room read never carries", 101);
+    /** @type {string[]} */
+    const seen = [];
+    const r = await watch(room.transport, {
+      stateDir: path.join(dir, "s"), key: "r", mode: "stream", interval: 15, forSeconds: 60,
+      threads: followed(["T1"], 60),
+      onBatch: (m) => { seen.push(...m.map((x) => x.text)); },
+      now: room.now, random: () => 0.5, sleep: async (ms) => { room.tick(ms); },
+    });
+    assert.deepEqual(seen, ["in the channel", "the reply the room read never carries"]);
+    assert.equal(room.reads.room, 5, "polled at 0, 15, 30, 45 and 60 seconds");
+    assert.equal(room.reads.threads.T1, 2, "read when the watch armed and once a minute after");
+    assert.deepEqual(r.threads, { T1: 1 }, "the watch-result line names what each followed thread delivered");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("the reads a seat spends on threads are sessions x followed x 60/threadInterval, plus one each at the arm", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const sessions = 2;
+    const ids = ["T1", "T2"];
+    const threadInterval = 60;
+    const minutes = 2;
+    let threadReads = 0;
+    for (let n = 0; n < sessions; n++) {
+      const room = countingRoom();
+      await watch(room.transport, {
+        stateDir: path.join(dir, `s${n}`), key: "r", mode: "stream", interval: 15, forSeconds: minutes * 60,
+        threads: followed(ids, threadInterval),
+        onBatch: () => {},
+        now: room.now, random: () => 0.5, sleep: async (ms) => { room.tick(ms); },
+      });
+      threadReads += Object.values(room.reads.threads).reduce((a, b) => a + b, 0);
+    }
+    const armed = sessions * ids.length;
+    assert.equal(threadReads - armed, sessions * ids.length * minutes * (60 / threadInterval));
+    assert.equal(threadReads, 12, "two sessions following two threads for two minutes at a minute apiece");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("without --follow a thread reply is never asked for, and nothing else changes", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const room = countingRoom();
+    room.say("", "in the channel", 100);
+    room.say("T1", "in a thread", 101);
+    /** @type {string[]} */
+    const seen = [];
+    const r = await watch(room.transport, {
+      stateDir: path.join(dir, "s"), key: "r", mode: "once",
+      onBatch: (m) => { seen.push(...m.map((x) => x.text)); },
+    });
+    assert.deepEqual(seen, ["in the channel"]);
+    assert.deepEqual(room.reads.threads, {});
+    assert.deepEqual(r.threads, {});
+    assert.equal(r.cursor, "1");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a merged batch is delivered in ts order across the room and the threads it followed", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const room = countingRoom();
+    room.say("T2", "second", 200);
+    room.say("", "first", 100);
+    room.say("T1", "third", 300);
+    room.say("", "fourth", 400);
+    /** @type {string[]} */
+    const seen = [];
+    await watch(room.transport, {
+      stateDir: path.join(dir, "s"), key: "r", mode: "once",
+      threads: followed(["T1", "T2"], 60),
+      onBatch: (m) => { seen.push(...m.map((x) => x.text)); },
+    });
+    assert.deepEqual(seen, ["first", "second", "third", "fourth"], "one batch, in the order the room said them");
+
+    // a transport whose room read also carries replies (or a broadcast reply on one that does not)
+    // hands the same message to both reads; it is delivered once
+    const both = countingRoom();
+    both.say("", "shared", 100);
+    both.say("T1", "shared", 100);
+    const dup = /** @type {any} */ (both.transport);
+    const readOnce = dup.read.bind(dup);
+    dup.read = async (/** @type {any} */ o) => (await readOnce(o)).map((/** @type {any} */ m) => ({ ...m, id: "same" }));
+    /** @type {string[]} */
+    const once = [];
+    await watch(both.transport, {
+      stateDir: path.join(dir, "s2"), key: "r", mode: "once",
+      threads: followed(["T1"], 60),
+      onBatch: (m) => { once.push(...m.map((x) => x.text)); },
+    });
+    assert.deepEqual(once, ["shared"]);
   } finally {
     await cleanup();
   }

@@ -19,7 +19,12 @@
     "download": {
       "transport": "slack",
       "channel": "C0123ABCDEF",
-      "tokenFile": "~/.agora/slack-bot.token"
+      "tokenFile": "~/.agora/slack-bot.token",
+      "interval": 15,
+      "threadInterval": 60,
+      "followCap": 8,
+      "followIdleMinutes": 60,
+      "pollBudget": 40
     },
     "issue-3": {
       "transport": "github",

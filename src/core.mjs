@@ -236,3 +236,36 @@ export async function forgetCursor(dir, key) {
 
 /** @param {number} ms */
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * A wait, spread by a tenth either way. Watches armed together otherwise stay in lockstep for as
+ * long as they live, and a rate-limit response hands every one of them the same retry interval,
+ * which turns a loose herd into a tight one.
+ * @param {number} ms @param {() => number} [random]
+ */
+export function jitter(ms, random = Math.random) {
+  return Math.round(ms * (0.9 + random() * 0.2));
+}
+
+/** A positive number from a room's config, or the fallback. @param {RoomConfig} room @param {string} field @param {number} fallback */
+export function roomNumber(room, field, fallback) {
+  const v = Number(room[field]);
+  return Number.isFinite(v) && v > 0 ? v : fallback;
+}
+
+/** Seconds between room polls: the flag, then the room's own `interval`, then the default. @param {RoomConfig} room @param {number} [override] */
+export function roomInterval(room, override) {
+  if (override !== undefined) return override;
+  return roomNumber(room, "interval", 15);
+}
+
+/** Seconds between reads of one followed thread. @param {RoomConfig} room @param {number} [override] */
+export function roomThreadInterval(room, override) {
+  if (override !== undefined) return override;
+  return roomNumber(room, "threadInterval", 60);
+}
+
+/** Reads a minute this seat is willing to spend on a transport before `doctor` says so. @param {RoomConfig} room */
+export function roomPollBudget(room) {
+  return roomNumber(room, "pollBudget", 40);
+}

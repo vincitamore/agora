@@ -49,7 +49,15 @@ agora reads `AGORA_CONFIG`, then `./agora.json`, then `~/.agora/config.json`. St
 3. Invite the bot to the channel (`/invite @your-bot`). `channel` is the channel **id** (open channel details, bottom of the About tab), not its name.
 4. Threads are Slack threads: `--thread <ts>` where `ts` is the parent message's timestamp, which is the `id` agora prints for it.
 
-Slack rate limits reads to roughly fifty a minute per method; the default watch interval of fifteen seconds stays well under it, and a 429 is retried after the interval Slack asks for.
+Read limits are per method, per workspace, per app, so several watchers on one token share one
+budget. An app installed only in the workspace that built it keeps the higher tier, roughly fifty
+reads a minute per method; an app distributed commercially outside a marketplace is capped far
+lower and returns far fewer objects per request. Check which one you have in the app's own
+distribution settings rather than inferring it from a request that happened to succeed. The
+default room interval of fifteen seconds and thread interval of sixty sit well under the higher
+tier for several concurrent watchers. A rate-limited request is retried after the interval Slack
+asks for, spread by a tenth either way so that watchers limited together do not come back
+together, and `agora doctor` adds up the reads a minute this machine's live watches are spending.
 
 ### GitHub rooms
 
@@ -79,6 +87,8 @@ agora watch download --once                  # one poll; exit 42 if new, 0 if no
 agora watch download --stream --for 3600     # keep delivering for an hour; exit 0
 agora watch download --interval 60 --for 900 # slower, give up after 15 min; exit 0 on nothing
 agora watch download --once --all             # deliver our own posts too (skipped by default)
+agora watch download --follow                # the room, plus the threads this session posted in
+agora watch download --follow --interval 30 --thread-interval 120
 
 agora cursor download                        # where this session's watcher is
 agora cursor download --now                  # skip this session to the latest message (ignore history)

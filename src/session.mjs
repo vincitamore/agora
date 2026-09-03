@@ -319,3 +319,86 @@ export async function listRecords(stateRoot, deps) {
 export function ageHours(rec, now = new Date()) {
   return (now.getTime() - new Date(rec.lastSeen).getTime()) / 3_600_000;
 }
+
+/**
+ * Does this pid answer a signal? A process this user may not signal (EPERM) is still a process;
+ * only ESRCH means gone. Used for a watch's own pid, which carries no boot epoch of its own.
+ * @param {number | undefined} pid @param {(pid: number, sig: 0) => void} [kill]
+ */
+export function pidAlive(pid, kill) {
+  if (!Number.isInteger(pid) || Number(pid) <= 0) return false;
+  try {
+    (kill ?? ((p, s) => process.kill(p, s)))(Number(pid), 0);
+    return true;
+  } catch (e) {
+    return /** @type {NodeJS.ErrnoException} */ (e).code !== "ESRCH";
+  }
+}
+
+/**
+ * A live watch's registration: one file per cursor key, written when a watch arms and removed
+ * when it leaves. It is what lets a second watch on the same key say so instead of silently
+ * double-delivering, and what lets `doctor` add up the reads a minute this seat is spending.
+ * @typedef {object} ArmedWatch
+ * @property {string} room the room alias
+ * @property {string} [thread]
+ * @property {number} interval seconds between room polls
+ * @property {number} [threadInterval] seconds between reads of one followed thread
+ * @property {boolean} [follow]
+ * @property {number} pid the watching process
+ * @property {number} [harnessPid]
+ * @property {string | null} [since] the cursor it started from
+ * @property {string} startedAt
+ */
+
+const armedDir = (/** @type {string} */ dir) => path.join(dir, "armed");
+const armedPath = (/** @type {string} */ dir, /** @type {string} */ key) => path.join(armedDir(dir), `${key}.json`);
+
+/** @param {string} dir @param {string} key @returns {Promise<ArmedWatch | undefined>} */
+export async function readArmed(dir, key) {
+  try {
+    const rec = JSON.parse(await readFile(armedPath(dir, key), "utf8"));
+    return rec && typeof rec.pid === "number" ? rec : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** @param {string} dir @param {string} key @param {ArmedWatch} rec */
+export async function writeArmed(dir, key, rec) {
+  await mkdir(armedDir(dir), { recursive: true });
+  await writeFile(armedPath(dir, key), JSON.stringify(rec, null, 2) + "\n", "utf8");
+}
+
+/** @param {string} dir @param {string} key */
+export async function removeArmed(dir, key) {
+  await rm(armedPath(dir, key), { force: true });
+}
+
+/**
+ * Every watch registered anywhere under this state root, with the session directory it belongs to.
+ * A registration whose pid is gone is a leftover from a killed process; the caller decides.
+ * @param {string} stateRoot
+ * @returns {Promise<Array<{ slug: string, dir: string, key: string, armed: ArmedWatch }>>}
+ */
+export async function listArmed(stateRoot) {
+  /** @type {Array<{ slug: string, dir: string, key: string, armed: ArmedWatch }>} */
+  const out = [];
+  for (const slug of await listSessions(stateRoot)) {
+    const dir = path.join(stateRoot, "sessions", slug);
+    /** @type {string[]} */
+    let files = [];
+    try {
+      files = await readdir(armedDir(dir));
+    } catch {
+      continue;
+    }
+    for (const f of files.sort()) {
+      if (!f.endsWith(".json")) continue;
+      const key = f.slice(0, -".json".length);
+      const armed = await readArmed(dir, key);
+      if (armed) out.push({ slug, dir, key, armed });
+    }
+  }
+  return out;
+}
