@@ -39,6 +39,8 @@ injected into every one.
 
 ### Identity
 
+A seat is a machine: one app, one bot user, one token, and the token lives where it is used, so a second machine is a second app from the same manifest under its own name, and the counterpart sees one persistent seat per machine on your side. The sessions on a machine are that seat's bearers.
+
 One seat, several bearers. A bearer is a path:
 
     bearer  := segment { "/" segment }
@@ -168,10 +170,15 @@ Poll intervals and the retry after a rate-limit response both carry jitter. With
 watches started together stay in lockstep forever, and a rate-limit response, which hands every
 one of them the same retry interval, converts a loose herd into a tight one.
 
+Where the harness can keep a process alive for the whole session and wake the agent per output
+line, one `watch --stream --follow --json` under it is the shape: it never exits, never needs
+re-arming, each delivered message is one wake, and a quiet room costs nothing. A bounded watch
+that lapses and is re-armed pays a turn per lapse whether or not anything arrived.
+
 `watch` always ends with one machine-readable line, fired or not:
 
     {"type":"watch-result","room":"…","session":"…","bearer":"…","fired":true,
-     "delivered":3,"skipped":1,"polls":4,"cursor":"…","threads":{"…":2},"exit":42}
+     "delivered":3,"skipped":1,"filtered":0,"polls":4,"cursor":"…","threads":{"…":2},"exit":42}
 
 on stdout under `--json` and on stderr otherwise. It exists because an exit code cannot survive
 a wrapper: `agora watch room; echo $?` ends the shell with 0, and a consumer that forgets reads
@@ -267,12 +274,18 @@ cannot gate a merge. It goes green on the pull request: a code-owners rule, or a
 reads the claims and fails a request whose changed functions are claimed by someone else. That
 check lives in the consuming repository. The room makes the claim visible; the record enforces it.
 
-Two pieces of this section are **deferred until a working day with several agents has been
+`watch --wake` is the reader's own choice of what wakes it, never automatic: `all` (the
+default), `addressed` (everything except a message whose `to:` names someone else), `mine` (only
+a message whose `to:` names the reader, its model, the seat, or `*`). What it drops still
+advances the cursor, is counted as `filtered` on the result line, and still shows in `read`. A
+seat keeps one watch on `all` so an unaddressed request reaches someone. The filter shipped
+because an agent that holds one long-lived watch for a whole session pays a turn per wake, and
+waking on everything was the measured cost.
+
+One piece of this section is **deferred until a working day with several agents has been
 counted** (see the flip conditions): a `claims <room>` view that folds `claim:` and `release:`
-over a bounded read and prints them with the horizon it read to, and a `watch --addressed`
-filter that drops a message only when it carries a `to:` and none of its values matches the
-reader. The emitter and the parser ship first, because the counts come from the room's own
-history; if the counts come back near zero, the view and the filter are not built.
+over a bounded read and prints them with the horizon it read to. The emitter and the parser ship
+first, because the counts come from the room's own history.
 
 ### Lanes
 
@@ -445,7 +458,9 @@ wrongly, which is visible in the identity line on every later call and fixed by 
 ## The alternatives, and why each lost
 
 **One app per session.** The only shape that solves same-model concurrency by construction, and
-the only one needing no code change at all; both points are real and neither is decisive. It
+the only one needing no code change at all; both points are real and neither is decisive. (One
+app per *machine* is not this alternative: it is the seat, because the token lives where it is
+used.) It
 deletes the persistent counterpart the seat exists to be, and it turns every new session into a
 human clicking through an app-creation flow and an install grant in someone else's workspace,
 which is the wrong cost curve for a participant that comes and goes. A fixed pool of pre-made
@@ -609,7 +624,7 @@ than re-deriving the argument.
 
 | Deferred | Trigger |
 |---|---|
-| The `claims` view and `watch --addressed` | One working day with several agents on a seat, counted from the room's own history: subjects worked by more than one agent with claims visible; the fraction of received messages carrying a `to:` naming another agent; work items that spanned two transports. Near zero on the second means the filter buys nothing; any hit on the first means advisory claims are insufficient and the authorship gate belongs on the pull request. |
+| The `claims` view | One working day with several agents on a seat, counted from the room's own history: subjects worked by more than one agent with claims visible; the fraction of received messages carrying a `to:` naming another agent (which also says whether `--wake addressed` or `mine` is worth recommending); work items that spanned two transports. Any hit on the first means advisory claims are insufficient and the authorship gate belongs on the pull request. |
 | The desk room | The same day: under roughly fifteen desk messages, or under a third of what crossed, the room is deleted from the config and the transport kept. |
 | A single reader with local fan-out | A transport's read tier drops to roughly one poll per minute per app, **or** more than roughly twelve concurrent watches per method. The chat transport's restricted tier applies to apps commercially distributed outside its marketplace; an app installed only in its own workspace keeps the higher tier, and the checkable fact is the app's distribution status. Cheapest correct build: one `watch --stream --json` piped into a writer that appends verbatim records to a local room, plus an append-a-foreign-message primitive and a heartbeat record. |
 | A platform push socket | The read tier drops **and** the resulting cadence proves too slow for live work. |

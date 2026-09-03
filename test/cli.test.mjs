@@ -233,6 +233,45 @@ test("cli: a session that went dark is announced to the room once by the first w
   }
 });
 
+test("cli: --wake addressed drops what is addressed elsewhere; --wake mine delivers only what names me, my model, the seat or everyone", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const cfgPath = path.join(dir, "agora.json");
+    await writeFile(cfgPath, JSON.stringify({
+      actor: { name: "Grace", kind: "agent" },
+      rooms: { down: { transport: "local", path: path.join(dir, "down.ndjson") } },
+    }));
+    const root = path.join(dir, "state");
+    const C = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "c", AGORA_ACTOR: "Codex", CLAUDE_PID: "" };
+    const A = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "a", AGORA_ACTOR: "Grace/watch", CLAUDE_PID: "" };
+    await agora(["post", "down", "--to", "Grace/review", "not for a"], C);
+    await agora(["post", "down", "--to", "Grace", "for every Grace"], C);
+    await agora(["post", "down", "plain talk"], C);
+    await agora(["post", "down", "--to", "*", "for everyone"], C);
+
+    let r = await agora(["watch", "down", "--once", "--json", "--wake", "addressed"], A);
+    assert.equal(r.code, 42);
+    let texts = messages(r.stdout).map((/** @type {string} */ l) => JSON.parse(l).text.split("\n")[0]);
+    assert.deepEqual(texts, ["for every Grace", "plain talk", "for everyone"]);
+    assert.match(r.stdout, /"filtered":1/);
+
+    await agora(["cursor", "down", "--reset"], A);
+    r = await agora(["watch", "down", "--once", "--json", "--wake", "mine"], A);
+    assert.equal(r.code, 42);
+    texts = messages(r.stdout).map((/** @type {string} */ l) => JSON.parse(l).text.split("\n")[0]);
+    assert.deepEqual(texts, ["for every Grace", "for everyone"], "plain talk does not wake a --wake mine watch");
+    assert.match(r.stdout, /"filtered":2/);
+    r = await agora(["cursor", "down", "--json"], A);
+    assert.equal(JSON.parse(r.stdout).cursor, "4", "filtered messages still advance the cursor");
+    r = await agora(["read", "down", "--json"], A);
+    assert.equal(r.stdout.trim().split("\n").length, 4, "and they are still readable");
+    r = await agora(["watch", "down", "--once", "--wake", "sometimes"], A);
+    assert.equal(r.code, 2);
+  } finally {
+    await cleanup();
+  }
+});
+
 test("cli: a session with no position seeds once from the shared cursor and then keeps its own", async () => {
   const { dir, cleanup } = await tmp();
   try {
@@ -291,7 +330,7 @@ test("cli: every watch ends with one watch-result line, on stderr in human outpu
     let r = await agora(["watch", "down", "--once"], env);
     assert.equal(r.code, 0);
     const quiet = JSON.parse(r.stderr.trim().split(/\r?\n/).at(-1) ?? "");
-    assert.deepEqual(quiet, { type: "watch-result", room: "down", session: "w", bearer: "Grace", fired: false, delivered: 0, skipped: 0, polls: 1, cursor: null, threads: {}, exit: 0 });
+    assert.deepEqual(quiet, { type: "watch-result", room: "down", session: "w", bearer: "Grace", fired: false, delivered: 0, skipped: 0, filtered: 0, polls: 1, cursor: null, threads: {}, exit: 0 });
     assert.equal(r.stdout, "", "nothing on stdout when nothing arrived");
 
     await agora(["post", "down", "from them"], { ...env, AGORA_SESSION: "them" });

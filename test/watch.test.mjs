@@ -195,6 +195,26 @@ test("an unsigned seat post is skipped by the session that posted it and deliver
   }
 });
 
+test("wake: the reader's filter drops what it chose not to wake on, counts it as filtered, and the cursor still advances", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const t = localTransport({ transport: "local", path: path.join(dir, "r.ndjson") }, { actor: { name: "Codex", kind: "agent" } });
+    await t.post("for the other one\n\nto: Grace/review");
+    await t.post("for me\n\nto: Grace/watch");
+    await t.post("for nobody in particular");
+    /** @type {string[]} */
+    const seen = [];
+    const wake = (/** @type {import('../src/core.mjs').Message} */ m) => !/to: Grace\/review/.test(m.text);
+    const r = await watch(t, { stateDir: path.join(dir, "s"), key: "r", mode: "once", wake, onBatch: (m) => { seen.push(...m.map((x) => x.text.split("\n")[0])); } });
+    assert.deepEqual(seen, ["for me", "for nobody in particular"]);
+    assert.equal(r.filtered, 1);
+    assert.equal(r.delivered, 2);
+    assert.equal(await readCursor(path.join(dir, "s"), "r"), "3", "the cursor advanced past the filtered message too");
+  } finally {
+    await cleanup();
+  }
+});
+
 test("a crash while delivering does not advance the cursor; the next watch re-delivers", async () => {
   const { dir, cleanup } = await tmp();
   try {

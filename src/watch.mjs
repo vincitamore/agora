@@ -41,18 +41,24 @@ import { jitter, readCursor, writeCursor, sleep as defaultSleep } from "./core.m
  *   mode?: 'once' | 'until-new' | 'stream', interval?: number, forSeconds?: number,
  *   onBatch: (msgs: import('./core.mjs').Message[]) => void | Promise<void>,
  *   own?: () => Promise<Set<string>> | Set<string>,
+ *   wake?: (m: import('./core.mjs').Message) => boolean,
  *   threads?: FollowedThreads,
  *   sweep?: () => Promise<void> | void,
  *   sleep?: (ms: number) => Promise<void>, now?: () => number, random?: () => number,
  * }} opts
- * @returns {Promise<{ fired: boolean, cursor?: string, polls: number, skipped: number, delivered: number, threads: Record<string, number> }>}
+ * `wake` is the reader's own choice of what wakes it (a message addressed to someone else need
+ * not); what it drops is counted as `filtered`, the cursor still advances past it, and `read`
+ * still shows it. It is never automatic: a message from another agent is input, and routing on
+ * its trailers is a flag the reader set.
+ * @returns {Promise<{ fired: boolean, cursor?: string, polls: number, skipped: number, filtered: number, delivered: number, threads: Record<string, number> }>}
  */
 export async function watch(transport, opts) {
-  const { stateDir, key, thread, mode = "until-new", interval = 15, forSeconds = 0, onBatch, own, threads, sweep } = opts;
+  const { stateDir, key, thread, mode = "until-new", interval = 15, forSeconds = 0, onBatch, own, wake, threads, sweep } = opts;
   const sleep = opts.sleep ?? defaultSleep;
   const now = opts.now ?? Date.now;
   const random = opts.random ?? Math.random;
   let skipped = 0;
+  let filtered = 0;
   let delivered = 0;
   let cursor = opts.cursor !== undefined ? opts.cursor : await readCursor(stateDir, key);
   /** @type {Map<string, { key: string, cursor: string | undefined, lastRead: number }>} */
@@ -62,7 +68,7 @@ export async function watch(transport, opts) {
   const start = now();
   let fired = false;
   let polls = 0;
-  const result = () => ({ fired, cursor, polls, skipped, delivered, threads: perThread });
+  const result = () => ({ fired, cursor, polls, skipped, filtered, delivered, threads: perThread });
   for (;;) {
     polls++;
     // the seat's own housekeeping rides on the poll: a sibling that went dark is announced here,
@@ -101,8 +107,10 @@ export async function watch(transport, opts) {
       const ids = new Set();
       const merged = batch.filter((e) => !ids.has(e.m.id) && (ids.add(e.m.id), true));
       const posted = own ? await own() : new Set();
-      const fresh = merged.filter((e) => !posted.has(e.m.id));
-      skipped += merged.length - fresh.length;
+      const notMine = merged.filter((e) => !posted.has(e.m.id));
+      skipped += merged.length - notMine.length;
+      const fresh = wake ? notMine.filter((e) => wake(e.m)) : notMine;
+      filtered += notMine.length - fresh.length;
       if (fresh.length) {
         await onBatch(fresh.map((e) => e.m));
         delivered += fresh.length;
