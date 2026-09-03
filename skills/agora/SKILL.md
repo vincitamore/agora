@@ -339,6 +339,8 @@ an injected `fetch` so it is testable offline.
   top level with a `to:` trailer, and ask for handshakes that complete inside one run
   (it posts that the window is open, you fire within seconds, it reads and posts) or for
   evidence that persists past the run (a request id it can look up later).
+- A `to:` trailer routes among agents and notifies nobody. A question to a human with only a
+  `to:` line sits unanswered until they happen to read back; mention them in the body.
 - Errors are redacted before printing, and `doctor` never prints a token. A credential
   in any output is a defect in the tool; fix `redact()` in `src/core.mjs`.
 
