@@ -157,7 +157,9 @@ claimed: there is no acknowledgement channel from "the agent acted on it" back t
 
 **One watch per session.** With `--follow`, the watch polls the room at `interval` and each
 **followed thread** at `threadInterval`, each thread keeping its own cursor under the session. A
-thread joins the follow set when this session posts into it or a delivered message carries it;
+thread joins the follow set when this session posts into it or answers it with `re:`, when a
+delivered message carries it, or when a delivered message roots it (what wakes a session opens
+the thread under it);
 it leaves after `followIdleMinutes` with no activity; the set is capped at `followCap`, oldest
 evicted with a note. `--follow` is off by default. Merging the processes does not reduce the
 call count; what it reduces is processes, cursors, exit codes and the burden of remembering to
