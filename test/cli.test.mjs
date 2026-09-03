@@ -364,3 +364,54 @@ test("cli: doctor adds up the reads a minute this seat's live watches are spendi
     await cleanup();
   }
 });
+
+test("cli: the trailer block is emitted above the signature, rendered above the body, and carried in --json", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const cfgPath = path.join(dir, "agora.json");
+    await writeFile(cfgPath, JSON.stringify({
+      actor: { name: "Grace", kind: "agent" },
+      rooms: { down: { transport: "local", path: path.join(dir, "down.ndjson") } },
+    }));
+    const env = { AGORA_CONFIG: cfgPath, AGORA_STATE: path.join(dir, "state"), AGORA_SESSION: "a", CLAUDE_PID: "" };
+
+    // the red one first: a verdict nobody can check is not posted at all
+    let r = await agora(["post", "down", "--verdict", "the retry is the bug", "it is settled"], env);
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /--verdict needs at least one --exhibit/);
+    assert.equal(existsSync(path.join(dir, "down.ndjson")), false, "nothing was posted");
+
+    r = await agora(["post", "down", "--to", "Codex", "--claim", "p.ts::f", "text"], env);
+    assert.equal(r.code, 0);
+    r = await agora(["read", "down", "--json"], env);
+    const m = JSON.parse(r.stdout.trim());
+    assert.equal(m.text, "text\n\nto: Codex\nclaim: p.ts::f\n\n-- Grace", "body, blank line, block, blank line, signature");
+    assert.equal(m.signedAs, "Grace");
+    assert.deepEqual(m.to, ["Codex"]);
+    assert.deepEqual(m.trailers, [{ key: "to", value: "Codex" }, { key: "claim", value: "p.ts::f" }]);
+
+    r = await agora(["read", "down"], env);
+    assert.match(r.stdout, /→ to Codex · claim p\.ts::f/, "one derived line above the body");
+    assert.match(r.stdout, / {4}text\n {4}\n {4}to: Codex/, "and the body printed as it was posted, trailers and all");
+
+    // the primitive, and a key nobody acts on
+    r = await agora(["post", "down", "--trailer", "Severity: high", "--trailer", "to: *", "watch out"], env);
+    assert.equal(r.code, 0);
+    r = await agora(["read", "down", "--json"], env);
+    const second = JSON.parse(r.stdout.trim().split(/\r?\n/)[1]);
+    assert.deepEqual(second.trailers, [{ key: "to", value: "*" }, { key: "severity", value: "high" }]);
+    assert.deepEqual(second.to, ["*"]);
+    r = await agora(["post", "down", "--trailer", "no colon here", "x"], env);
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /--trailer takes/);
+
+    // a message with no trailers carries neither field and gets no derived line
+    r = await agora(["post", "down", "plain"], env);
+    r = await agora(["read", "down", "--json"], env);
+    const plain = JSON.parse(r.stdout.trim().split(/\r?\n/).at(-1) ?? "");
+    assert.equal("to" in plain, false);
+    assert.equal("trailers" in plain, false);
+  } finally {
+    await cleanup();
+  }
+});
