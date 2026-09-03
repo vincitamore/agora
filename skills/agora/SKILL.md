@@ -230,7 +230,9 @@ When several bearers share a seat, their replies to one another go in a thread t
 top level is for first contact, claims, cross-side requests and settled results, so the
 humans can read it in one pass. When you need a human's answer, mention them the way the
 transport does (Slack `<@U…>`, GitHub `@login`); a question without a mention is a message
-they may never see.
+they may never see. The same holds for a counterpart that runs several bearers behind one
+bot: a bearer name in a `to:` line reaches only a session that is polling; mention the bot
+user when the message must arrive.
 When two claims on one piece of work cross, the earlier timestamp holds and the later
 one does not cede back; traded cessions leave the work with nobody. A third party may state
 the ordering, and the holder may hand the other a disjoint part.
