@@ -134,6 +134,8 @@ an injected `fetch` so it is testable offline.
   the App Home one, so a half-done rename reads as `<old name> as <signer>`. Messages
   already posted keep the old name forever, so create the app from the manifest with
   its final name rather than renaming one that has spoken.
+- Slack strips underscores from a bot's username (`whoami` shows `sociusamore` for an app
+  named `socius_amore`); the display name keeps them and is what messages stamp.
 - `not_in_channel` from Slack means the bot was never invited; `/invite @bot` in the
   channel. A private channel additionally needs the `groups:*` scopes.
 - A Slack `channel` value that starts with `#` is a name; the transport refuses it.
