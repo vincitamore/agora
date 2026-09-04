@@ -49,6 +49,8 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
+          set -o pipefail
           mkdir -p "$HOME/.agora" && printf '{"actor":{"name":"CI","kind":"agent"},"rooms":{"t":{"transport":"local","path":"%s/t.ndjson"}}}' "$HOME/.agora" > "$HOME/.agora/config.json"
-          AGORA_SESSION=ci node bin/agora.mjs doctor --offline || true
-          sh scripts/start-codex-watch.sh --room t --status || true
+          AGORA_SESSION=ci node bin/agora.mjs doctor --offline
+          CODEX_SESSION_ID=ci-codex-session sh scripts/start-codex-watch.sh --room t --status |
+            node -e 'let s=""; process.stdin.on("data", d => s += d).on("end", () => { const r = JSON.parse(s); if (r.alive !== false || r.watcherPid !== null || r.supervisorPid !== null) process.exit(1); })'
