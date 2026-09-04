@@ -148,7 +148,7 @@ const SCHEMA = {
         "--limit <n>": "how many recent messages to fold this session's own posts out of (default 200)",
         "--no-threads": "read the room alone. The room's live threads are folded into the window by default, as `read --threads` does, because on a transport whose room read omits replies a release posted in a thread would leave the claim it closed standing in the envelope; this buys one read back and accepts that",
       },
-      does: "what this session would hand to whoever holds the seat next: seat, bearer, session key and the source of each; this session's cursor for the room and every thread it holds one for; its follow set; its armed watches; and, from one bounded read of the room with its live threads folded in, read against its own posted ledger, the claims it has not released, every release, every verdict that still stands, every verdict a later one of its own withdrew, the messages it addressed to someone, and the deliveries addressed to it it has neither spoken after nor answered by name. Derived at the call, stored nowhere, and no message text: a commitment is named by its trailer value and located by its id and cursor",
+      does: "what this session would hand to whoever holds the seat next: seat, bearer, session key and the source of each; this session's cursor for the room and every thread it holds one for; its follow set; its armed watches; and, from one bounded read of the room with its live threads folded in, read against its own posted ledger, the claims it has not released, every release, every verdict that still stands, every verdict a later one of its own withdrew, the messages it addressed to someone, the deliveries addressed to it it has neither spoken after nor answered by name, and the live threads it could not read with the reason for each. Derived at the call, stored nowhere, and no message text: a commitment is named by its trailer value and located by its id and cursor",
     },
     session: {
       args: [],
@@ -826,8 +826,15 @@ async function main(argv) {
       const wantThreads = !values["no-threads"];
       const window = await carryWindow(transport, { limit, thread, threads: wantThreads });
       const msgs = window.messages;
-      if (window.threads.length) console.error(`agora: read ${window.threads.length} live thread${window.threads.length === 1 ? "" : "s"} into the room`);
-      else if (wantThreads && !thread && !transport.threads) console.error(`agora: ${transport.kind} has no threads; the window is the room read alone`);
+      const unread = window.threadsUnread;
+      // One line for the fold: how much of it landed, and what did not, with the reason. A thread
+      // that could not be read is a hole in the window every list in the envelope is computed
+      // from, so it is said out loud on the way past rather than left to be noticed in the JSON.
+      if (window.threads.length || unread.length) {
+        const seen = window.threads.length + unread.length;
+        const line = `agora: folded ${window.threads.length} of ${seen} live thread${seen === 1 ? "" : "s"} into the room`;
+        console.error(redact(unread.length ? `${line}; ${unread.length} not read: ${unread.map((u) => `${u.id} (${u.reason})`).join(", ")}` : line));
+      } else if (wantThreads && !thread && !transport.threads) console.error(`agora: ${transport.kind} has no threads; the window is the room read alone`);
       // the same call `--wake addressed` makes, and for the same reason: an address may name the
       // seat rather than a bearer, and a transport that cannot say who it is leaves bearer
       // addressing working on its own
@@ -846,6 +853,7 @@ async function main(argv) {
         seat: seat ? { id: seat.id ?? null, name: seat.name ?? null } : null,
         bearer: { name: bearer.name, source: bearer.source },
         session: { slug: session.slug, source: session.source, registered: Boolean(record) },
+        threadsUnread: unread,
         ...state,
         ...folded,
       };

@@ -2,11 +2,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createServer } from "node:http";
 import { promisify } from "node:util";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
-import { writeCursor } from "../src/core.mjs";
+import { AgoraError, writeCursor } from "../src/core.mjs";
 import { carryState, carryWindow, foldRoom, renderCarry } from "../src/carry.mjs";
 import { appendPosted, inheritSession, readPosted } from "../src/session.mjs";
 import { writeFollow } from "../src/follow.mjs";
@@ -142,6 +143,87 @@ test("carry: the window folds the room's live threads, so a release posted as a 
   const blind = foldRoom(plain.messages, new Set(["p1", "r3"]), { bearer: "Fable/watch" });
   assert.deepEqual(blind.claims.map((x) => x.subject), ["human:1788534332"]);
   assert.deepEqual(blind.releases, []);
+});
+
+test("carry: a thread the transport cannot read is named in threadsUnread and the rest still fold", async () => {
+  // the measured defect: on a busy room one `conversations.replies` in the fold was rate limited,
+  // and carry exited 1 with an empty envelope -- a successor asking what this seat held got
+  // nothing at all, on exactly the room busy enough to need the answer, while a watch on the same
+  // call in the same process degraded and kept going
+  const p1 = msg("p1", "one\n\nclaim: a\n\n-- Fable/watch", { cursor: "10", raw: { reply_count: 1, latest_reply: "11" } });
+  const p2 = msg("p2", "two\n\nclaim: b\n\n-- Fable/watch", { cursor: "20", raw: { reply_count: 1, latest_reply: "31" } });
+  const p3 = msg("p3", "three\n\nclaim: c\n\n-- Fable/watch", { cursor: "30", raw: { reply_count: 1, latest_reply: "41" } });
+  const r1 = msg("r1", "handing a back\n\nrelease: a\n\n-- Fable/watch", { thread: "p1", cursor: "11" });
+  const r3 = msg("r3", "handing c back\n\nrelease: c\n\n-- Fable/watch", { thread: "p3", cursor: "41" });
+  /** @type {string[]} */
+  const order = [];
+  const transport = {
+    threads: true,
+    /** @param {import('../src/core.mjs').ReadOptions} [o] */
+    async read(o = {}) {
+      if (!o.thread) return [p1, p2, p3];
+      order.push(o.thread);
+      // the transport has already retried behind its own jittered wait and given up: this is what
+      // the fold is handed, and it must not put a second loop on top of it
+      if (o.thread === "p2") throw new AgoraError("slack conversations.replies: rate limited");
+      return o.thread === "p1" ? [r1] : [r3];
+    },
+  };
+
+  const w = await carryWindow(transport, { limit: 200 });
+  assert.deepEqual(w.threads, ["p3", "p1"], "two of the three folded");
+  assert.deepEqual(w.threadsUnread, [{ id: "p2", reason: "slack conversations.replies: rate limited" }]);
+  assert.deepEqual(order, ["p3", "p2", "p1"], "newest activity first, so a fold cut short is cut at the least costly place");
+  assert.deepEqual(w.messages.map((m) => m.id), ["p1", "r1", "p2", "p3", "r3"]);
+
+  // the envelope is computed from what was folded: the two readable releases close their claims,
+  // and the one behind the unread thread is still reported open -- which is exactly what the
+  // named hole tells a successor to distrust
+  const c = foldRoom(w.messages, new Set(["p1", "p2", "p3", "r1", "r3"]), { bearer: "Fable/watch" });
+  assert.deepEqual(c.claims.map((x) => x.subject), ["b"]);
+  assert.deepEqual(c.releases.map((x) => x.subject), ["a", "c"]);
+  const text = renderCarry({ ...c, threadsUnread: w.threadsUnread, cursorKey: "down", cursor: null, threads: [] });
+  assert.match(text, /unread {6}p2: slack conversations\.replies: rate limited/);
+});
+
+test("carry: a malformed thread id and a thread that is gone are recorded, never thrown", async () => {
+  const parent = msg("p1", "one\n\n-- Fable/watch", { cursor: "10", raw: { reply_count: 1, latest_reply: "11" } });
+  const mangled = msg("m5", "a reply whose thread lost its last digits\n\n-- Fable/watch", { thread: "178845964", cursor: "9" });
+  const gone = msg("p9", "two\n\n-- Fable/watch", { cursor: "20", raw: { reply_count: 1, latest_reply: "21" } });
+  const transport = {
+    threads: true,
+    /** @param {string} id */
+    validateThread: (id) => (/^p\d$/.test(id) ? undefined : "not a thread id here (an unquoted timestamp loses its last digits under pwsh)"),
+    /** @param {import('../src/core.mjs').ReadOptions} [o] */
+    async read(o = {}) {
+      if (!o.thread) return [parent, mangled, gone];
+      if (o.thread === "p9") throw new AgoraError("slack conversations.replies: thread_not_found");
+      return [];
+    },
+  };
+  const w = await carryWindow(transport, { limit: 200 });
+  assert.deepEqual(w.threads, ["p1"]);
+  assert.deepEqual(w.threadsUnread, [
+    { id: "p9", reason: "slack conversations.replies: thread_not_found" },
+    { id: "178845964", reason: "not a thread id here (an unquoted timestamp loses its last digits under pwsh)" },
+  ], "a thread that is gone and one this read cannot reach are the same fact: named, not fatal");
+});
+
+test("carry: --no-threads carries the field empty, and the room read is the one failure that is fatal", async () => {
+  const parent = msg("p1", "one\n\n-- Fable/watch", { cursor: "10", raw: { reply_count: 1, latest_reply: "11" } });
+  const transport = {
+    threads: true,
+    /** @param {import('../src/core.mjs').ReadOptions} [o] */
+    async read(o = {}) {
+      if (o.thread) throw new AgoraError("slack conversations.replies: rate limited");
+      return [parent];
+    },
+  };
+  const plain = await carryWindow(transport, { limit: 200, threads: false });
+  assert.deepEqual(plain.threadsUnread, [], "the field is in the envelope whether or not a thread was missed");
+
+  const roomFails = { threads: true, async read() { throw new AgoraError("slack conversations.history: rate limited"); } };
+  await assert.rejects(() => carryWindow(roomFails, { limit: 200 }), /conversations\.history: rate limited/);
 });
 
 test("carry: a claim taken again after a release re-opens the subject, and the earliest after the release holds", () => {
@@ -317,6 +399,111 @@ test("cli: carry --limit and --no-threads are bounded reads that move no cursor"
     const cur = await agora(["cursor", "down", "--json"], env);
     assert.equal(JSON.parse(cur.stdout.trim()).cursor, null, "carry never touches the saved position");
   } finally {
+    await cleanup();
+  }
+});
+
+/**
+ * A Slack API stand-in: a channel of three parents, each with one reply, where the thread named
+ * by `limited` answers `conversations.replies` with 429 forever. The transport's own jittered
+ * retry runs against it and gives up on its own, which is the state `carry` is handed.
+ * @param {{ limited?: string, roomStatus?: number }} [o]
+ */
+async function slackStub(o = {}) {
+  const parents = [
+    { ts: "1788459640.000100", user: "U1", text: "taking a\n\nclaim: a\n\n-- Fable/watch", reply_count: 1, latest_reply: "1788459640.000110" },
+    { ts: "1788459640.000200", user: "U1", text: "taking b\n\nclaim: b\n\n-- Fable/watch", reply_count: 1, latest_reply: "1788459640.000210" },
+    { ts: "1788459640.000300", user: "U1", text: "taking c\n\nclaim: c\n\n-- Fable/watch", reply_count: 1, latest_reply: "1788459640.000310" },
+  ];
+  /** @type {Record<string, any[]>} */
+  const replies = {
+    "1788459640.000100": [{ ts: "1788459640.000110", user: "U1", thread_ts: "1788459640.000100", text: "handing a back\n\nrelease: a\n\n-- Fable/watch" }],
+    "1788459640.000200": [{ ts: "1788459640.000210", user: "U1", thread_ts: "1788459640.000200", text: "handing b back\n\nrelease: b\n\n-- Fable/watch" }],
+    "1788459640.000300": [{ ts: "1788459640.000310", user: "U1", thread_ts: "1788459640.000300", text: "handing c back\n\nrelease: c\n\n-- Fable/watch" }],
+  };
+  const server = createServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://x");
+    /** @param {any} body */
+    const send = (body) => res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(body));
+    if (url.pathname === "/auth.test") return send({ ok: true, user_id: "U9", user: "agora-bot" });
+    if (url.pathname === "/users.info") return send({ ok: true, user: { real_name: "Fable" } });
+    if (url.pathname === "/conversations.history") {
+      if (o.roomStatus) return res.writeHead(o.roomStatus).end("no");
+      return send({ ok: true, messages: parents });
+    }
+    if (url.pathname === "/conversations.replies") {
+      const ts = String(url.searchParams.get("ts"));
+      // no retry-after body: the header is what the transport waits on, and it floors at a second
+      if (ts === o.limited) return res.writeHead(429, { "retry-after": "0" }).end("{}");
+      return send({ ok: true, messages: [parents.find((p) => p.ts === ts), ...(replies[ts] ?? [])] });
+    }
+    return res.writeHead(404).end("{}");
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", () => r(undefined)));
+  const addr = /** @type {import('node:net').AddressInfo} */ (server.address());
+  return {
+    api: `http://127.0.0.1:${addr.port}`,
+    ids: ["1788459640.000100", "1788459640.000110", "1788459640.000200", "1788459640.000300", "1788459640.000310"],
+    close: () => new Promise((r) => server.close(() => r(undefined))),
+  };
+}
+
+test("cli: carry survives a rate-limited thread read, names it, and still emits the envelope", async () => {
+  // the measured defect: on a busy room one rate-limited `conversations.replies` in the fold took
+  // the whole envelope down -- exit 1, zero bytes -- and a successor asking what this seat held
+  // got nothing, while a watch on the same call in the same process degraded and kept going
+  const { dir, cleanup } = await tmp();
+  const slack = await slackStub({ limited: "1788459640.000200" });
+  try {
+    const cfgPath = path.join(dir, "agora.json");
+    await writeFile(cfgPath, JSON.stringify({
+      actor: { name: "Fable/watch", kind: "agent" },
+      rooms: { busy: { transport: "slack", channel: "C0123ABC", api: slack.api, tokenEnv: "AGORA_TEST_SLACK" } },
+    }));
+    const env = { AGORA_CONFIG: cfgPath, AGORA_STATE: path.join(dir, "state"), AGORA_SESSION: "s1", AGORA_TEST_SLACK: "xoxb-stub" };
+    await agora(["session", "--as", "Fable/watch"], env);
+    // the ledger is the filter on the fold, and these are this session's own posts
+    const sdir = path.join(dir, "state", "sessions", "s1");
+    for (const id of slack.ids) await appendPosted(sdir, id);
+
+    const r = await agora(["carry", "busy", "--json"], env);
+    assert.equal(r.code, 0, "one unreadable thread is not a failed handover");
+    const c = JSON.parse(r.stdout.trim());
+    assert.equal(c.type, "carry");
+    assert.deepEqual(c.threadsUnread, [{ id: "1788459640.000200", reason: "slack conversations.replies: rate limited" }]);
+    assert.match(r.stderr, /agora: folded 2 of 3 live threads into the room; 1 not read: 1788459640\.000200 \(slack conversations\.replies: rate limited\)/);
+    // the two threads that were readable folded, so the releases in them closed their claims; the
+    // subject behind the unread thread is still reported open, which the named hole is the warning about
+    assert.deepEqual(c.claims.map((/** @type {any} */ x) => x.subject), ["b"]);
+    assert.deepEqual(c.releases.map((/** @type {any} */ x) => x.subject), ["a", "c"]);
+    assert.equal(c.horizon.messages, 5);
+
+    const human = await agora(["carry", "busy"], env);
+    assert.equal(human.code, 0);
+    assert.match(human.stdout, /unread {6}1788459640\.000200: slack conversations\.replies: rate limited/);
+  } finally {
+    await slack.close();
+    await cleanup();
+  }
+});
+
+test("cli: a room read that fails is still exit 1, because there is no envelope without it", async () => {
+  const { dir, cleanup } = await tmp();
+  const slack = await slackStub({ roomStatus: 500 });
+  try {
+    const cfgPath = path.join(dir, "agora.json");
+    await writeFile(cfgPath, JSON.stringify({
+      actor: { name: "Fable/watch", kind: "agent" },
+      rooms: { busy: { transport: "slack", channel: "C0123ABC", api: slack.api, tokenEnv: "AGORA_TEST_SLACK" } },
+    }));
+    const env = { AGORA_CONFIG: cfgPath, AGORA_STATE: path.join(dir, "state"), AGORA_SESSION: "s1", AGORA_TEST_SLACK: "xoxb-stub" };
+    await agora(["session", "--as", "Fable/watch"], env);
+    const r = await agora(["carry", "busy", "--json"], env);
+    assert.equal(r.code, 1);
+    assert.equal(r.stdout.trim(), "", "a partial envelope would be a lie about the window it was computed from");
+    assert.match(r.stderr, /conversations\.history: HTTP 500/);
+  } finally {
+    await slack.close();
     await cleanup();
   }
 });

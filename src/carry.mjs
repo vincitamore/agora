@@ -1,8 +1,8 @@
 // @ts-check
-import { cursorKey, readCursorFile } from "./core.mjs";
+import { cursorKey, readCursorFile, redact } from "./core.mjs";
 import { readFollow } from "./follow.mjs";
 import { armedAlive, readArmed, sessionScope } from "./session.mjs";
-import { withThreads } from "./threads.mjs";
+import { after, boundedRoots, mergeAscending } from "./threads.mjs";
 import { matchesAddress, parseTrailers } from "./trailers.mjs";
 
 /**
@@ -100,18 +100,88 @@ export async function carryState(dir, stateRoot, alias) {
  *
  * Nothing here writes. The room read takes no cursor and the thread reads take none either, so
  * neither this session's position nor the shared one moves.
- * @param {{ threads: boolean, read: (o: import('./core.mjs').ReadOptions) => Promise<Message[]> }} transport
+ *
+ * **One thread that cannot be read is not a failed handover.** The threads are read one at a
+ * time and a read that throws is recorded in `threadsUnread` rather than thrown on: a busy room
+ * rate-limits one `conversations.replies` out of eighteen, and a carry that propagated that
+ * exited non-zero with an empty envelope -- a successor asking what it holds got nothing at all,
+ * on exactly the room busy enough to need the answer, while a watch on the same call in the same
+ * process degraded and kept going. `--no-threads` was the only way through and it silently drops
+ * the fold, which is the defect the fold exists to prevent. So the room read is the one failure
+ * that is fatal here; every thread is either folded or named as missing, and the envelope always
+ * comes. The reason is carried verbatim so the reader can tell a thread that was rate-limited
+ * (read it again in a minute) from one that is gone (`thread_not_found`) without guessing.
+ *
+ * No retry is added on top of the transport's own. Slack already retries a 429 four times behind
+ * a jittered wait, and a second loop out here would multiply that into a herd against the limit
+ * that produced it.
+ * @param {{ threads: boolean, read: (o: import('./core.mjs').ReadOptions) => Promise<Message[]>, validateThread?: (id: string) => string | undefined }} transport
  * @param {{ limit?: number, thread?: string, threads?: boolean, cap?: number }} [opts]
- * @returns {Promise<{ messages: Message[], threads: string[] }>}
+ * @returns {Promise<{ messages: Message[], threads: string[], threadsUnread: Array<{ id: string, reason: string }> }>}
  */
 export async function carryWindow(transport, opts = {}) {
   const limit = opts.limit ?? 200;
   const messages = await transport.read({ ...(opts.thread ? { thread: opts.thread } : {}), limit });
   // a read already narrowed to one thread cannot fold itself in, and a transport with no threads
   // has nothing to fold: in both cases the room read is the whole window
-  if (opts.threads === false || opts.thread || !transport.threads) return { messages, threads: [] };
-  const folded = await withThreads(transport, messages, messages, opts.cap === undefined ? {} : { cap: opts.cap });
-  return { messages: folded.messages, threads: folded.threads };
+  if (opts.threads === false || opts.thread || !transport.threads) return { messages, threads: [], threadsUnread: [] };
+  // bounded exactly as `read --threads` bounds it, then ordered by what moved last: when the cap
+  // or the rate limit cuts the fold short, the threads a handover most needs are the ones already in
+  const roots = byLastActivity(boundedRoots(messages, messages, opts.cap === undefined ? {} : { cap: opts.cap }), messages);
+  /** @type {Message[][]} */
+  const replies = [];
+  /** @type {string[]} */
+  const threads = [];
+  /** @type {Array<{ id: string, reason: string }>} */
+  const threadsUnread = [];
+  for (const id of roots) {
+    // a mangled id (an unquoted Slack ts loses its last digits under pwsh) is a thread this read
+    // cannot reach, which is the same fact as a read that failed -- named, never thrown
+    const bad = transport.validateThread?.(id);
+    if (bad) {
+      threadsUnread.push({ id, reason: redact(bad) });
+      continue;
+    }
+    try {
+      replies.push(await transport.read({ thread: id, since: undefined }));
+      threads.push(id);
+    } catch (err) {
+      threadsUnread.push({ id, reason: redact(err instanceof Error ? err.message : String(err)) });
+    }
+  }
+  return { messages: mergeAscending(messages, ...replies), threads, threadsUnread };
+}
+
+/**
+ * The same roots, newest activity first.
+ *
+ * A thread's activity is the newest cursor the window has for it: its parent's `latest_reply`
+ * where the transport reports one, and any reply of its own already in the window. Reading in
+ * that order is what makes a short fold the useful half rather than an arbitrary one -- the
+ * release posted twenty minutes ago is folded before the thread that has been quiet since
+ * Tuesday, so an envelope cut short by a rate limit is still cut at the least costly place.
+ * @param {string[]} roots
+ * @param {Message[]} msgs
+ * @returns {string[]}
+ */
+function byLastActivity(roots, msgs) {
+  /** @type {Map<string, string>} */
+  const at = new Map();
+  const want = new Set(roots);
+  for (const m of msgs) {
+    const root = m.thread && m.thread !== m.id ? m.thread : m.id;
+    if (!want.has(root)) continue;
+    const raw = /** @type {Record<string, unknown>} */ (m.raw ?? {});
+    for (const v of [m.cursor, raw.latest_reply]) {
+      if (v === undefined || v === null) continue;
+      const prev = at.get(root);
+      if (prev === undefined || after(String(v), prev)) at.set(root, String(v));
+    }
+  }
+  /** @param {string} id */
+  const key = (id) => at.get(id) ?? "";
+  // stable: two threads the window cannot tell apart keep the order the bounding gave them
+  return [...roots].sort((a, b) => (after(key(a), key(b)) ? -1 : after(key(b), key(a)) ? 1 : 0));
 }
 
 /**
@@ -279,6 +349,9 @@ export function renderCarry(c) {
   row("cursor", `${c.cursorKey}: ${c.cursor ?? "(none: a watch would read from the start)"}${c.seedFrom !== undefined ? `  would seed from the shared cursor ${c.seedFrom ?? "(from the start)"}` : ""}`);
   for (const t of c.threads ?? [])
     row("thread", `${t.thread}: ${t.cursor ?? "(none)"}${t.followed ? "" : "  (left the follow set)"}${t.lastActivity ? `  last activity ${t.lastActivity}` : ""}`);
+  // named, never silently absent: a thread missing from the fold is a hole in the window every
+  // list below is computed from, and a successor has to know which hole before it trusts them
+  for (const u of c.threadsUnread ?? []) row("unread", `${u.id}: ${u.reason}`);
   for (const [id, root] of Object.entries(c.follow?.aliases ?? {})) row("alias", `${id} is another name for ${root}`);
   for (const a of c.armed ?? []) row("armed", `${a.key}  ${a.mode ?? "watch"}  pid ${a.pid}  ${a.alive ? "live" : "gone"}${a.since ? `  since ${a.since}` : ""}`);
   for (const x of c.claims ?? []) row("claim", `${x.subject}   ${x.id} cursor ${x.cursor}`);
