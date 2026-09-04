@@ -2,6 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { githubTransport } from "../src/transports/github.mjs";
+import { createTransport, tokenSource } from "../src/transports/index.mjs";
 import { fakeFetch } from "./helpers.mjs";
 
 const comments = [
@@ -65,6 +66,24 @@ test("github room: since excludes edited-old comments and ties on created_at", a
   assert.deepEqual(after13, []);
 });
 
+test("github room: without a cursor the newest messages up to the limit", async () => {
+  const { t } = make();
+  assert.deepEqual((await t.read({ limit: 2 })).map((m) => m.id), ["12", "13"]);
+});
+
+test("github room: same-second comments sort by Number(id), not the cursor string", async () => {
+  const sameSecond = [
+    { id: 10, created_at: "2026-09-03T06:00:00Z", updated_at: "2026-09-03T06:00:00Z", body: "c10", user: { login: "a", type: "User" }, html_url: "u10" },
+    { id: 8, created_at: "2026-09-03T06:00:00Z", updated_at: "2026-09-03T06:00:00Z", body: "c8", user: { login: "a", type: "User" }, html_url: "u8" },
+    { id: 9, created_at: "2026-09-03T06:00:00Z", updated_at: "2026-09-03T06:00:00Z", body: "c9", user: { login: "a", type: "User" }, html_url: "u9" },
+  ];
+  const { fetch } = fakeFetch([["/issues/3/comments", () => ({ body: sameSecond })]]);
+  const t = githubTransport({ transport: "github", repo: "a/b", issue: 3 }, { token: "t", fetch });
+  assert.deepEqual((await t.read()).map((m) => m.id), ["8", "9", "10"]);
+  const after8 = await t.read({ since: "2026-09-03T06:00:00Z|8" });
+  assert.deepEqual(after8.map((m) => m.id), ["9", "10"]);
+});
+
 test("github room posts a comment and refuses threads", async () => {
   const { t, calls } = make();
   const r = await t.post("hello");
@@ -83,7 +102,7 @@ test("github room surfaces API errors with status and message", async () => {
   await assert.rejects(() => t.read(), /403 Resource not accessible/);
 });
 
-test("github room sends the validator it was given last and reads a not-modified answer as an empty batch", async () => {
+test("github room sends the validator it was given last and re-filters a not-modified page", async () => {
   const cache = memoryCache();
   const first = make({ etag: 'W/"abc123"', cache });
   assert.equal((await first.t.read()).length, 4);
@@ -91,14 +110,34 @@ test("github room sends the validator it was given last and reads a not-modified
   assert.equal(cache.m.size, 1, "and the validator is kept where a later process can find it");
 
   const again = await first.t.read();
-  assert.deepEqual(again, [], "not modified is no messages, not an error");
+  assert.deepEqual(again.map((m) => m.id), ["10", "11", "12", "13"], "304 re-filters the cached page, not an empty batch");
   assert.equal(/** @type {any} */ (first.calls.at(-1)?.init?.headers)["if-none-match"], 'W/"abc123"');
 
   // a fresh instance holds nothing of its own: the store is what makes this survive a re-arm
   const fresh = make({ etag: 'W/"abc123"', cache });
-  assert.deepEqual(await fresh.t.read(), []);
+  assert.deepEqual((await fresh.t.read()).map((m) => m.id), ["10", "11", "12", "13"]);
   assert.equal(/** @type {any} */ (fresh.calls.at(-1)?.init?.headers)["if-none-match"], 'W/"abc123"');
+  assert.deepEqual((await fresh.t.read({ since: "2026-09-03T06:00:00Z|11" })).map((m) => m.id), ["12", "13"], "a lagging cursor re-filters the cached page");
 
   const uncached = make({ etag: 'W/"abc123"' });
   assert.equal((await uncached.t.read()).length, 4, "with no store the first read of each process is unconditional");
+});
+
+test("tokenSource and createTransport name the same GITHUB_TOKEN", async () => {
+  const prev = process.env.GITHUB_TOKEN;
+  process.env.GITHUB_TOKEN = "ghp_from_env";
+  try {
+    const room = /** @type {import("../src/core.mjs").RoomConfig} */ ({ transport: "github", repo: "a/b", issue: 3 });
+    assert.equal(await tokenSource(room), "env");
+    const { fetch, calls } = fakeFetch([
+      ["/user", () => ({ body: { id: 1, login: "x" } })],
+    ]);
+    const cfg = /** @type {import("../src/core.mjs").Config} */ ({ actor: { name: "A", kind: "agent" }, rooms: { r: room } });
+    const t = await createTransport("r", room, cfg, { fetch });
+    await t.whoami();
+    assert.equal(/** @type {any} */ (calls[0].init?.headers).authorization, "Bearer ghp_from_env");
+  } finally {
+    if (prev === undefined) delete process.env.GITHUB_TOKEN;
+    else process.env.GITHUB_TOKEN = prev;
+  }
 });

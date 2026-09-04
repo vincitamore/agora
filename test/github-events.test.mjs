@@ -78,8 +78,27 @@ test("github-events: reads are conditional and a feed refuses to post", async ()
   await t.read();
   const again = await t.read();
   assert.deepEqual(etags, ["", '"tag-1"'], "the validator from the first read is sent on the second");
-  assert.deepEqual(again, [], "not modified is an empty batch");
+  assert.deepEqual(again.map((m) => m.id), ["10", "20", "30", "40", "50"], "304 re-filters the cached page");
+  assert.deepEqual((await t.read({ since: "30" })).map((m) => m.id), ["40", "50"], "a lagging cursor re-filters the cached page");
   await assert.rejects(() => t.post("hello"), /read-only/);
   await assert.rejects(() => t.read({ thread: "x" }), /no threads/);
   assert.deepEqual(await t.whoami(), { id: "7", name: "vincitamore" });
+  assert.deepEqual(await t.whoami(), { id: "7", name: "vincitamore" }, "whoami is not conditional; a second call is the same identity");
+});
+
+test("github-events whoami never sends a validator, so a 304 cannot become id 'undefined'", async () => {
+  /** @type {string[]} */
+  const sent = [];
+  const { fetch } = fakeFetch([
+    ["/user", (_url, init) => {
+      const tag = /** @type {Record<string, string>} */ (init?.headers ?? {})["if-none-match"];
+      sent.push(tag ?? "");
+      if (tag) return { status: 304 };
+      return { body: { id: 7, login: "vincitamore" }, headers: { etag: '"u"' } };
+    }],
+  ]);
+  const t = githubEventsTransport({ transport: "github-events", repo: "a/b" }, { token: "t", fetch });
+  assert.deepEqual(await t.whoami(), { id: "7", name: "vincitamore" });
+  assert.deepEqual(await t.whoami(), { id: "7", name: "vincitamore" });
+  assert.deepEqual(sent, ["", ""], "neither call is conditional");
 });

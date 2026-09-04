@@ -32,36 +32,54 @@ export function githubEventsTransport(room, { token, fetch: f = globalThis.fetch
   const wantTypes = Array.isArray(room.events) ? new Set(room.events.map(String)) : undefined;
   const wantRefs = Array.isArray(room.refs) ? room.refs.map(String) : undefined;
 
-  /** @type {Map<string, string>} */
-  const validators = new Map();
+  /** @typedef {{ etag: string, body?: unknown }} Cached */
+  /** @type {Map<string, Cached>} */
+  const cached = new Map();
+
   /** @param {string} key */
-  async function validator(key) {
-    if (validators.has(key)) return validators.get(key);
-    const v = await cache?.get(key);
-    if (v) validators.set(key, v);
-    return v;
+  async function loadCached(key) {
+    const hit = cached.get(key);
+    if (hit) return hit;
+    const raw = await cache?.get(key);
+    if (!raw) return undefined;
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && typeof parsed.etag === "string") {
+        cached.set(key, parsed);
+        return parsed;
+      }
+    } catch {
+      /* legacy: the value was the etag itself */
+    }
+    const legacy = { etag: raw };
+    cached.set(key, legacy);
+    return legacy;
   }
 
-  /** @param {string} pathname @param {Record<string, string>} [params] */
-  async function get(pathname, params = {}) {
+  /** @param {string} key @param {Cached} entry */
+  async function saveCached(key, entry) {
+    cached.set(key, entry);
+    await cache?.set(key, JSON.stringify(entry));
+  }
+
+  /** @param {string} pathname @param {Record<string, string>} [params] @param {{ conditional?: boolean }} [opts] */
+  async function get(pathname, params = {}, { conditional = true } = {}) {
     const url = new URL(`${api}${pathname}`);
     for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
     const key = url.toString();
-    const etag = await validator(key);
+    const prev = conditional ? await loadCached(key) : undefined;
     const res = await f(url, {
       headers: {
         authorization: `Bearer ${token}`,
         accept: "application/vnd.github+json",
         "x-github-api-version": "2022-11-28",
         "user-agent": "agora",
-        ...(etag ? { "if-none-match": etag } : {}),
+        ...(prev?.etag ? { "if-none-match": prev.etag } : {}),
       },
     });
-    if (res.status === 304) return NOT_MODIFIED;
-    const tag = res.headers.get("etag");
-    if (tag && validators.get(key) !== tag) {
-      validators.set(key, tag);
-      await cache?.set(key, tag);
+    if (conditional && res.status === 304) {
+      if (prev && "body" in prev) return prev.body;
+      return NOT_MODIFIED;
     }
     const text = await res.text();
     /** @type {any} */
@@ -72,6 +90,10 @@ export function githubEventsTransport(room, { token, fetch: f = globalThis.fetch
       /* non-JSON body */
     }
     if (!res.ok) throw new AgoraError(`github GET ${pathname}: ${res.status} ${json?.message ?? text.slice(0, 200)}`);
+    if (conditional) {
+      const tag = res.headers.get("etag");
+      if (tag) await saveCached(key, { etag: tag, body: json });
+    }
     return json;
   }
 
@@ -185,7 +207,7 @@ export function githubEventsTransport(room, { token, fetch: f = globalThis.fetch
     room: roomName,
     threads: false,
     async whoami() {
-      const u = await get("/user");
+      const u = await get("/user", {}, { conditional: false });
       return { id: String(u.id), name: String(u.login) };
     },
     async read({ thread, since, limit = 100 } = {}) {
