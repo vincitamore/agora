@@ -194,6 +194,21 @@ runs inside `onBatch`. After each enqueue returns, it checkpoints that delivery'
 before starting the next one. A later failed enqueue therefore preserves the at-least-once contract
 for the failed suffix without replaying a prefix Codex already accepted. A death between queue
 acceptance and its checkpoint can still replay that stable message id; exactly-once is not claimed.
+
+Queue recovery is local to the adapter, not a supervisor restart loop. Each subprocess is killed
+after 30 seconds; failed injections get at most three attempts with one- and two-second backoff.
+Spawn permission/path errors stop immediately. Retry diagnostics carry the locator and failure
+metadata, never execFile's full argv (which contains the private prompt). Failed exits and timeouts
+have unknown acceptance, so automatic retry can duplicate a stable cursor. `onQueued` is outside
+the retry block: a checkpoint failure must not immediately reinject an already accepted effect.
+Exhaustion leaves the accepted prefix checkpointed and exits 1 naming the pending suffix; re-arm
+only after inspecting the queue. The injectable runner, delay and cancellation signal support
+offline partial-batch, hung-child and cancellation tests without touching any Codex database.
+
+The recorded PID is evidence only about the process it names. In particular, an `AGORA_SESSION_PID`
+can name a detached delivery supervisor while the Codex conversation is still active. Notices
+for these records (including mixed sweeps) explicitly leave conversation liveness unknown and
+ask the reader to verify before reassignment. No trailer automatically reassigns work.
 The bridge deliberately uses the same Codex-derived Agora session as interactive posts. Giving the
 watch a separate explicit `AGORA_SESSION` splits the posted-id ledger, makes the task's own posts
 look foreign, and turns them into queued echo turns.

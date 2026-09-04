@@ -628,6 +628,13 @@ an injected `fetch` so it is testable offline.
   thread/binary. Inside a Codex sandbox, put `AGORA_STATE` under a writable root and enable transport
   network; `agora doctor` reports `CODEX_SANDBOX` and `CODEX_SANDBOX_NETWORK_DISABLED`. A terminal
   session id is not evidence that the process will remain resident after the turn ends.
+- Queue failures get at most three attempts, with one- then two-second backoff and a 30-second
+  subprocess timeout. Retry metadata is visible on stderr without the prompt. A failed exit or
+  timeout has unknown acceptance: retry can duplicate a stable cursor, never treat it as a new
+  request. Only successful queue calls checkpoint; a failed checkpoint is not retried as an
+  injection. Exhaustion exits 1 naming the pending suffix; inspect the queue, then re-arm with
+  the same session/cursors. Missing or inaccessible executables stop immediately. There is no
+  infinite supervisor restart loop, and a SQLite error does not authorize resetting databases.
 - A Codex queue target is checked before the first room read and once a minute thereafter. The
   thread must have a rollout and a writer lock the OS proves is held. Missing or stale means exit 1,
   with the cause in `watch-result.reason`; an unprobeable platform says unknown and continues rather
@@ -662,6 +669,9 @@ an injected `fetch` so it is testable offline.
   dies and is resumed within the grace is never announced; a record older than the horizon is
   pruned, not announced; after a reboot every recent record is announced once, which is the
   truth.
+- A notice for an `AGORA_SESSION_PID` record is about a delivery/session process, often a
+  detached supervisor, not proof the conversation ended. Verify with the bearer or operator
+  before reassigning work; an alive process alone is likewise not proof queue delivery recovered.
 - A second watch on one cursor key double-delivers, and both advance the same position.
   A watch registers the key it holds while it runs and warns when it finds another live
   process registered there; the warning never refuses, so read it.
