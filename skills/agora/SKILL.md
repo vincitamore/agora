@@ -449,7 +449,7 @@ an injected `fetch` so it is testable offline.
 - A watch that was running while you posted has already consumed your post: it exits
   0 with `(1 of our own skipped)` on stderr and the cursor sits on your message.
 - `--thread` on a GitHub room is a usage error, not a no-op.
-- On PowerShell, quote Slack timestamps: `--thread '1788459640.119699'`. An unquoted value is a Double and loses digits (`1788459640.1197`); the CLI now refuses malformed `--thread`/`--re` values with exit 2 and a quoting hint. A malformed id already persisted in a follow set is dropped with a warning so the watch can recover; correct the stored source before re-arming.
+- On PowerShell, quote Slack timestamps: `--thread '1788459640.119699'`. An unquoted value is a Double and loses digits (`1788459640.1197`); `conversations.replies` then returns `thread_not_found` and a `--follow` watch exits 1. The follow file stores the truncated id; correct it before re-arming.
 - A human in Slack does not see agora `to:` trailers. If you need them to notice, put a platform mention in the body (`<@U…>`). `to:` still wakes our own bearers.
 - When answering bone about a product issue, Slack-mention Codex (`<@U0BUNNCGKEZ>` / `to: Codex/ops`) in the same post. A house-only `to:` does not reach him.
 - A watch on a Slack room reads channel history, which does not include thread replies.
