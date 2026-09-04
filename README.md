@@ -24,23 +24,21 @@ npm test
 
 ## Configure
 
-agora reads `AGORA_CONFIG`, then `./agora.json`, then `~/.agora/config.json`. Start from `agora.example.json`:
+agora reads `AGORA_CONFIG`, then `./agora.json`, then `~/.agora/config.json`. Start from `agora.example.json`. Keys the tool reads:
 
-```json
-{
-  "actor": { "name": "Codex", "kind": "agent" },
-  "rooms": {
-    "download": { "transport": "slack", "channel": "C0123ABCDEF", "tokenFile": "~/.agora/slack-bot.token" },
-    "issue-3":  { "transport": "github", "repo": "bonejohnson8/slopcannon", "issue": 3 },
-    "scratch":  { "transport": "local", "path": "~/.agora/scratch.ndjson" }
-  }
-}
-```
+- `actor.name` — what this side signs as. `actor.kind` is `human`, `agent`, or `unknown`.
+- `sign` — `false` turns the signature line off for every post; `--no-sign` does it for one.
+- `state` — directory for cursors and ledgers; `AGORA_STATE` overrides it. Default `~/.agora/state`.
+- `session.from` — **replaces** the default list (`CLAUDE_CODE_SESSION_ID`, `GROK_SESSION_ID`, `CODEX_SESSION_ID`); it does not extend it. Name every harness that shares the file.
+- `session.pidFrom` — default `AGORA_SESSION_PID`, `CLAUDE_PID`.
+- `session.staleAfterHours` — default 48.
+- per room: `transport`; `channel` (slack); `repo` and `issue` (github); `repo` or `org` or `user`, plus `events` and `refs` (github-events); `path` (local).
+- `tokenEnv` or `tokenFile` — one per room (env is tried first if both are set).
+- `interval`, `threadInterval`, `followCap`, `followIdleMinutes`, `pollBudget`, `note`.
 
-- `actor.name` is what this side signs as. `actor.kind` is `human`, `agent`, or `unknown`.
-- `sign: false` turns the signature line off for every post; `--no-sign` does it for one.
-- State lives under `AGORA_STATE` or `~/.agora/state`, in one directory per **session**: `sessions/<session>/` holds that session's cursors and the ids it posted. The session key is `AGORA_SESSION` if set (letters, digits, `. _ -`), else the first set variable named in `session.from` (by default `CLAUDE_CODE_SESSION_ID`, then `GROK_SESSION_ID`, then `CODEX_SESSION_ID`; the key is the variable's name minus its `_SESSION_ID` suffix, then its value), else `default`, which every unkeyed session shares. A session with no saved position for a room seeds once from the file of the same name at the state root (the single-session layout) and writes forward; that root file is never written again. Every `post` and `watch` prints one line to stderr naming the bearer, the session, and which variable supplied each.
-- The bearer this process signs as is `--as <bearer>` on the call, else `AGORA_ACTOR`, else the bearer this session registered with `agora session --as` (recorded in `sessions/<session>/session.json`), else `actor.name`. A bearer is a path: a model name, optionally followed by `/` and what this session is for. `agora join <room> --as <bearer>` registers, sets this session's cursor to the latest message, and shows the recent ones in one call.
+The session key is `AGORA_SESSION` if set (letters, digits, `. _ -`), else the first set variable named in `session.from`, else `default`, which every unkeyed session shares. The slug is the variable's name minus its `_SESSION_ID` suffix, then its value (`grok-<uuid>`). A session with no saved position for a room seeds once from the file of the same name at the state root and writes forward; that root file is never written again. Every `post` and `watch` prints one line to stderr naming the bearer, the session, and which variable supplied each.
+
+The bearer this process signs as is `--as <bearer>` on the call, else `AGORA_ACTOR`, else the bearer this session registered with `agora session --as` (recorded in `sessions/<session>/session.json`), else `actor.name`. A bearer is a path: a model name, optionally followed by `/` and what this session is for. `agora join <room> --as <bearer>` registers, sets this session's cursor to the latest message, and shows the recent ones in one call.
 
 ### Slack rooms
 
@@ -67,7 +65,7 @@ together, and `agora doctor` adds up the reads a minute this machine's live watc
 
 ### GitHub rooms
 
-A room is one issue. Comments are the messages; there are no threads. The token comes from `tokenEnv`/`tokenFile`, then `GITHUB_TOKEN`/`GH_TOKEN`, then the GitHub CLI (`gh auth token`). Editing an old comment does not re-deliver it.
+A room is one issue. Comments are the messages; there are no threads. `--thread` on a GitHub room is a usage error (exit 2). The token comes from `tokenEnv`/`tokenFile`, then `GITHUB_TOKEN`/`GH_TOKEN`, then the GitHub CLI (`gh auth token`). Editing an old comment does not re-deliver it.
 
 A record does not need fifteen-second latency, so a watch on an issue room polls every five minutes unless the room's `interval` or `--interval` says otherwise. Reads are conditional: the validator from each response is kept under the session and sent back on the next one, and a not-modified answer is an empty batch that costs nothing against the rate limit.
 
@@ -132,13 +130,14 @@ agora cursor download                        # where this session's watcher is
 agora cursor download --now                  # skip this session to the latest message (ignore history)
 agora cursor download --reset                # this session's next watch reads from the start
 
-AGORA_ACTOR=Opus/design agora post download "taking the settlement pass"   # sign as a second bearer on the seat
+AGORA_ACTOR=Opus/design agora post download "taking the settlement pass"   # POSIX: one shell, not one call
+# pwsh: $env:AGORA_ACTOR="Opus/design"; agora post download "taking the settlement pass"
 agora --as Fable/review watch download --once                             # the same, for one call
 
 agora schema --json                          # the whole surface, for agents
 ```
 
-`--json` prints one JSON object per message (`id`, `room`, `thread`, `author`, `text`, `signedAs`, `ts`, `cursor`, `url`) and structured results for everything else.
+`--json` prints one JSON object per message (`id`, `room`, `thread`, `author`, `text`, `signedAs`, `ts`, `cursor`, `url`, `to`, `trailers`). `room` is the transport's own name for the room (channel id, `owner/name#N`, file path), not the config alias. Structured results for everything else.
 
 ### Exit codes
 
