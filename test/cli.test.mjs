@@ -1,7 +1,8 @@
 // @ts-check
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { once } from "node:events";
 import { createServer } from "node:http";
 import { promisify } from "node:util";
 import { mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
@@ -47,6 +48,51 @@ async function agora(args, env, opts = {}) {
     return { code: err.code, stdout: err.stdout ?? "", stderr: err.stderr ?? "" };
   }
 }
+
+test("cli: a slow pipe receives every large message before successful exit", { timeout: 30000 }, async () => {
+  const { dir, cleanup } = await tmp();
+  const roomPath = path.join(dir, "room.ndjson");
+  const cfgPath = path.join(dir, "agora.json");
+  const payload = "x".repeat(32768);
+  const records = Array.from({ length: 64 }, (_, i) => ({
+    id: String(i + 1), text: `${i}:${payload}`, ts: "2026-09-04T00:00:00.000Z",
+    author: { id: "fixture", name: "fixture", kind: "human" },
+  }));
+  /** @type {import('node:child_process').ChildProcessWithoutNullStreams | undefined} */
+  let child;
+  try {
+    await writeFile(roomPath, records.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    await writeFile(cfgPath, JSON.stringify({
+      actor: { name: "reader", kind: "agent" },
+      rooms: { down: { transport: "local", path: roomPath } },
+    }));
+    child = spawn(process.execPath, [BIN, "read", "down", "--json"], {
+      env: { ...process.env, AGORA_CONFIG: cfgPath, AGORA_STATE: path.join(dir, "state"), AGORA_SESSION: "slow-pipe" },
+      windowsHide: true,
+    });
+    child.stdin.end();
+    const closed = once(child, "close");
+    let stderr = "";
+    child.stderr.setEncoding("utf8").on("data", (s) => { stderr += s; });
+    const chunks = [];
+    // More than a pipe buffer, consumed slowly: console output must survive backpressure.
+    for await (const chunk of child.stdout) {
+      chunks.push(chunk);
+      await delay(2);
+    }
+    const [code] = await closed;
+    assert.equal(code, 0, stderr);
+    const lines = messages(Buffer.concat(chunks).toString("utf8"));
+    assert.equal(lines.length, records.length, "no suffix lost when the process finishes");
+    assert.deepEqual(lines.map((line) => {
+      const m = JSON.parse(line);
+      return { id: m.id, text: m.text };
+    }), records.map(({ id, text }) => ({ id, text })));
+  } finally {
+    if (child && child.exitCode === null && child.signalCode === null) child.kill();
+    await cleanup();
+  }
+});
 
 test("cli end to end on a local room", async () => {
   const { dir, cleanup } = await tmp();

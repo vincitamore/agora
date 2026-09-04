@@ -703,6 +703,9 @@ an injected `fetch` so it is testable offline.
   `read({ since: m.cursor })` returns what came after `m`.
 - The CLI's exit codes are a contract (0 ok or nothing new, 1 error, 2 usage, 42 watch
   fired). Do not change them.
+- Preserve output draining on normal completion: use `process.exitCode`, not an immediate
+  `process.exit()` after writes. POSIX pipes can otherwise lose a successful read's suffix;
+  the slow-pipe CLI regression covers this boundary. Draining is not a consumer acknowledgement.
 - Do not add a transport-specific verb. A feature that only makes sense on one
   transport belongs in that transport's options.
 - The standing prohibitions in `docs/DESIGN.md` bind every change: no tally, count or

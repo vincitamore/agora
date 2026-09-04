@@ -213,6 +213,12 @@ a wrapper: `agora watch room; echo $?` ends the shell with 0, and a consumer tha
 that as "nothing arrived". `fired: false` is printed too, so "the watch ran and found nothing" is
 distinguishable from "the watch never ran".
 
+The CLI assigns `process.exitCode` and lets Node drain pending output on normal completion,
+including errors. An immediate `process.exit()` can truncate asynchronous POSIX pipe writes;
+a successful transport read is not delivered if shutdown discards its output. A slow-pipe
+regression checks the full message sequence. This does not acknowledge downstream consumption,
+and forced termination can still interrupt output.
+
 A watch registers itself while it runs (`armed/<key>.json`) and removes the registration on
 exit. A second watch on the same key is warned, never refused: two watches on one key
 double-deliver, and the registration is what makes that visible. Each armed and session record also
