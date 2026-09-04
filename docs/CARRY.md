@@ -128,7 +128,7 @@ One object. Every field is derived at the call; the `from` column says from what
 | `verdicts[]` | `{ verdict, exhibits[], id, cursor, ts, thread? }`: what this session **now** says | the same fold; the exhibits are the `exhibit:` lines of the same message. A verdict a later verdict of this session's own withdrew is in `superseded`, not here |
 | `superseded[]` | `{ verdict, exhibits[], id, cursor, ts, thread?, supersededBy }`: every verdict of this session's own that a later post of its own withdrew, with the id of the message that withdrew it | the same fold: a `withdraws:` naming an earlier own verdict's `id` (or its `cursor`), or a `verdict:` carrying a `re:` that names one, moves that verdict out of `verdicts` and here |
 | `obligations[]` | `{ to[], id, cursor, ts }`: every message this session posted carrying a `to:` — what this side asked of someone else | the same fold |
-| `owed[]` | `{ from, to[], id, cursor, ts, thread? }`: deliveries addressed to this side that are still awaiting a reply from it | the window (the folded threads included), minus this session's own posts, matched by the standing address rule, then cut per lane: a message is owed unless this session posted in the same thread after it — in the room, for a top-level message — or answered it with a `re:` naming its id |
+| `owed[]` | `{ from, to[], id, cursor, ts, thread? }`: deliveries addressed to this side that are still awaiting a reply from it | the window (the folded threads included), minus this session's own posts, matched by the standing address rule, then cut per lane: a message in a thread is owed unless this session posted in that thread after it, and a top-level message is owed until this session answers it with a `re:` naming its id |
 | `threadsUnread[]` | `{ id, reason }` for every live thread the fold could not read, with the transport's own words for why (`rate limited`, `thread_not_found`, an id this transport cannot reach). Empty when the fold was complete, and always present. Not the same list as `threads[]`, which is the positions this session holds | the fold: each thread is read on its own, and a read that throws is recorded here instead of ending the envelope. Every list above is computed from a window with these threads missing from it, so a non-empty list here is the measure of how far to trust them |
 | `horizon` | `{ messages, own, oldest, newest, lastOwn }`: how far the read reached and where this session's last post sits in it | the window itself |
 
@@ -165,10 +165,15 @@ seat that owed a receipt from four minutes ago reported nothing owed at all.
 
 A post is the receipt, and the lane says which post. A room read is not one conversation on a
 transport with threads: a top-level line is no answer to a question asked in a thread four hours
-earlier, and a reply in one thread is no answer to a question in another. So each thread is cut at
-this session's own newest post in that thread and the room at its own newest top-level post.
-A `re:` naming the message is the explicit form of the same receipt and reaches across lanes,
-because an answer by name is an answer wherever it was posted.
+earlier, and a reply in one thread is no answer to a question in another. So a thread is cut at this
+session's own newest post in it, because a reply in a thread is about the thread.
+
+At top level `owed` clears only by a `re:` naming the message. A top-level post is addressed to
+nothing in particular, so cutting the room lane at this session's own newest line cleared every
+addressed delivery below it at once: two requests arrive, one receipt goes out naming the first, and
+the second vanishes from the envelope — measured, and on exactly the seat that is behind. A `re:`
+naming the message is the receipt in both lanes, and reaches across them, because an answer by name
+is an answer wherever it was posted.
 
 When the window holds nothing of this session's own, every addressed message in it is owed — an
 empty list there would be a claim about a horizon this read cannot see.

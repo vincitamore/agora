@@ -268,7 +268,8 @@ unaddressed request reaches someone.
 machine-readable `watch-result` line whether or not it fired, carrying `fired`,
 `delivered`, `skipped`, `polls`, `cursor`, the per-thread counts and the `exit` it is
 about to leave with: on stdout under `--json`, after the messages, and on stderr
-otherwise. A wrapper such as `agora watch room; echo $?` ends with the shell's 0, and a
+otherwise. A `gap` on that line means the backlog was deeper than the walk, so nothing
+was delivered and nothing advanced: walk it with `--pages <n>`. A wrapper such as `agora watch room; echo $?` ends with the shell's 0, and a
 consumer that forgets reads that as nothing arrived. `agora doctor` prints the reads a
 minute this seat's live watches are spending on each transport, splits room-history reads from
 thread-reply reads, exposes the honest per-watch sum

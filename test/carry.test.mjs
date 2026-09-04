@@ -90,14 +90,30 @@ test("carry: a verdict carries its exhibits, and an obligation is an own post wi
   assert.deepEqual(c.obligations.map((o) => [o.to, o.id, o.cursor]), [[["Codex"], "m1", "1"]]);
 });
 
-test("carry: deliveries owing a receipt are those addressed here after this session's last own post", () => {
+test("carry: at top level a delivery stays owed under a later own post, and an address for someone else is never owed", () => {
   const before = msg("m0", "earlier ask\n\nto: Grace/watch\n\n-- Peer/dev", { who: "peer", kind: "human" });
   const elsewhere = msg("m6", "for the other one\n\nto: Opus/design\n\n-- Peer/dev", { who: "peer", kind: "human" });
   const c = foldRoom([before, OWN_CLAIM, THEIRS, elsewhere], new Set(["m1"]), { bearer: "Grace/watch" });
-  // m0 is older than the last own post, so it was answered by it; m6 names someone else
-  assert.deepEqual(c.owed.map((o) => o.id), ["m5"]);
-  assert.deepEqual(c.owed.map((o) => [o.from, o.to]), [["Peer/dev", ["Grace"]]]);
+  // m0 is older than this session's own top-level post, and that post named nothing: at top level
+  // a later line of our own is not a receipt, so m0 is still owed. m6 names someone else.
+  assert.deepEqual(c.owed.map((o) => o.id), ["m0", "m5"]);
+  assert.deepEqual(c.owed.map((o) => [o.from, o.to]), [["Peer/dev", ["Grace/watch"]], ["Peer/dev", ["Grace"]]]);
   assert.deepEqual(c.horizon.lastOwn, { id: "m1", cursor: "1", ts: OWN_CLAIM.ts });
+});
+
+test("carry: a receipt naming A leaves B owed, and a later unrelated top-level post leaves both owed", () => {
+  // the measured defect: two addressed requests at top level and one `re:` receipt for the first
+  // cleared BOTH, because the room lane was cut at this session's own newest post the way a thread
+  // is. At top level a post answers nothing it does not name.
+  const a = msg("m20", "Request A\n\nto: Grace\n\n-- Peer/dev", { who: "peer", kind: "human" });
+  const b = msg("m21", "Request B\n\nto: Grace\n\n-- Peer/dev", { who: "peer", kind: "human" });
+  const receipt = msg("m22", "on A\n\nre: m20\n\n-- Grace/watch");
+  const c = foldRoom([a, b, receipt], new Set(["m22"]), { bearer: "Grace/watch" });
+  assert.deepEqual(c.owed.map((o) => o.id), ["m21"], "the re: clears A alone; B is still unanswered");
+
+  const later = msg("m23", "something else entirely\n\n-- Grace/watch");
+  const both = foldRoom([a, b, later], new Set(["m23"]), { bearer: "Grace/watch" });
+  assert.deepEqual(both.owed.map((o) => o.id), ["m20", "m21"], "a later top-level post of our own is a receipt for neither");
 });
 
 test("carry: with nothing of this session's own in the window, every addressed message is owed", () => {

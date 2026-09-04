@@ -2,7 +2,7 @@
 import { jitter, readCursor, redact, writeCursor, sleep as defaultSleep } from "./core.mjs";
 
 /** @typedef {{ room?: string, threads: Map<string, string> }} CursorCheckpoint */
-/** @typedef {{ delivered: number, skipped: number, filtered: number, checkpoint: (message: import('./core.mjs').Message | string) => Promise<void> }} BatchInfo */
+/** @typedef {{ delivered: number, skipped: number, filtered: number, gap?: import('./core.mjs').ReadGap, checkpoint: (message: import('./core.mjs').Message | string) => Promise<void> }} BatchInfo */
 
 /**
  * @typedef {object} FollowedThreads
@@ -56,7 +56,7 @@ import { jitter, readCursor, redact, writeCursor, sleep as defaultSleep } from "
  *   urgent?: (m: import('./core.mjs').Message) => boolean,
  *   coalesceSeconds?: number, maxBatch?: number,
  *   guard?: () => string | undefined | Promise<string | undefined>,
- *   threads?: FollowedThreads,
+ *   threads?: FollowedThreads, pages?: number,
  *   sweep?: () => Promise<void> | void,
  *   sleep?: (ms: number) => Promise<void>, now?: () => number, random?: () => number,
  * }} opts
@@ -65,10 +65,13 @@ import { jitter, readCursor, redact, writeCursor, sleep as defaultSleep } from "
  * still shows it. It is never automatic: a message from another agent is input, and routing on
  * its trailers is a flag the reader set. An incoming `ack:` is never consulted here: honouring
  * `ack: none` is a judgement, not a filter, suppress, or delay.
- * @returns {Promise<{ fired: boolean, cursor?: string, polls: number, skipped: number, filtered: number, delivered: number, elapsedMs: number, following: number, threads: Record<string, number>, reason?: string }>}
+ * A room read that could not walk back to the cursor delivers NOTHING and advances nothing: the
+ * transport says so with a `gap` on the read, and the gap is carried to the batch stats and to the
+ * result, so a caller can tell "the room was quiet" from "the backlog is deeper than the walk".
+ * @returns {Promise<{ fired: boolean, cursor?: string, polls: number, skipped: number, filtered: number, delivered: number, elapsedMs: number, following: number, threads: Record<string, number>, gap?: import('./core.mjs').ReadGap, reason?: string }>}
  */
 export async function watch(transport, opts) {
-  const { stateDir, key, thread, mode = "until-new", interval = 15, forSeconds = 0, onBatch, own, wake, urgent, threads, sweep, guard } = opts;
+  const { stateDir, key, thread, mode = "until-new", interval = 15, forSeconds = 0, onBatch, own, wake, urgent, threads, sweep, guard, pages } = opts;
   const sleep = opts.sleep ?? defaultSleep;
   const now = opts.now ?? Date.now;
   const random = opts.random ?? Math.random;
@@ -88,6 +91,13 @@ export async function watch(transport, opts) {
   let polls = 0;
   /** @type {string | undefined} */
   let reason;
+  /**
+   * The last unreached-cursor gap a room read reported. Sticky: it stands on the result even if a
+   * later poll came back clean, because "the backlog was deeper than the walk" is a fact about this
+   * watch that a caller must not have to have been watching stderr to learn.
+   * @type {import('./core.mjs').ReadGap | undefined}
+   */
+  let gap;
   /** @type {Array<{ m: import('./core.mjs').Message, thread?: string, checkpoint?: CursorCheckpoint }>} */
   const held = [];
   /** @type {Set<string>} */
@@ -103,7 +113,7 @@ export async function watch(transport, opts) {
   const checkpointThreadCursors = new Map();
   let windowSkipped = 0;
   let windowFiltered = 0;
-  const result = () => ({ fired, cursor, polls, skipped, filtered, delivered, elapsedMs: Math.max(0, now() - start), following: followed.size, threads: perThread, ...(reason ? { reason } : {}) });
+  const result = () => ({ fired, cursor, polls, skipped, filtered, delivered, elapsedMs: Math.max(0, now() - start), following: followed.size, threads: perThread, ...(gap ? { gap } : {}), ...(reason ? { reason } : {}) });
 
   /** Persist safe cursors: immediately with no held delivery, otherwise only after delivery. */
   const persistPending = async () => {
@@ -127,7 +137,7 @@ export async function watch(transport, opts) {
    * acknowledgement advances only through that accepted prefix; the unacknowledged suffix remains
    * at-least-once. Calls must follow delivery order, which is the order `msgs` is handed to it.
    * @param {Array<{ m: import('./core.mjs').Message, checkpoint?: CursorCheckpoint }>} entries
-   * @param {{ delivered: number, skipped: number, filtered: number }} counts
+   * @param {{ delivered: number, skipped: number, filtered: number, gap?: import('./core.mjs').ReadGap }} counts
    * @returns {BatchInfo}
    */
   const batchInfo = (entries, counts) => {
@@ -190,7 +200,13 @@ export async function watch(transport, opts) {
     if (sweep) await sweep();
     /** @type {Array<{ m: import('./core.mjs').Message, thread?: string, checkpoint?: CursorCheckpoint }>} */
     const batch = [];
-    const roomMsgs = await transport.read({ thread, since: cursor });
+    const roomMsgs = await transport.read({ thread, since: cursor, ...(pages ? { pages } : {}) });
+    if (roomMsgs.gap) {
+      gap = roomMsgs.gap;
+      // said every poll it happens: the cursor is not moving, and the reader is the only one who
+      // can decide to walk deeper
+      console.error(redact(`agora: ${gap.reason}; nothing was delivered and the cursor did not move (deepest reached ${gap.oldestFetched ?? "nothing"}) -- re-run with --pages above ${gap.pages}`));
+    }
     for (const m of roomMsgs) batch.push({ m });
 
     /** @type {Map<string, string>} */
@@ -288,7 +304,7 @@ export async function watch(transport, opts) {
         if (fresh.length) {
           // the counts of THIS poll, so a consumer taking one object per poll says what the poll did
           // without subtracting running totals itself
-          await onBatch(fresh.map((e) => e.m), batchInfo(fresh, { delivered: fresh.length, skipped: skippedHere, filtered: filteredHere }));
+          await onBatch(fresh.map((e) => e.m), batchInfo(fresh, { delivered: fresh.length, skipped: skippedHere, filtered: filteredHere, ...(roomMsgs.gap ? { gap: roomMsgs.gap } : {}) }));
           delivered += fresh.length;
           // a message counts against a followed thread whether the thread read or the room read
           // was the one that carried it

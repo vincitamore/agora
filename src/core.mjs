@@ -31,7 +31,22 @@ const execFileAsync = promisify(execFile);
  * this session's own) and follows the first, the rest as other names for it.
  * @typedef {{ id: string, cursor: string, url?: string, ids?: string[] }} PostResult
  */
-/** @typedef {{ thread?: string, since?: string, limit?: number }} ReadOptions */
+/**
+ * Why a read after a cursor could not reach it: the page cap, or a walk that stopped early. A read
+ * that ends this way returns NOTHING rather than the oldest window of what it happened to collect,
+ * because that window looks complete and the cursor saved after it steps over everything below.
+ * `oldestFetched` is the deepest position the walk did reach, `pages` how many it was allowed.
+ * @typedef {{ reason: string, oldestFetched?: string, pages: number }} ReadGap
+ */
+/** @typedef {{ gap?: ReadGap }} GapCarrier */
+/**
+ * What a read returns: the messages, ascending, and on the array itself the gap, when the walk
+ * could not reach the cursor. A property on the array rather than an envelope so every existing
+ * caller keeps reading a plain list (`JSON.stringify` of an array drops it, which is what the wire
+ * wants); a caller that must not step over a backlog reads `.gap`.
+ * @typedef {Message[] & GapCarrier} ReadResult
+ */
+/** @typedef {{ thread?: string, since?: string, limit?: number, pages?: number }} ReadOptions */
 /** @typedef {{ thread?: string }} PostOptions */
 /**
  * What a transport implements. `read` returns messages ascending, each carrying a cursor.
@@ -40,7 +55,7 @@ const execFileAsync = promisify(execFile);
  * @property {string} room the transport's own name for the room
  * @property {boolean} threads whether `thread` means anything here
  * @property {() => Promise<{ id: string, name: string }>} whoami
- * @property {(opts?: ReadOptions) => Promise<Message[]>} read
+ * @property {(opts?: ReadOptions) => Promise<ReadResult>} read
  * @property {(text: string, opts?: PostOptions) => Promise<PostResult>} post
  * @property {(cursor: string) => string | undefined} [validateCursor] why this string is not a
  *   cursor here, or nothing. `cursor --set` asks before it writes, so a shape the transport can

@@ -94,7 +94,7 @@ const SCHEMA = {
     whoami: { args: ["<room>"], options: {}, does: "the identity this side posts as, per the transport" },
     read: {
       args: ["<room>"],
-      options: { "--thread <id>": "a thread inside the room", "--since <cursor>": "only what came after", "--limit <n>": "cap (default transport)", "--threads": "fold the room's live threads in: replies after --since, interleaved by time (Slack never shows them in a room read)" },
+      options: { "--thread <id>": "a thread inside the room", "--since <cursor>": "only what came after", "--limit <n>": "cap (default transport)", "--pages <n>": "pages of history to walk back through when --since is given (Slack, default 10 of 200 messages). A walk that does not reach the cursor returns nothing and names the gap rather than a partial window from the middle of the backlog", "--threads": "fold the room's live threads in: replies after --since, interleaved by time (Slack never shows them in a room read)" },
       does: "print messages ascending; never touches the saved cursor",
     },
     post: {
@@ -125,6 +125,7 @@ const SCHEMA = {
         "--follow": "also read the threads this session has posted in, at the slower thread interval",
         "--once": "one poll, then exit",
         "--stream": "keep delivering until --for elapses",
+        "--pages <n>": "pages of history one poll walks back through (Slack, default 10 of 200 messages); a poll whose walk does not reach the cursor delivers nothing, advances nothing, and carries a gap on the result line",
         "--interval <s>": "seconds between room polls (default: the room's interval, else 15)",
         "--thread-interval <s>": "seconds between reads of one followed thread (default: the room's threadInterval, else 60)",
         "--for <s>": "give up after this many seconds (default: never)",
@@ -180,6 +181,7 @@ const OPTIONS = /** @type {const} */ ({
   thread: { type: "string" },
   since: { type: "string" },
   limit: { type: "string" },
+  pages: { type: "string" },
   threads: { type: "boolean", default: false },
   file: { type: "string" },
   trailer: { type: "string", multiple: true },
@@ -978,7 +980,11 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
     case "read": {
       if (values.threads && thread) throw new AgoraError(`--threads folds the room's live threads into the read; it cannot be combined with --thread`, EXIT.usage);
       const limit = positive(values.limit, "limit");
-      let msgs = await transport.read({ thread, since: values.since, limit });
+      const pages = positive(values.pages, "pages");
+      let msgs = await transport.read({ thread, since: values.since, limit, pages });
+      // a read after a cursor that could not walk back to it returns NOTHING rather than a window
+      // from the middle of the backlog, so the empty result must say which of the two it is
+      const gap = msgs.gap;
       if (values.threads && transport.threads) {
         // On Slack a room read never contains replies, and a parent older than the cursor is
         // not in the window even when its thread moved after it: a claim made in a thread is
@@ -992,7 +998,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       printMessages(msgs, json, roomAlias);
       // stdout stays pure: a read that printed nothing is otherwise indistinguishable from a read
       // of the wrong room, a --since past everything, or a room that is genuinely quiet
-      console.error(`agora: read ${msgs.length} message${msgs.length === 1 ? "" : "s"} from ${roomAlias} (${transport.kind}) since ${values.since ?? "the start"}`);
+      console.error(`agora: read ${msgs.length} message${msgs.length === 1 ? "" : "s"} from ${roomAlias} (${transport.kind}) since ${values.since ?? "the start"}${gap ? `; the walk did not reach that cursor (${gap.reason}, deepest reached ${gap.oldestFetched ?? "nothing"}), so nothing is printed rather than a partial window -- re-run with --pages above ${gap.pages}` : ""}`);
       return EXIT.ok;
     }
     case "post": {
@@ -1082,6 +1088,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       const mode = values.once ? "once" : values.stream ? "stream" : "until-new";
       const key = cursorKey(roomAlias, thread);
       const interval = roomInterval(room, positive(values.interval, "interval"));
+      const pages = positive(values.pages, "pages");
       const threadInterval = roomThreadInterval(room, positive(values["thread-interval"], "thread-interval"));
       const forSeconds = num(values.for, "for", 0) ?? 0;
       const coalesceSeconds = positive(values.coalesce, "coalesce");
@@ -1255,6 +1262,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
           maxBatch,
           interval,
           forSeconds,
+          pages,
           threads,
           sweep,
           guard: codexGuard,
@@ -1328,6 +1336,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         budgetSeconds: forSeconds,
         elapsedMs: result.elapsedMs,
         cursor: result.cursor ?? null,
+        gap: result.gap ?? null,
         threads: result.threads,
         evicted,
         following: result.following || following,

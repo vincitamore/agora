@@ -2,6 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createServer } from "node:http";
 import { promisify } from "node:util";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -363,7 +364,7 @@ test("cli: every watch ends with one watch-result line, on stderr in human outpu
     assert.equal(r.code, 0);
     const { elapsedMs, ...quiet } = JSON.parse(r.stderr.trim().split(/\r?\n/).at(-1) ?? "");
     assert.equal(typeof elapsedMs, "number", "how long this watch actually waited, beside the budget it was given");
-    assert.deepEqual(quiet, { type: "watch-result", room: "down", alias: "down", session: "w", bearer: "Grace", fired: false, delivered: 0, skipped: 0, filtered: 0, polls: 1, budgetSeconds: 0, cursor: null, threads: {}, evicted: [], following: 0, session_wakes: 0, bytes_delivered: 0, exit: 0 });
+    assert.deepEqual(quiet, { type: "watch-result", room: "down", alias: "down", session: "w", bearer: "Grace", fired: false, delivered: 0, skipped: 0, filtered: 0, polls: 1, budgetSeconds: 0, cursor: null, gap: null, threads: {}, evicted: [], following: 0, session_wakes: 0, bytes_delivered: 0, exit: 0 });
     assert.equal(r.stdout, "", "nothing on stdout when nothing arrived");
 
     await agora(["post", "down", "from them"], { ...env, AGORA_SESSION: "them" });
@@ -1518,6 +1519,73 @@ test("cli: doctor names a room where no live watch wakes on all, and a watch rec
     assert.equal(r.code, 2);
     assert.equal(existsSync(armedC), false);
   } finally {
+    await cleanup();
+  }
+});
+
+/**
+ * A Slack API on loopback serving `count` messages newest-first, 200 to a page, so the CLI's own
+ * paging is exercised end to end rather than a transport stub's.
+ * @param {number} count
+ */
+async function slackBacklog(count) {
+  const stamp = (/** @type {number} */ n) => `1700000000.${String(n).padStart(6, "0")}`;
+  const newestFirst = Array.from({ length: count }, (_, i) => ({ ts: stamp(i + 1), user: "U2", username: "fixture", text: `message ${i + 1}` })).reverse();
+  const server = createServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://x");
+    /** @param {any} body */
+    const send = (body) => res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(body));
+    if (url.pathname === "/auth.test") return send({ ok: true, user_id: "U9", user: "agora-bot" });
+    if (url.pathname === "/users.info") return send({ ok: true, user: { real_name: "fixture" } });
+    if (url.pathname === "/conversations.history") {
+      const oldest = url.searchParams.get("oldest") ?? "";
+      const eligible = newestFirst.filter((m) => m.ts > oldest);
+      const offset = Number(url.searchParams.get("cursor") ?? 0);
+      const end = offset + Number(url.searchParams.get("limit") ?? 200);
+      const more = end < eligible.length;
+      return send({ ok: true, messages: eligible.slice(offset, end), has_more: more, response_metadata: { next_cursor: more ? String(end) : "" } });
+    }
+    return res.writeHead(404).end("{}");
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", () => r(undefined)));
+  const addr = /** @type {import('node:net').AddressInfo} */ (server.address());
+  return { api: `http://127.0.0.1:${addr.port}`, stamp, close: () => new Promise((r) => server.close(() => r(undefined))) };
+}
+
+test("cli: read --pages walks deeper, and a walk that cannot reach the cursor prints nothing and names the gap", async () => {
+  const { dir, cleanup } = await tmp();
+  const back = await slackBacklog(2500);
+  try {
+    const cfgPath = path.join(dir, "agora.json");
+    await writeFile(cfgPath, JSON.stringify({
+      actor: { name: "Grace", kind: "agent" },
+      rooms: { down: { transport: "slack", channel: "C1", api: back.api, tokenEnv: "AGORA_TEST_TOKEN" } },
+    }));
+    const env = { AGORA_CONFIG: cfgPath, AGORA_STATE: path.join(dir, "state"), AGORA_SESSION: "w", AGORA_TEST_TOKEN: "xoxb-test" };
+
+    let r = await agora(["read", "down", "--since", back.stamp(0), "--json"], env);
+    assert.equal(r.code, 0);
+    assert.equal(r.stdout.trim(), "", "a window from the middle of the backlog is not printed as if it were complete");
+    assert.match(r.stderr, /agora: read 0 messages from down \(slack\)/);
+    assert.match(r.stderr, /the walk did not reach that cursor \(backlog deeper than 10 pages, deepest reached 1700000000\.000501\)/);
+    assert.match(r.stderr, /re-run with --pages above 10/);
+
+    r = await agora(["read", "down", "--since", back.stamp(0), "--pages", "13", "--json"], env);
+    assert.equal(r.code, 0);
+    const msgs = messages(r.stdout).map((/** @type {string} */ l) => JSON.parse(l));
+    assert.equal(msgs.length, 200, "the oldest unseen up to the limit");
+    assert.deepEqual([msgs[0].text, msgs.at(-1).text], ["message 1", "message 200"]);
+    assert.doesNotMatch(r.stderr, /did not reach that cursor/);
+
+    r = await agora(["read", "down", "--pages", "0"], env);
+    assert.equal(r.code, 2, "a walk of no pages reads nothing and would report a gap forever");
+    assert.match(r.stderr, /--pages must be a positive number/);
+
+    const schema = JSON.parse((await agora(["schema", "--json"], env)).stdout);
+    assert.ok(schema.verbs.read.options["--pages <n>"], "read carries it");
+    assert.ok(schema.verbs.watch.options["--pages <n>"], "and so does watch");
+  } finally {
+    await back.close();
     await cleanup();
   }
 });
