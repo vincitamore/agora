@@ -48,8 +48,9 @@ export function codexRollout(thread, env = process.env) {
 /**
  * Ask the OS whether Codex still holds its writer lock. The file is empty and names no pid, so
  * existence alone fails open after a crash. Windows exposes the held byte-range lock as EBUSY on
- * read; Linux's `flock -n` probes the advisory lock without disturbing it. An unavailable probe is
- * honestly unknown, never asserted live.
+ * read; Linux's `flock -n` probes the advisory lock without disturbing it; macOS's system `lsof`
+ * proves that some process still owns an open descriptor for the per-thread marker. An unavailable
+ * probe is honestly unknown, never asserted live.
  * @param {string} lock @param {{ platform?: NodeJS.Platform, read?: typeof readFileSync, run?: typeof spawnSync }} [deps]
  * @returns {'active' | 'stale' | 'unknown'}
  */
@@ -70,6 +71,14 @@ export function probeCodexWriterLock(lock, deps = {}) {
     const result = (deps.run ?? spawnSync)("flock", ["-n", lock, "true"], { stdio: "ignore" });
     if (result.status === 0) return "stale";
     if (result.status === 1) return "active";
+  }
+  if (platform === "darwin") {
+    const result = (deps.run ?? spawnSync)("/usr/sbin/lsof", ["-F", "p", "--", lock], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    if (result.status === 0 && /^p\d+$/m.test(String(result.stdout ?? ""))) return "active";
+    if (result.status === 1 && !result.error) return "stale";
   }
   return "unknown";
 }
