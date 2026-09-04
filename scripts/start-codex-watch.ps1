@@ -147,7 +147,8 @@ if ($Worker) {
     $env:AGORA_ACTOR = $Actor
     $env:AGORA_CONFIG = $ConfigPath
     $env:AGORA_STATE = $StateRoot
-    $env:AGORA_SESSION = $sessionSlug
+    $env:CODEX_SESSION_ID = $SessionId
+    Remove-Item Env:AGORA_SESSION -ErrorAction SilentlyContinue
     $env:PATH = @((Split-Path $CodexPath), (Split-Path $RuntimePath), $env:PATH) -join ';'
 
     $stdoutPath = "$LogPrefix.stdout.log"
