@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { parseSignature } from "../src/core.mjs";
-import { formatTrailers, matchesAddress, parseTrailers } from "../src/trailers.mjs";
+import { formatTrailers, matchesAddress, parseTrailers, TRAILER_VALUE_MAX, trailerValueOk } from "../src/trailers.mjs";
 
 test("a message with no block is all body", () => {
   assert.deepEqual(parseTrailers("just a line"), { body: "just a line", trailers: [], to: [] });
@@ -52,10 +52,14 @@ test("no partial parses: one line that is not a trailer, or no known key, and th
   const carried = parseTrailers("body\n\nto: Codex\nseverity: high");
   assert.deepEqual(carried.trailers, [{ key: "to", value: "Codex" }, { key: "severity", value: "high" }], "an unknown key beside a known one is carried");
 
-  const long = `body\n\nto: Codex\nbecause: ${"x".repeat(201)}`;
-  assert.deepEqual(parseTrailers(long).trailers, [], "a value past 200 characters rejects the whole block");
-  const justFits = `body\n\nto: Codex\nbecause: ${"x".repeat(200)}`;
+  const long = `body\n\nto: Codex\nbecause: ${"x".repeat(TRAILER_VALUE_MAX + 1)}`;
+  assert.deepEqual(parseTrailers(long).trailers, [], `a value past ${TRAILER_VALUE_MAX} characters rejects the whole block`);
+  const justFits = `body\n\nto: Codex\nbecause: ${"x".repeat(TRAILER_VALUE_MAX)}`;
   assert.equal(parseTrailers(justFits).trailers.length, 2);
+  assert.equal(trailerValueOk("x".repeat(TRAILER_VALUE_MAX)), true);
+  assert.equal(trailerValueOk("x".repeat(TRAILER_VALUE_MAX + 1)), false);
+  assert.equal(trailerValueOk(""), false);
+  assert.equal(trailerValueOk("line\nbreak"), false);
 });
 
 test("addresses accumulate across repeated keys and comma-separated values alike", () => {
@@ -96,6 +100,12 @@ test("what the emitter writes is what the parser reads back", () => {
     { key: "severity", value: "high" },
   ]);
   assert.deepEqual(round.to, ["Codex", "Grace/review"]);
+  const cap = { key: "because", value: "x".repeat(TRAILER_VALUE_MAX) };
+  assert.deepEqual(
+    parseTrailers(`body\n\n${formatTrailers([cap, { key: "to", value: "Codex" }])}`).trailers,
+    [{ key: "to", value: "Codex" }, cap],
+    "formatTrailers of a max-length value re-parses to the same entries",
+  );
 });
 
 test("an address matches a bearer by whole segments, from the left", () => {

@@ -494,6 +494,28 @@ test("cli: the trailer block is emitted above the signature, rendered above the 
     assert.equal(r.code, 2);
     assert.match(r.stderr, /--trailer takes/);
 
+    r = await agora(["post", "down", "--to", "Codex", "--because", "x".repeat(401), "look"], env);
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /--because takes a non-empty single-line value of at most 400/);
+    const postedBefore = (await readFile(path.join(dir, "down.ndjson"), "utf8")).trim().split(/\n/).length;
+
+    r = await agora(["post", "down", "--to", "", "--claim", "src/a.ts::f", "empty address"], env);
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /--to takes a non-empty single-line value of at most 400/);
+
+    r = await agora(["post", "down", "--to", "Grace", "--because", "line one\nline two", "multiline"], env);
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /--because takes a non-empty single-line value of at most 400/);
+
+    r = await agora(["post", "down", "--to", "Codex", "--because", "x".repeat(400), "fits"], env);
+    assert.equal(r.code, 0);
+    const postedAfter = (await readFile(path.join(dir, "down.ndjson"), "utf8")).trim().split(/\n/).length;
+    assert.equal(postedAfter, postedBefore + 1, "over-long/empty/newline sugar posts nothing; a 400-char value does");
+
+    r = await agora(["schema"], env);
+    assert.equal(r.code, 0);
+    assert.match(r.stdout, /value at most 400 characters, shared with the named flags/);
+
     // a message with no trailers carries neither field and gets no derived line
     r = await agora(["post", "down", "plain"], env);
     r = await agora(["read", "down", "--json"], env);

@@ -161,6 +161,10 @@ one pass, and a verbose bearer gets stood down.
 **Address and claim in the trailer block.** `--to`, `--re`, `--claim`, `--release`,
 `--verdict`, `--exhibit` and `--because` emit `key: value` lines in a block between the
 body and the signature; `--trailer "<key>: <value>"` is the primitive underneath them.
+A value is one line of at most 400 characters and never empty; every flag that emits one
+refuses past that with exit 2 and posts nothing, because the reader accepts a block only
+when every line fits, so one over-long exhibit would silently strip the `to:` beside it.
+Put the detail in the body and keep the trailer to the locator.
 Addresses match by segment prefix, so `to: Grace` reaches `Grace/watch` and `Grace/review`
 while `to: Grace/watch` reaches one; `*` reaches everyone, and a platform mention reaches
 the seat rather than a bearer, because the platform's own mechanism resolves to the bot

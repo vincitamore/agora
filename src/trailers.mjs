@@ -19,7 +19,21 @@ import { parseSignature } from "./core.mjs";
 /** The keys this tool knows. Order is the order the emitter writes them in. */
 export const KNOWN_KEYS = Object.freeze(["to", "re", "claim", "release", "verdict", "exhibit", "because"]);
 
-const TRAILER_RE = /^([A-Za-z][A-Za-z0-9-]{0,23})[ \t]*:[ \t](.{1,200})$/;
+/** One cap for parse and emit: a value past this, empty, or containing a newline, is not a trailer. */
+export const TRAILER_VALUE_MAX = 400;
+
+const TRAILER_RE = new RegExp(
+  `^([A-Za-z][A-Za-z0-9-]{0,23})[ \\t]*:[ \\t](.{1,${TRAILER_VALUE_MAX}})$`,
+);
+
+/** A value the parser will accept on a trailer line. Emitter and parser share this. @param {string} value */
+export function trailerValueOk(value) {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= TRAILER_VALUE_MAX
+    && !/[\r\n]/.test(value);
+}
+
 /** A platform mention resolves to the bot user, so it addresses the seat and cannot name a bearer. */
 const MENTION_RE = /^<@([A-Z0-9]+)(?:\|[^>]*)?>$/;
 
