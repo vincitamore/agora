@@ -527,9 +527,12 @@ an injected `fetch` so it is testable offline.
   way. On Windows, use `scripts/start-codex-watch.ps1 -Room <room> -Actor <bearer>`: it asks the OS
   process service to own a hidden worker, preserves the Codex-derived session, and writes separate
   stdout/stderr logs. On POSIX use `scripts/start-codex-watch.sh --room <room> --actor <bearer>`.
-  Both launchers resolve Node before Bun, accept an explicit runtime and Codex binary, report status,
-  stop by exact armed PID, refuse double-arm unless forced, and preserve arguments containing shell
-  metacharacters. The watch itself accepts `--codex-bin` / `AGORA_CODEX_BIN` and `--codex-thread` /
+  On macOS that script registers a per-session LaunchAgent below `AGORA_STATE` and loads it with
+  `launchctl`; the OS then owns the worker after the arming command exits. `--status`, `--stop`, and
+  `--force` resolve the exact LaunchAgent and armed PID, stopping removes its generated property
+  list, and a second arm is refused. On Linux it keeps the `setsid` plus `nohup` path. Both launchers
+  resolve Node before Bun, accept an explicit runtime and Codex binary, and preserve arguments
+  containing shell metacharacters. The watch itself accepts `--codex-bin` / `AGORA_CODEX_BIN` and `--codex-thread` /
   `AGORA_CODEX_THREAD`; room content always remains one argv value. Verify the returned supervisor
   PID, the PID in the session's `armed/<room>.json`, and `agora doctor`'s live-watch count plus Codex
   thread/binary. Inside a Codex sandbox, put `AGORA_STATE` under a writable root and enable transport

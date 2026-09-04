@@ -1,0 +1,231 @@
+// @ts-check
+import test from "node:test";
+import assert from "node:assert/strict";
+import { access, chmod, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+import { execFile } from "node:child_process";
+import { tmp } from "./helpers.mjs";
+
+const runFile = promisify(execFile);
+const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const launcher = path.join(repoRoot, "scripts", "start-codex-watch.sh");
+
+test("Codex POSIX launcher gives macOS to launchd without weakening Linux detachment", async () => {
+  const source = await readFile(launcher, "utf8");
+  await access(launcher, constants.X_OK);
+  assert.match(source, /launchctl bootstrap/);
+  assert.match(source, /launchctl bootout/);
+  assert.match(source, /plutil -insert ProgramArguments -array/);
+  assert.match(source, /plutil -insert KeepAlive -bool false/);
+  assert.match(source, /plutil -insert WorkingDirectory/);
+  assert.match(source, /nohup setsid/);
+  assert.doesNotMatch(source, /\beval\b/);
+});
+
+const runLaunchdTest = process.platform === "darwin" && process.env.AGORA_TEST_LAUNCHD === "1";
+
+test("macOS LaunchAgent survives the launcher and keeps exact lifecycle and arguments", {
+  skip: runLaunchdTest ? false : "set AGORA_TEST_LAUNCHD=1 on macOS to exercise the real user LaunchAgent",
+  timeout: 60_000,
+}, async (t) => {
+  const fixture = await tmp();
+  const helpers = path.join(fixture.dir, "runtime & helpers");
+  const state = path.join(fixture.dir, "state & literal $");
+  const logs = path.join(fixture.dir, "logs & literal $");
+  const config = path.join(fixture.dir, "config & literal $.toml");
+  const runtime = path.join(helpers, "fake runtime");
+  const codex = path.join(helpers, "fake codex");
+  const capture = path.join(state, "capture.json");
+  const sentinel = path.join(fixture.dir, "shell-injection-must-not-run");
+  const session = `launchdtest-${process.pid}`;
+  const thread = `thread-${process.pid}`;
+  const room = "launchd fixture; still one argument";
+  const bridgeRoom = "bridge";
+  const actor = `Codex/watch; touch ${sentinel}`;
+  const logPrefix = path.join(logs, "watch & literal $");
+  const environment = { ...process.env, CODEX_SESSION_ID: session, CODEX_THREAD_ID: thread };
+
+  await mkdir(helpers, { recursive: true });
+  await writeFile(config, "[rooms]\n");
+  await writeFile(codex, "#!/bin/sh\nexit 0\n");
+  await chmod(codex, 0o755);
+  await writeFile(runtime, `#!${process.execPath}
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import path from "node:path";
+const room = process.argv[4];
+const session = process.env.CODEX_SESSION_ID;
+const root = process.env.AGORA_STATE;
+const armed = path.join(root, "sessions", \`codex-\${session}\`, "armed", \`\${room}.json\`);
+mkdirSync(path.dirname(armed), { recursive: true });
+writeFileSync(armed, JSON.stringify({ room, pid: process.pid }, null, 2) + "\\n");
+writeFileSync(path.join(root, "capture.json"), JSON.stringify({
+  actor: process.env.AGORA_ACTOR,
+  config: process.env.AGORA_CONFIG,
+  state: process.env.AGORA_STATE,
+  args: process.argv.slice(2),
+  pid: process.pid,
+  ppid: process.ppid,
+}) + "\\n");
+const stop = () => { rmSync(armed, { force: true }); process.exit(0); };
+process.on("SIGTERM", stop);
+process.on("SIGINT", stop);
+setInterval(() => {}, 1_000);
+`);
+  await chmod(runtime, 0o755);
+
+  const lifecycleArgs = ["--room", room, "--state", state];
+  const armArgs = [
+    ...lifecycleArgs,
+    "--actor", actor,
+    "--config", config,
+    "--runtime", runtime,
+    "--codex-bin", codex,
+    "--log-prefix", logPrefix,
+  ];
+  /** @param {string[]} args */
+  const run = async (args) => {
+    const result = await runFile(launcher, args, { env: environment, timeout: 20_000 });
+    return { ...result, json: JSON.parse(result.stdout.trim()) };
+  };
+
+  t.after(async () => {
+    for (const cleanupRoom of [room, bridgeRoom]) {
+      await runFile(launcher, ["--room", cleanupRoom, "--state", state, "--stop"], { env: environment, timeout: 10_000 }).catch(() => {});
+    }
+    await fixture.cleanup();
+  });
+
+  const armed = await run(armArgs);
+  assert.equal(armed.json.watcherPid, armed.json.supervisorPid);
+  assert.equal(armed.json.actor, actor);
+  assert.equal(armed.json.stdout, `${logPrefix}.stdout.log`);
+  assert.equal(armed.json.stderr, `${logPrefix}.stderr.log`);
+  await access(`${logPrefix}.stdout.log`);
+  await access(`${logPrefix}.stderr.log`);
+
+  const firstPid = armed.json.watcherPid;
+  const observed = JSON.parse(await readFile(capture, "utf8"));
+  assert.equal(observed.pid, firstPid);
+  assert.equal(observed.ppid, 1, "launchd, not the completed launcher command, owns the worker");
+  assert.equal(observed.actor, actor);
+  assert.equal(observed.config, config);
+  assert.equal(observed.state, state);
+  assert.deepEqual(observed.args, [
+    path.join(repoRoot, "bin", "agora.mjs"),
+    "watch", room, "--stream", "--follow", "--json", "--wake", "addressed",
+    "--codex-queue", "--codex-thread", thread, "--codex-bin", codex,
+  ]);
+  await assert.rejects(access(sentinel), { code: "ENOENT" });
+
+  const status = await run([...lifecycleArgs, "--status"]);
+  assert.deepEqual(
+    { watcherPid: status.json.watcherPid, supervisorPid: status.json.supervisorPid, alive: status.json.alive },
+    { watcherPid: firstPid, supervisorPid: firstPid, alive: true },
+  );
+
+  await assert.rejects(run(armArgs), (/** @type {any} */ error) => {
+    assert.equal(error.code, 1);
+    assert.match(error.stderr, /live watch already holds/);
+    return true;
+  });
+  const afterDuplicate = await run([...lifecycleArgs, "--status"]);
+  assert.equal(afterDuplicate.json.watcherPid, firstPid);
+
+  const forced = await run([...armArgs, "--force"]);
+  assert.notEqual(forced.json.watcherPid, firstPid);
+  assert.equal(forced.json.watcherPid, forced.json.supervisorPid);
+  assert.throws(() => process.kill(firstPid, 0), { code: "ESRCH" });
+
+  const stopped = await run([...lifecycleArgs, "--stop"]);
+  assert.equal(stopped.json.stopped, true);
+  assert.equal(stopped.json.watcherPid, forced.json.watcherPid);
+  assert.equal(stopped.json.supervisorPid, forced.json.watcherPid);
+  assert.throws(() => process.kill(forced.json.watcherPid, 0), { code: "ESRCH" });
+  const finalStatus = await run([...lifecycleArgs, "--status"]);
+  assert.deepEqual(
+    { watcherPid: finalStatus.json.watcherPid, supervisorPid: finalStatus.json.supervisorPid, alive: finalStatus.json.alive },
+    { watcherPid: null, supervisorPid: null, alive: false },
+  );
+  const launchdFiles = await readdir(path.join(state, "sessions", `codex-${session}`, "launchd"));
+  assert.deepEqual(launchdFiles, []);
+
+  const roomFile = path.join(fixture.dir, "room & literal $.ndjson");
+  const queueCapture = path.join(fixture.dir, "codex queue.json");
+  await writeFile(config, JSON.stringify({
+    actor: { name: "Fixture sender", kind: "agent" },
+    rooms: {
+      [bridgeRoom]: { transport: "local", path: roomFile, interval: 0.1, pollBudget: 1_000 },
+    },
+  }));
+  await writeFile(codex, `#!${process.execPath}
+import { appendFileSync } from "node:fs";
+appendFileSync(${JSON.stringify(queueCapture)}, JSON.stringify(process.argv.slice(2)) + "\\n");
+`);
+  await chmod(codex, 0o755);
+
+  const bridgeArgs = [
+    "--room", bridgeRoom,
+    "--actor", "Codex/watch",
+    "--config", config,
+    "--state", state,
+    "--runtime", process.execPath,
+    "--codex-bin", codex,
+    "--log-prefix", path.join(logs, "bridge & literal $"),
+  ];
+  const bridge = await run(bridgeArgs);
+  assert.equal(bridge.json.watcherPid, bridge.json.supervisorPid);
+
+  await runFile(process.execPath, [
+    path.join(repoRoot, "bin", "agora.mjs"),
+    "post", bridgeRoom, "launchd addressed wake probe", "--to", "Codex/watch",
+  ], {
+    env: {
+      ...process.env,
+      AGORA_CONFIG: config,
+      AGORA_STATE: state,
+      AGORA_ACTOR: "Fixture/sender",
+      CODEX_SESSION_ID: `sender-${process.pid}`,
+      CODEX_THREAD_ID: `sender-thread-${process.pid}`,
+    },
+    timeout: 10_000,
+  });
+
+  /** @type {any[] | undefined} */
+  let queued;
+  for (let i = 0; i < 50; i++) {
+    try {
+      const last = (await readFile(queueCapture, "utf8")).trim().split(/\r?\n/).at(-1);
+      if (!last) throw new Error("no queued call yet");
+      queued = JSON.parse(last);
+      break;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+  assert.ok(queued, "the addressed room message reached codex queue");
+  assert.deepEqual(queued.slice(0, 3), ["queue", "--thread", thread]);
+  assert.equal(queued[3], "--message");
+  assert.match(queued[4], /^\[Agora delivery; room bridge; cursor 1; from Fixture\/sender\]/);
+  assert.match(queued[4], /launchd addressed wake probe/);
+
+  const bridgeStatus = await run(["--room", bridgeRoom, "--state", state, "--status"]);
+  assert.deepEqual(
+    { watcherPid: bridgeStatus.json.watcherPid, supervisorPid: bridgeStatus.json.supervisorPid, alive: bridgeStatus.json.alive },
+    { watcherPid: bridge.json.watcherPid, supervisorPid: bridge.json.watcherPid, alive: true },
+  );
+  const doctor = await runFile(process.execPath, [path.join(repoRoot, "bin", "agora.mjs"), "doctor", "--offline", "--json"], {
+    env: { ...environment, AGORA_CONFIG: config, AGORA_STATE: state, AGORA_CODEX_BIN: codex },
+    timeout: 10_000,
+  });
+  const doctorRows = doctor.stdout.trim().split(/\r?\n/).map((line) => JSON.parse(line));
+  const currentSession = doctorRows.find((row) => row.type === "session" && row.slug === `codex-${session}`);
+  assert.deepEqual(currentSession.armed, [{ key: bridgeRoom, room: bridgeRoom, mode: "stream", pid: bridge.json.watcherPid }]);
+  assert.equal(doctorRows.find((row) => row.type === "poll-rate")?.watches, 1);
+
+  const bridgeStopped = await run(["--room", bridgeRoom, "--state", state, "--stop"]);
+  assert.equal(bridgeStopped.json.stopped, true);
+  assert.equal(bridgeStopped.json.watcherPid, bridge.json.watcherPid);
+});
