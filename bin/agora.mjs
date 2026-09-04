@@ -48,7 +48,7 @@ import {
 } from "../src/session.mjs";
 import { FOLLOW_CAP, FOLLOW_IDLE_MINUTES, dropFollow, followThreads, readFollow, rootsOf, threadsOf } from "../src/follow.mjs";
 import { withThreads } from "../src/threads.mjs";
-import { formatTrailers, matchesAddress, parseTrailers } from "../src/trailers.mjs";
+import { formatTrailers, matchesAddress, parseTrailers, TRAILER_VALUE_MAX, trailerValueOk } from "../src/trailers.mjs";
 import { queueCodex } from "../src/codex.mjs";
 import { clearWatchMode, touchWatchMode, watchModeSentinel } from "../src/harness.mjs";
 
@@ -78,14 +78,14 @@ const SCHEMA = {
         "--file <path>": "text from a file",
         "--stdin": "text from stdin",
         "--no-sign": "omit the signature line",
-        "--trailer <key: value>": "one trailer line, repeatable (the primitive under the rest)",
+        "--trailer <key: value>": `one trailer line, repeatable (the primitive; value at most ${TRAILER_VALUE_MAX} characters, shared with the named flags)`,
         "--to <addr>": "address a bearer, a seat or *, repeatable",
         "--re <id>": "the message this answers",
         "--claim <subject>": "announce you are working on it, repeatable",
         "--release <subject>": "hand it back, repeatable",
         "--verdict <line>": "a settled result; needs at least one --exhibit",
-        "--exhibit <locator>": "what settles it, repeatable",
-        "--because <text>": "the reasoning behind it",
+        "--exhibit <locator>": `what settles it, repeatable (same ${TRAILER_VALUE_MAX}-character cap as --trailer)`,
+        "--because <text>": `the reasoning behind it (same ${TRAILER_VALUE_MAX}-character cap as --trailer)`,
       },
       does: "post one message signed as this session's bearer, with any trailers in a block above the signature; prints id and cursor",
     },
@@ -265,17 +265,25 @@ async function pollRates(cfg, stateRoot) {
 function trailerEntries(values) {
   /** @type {import('../src/trailers.mjs').Trailer[]} */
   const out = [];
+  /** @param {string} flag */
+  const reject = (flag) => {
+    throw new AgoraError(`${flag} takes a non-empty single-line value of at most ${TRAILER_VALUE_MAX} characters`, EXIT.usage);
+  };
   for (const raw of /** @type {string[]} */ (values.trailer ?? [])) {
     const at = raw.indexOf(":");
     const key = at < 0 ? "" : raw.slice(0, at).trim().toLowerCase();
     const value = at < 0 ? "" : raw.slice(at + 1).trim();
-    if (!/^[a-z][a-z0-9-]{0,23}$/.test(key) || !value || value.length > 200)
-      throw new AgoraError(`--trailer takes "<key>: <value>" (a lower-case key of up to 24 characters, a value of up to 200)`, EXIT.usage);
+    if (!/^[a-z][a-z0-9-]{0,23}$/.test(key) || !trailerValueOk(value))
+      throw new AgoraError(`--trailer takes "<key>: <value>" (a lower-case key of up to 24 characters, a value of up to ${TRAILER_VALUE_MAX})`, EXIT.usage);
     out.push({ key, value });
   }
   for (const key of ["to", "re", "claim", "release", "verdict", "exhibit", "because"]) {
     const v = values[key];
-    for (const value of Array.isArray(v) ? v : v === undefined ? [] : [String(v)]) out.push({ key, value: String(value).trim() });
+    for (const value of Array.isArray(v) ? v : v === undefined ? [] : [String(v)]) {
+      const trimmed = String(value).trim();
+      if (!trailerValueOk(trimmed)) reject(`--${key}`);
+      out.push({ key, value: trimmed });
+    }
   }
   return out;
 }
