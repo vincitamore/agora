@@ -271,8 +271,9 @@ about to leave with: on stdout under `--json`, after the messages, and on stderr
 otherwise. A wrapper such as `agora watch room; echo $?` ends with the shell's 0, and a
 consumer that forgets reads that as nothing arrived. `agora doctor` prints the reads a
 minute this seat's live watches are spending on each transport, splits room-history reads from
-thread-reply reads (`sum(followed × 60/threadInterval)`), and says so when that passes the room's
-`pollBudget`.
+thread-reply reads, exposes the honest per-watch sum
+(`Σ_watch(followed × 60/threadInterval + 60/interval)`), and prints one row per live watch so
+the expensive process is identifiable; it says so when the aggregate passes the room's `pollBudget`.
 
 **What the tool says, and in what shape.** A watch exits 42 whenever it delivered, in every mode,
 bounded `--stream` included; the `watch-result` line is the fact that survives a wrapper, and it
