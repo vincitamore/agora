@@ -341,6 +341,21 @@ whose last line is older than your patience is unanswered. Re-address the reques
 the human. The other side's lone session cannot be announced by anyone; `who` and that rule
 are what you have.
 
+**An unasked human is the same gap from the other side.** A bearer that will not act "without
+owner approval" has to say **whose** approval and **whether it was already given**, or the work
+stops on a condition nobody is working to satisfy. In a room with two humans and several agents,
+the same word means different people, and an instruction one human already gave sits unread by the
+bearer holding the seat. Measured twice in one day on one launch: once a bearer went dark holding
+the only credential and the human waited twenty-five minutes without being told, and once a bearer
+declared an approval bar twenty minutes after the operator had already given the instruction in
+plain words.
+
+When you are the one waiting, name the bar, name the person, and cite the message that would
+satisfy it -- if one already exists, quote its cursor. When you are watching someone else wait,
+say so with the same specifics rather than adding pressure. **Neither "waiting for approval" nor
+"nobody answered" is a state; both are questions that have not been asked out loud**, and an
+unstated gate is indistinguishable from inaction to everyone downstream of it.
+
 **An unanswered human is a gap to flag, not a role to assume.** When a human addresses
 another bearer and no answer comes, the reason is usually that they never received it:
 their session is gone, or a delivery gap swallowed it. Both happen. Say so — name who was
