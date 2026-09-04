@@ -11,6 +11,7 @@ codex_home=${CODEX_HOME:-${HOME}/.codex}
 runtime_path=
 codex_path=${AGORA_CODEX_BIN:-}
 log_prefix=
+thread_interval=120
 status=false
 stop=false
 force=false
@@ -33,6 +34,7 @@ while [ "$#" -gt 0 ]; do
     --runtime|-RuntimePath|-BunPath) runtime_path=$2; shift 2 ;;
     --codex-bin|-CodexPath) codex_path=$2; shift 2 ;;
     --log-prefix|-LogPrefix) log_prefix=$2; shift 2 ;;
+    --thread-interval|-ThreadInterval) thread_interval=$2; shift 2 ;;
     --status|-Status) status=true; shift ;;
     --stop|-Stop) stop=true; shift ;;
     --force|-Force) force=true; shift ;;
@@ -40,6 +42,11 @@ while [ "$#" -gt 0 ]; do
     *) printf '%s\n' "unknown option: $1" >&2; exit 2 ;;
   esac
 done
+
+case "$thread_interval" in
+  ''|*[!0-9]*) printf '%s\n' '--thread-interval must be a positive integer' >&2; exit 2 ;;
+esac
+[ "$thread_interval" -gt 0 ] || { printf '%s\n' '--thread-interval must be a positive integer' >&2; exit 2; }
 
 [ -n "$room" ] || { printf '%s\n' '--room is required' >&2; exit 2; }
 case "$session_id" in
@@ -211,7 +218,7 @@ if [ "$worker" = true ]; then
   export AGORA_ACTOR=$actor AGORA_CONFIG=$config_path AGORA_STATE=$state_root AGORA_SESSION_PID=$$ CODEX_HOME=$codex_home CODEX_SESSION_ID=$session_id
   unset AGORA_SESSION
   exec "$runtime_path" "$agora_path" watch "$room" --stream --follow --json --wake addressed \
-    --coalesce 20 --codex-queue --codex-thread "$thread_id" --codex-bin "$codex_path" >>"$log_prefix.stdout.log" 2>>"$log_prefix.stderr.log"
+    --thread-interval "$thread_interval" --coalesce 20 --codex-queue --codex-thread "$thread_id" --codex-bin "$codex_path" >>"$log_prefix.stdout.log" 2>>"$log_prefix.stderr.log"
 fi
 
 create_launchd_plist() {
@@ -228,7 +235,7 @@ create_launchd_plist() {
   for plist_value in \
     "$script_path" --worker --room "$room" --actor "$actor" --session-id "$session_id" \
     --thread-id "$thread_id" --config "$config_path" --state "$state_root" --runtime "$runtime_path" \
-    --codex-home "$codex_home" --codex-bin "$codex_path" --log-prefix "$log_prefix"
+    --codex-home "$codex_home" --codex-bin "$codex_path" --log-prefix "$log_prefix" --thread-interval "$thread_interval"
   do
     plutil -insert "ProgramArguments.$plist_index" -string "$plist_value" "$plist_load_path"
     plist_index=$((plist_index + 1))
@@ -259,12 +266,12 @@ if [ "$launchd" = true ]; then
 elif command -v setsid >/dev/null 2>&1; then
   nohup setsid "$script_path" --worker --room "$room" --actor "$actor" --session-id "$session_id" --thread-id "$thread_id" \
     --config "$config_path" --state "$state_root" --runtime "$runtime_path" --codex-bin "$codex_path" \
-    --codex-home "$codex_home" --log-prefix "$log_prefix" >/dev/null 2>&1 &
+    --codex-home "$codex_home" --log-prefix "$log_prefix" --thread-interval "$thread_interval" >/dev/null 2>&1 &
   supervisor_pid=$!
 else
   nohup "$script_path" --worker --room "$room" --actor "$actor" --session-id "$session_id" --thread-id "$thread_id" \
     --config "$config_path" --state "$state_root" --runtime "$runtime_path" --codex-bin "$codex_path" \
-    --codex-home "$codex_home" --log-prefix "$log_prefix" >/dev/null 2>&1 &
+    --codex-home "$codex_home" --log-prefix "$log_prefix" --thread-interval "$thread_interval" >/dev/null 2>&1 &
   supervisor_pid=$!
 fi
 

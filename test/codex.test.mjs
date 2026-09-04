@@ -219,6 +219,20 @@ test("both Codex launchers coalesce a dark-seat backlog before queueing it", asy
     readFile(path.join(root, "scripts", "start-codex-watch.ps1"), "utf8"),
     readFile(path.join(root, "scripts", "start-codex-watch.sh"), "utf8"),
   ]);
-  assert.match(powershell, /watch \$Room[^\r\n]+--wake addressed --coalesce 20 --codex-queue/);
-  assert.match(posix, /watch "\$room"[^\n]+--wake addressed \\\n\s+--coalesce 20 --codex-queue/);
+  assert.match(powershell, /watch \$Room[^\r\n]+--wake addressed [^\r\n]+--coalesce 20 --codex-queue/);
+  assert.match(posix, /watch "\$room"[^\n]+--wake addressed \\\n\s+[^\n]*--coalesce 20 --codex-queue/);
+});
+
+test("both Codex launchers slow followed-thread polling without weakening room delivery", async () => {
+  const root = path.resolve(import.meta.dirname, "..");
+  const [powershell, posix] = await Promise.all([
+    readFile(path.join(root, "scripts", "start-codex-watch.ps1"), "utf8"),
+    readFile(path.join(root, "scripts", "start-codex-watch.sh"), "utf8"),
+  ]);
+  assert.match(powershell, /\[double\]\$ThreadInterval = 120/);
+  assert.match(powershell, /--wake addressed --thread-interval \$ThreadInterval --coalesce 20/);
+  assert.match(powershell, /'-ThreadInterval', \[string\]\$ThreadInterval/);
+  assert.match(posix, /^thread_interval=120$/m);
+  assert.match(posix, /--wake addressed \\\n\s+--thread-interval "\$thread_interval" --coalesce 20/);
+  assert.match(posix, /--thread-interval "\$thread_interval"/);
 });
