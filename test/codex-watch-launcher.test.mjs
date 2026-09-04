@@ -86,6 +86,7 @@ setInterval(() => {}, 1_000);
     "--runtime", runtime,
     "--codex-bin", codex,
     "--log-prefix", logPrefix,
+    "--thread-interval", "137",
   ];
   /** @param {string[]} args */
   const run = async (args) => {
@@ -133,7 +134,7 @@ setInterval(() => {}, 1_000);
   assert.deepEqual(observed.args, [
     path.join(repoRoot, "bin", "agora.mjs"),
     "watch", room, "--stream", "--follow", "--json", "--wake", "addressed",
-    "--coalesce", "20", "--codex-queue", "--codex-thread", thread, "--codex-bin", codex,
+    "--thread-interval", "137", "--coalesce", "20", "--codex-queue", "--codex-thread", thread, "--codex-bin", codex,
   ]);
   await assert.rejects(access(sentinel), { code: "ENOENT" });
 

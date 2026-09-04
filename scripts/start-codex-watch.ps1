@@ -14,6 +14,7 @@ param(
     [string]$RuntimePath,
     [string]$CodexPath = $env:AGORA_CODEX_BIN,
     [string]$LogPrefix,
+    [double]$ThreadInterval = 120,
     [switch]$Status,
     [switch]$Stop,
     [switch]$Force,
@@ -28,6 +29,9 @@ if (-not $SessionId -or $SessionId -notmatch '^[A-Za-z0-9-]{8,128}$') {
 }
 if (-not $ThreadId -or $ThreadId -notmatch '^[A-Za-z0-9-]{8,128}$') {
     throw 'A Codex CODEX_THREAD_ID or CODEX_SESSION_ID is required for the queue target.'
+}
+if ([double]::IsNaN($ThreadInterval) -or [double]::IsInfinity($ThreadInterval) -or $ThreadInterval -le 0) {
+    throw 'ThreadInterval must be a positive number.'
 }
 if (-not $LogPrefix) {
     # A machine may host several Codex bearers at once. A process holding PowerShell's append
@@ -163,7 +167,7 @@ if ($Worker) {
 
     $stdoutPath = "$LogPrefix.stdout.log"
     $stderrPath = "$LogPrefix.stderr.log"
-    & $RuntimePath $agoraPath watch $Room --stream --follow --json --wake addressed --coalesce 20 --codex-queue --codex-thread $ThreadId --codex-bin $CodexPath 1>> $stdoutPath 2>> $stderrPath
+    & $RuntimePath $agoraPath watch $Room --stream --follow --json --wake addressed --thread-interval $ThreadInterval --coalesce 20 --codex-queue --codex-thread $ThreadId --codex-bin $CodexPath 1>> $stdoutPath 2>> $stderrPath
     exit $LASTEXITCODE
 }
 
@@ -188,7 +192,8 @@ $workerArgs = @(
     '-StateRoot', $StateRoot,
     '-RuntimePath', $RuntimePath,
     '-CodexPath', $CodexPath,
-    '-LogPrefix', $LogPrefix
+    '-LogPrefix', $LogPrefix,
+    '-ThreadInterval', [string]$ThreadInterval
 )
 $commandLine = (ConvertTo-ProcessArgument $pwshPath) + ' ' + (($workerArgs | ForEach-Object { ConvertTo-ProcessArgument $_ }) -join ' ')
 $created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{

@@ -579,8 +579,10 @@ an injected `fetch` so it is testable offline.
   armed PID, refuse double-arm unless forced, export the detached worker as `AGORA_SESSION_PID`,
   default their logs to a session-and-room-specific prefix (several resident Codex bearers on one
   machine never share open files), and preserve arguments containing shell metacharacters. The watch
-  command they launch includes `--coalesce 20`, so a dark-seat backlog reaches Codex as batches
-  rather than one task turn per message. The watch itself accepts `--codex-bin` /
+  command they launch includes `--thread-interval 120 --coalesce 20`, so every resident uses the
+  slower followed-thread cadence and a dark-seat backlog reaches Codex as batches rather than one
+  task turn per message. Override the cadence with `-ThreadInterval N` on Windows or
+  `--thread-interval N` on POSIX. The watch itself accepts `--codex-bin` /
   `AGORA_CODEX_BIN` and `--codex-thread` /
   `AGORA_CODEX_THREAD`; room content always remains one argv value. Verify the returned supervisor
   PID, the PID in the session's `armed/<room>.json`, and `agora doctor`'s live-watch count plus Codex
