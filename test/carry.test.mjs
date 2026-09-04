@@ -7,7 +7,7 @@ import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { writeCursor } from "../src/core.mjs";
-import { carryState, foldRoom, renderCarry } from "../src/carry.mjs";
+import { carryState, carryWindow, foldRoom, renderCarry } from "../src/carry.mjs";
 import { appendPosted, inheritSession, readPosted } from "../src/session.mjs";
 import { writeFollow } from "../src/follow.mjs";
 import { tmp } from "./helpers.mjs";
@@ -35,7 +35,7 @@ async function agora(args, env) {
 /** Every typed line of a `--json` run, parsed. @param {string} out */
 const typed = (out) => out.trim().split(/\r?\n/).filter((l) => l.trim()).map((l) => JSON.parse(l));
 
-/** @param {string} id @param {string} text @param {{ ts?: string, who?: string, kind?: string, thread?: string }} [o] */
+/** @param {string} id @param {string} text @param {{ ts?: string, who?: string, kind?: string, thread?: string, cursor?: string, raw?: Record<string, unknown> }} [o] */
 function msg(id, text, o = {}) {
   return /** @type {import('../src/core.mjs').Message} */ ({
     id,
@@ -45,7 +45,8 @@ function msg(id, text, o = {}) {
     text,
     signedAs: /^--\s(.+)$/m.exec(text)?.[1],
     ts: o.ts ?? `2026-09-04T00:00:${String(Number(id.replace(/\D/g, "")) || 0).padStart(2, "0")}.000Z`,
-    cursor: id.replace(/\D/g, "") || id,
+    cursor: o.cursor ?? (id.replace(/\D/g, "") || id),
+    ...(o.raw ? { raw: o.raw } : {}),
   });
 }
 
@@ -109,6 +110,91 @@ test("carry: an address naming the seat, the model or everyone reaches this bear
   const named = msg("m8", "the seat\n\nto: agora-bot\n\n-- Peer/dev", { who: "peer", kind: "human" });
   const c = foldRoom([seat, named], new Set(), { bearer: "Grace/watch", seat: { id: "U01", name: "agora-bot" } });
   assert.deepEqual(c.owed.map((o) => o.id), ["m7", "m8"]);
+});
+
+test("carry: the window folds the room's live threads, so a release posted as a thread reply closes its claim", async () => {
+  // the measured defect: on Slack a room read never contains replies, so a claim taken at the top
+  // level and handed back in the thread under it read as still open ninety minutes later
+  const parent = msg("p1", "taking it\n\nclaim: human:1788534332\n\n-- Grace/watch", { cursor: "1", raw: { reply_count: 1, latest_reply: "3" } });
+  const reply = msg("r3", "handing it back\n\nrelease: human:1788534332\n\n-- Grace/watch", { thread: "p1", cursor: "3" });
+  /** @type {import('../src/core.mjs').ReadOptions[]} */
+  const reads = [];
+  const transport = {
+    threads: true,
+    /** @param {import('../src/core.mjs').ReadOptions} [o] */
+    async read(o = {}) {
+      reads.push(o);
+      if (o.thread) return o.thread === "p1" ? [reply] : [];
+      return [parent]; // channel history: parents only, exactly as Slack answers
+    },
+  };
+
+  const w = await carryWindow(transport, { limit: 200 });
+  assert.deepEqual(w.threads, ["p1"]);
+  assert.deepEqual(reads, [{ limit: 200 }, { thread: "p1", since: undefined }]);
+  const c = foldRoom(w.messages, new Set(["p1", "r3"]), { bearer: "Grace/watch" });
+  assert.deepEqual(c.claims, [], "the release is in the window, so the claim is not open");
+  assert.deepEqual(c.releases.map((x) => [x.subject, x.id]), [["human:1788534332", "r3"]]);
+
+  // and the room read alone is the defect, which is what --no-threads buys back
+  const plain = await carryWindow(transport, { limit: 200, threads: false });
+  assert.deepEqual(plain.threads, []);
+  const blind = foldRoom(plain.messages, new Set(["p1", "r3"]), { bearer: "Grace/watch" });
+  assert.deepEqual(blind.claims.map((x) => x.subject), ["human:1788534332"]);
+  assert.deepEqual(blind.releases, []);
+});
+
+test("carry: a claim taken again after a release re-opens the subject, and the earliest after the release holds", () => {
+  const take = msg("c1", "taking it\n\nclaim: docs/x.md\n\n-- Grace/watch");
+  const give = msg("c2", "handing it back\n\nrelease: docs/x.md\n\n-- Grace/watch");
+  const again = msg("c3", "taking it up again\n\nclaim: docs/x.md\n\n-- Grace/watch");
+  const later = msg("c4", "still mine\n\nclaim: docs/x.md\n\n-- Grace/watch");
+  const c = foldRoom([take, give, again, later], new Set(["c1", "c2", "c3", "c4"]), { bearer: "Grace/watch" });
+  assert.deepEqual(c.claims.map((x) => [x.subject, x.id]), [["docs/x.md", "c3"]], "the earliest claim after the release, not the first one ever posted");
+  assert.deepEqual(c.releases.map((x) => x.id), ["c2"], "the retraction is still carried beside it");
+});
+
+test("carry: a verdict answering an earlier own verdict supersedes it, and the withdrawn one is carried", () => {
+  const first = msg("v1", "it passes\n\nverdict: pass\nexhibit: run 4412 line 88\n\n-- Grace/watch");
+  const withdrawn = msg("v2", "that was the wrong branch\n\nre: v1\nverdict: withdrawn\nexhibit: run 4419 line 12\n\n-- Grace/watch");
+  const c = foldRoom([first, withdrawn], new Set(["v1", "v2"]), { bearer: "Grace/watch" });
+  assert.deepEqual(c.verdicts.map((v) => [v.verdict, v.id]), [["withdrawn", "v2"]], "the withdrawn verdict is no longer what this session says");
+  assert.deepEqual(c.superseded.map((v) => [v.id, v.cursor, v.verdict, v.supersededBy]), [["v1", "1", "pass", "v2"]]);
+  const text = renderCarry({ ...c, cursorKey: "down", cursor: null });
+  assert.match(text, /superseded {2}pass {3}v1 cursor 1, withdrawn by v2/);
+  assert.ok(!text.includes("it passes"), "a withdrawal names the verdict, never the words");
+
+  // a `re:` that names something other than one of this session's own verdicts changes nothing
+  const unrelated = msg("v3", "and the other one\n\nre: foreign-9\nverdict: pass\nexhibit: run 4420\n\n-- Grace/watch");
+  const b = foldRoom([first, unrelated], new Set(["v1", "v3"]), { bearer: "Grace/watch" });
+  assert.deepEqual(b.verdicts.map((v) => v.id), ["v1", "v3"]);
+  assert.deepEqual(b.superseded, []);
+});
+
+test("carry: a delivery addressed here is owed until this session answers it by name", () => {
+  const ask = msg("m10", "can you rerun it?\n\nto: Grace\n\n-- Peer/dev", { who: "peer", kind: "human" });
+  const open = foldRoom([OWN_CLAIM, ask], new Set(["m1"]), { bearer: "Grace/watch" });
+  assert.deepEqual(open.owed.map((o) => o.id), ["m10"], "a delivery awaiting a reply, not this session's own to:");
+  assert.deepEqual(open.obligations.map((o) => o.id), ["m1"], "what this session addressed to someone else is the other list");
+
+  // the receipt is posted in a thread, so only the `re:` can be what answers it
+  const receipt = msg("m11", "on it\n\nre: m10\n\n-- Grace/watch", { thread: "t9" });
+  const answered = foldRoom([OWN_CLAIM, ask, receipt], new Set(["m1", "m11"]), { bearer: "Grace/watch" });
+  assert.deepEqual(answered.owed, []);
+
+  const other = msg("m11", "on something else\n\nre: m99\n\n-- Grace/watch", { thread: "t9" });
+  const still = foldRoom([OWN_CLAIM, ask, other], new Set(["m1", "m11"]), { bearer: "Grace/watch" });
+  assert.deepEqual(still.owed.map((o) => o.id), ["m10"], "a re: naming another message answers nothing here");
+});
+
+test("carry: a post in the room or in another thread is no receipt for a delivery in this one", () => {
+  const inThread = msg("m12", "and this one?\n\nto: Grace\n\n-- Peer/dev", { who: "peer", kind: "human", thread: "t1" });
+  const elsewhere = msg("m13", "noted\n\n-- Grace/watch", { thread: "t2" });
+  const top = msg("m14", "back to the room\n\n-- Grace/watch");
+  const c = foldRoom([inThread, elsewhere, top], new Set(["m13", "m14"]), { bearer: "Grace/watch" });
+  assert.deepEqual(c.owed.map((o) => [o.id, o.thread]), [["m12", "t1"]]);
+  const here = foldRoom([inThread, msg("m15", "on it\n\n-- Grace/watch", { thread: "t1" })], new Set(["m15"]), { bearer: "Grace/watch" });
+  assert.deepEqual(here.owed, [], "speaking in the same thread after it is the receipt");
 });
 
 test("carry: nothing rendered carries a message body", () => {
@@ -178,9 +264,11 @@ test("cli: carry derives the keep-list from the session directory and one bounde
     await agora(["session", "--as", "Grace/watch"], env);
     await agora(["post", "down", "--claim", "worker/src/fetch.ts::retryFetch", "--to", "Codex", "taking the retry path"], env);
     await agora(["post", "down", "--verdict", "pass", "--exhibit", "run 4412 line 88", "settled"], env);
-    // a message this session did not post, addressed to it, after its last post
+    // a message this session did not post, addressed to it, after its last post. The window is one
+    // ascending list merged by time, as every transport's own read is, so the stamp is later than
+    // the posts above it rather than a fixed one that could fall before them.
     await writeFile(path.join(dir, "down.ndjson"), await readFile(path.join(dir, "down.ndjson"), "utf8")
-      + JSON.stringify({ id: "foreign-1", author: { id: "peer", name: "peer", kind: "human" }, text: "can you rerun it?\n\nto: Grace\n\n-- Peer/dev", ts: "2026-09-04T09:00:00.000Z" }) + "\n");
+      + JSON.stringify({ id: "foreign-1", author: { id: "peer", name: "peer", kind: "human" }, text: "can you rerun it?\n\nto: Grace\n\n-- Peer/dev", ts: new Date(Date.now() + 60_000).toISOString() }) + "\n");
 
     const r = await agora(["carry", "down", "--json"], env);
     assert.equal(r.code, 0);
@@ -193,6 +281,7 @@ test("cli: carry derives the keep-list from the session directory and one bounde
     assert.deepEqual(c.claims.map((/** @type {any} */ x) => x.subject), ["worker/src/fetch.ts::retryFetch"]);
     assert.deepEqual(c.verdicts.map((/** @type {any} */ x) => [x.verdict, x.exhibits]), [["pass", ["run 4412 line 88"]]]);
     assert.deepEqual(c.obligations.map((/** @type {any} */ x) => x.to), [["Codex"]]);
+    assert.deepEqual(c.superseded, [], "the field is in the envelope whether or not anything was withdrawn");
     assert.deepEqual(c.owed.map((/** @type {any} */ x) => [x.id, x.from]), [["foreign-1", "Peer/dev"]]);
     assert.equal(c.horizon.messages, 3);
     for (const body of ["taking the retry path", "can you rerun it?"]) assert.ok(!r.stdout.includes(body), "no message text crosses into the carry");
@@ -210,7 +299,7 @@ test("cli: carry derives the keep-list from the session directory and one bounde
   }
 });
 
-test("cli: carry --limit and --threads are bounded reads that move no cursor", async () => {
+test("cli: carry --limit and --no-threads are bounded reads that move no cursor", async () => {
   const { dir, cleanup } = await tmp();
   try {
     const cfgPath = path.join(dir, "agora.json");
@@ -221,7 +310,7 @@ test("cli: carry --limit and --threads are bounded reads that move no cursor", a
     const env = { AGORA_CONFIG: cfgPath, AGORA_STATE: path.join(dir, "state"), AGORA_SESSION: "s1" };
     await agora(["session", "--as", "Grace/watch"], env);
     for (const n of [1, 2, 3]) await agora(["post", "down", `line ${n}`], env);
-    const r = await agora(["carry", "down", "--json", "--limit", "2", "--threads"], env);
+    const r = await agora(["carry", "down", "--json", "--limit", "2", "--no-threads"], env);
     assert.equal(r.code, 0);
     const c = JSON.parse(r.stdout.trim());
     assert.equal(c.horizon.messages, 2, "the window is the newest --limit messages");

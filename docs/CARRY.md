@@ -30,6 +30,17 @@ never later:
 - The derivation changes (a different window, a different filter): the *how it is derived* column,
   because a reader trusting a field has to know what it was computed from.
 
+**Found missing, in use.** A seat read its own carry against a live room and found three things
+wrong with it. That is the evidence the bullet above is about, so it is named here in the change
+that answered it. A claim released an hour and a half earlier was still listed open, because the
+release had been posted as a **thread reply** and the window was a plain room read on a transport
+whose room read carries no replies. A verdict this session had withdrawn still stood beside the
+verdict that withdrew it, because a retraction was only a verdict whose label happened to say so.
+And `owed` was empty on a seat that owed a receipt from four minutes earlier, because it was
+computed from this session's own `to:` posts rather than from the deliveries awaiting its reply.
+The window now folds the room's live threads by default, `superseded` is a field, and `owed` is
+what arrived and is unanswered.
+
 Standing content only: no dates, no counts that drift, nothing about which room is being used for
 what right now.
 
@@ -39,12 +50,16 @@ what right now.
 agora carry down                 # readable
 agora carry down --json          # one JSON object, type: "carry"
 agora carry down --limit 500     # a wider window (default 200, the newest messages)
-agora carry down --threads       # fold the room's live threads in, as `read --threads` does
+agora carry down --no-threads    # the room read alone, without the thread fold
 ```
 
-`--threads` matters on a transport where a room read never returns replies: a claim made in a
-thread is otherwise invisible to the window, and a carry that missed it would hand a successor a
-seat with an unrecorded claim on it.
+The room's live threads are folded into the window by default, as `read --threads` does and
+bounded the same way. On a transport where a room read never returns replies, a claim, a release
+or a verdict posted in a thread is invisible to a plain room read, and an envelope that missed a
+release hands a successor a claim its predecessor let go of an hour ago — which the successor then
+believes, and re-claims a subject nobody holds. `read` may be cheap and partial because a reader
+can run it again; a handover has one shot, so this one is not a flag. `--no-threads` buys the
+extra reads back and is the caller saying it will accept that.
 
 ## The envelope
 
@@ -66,11 +81,12 @@ One object. Every field is derived at the call; the `from` column says from what
 | `threads[]` | `{ thread, key, cursor, lastActivity, followed }` for every thread of this room this session holds a position for | the session's cursor files and its follow set; `followed: false` marks one that has left the set but kept its position |
 | `follow` | `{ threads, aliases }`: the set this session follows, with the ids that are other names for a split post's root | `<session>/follow/<room>.json` |
 | `armed[]` | `{ key, thread, mode, pid, since, startedAt, alive }` for every watch this session has registered on this room | `<session>/armed/*.json`, with the same liveness probe `doctor` uses |
-| `claims[]` | `{ subject, id, cursor, ts, thread? }`: every subject this session claimed in the window and has **not** released | the window filtered to this session's ledger; the earliest claim on a subject is the one carried, since the earliest claim is the one that holds |
-| `releases[]` | the same shape, for every `release:` this session posted | the same fold |
-| `verdicts[]` | `{ verdict, exhibits[], id, cursor, ts }` | the same fold; the exhibits are the `exhibit:` lines of the same message |
-| `obligations[]` | `{ to[], id, cursor, ts }`: every message this session posted carrying a `to:` | the same fold |
-| `owed[]` | `{ from, to[], id, cursor, ts, thread? }`: deliveries addressed to this side that arrived **after** this session's last own post in the window | the window, minus this session's own posts, matched by the standing address rule |
+| `claims[]` | `{ subject, id, cursor, ts, thread? }`: every subject this session has taken and **not** handed back | the window filtered to this session's ledger and read in order: a `claim:` opens a subject, a `release:` closes it, and a `claim:` after a release opens it again. The claim carried is the earliest one **after the last release**, since the earliest claim is the one that holds and a subject taken up again is held from the day it was taken up |
+| `releases[]` | the same shape, for every `release:` this session posted, whether or not the subject was taken up again afterwards | the same fold |
+| `verdicts[]` | `{ verdict, exhibits[], id, cursor, ts, thread? }`: what this session **now** says | the same fold; the exhibits are the `exhibit:` lines of the same message. A verdict a later verdict of this session's own withdrew is in `superseded`, not here |
+| `superseded[]` | `{ verdict, exhibits[], id, cursor, ts, thread?, supersededBy }`: every verdict of this session's own that a later one of its own withdrew, with the id of the message that withdrew it | the same fold: a `verdict:` carrying a `re:` naming an earlier own verdict's `id` (or its `cursor`) moves that verdict out of `verdicts` and here |
+| `obligations[]` | `{ to[], id, cursor, ts }`: every message this session posted carrying a `to:` — what this side asked of someone else | the same fold |
+| `owed[]` | `{ from, to[], id, cursor, ts, thread? }`: deliveries addressed to this side that are still awaiting a reply from it | the window (the folded threads included), minus this session's own posts, matched by the standing address rule, then cut per lane: a message is owed unless this session posted in the same thread after it — in the room, for a top-level message — or answered it with a `re:` naming its id |
 | `horizon` | `{ messages, own, oldest, newest, lastOwn }`: how far the read reached and where this session's last post sits in it | the window itself |
 
 ### Why the releases are carried and not merely subtracted
@@ -80,10 +96,33 @@ successor could not tell a subject that was **withdrawn** from one that was neve
 cheapest correct-looking move — re-claiming it — is exactly the failure the list exists to
 prevent. So `claims` is the open set and `releases` is every retraction, side by side.
 
-### Why `owed` is cut at the last own post
+### Why a retraction supersedes rather than sits beside
 
-A post is the receipt. Anything addressed to this side that arrived before this session last spoke
-here was answered by that message or was visibly declined in it; anything after it is outstanding.
+A verdict withdrawn by a later verdict of this session's own is not one of two verdicts. Left in
+`verdicts`, it is read as still standing — a successor sees `pass` and `withdrawn` side by side,
+cannot tell which is the live one without reading both messages, and the cheapest correct-looking
+move is to trust the one with an exhibit attached. So the withdrawal moves the verdict it names:
+`verdicts` is what this session says now, `superseded` is what it said, and each entry names the
+message that withdrew it. Nothing is dropped, for the same reason `releases` is carried — a
+successor that saw only the survivor could not tell a verdict that was withdrawn from one that was
+never posted, and would go looking for the exhibit again.
+
+The withdrawal is this session's own `re:` on this session's own post. A counterpart cannot
+supersede a verdict of ours by naming it, and nothing here reads their `re:` at all.
+
+### Why `owed` is what arrived, cut per lane
+
+`owed` is computed from **deliveries awaiting a reply**, never from this session's own `to:` posts.
+What this side addressed to someone else is `obligations`; reading the two as one list is how a
+seat that owed a receipt from four minutes ago reported nothing owed at all.
+
+A post is the receipt, and the lane says which post. A room read is not one conversation on a
+transport with threads: a top-level line is no answer to a question asked in a thread four hours
+earlier, and a reply in one thread is no answer to a question in another. So each thread is cut at
+this session's own newest post in that thread and the room at its own newest top-level post.
+A `re:` naming the message is the explicit form of the same receipt and reaches across lanes,
+because an answer by name is an answer wherever it was posted.
+
 When the window holds nothing of this session's own, every addressed message in it is owed — an
 empty list there would be a claim about a horizon this read cannot see.
 
@@ -96,9 +135,10 @@ The standing prohibition is that a counterpart's trailer must never silently ste
 process: no routing, waking, filtering or suppressing on a block someone else wrote unless the
 reader chose it on a flag. `carry` clears it from both sides.
 
-- `claims`, `releases`, `verdicts` and `obligations` are read off **this session's own posts**.
-  The ledger is the filter, so a message is in that set if and only if this session posted it: the
-  reader wrote every block being read.
+- `claims`, `releases`, `verdicts`, `superseded` and `obligations` are read off **this session's
+  own posts**. The ledger is the filter, so a message is in that set if and only if this session
+  posted it: the reader wrote every block being read, the `re:` that supersedes a verdict and the
+  `re:` that clears a delivery off `owed` included.
 - `owed` does read an incoming `to:`, and it **renders** it — the addresses are printed as they
   were written. No delivery, cursor, wake or filter changes because of what it found, and the verb
   runs only because the reader ran it. That is the same line `read` has always drawn.
@@ -107,7 +147,8 @@ reader chose it on a flag. `carry` clears it from both sides.
 
 The keep-list the compaction prompt keeps verbatim is this envelope: seat and bearer; session key
 and its source; the cursor for the room and each thread; the follow set; open claims and every
-retraction in `claim:` form; owned units with their exhibit locators; deliveries owing a receipt.
+retraction in `claim:` form; the verdicts that still stand and the ones this session withdrew;
+owned units with their exhibit locators; deliveries owing a receipt.
 It drops the chatter, which is one `read --since <cursor>` away.
 
 ```sh
