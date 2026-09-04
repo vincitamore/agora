@@ -19,6 +19,11 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run check
+      - name: macOS launchd lifecycle
+        if: runner.os == 'macOS'
+        env:
+          AGORA_TEST_LAUNCHD: '1'
+        run: node --test test/codex-watch-launcher.test.mjs
       - name: launcher syntax
         if: runner.os != 'Windows'
         run: sh -n scripts/start-codex-watch.sh
@@ -34,7 +39,7 @@ jobs:
         shell: bash
         run: |
           echo "os: $(uname -a)"
-          for t in flock setsid nohup timeout gtimeout; do printf '%-9s %s\n' "$t" "$(command -v $t || echo absent)"; done
+          for t in flock setsid nohup timeout gtimeout launchctl plutil shasum lsof; do printf '%-9s %s\n' "$t" "$(command -v $t || echo absent)"; done
           echo "exec bit on bin/agora.mjs: $(ls -l bin/agora.mjs | cut -c1-10)"
           echo "index mode: $(git ls-files -s bin/agora.mjs | cut -c1-6)"
           echo "sed --version: $(sed --version 2>&1 | head -1)"

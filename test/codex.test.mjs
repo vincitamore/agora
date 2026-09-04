@@ -35,7 +35,7 @@ test("Codex liveness requires both a rollout and the thread-store writer marker"
   assert.equal(codexLiveness(thread, env, { rollout: () => rollout, exists: () => true, probe: () => "unknown" }).state, "unknown");
 });
 
-test("Codex writer-lock probing distinguishes an active Windows lock and a stale Linux lock", () => {
+test("Codex writer-lock probing distinguishes active, stale, and unprobeable locks on every supported OS", () => {
   const busy = () => { const error = /** @type {NodeJS.ErrnoException} */ (new Error("busy")); error.code = "EBUSY"; throw error; };
   const denied = () => { const error = /** @type {NodeJS.ErrnoException} */ (new Error("denied")); error.code = "EACCES"; throw error; };
   assert.equal(probeCodexWriterLock("x", { platform: "win32", read: /** @type {any} */ (busy) }), "active");
@@ -43,7 +43,13 @@ test("Codex writer-lock probing distinguishes an active Windows lock and a stale
   assert.equal(probeCodexWriterLock("x", { platform: "win32", read: /** @type {any} */ (() => Buffer.alloc(0)) }), "stale");
   assert.equal(probeCodexWriterLock("x", { platform: "linux", run: /** @type {any} */ (() => ({ status: 1 })) }), "active");
   assert.equal(probeCodexWriterLock("x", { platform: "linux", run: /** @type {any} */ (() => ({ status: 0 })) }), "stale");
-  assert.equal(probeCodexWriterLock("x", { platform: "darwin" }), "unknown");
+  assert.equal(probeCodexWriterLock("x", { platform: "darwin", run: /** @type {any} */ ((/** @type {string} */ command, /** @type {string[]} */ args) => {
+    assert.equal(command, "/usr/sbin/lsof");
+    assert.deepEqual(args, ["-F", "p", "--", "x"]);
+    return { status: 0, stdout: "p123\n" };
+  }) }), "active");
+  assert.equal(probeCodexWriterLock("x", { platform: "darwin", run: /** @type {any} */ (() => ({ status: 1, stdout: "" })) }), "stale");
+  assert.equal(probeCodexWriterLock("x", { platform: "darwin", run: /** @type {any} */ (() => ({ status: null, error: { code: "ENOENT" } })) }), "unknown");
 });
 
 test("Codex rollout discovery follows CODEX_HOME recursively", async () => {
