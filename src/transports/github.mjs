@@ -37,15 +37,34 @@ export function githubTransport(room, { token, fetch: f = globalThis.fetch, cach
   const api = String(room.api ?? "https://api.github.com").replace(/\/$/, "");
   const roomName = `${repo}#${issue}`;
 
-  /** @type {Map<string, string>} */
-  const validators = new Map();
+  /** @typedef {{ etag: string, body?: unknown }} Cached */
+  /** @type {Map<string, Cached>} */
+  const cached = new Map();
 
   /** @param {string} key */
-  async function validator(key) {
-    if (validators.has(key)) return validators.get(key);
-    const v = await cache?.get(key);
-    if (v) validators.set(key, v);
-    return v;
+  async function loadCached(key) {
+    const hit = cached.get(key);
+    if (hit) return hit;
+    const raw = await cache?.get(key);
+    if (!raw) return undefined;
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && typeof parsed.etag === "string") {
+        cached.set(key, parsed);
+        return parsed;
+      }
+    } catch {
+      /* legacy: the value was the etag itself */
+    }
+    const legacy = { etag: raw };
+    cached.set(key, legacy);
+    return legacy;
+  }
+
+  /** @param {string} key @param {Cached} entry */
+  async function saveCached(key, entry) {
+    cached.set(key, entry);
+    await cache?.set(key, JSON.stringify(entry));
   }
 
   /** @param {string} pathname @param {{ method?: string, body?: unknown, params?: Record<string, string>, conditional?: boolean }} [opts] */
@@ -53,7 +72,7 @@ export function githubTransport(room, { token, fetch: f = globalThis.fetch, cach
     const url = new URL(`${api}${pathname}`);
     for (const [k, v] of Object.entries(params ?? {})) url.searchParams.set(k, v);
     const key = url.toString();
-    const etag = conditional ? await validator(key) : undefined;
+    const prev = conditional ? await loadCached(key) : undefined;
     const res = await f(url, {
       method,
       headers: {
@@ -61,18 +80,14 @@ export function githubTransport(room, { token, fetch: f = globalThis.fetch, cach
         accept: "application/vnd.github+json",
         "x-github-api-version": "2022-11-28",
         "user-agent": "agora",
-        ...(etag ? { "if-none-match": etag } : {}),
+        ...(prev?.etag ? { "if-none-match": prev.etag } : {}),
         ...(body !== undefined ? { "content-type": "application/json" } : {}),
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
-    if (conditional && res.status === 304) return NOT_MODIFIED;
-    if (conditional) {
-      const tag = res.headers.get("etag");
-      if (tag && validators.get(key) !== tag) {
-        validators.set(key, tag);
-        await cache?.set(key, tag);
-      }
+    if (conditional && res.status === 304) {
+      if (prev && "body" in prev) return prev.body;
+      return NOT_MODIFIED;
     }
     const text = await res.text();
     /** @type {any} */
@@ -85,6 +100,10 @@ export function githubTransport(room, { token, fetch: f = globalThis.fetch, cach
     if (!res.ok) {
       const msg = json?.message ?? text.slice(0, 200);
       throw new AgoraError(`github ${method} ${pathname}: ${res.status} ${msg}`);
+    }
+    if (conditional) {
+      const tag = res.headers.get("etag");
+      if (tag) await saveCached(key, { etag: tag, body: json });
     }
     return json;
   }
@@ -124,7 +143,7 @@ export function githubTransport(room, { token, fetch: f = globalThis.fetch, cach
         const params = { per_page: "100", page: String(page) };
         if (from) params.since = from.ts;
         const batch = await call(`/repos/${repo}/issues/${issue}/comments`, { params, conditional: true });
-        if (batch === NOT_MODIFIED) break; // the record has not changed: an empty batch, not an error
+        if (batch === NOT_MODIFIED) break; // legacy etag-only cache: no body to re-filter
         if (!Array.isArray(batch) || batch.length === 0) break;
         for (const c of batch) {
           const created = String(c.created_at);
@@ -134,8 +153,12 @@ export function githubTransport(room, { token, fetch: f = globalThis.fetch, cach
         }
         if (batch.length < 100) break;
       }
-      out.sort((a, b) => (a.cursor < b.cursor ? -1 : a.cursor > b.cursor ? 1 : 0));
-      return out.slice(0, limit);
+      out.sort((a, b) => {
+        if (a.ts < b.ts) return -1;
+        if (a.ts > b.ts) return 1;
+        return Number(a.id) - Number(b.id);
+      });
+      return from ? out.slice(0, limit) : out.slice(-limit);
     },
     async post(text, { thread } = {}) {
       if (thread) throw new AgoraError(`github rooms have no threads; the issue is the thread`);
