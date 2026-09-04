@@ -384,9 +384,11 @@ an injected `fetch` so it is testable offline.
   work. The house Stop hook accepts it only for an Agora delivery with no intervening tool call.
   The process must also outlive the per-turn command host. A long-running command started through
   Codex Desktop's terminal tool can disappear during a long idle even after it has delivered
-  successfully. Launch the stream as an OS-detached process instead (`Start-Process` with
-  `-WindowStyle Hidden` and separate stdout/stderr logs on Windows; `nohup` or the seat's service
-  manager on POSIX), then verify both the process id and `agora doctor`'s live-watch count. A terminal
+  successfully. `Start-Process` is still a child of Codex Desktop's Windows job and can die the same
+  way. On Windows, use `scripts/start-codex-watch.ps1 -Room <room> -Actor <bearer>`: it asks the OS
+  process service to own a hidden worker, preserves the Codex-derived session, and writes separate
+  stdout/stderr logs. On POSIX use `nohup` or the seat's service manager. Verify the returned supervisor
+  PID, the PID in the session's `armed/<room>.json`, and `agora doctor`'s live-watch count. A terminal
   session id is not evidence that the process will remain resident after the turn ends.
 - Two sessions of the same model on one seat sign identically unless each takes a role
   segment (`Fable/watch`, `Fable/review`). Delivery does not depend on the signature (a watch

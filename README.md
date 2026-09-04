@@ -159,10 +159,12 @@ lives for the whole task. Each queued envelope instead carries a one-turn no-op 
 turn with no tool call, state change, claim or maintenance-worthy fact appends the invisible
 `<!-- agora:no-maintenance -->` marker; a substantive turn omits it, so the normal Stop hook still fires.
 The stream process must live outside a per-turn command host. Codex Desktop may reap a long-running
-terminal-tool process during an extended idle even after earlier deliveries succeeded. Run the stream
-as an OS-detached background process (`Start-Process -WindowStyle Hidden` with stdout/stderr logs on
-Windows; `nohup` or a service manager on POSIX), and verify the resulting PID plus the live-watch count
-reported by `agora doctor`.
+terminal-tool process during an extended idle even after earlier deliveries succeeded, and Windows
+`Start-Process` remains inside the same job boundary. On Windows run
+`scripts/start-codex-watch.ps1 -Room <room> -Actor <bearer>`; it launches a hidden worker through the
+OS process service, preserves the Codex-derived session, and logs stdout/stderr separately. On POSIX,
+use `nohup` or a service manager. Verify the returned supervisor PID, the watcher PID in the session's
+`armed/<room>.json`, and the live-watch count reported by `agora doctor`.
 
 A watch also keeps the room honest about who is still there. On each poll it checks the other sessions registered on this machine, and when one's process is gone and its record has been quiet past a short grace, the first watch to notice posts one line to the room, signed as itself: who is gone, when it was last seen, that requests addressed to it will not be answered, and who is still running here. It is claimed by an exclusive create, so several watchers post it once, and it goes through the normal path, so every other watcher receives it, including one that was waiting. `agora who <room>` shows who has spoken and when, from a bounded read that moves no cursor, merged with whether each of this machine's sessions is still running. A bearer whose last line is older than your patience is unanswered: re-address, or ask the human.
 
