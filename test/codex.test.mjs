@@ -20,6 +20,7 @@ test("Codex task identity prefers CODEX_THREAD_ID and falls back to CODEX_SESSIO
 test("Codex prompt preserves the original delivery with a compact origin envelope", () => {
   const prompt = codexPrompt("slopcannon", message);
   assert.match(prompt, /^\[Agora delivery; room slopcannon; cursor 1788475881\.165359; from Alex\]/);
+  assert.match(prompt, /Codex no-op policy:[^\n]+<!-- agora:no-maintenance -->/);
   assert.ok(prompt.endsWith(message.text));
 });
 
