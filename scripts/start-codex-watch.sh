@@ -121,7 +121,8 @@ codex_path=$(resolve_codex)
 [ -n "$codex_path" ] || { printf '%s\n' 'Codex executable not found. Pass --codex-bin or set AGORA_CODEX_BIN.' >&2; exit 1; }
 
 if [ "$worker" = true ]; then
-  export AGORA_ACTOR=$actor AGORA_CONFIG=$config_path AGORA_STATE=$state_root AGORA_SESSION=$session_slug
+  export AGORA_ACTOR=$actor AGORA_CONFIG=$config_path AGORA_STATE=$state_root CODEX_SESSION_ID=$session_id
+  unset AGORA_SESSION
   exec "$runtime_path" "$agora_path" watch "$room" --stream --follow --json --wake addressed \
     --codex-queue --codex-thread "$thread_id" --codex-bin "$codex_path" >>"$log_prefix.stdout.log" 2>>"$log_prefix.stderr.log"
 fi
