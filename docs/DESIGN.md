@@ -344,18 +344,22 @@ Routing is an opinion; rooms are the primitive, and a default that is wrong send
 shared function to the desk room exactly the once it mattered. What the tool adds instead is a
 label: a free-text `note` on a room, printed by `rooms` and `doctor`.
 
-The local transport carries three preconditions, each a silent failure if violated:
+The local transport carries three preconditions, with only partial detection of violations:
 
 - **One native filesystem per writer.** Measured: six concurrent writers and 1200 messages land
   intact on a native filesystem; the same writers behind a filesystem translation layer lose
   between a half and five-sixths of their lines, silently, with every surviving line parsing and
   every id unique, so no reader, no cursor and no check can detect it. `doctor` warns when a local
   room's resolved path sits behind a translation layer or under a syncing folder.
-- **Append only. Never rotate, truncate, or hand-edit.** The cursor is a line count, so
-  truncating leaves every watcher past the new length permanently deaf with no error. Growth is
-  not a problem at any realistic horizon: a file of tens of megabytes reads its tail in tens of
-  milliseconds. If bounding one ever becomes necessary, the honest move is a new file under a new
-  alias with fresh cursors.
+- **Append only. Never rotate, truncate, or hand-edit.** A read refuses a cursor beyond the
+  available record count, including when the log disappears. Invalid JSON in the unread range
+  refuses the whole batch rather than letting a valid suffix move the cursor past the corruption.
+  Neither failure delivers a batch or advances its cursor. Restore an intact log; if bounding one
+  becomes necessary, use a new file under a new alias with fresh cursors. Line-count cursors still
+  cannot detect replacement or truncation followed by regrowth to the saved count. Concurrent posts
+  locate their own ids in the log to return exact cursors: the tail count after append may already
+  belong to another writer. If an appended id cannot be found, the post reports an unknown outcome
+  and asks the caller to inspect before retrying; it never returns an invented cursor.
 - **Per-session identity**, without which two same-model sessions cannot be told apart on the
   very lane built for them.
 

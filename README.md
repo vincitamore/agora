@@ -99,9 +99,13 @@ translation layer, a network share, or a syncing folder, concurrent writers over
 bytes while every surviving line still parses and every id is still unique, so no reader, no cursor
 and no check can detect the loss. `agora doctor` says so when it can see it in the path.
 
-**The file is append-only**: never rotate it, truncate it, or edit it by hand. The cursor is a line
-count, so a truncation leaves every watcher past the new length permanently deaf, with no error. If
-one ever has to be bounded, start a new file under a new alias and let the cursors start fresh.
+**The file is append-only**: never rotate it, truncate it, or edit it by hand. A post returns the
+cursor of its own message even when other writers append concurrently. A read encountering invalid
+JSON after its cursor, or a cursor beyond the available records (including a missing log), fails
+with exit 1 before delivering a batch or advancing that cursor. Restore the intact log, or start
+a new file under a new alias with fresh cursors. A new reader still sees a missing room as empty.
+Line-count cursors cannot detect replacement or truncation followed by regrowth to the saved count;
+these checks do not make rotation safe. Errors name the damaged record without printing its text.
 
 ## Use
 
