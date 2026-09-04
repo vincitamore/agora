@@ -99,6 +99,7 @@ agora whoami download
 agora read download                          # messages, ascending
 agora read download --since 1756900000.000300 --json
 agora read download --thread 1756900000.000100
+agora read download --threads --since 1756900000.000300   # the room and every reply its live threads gained after the cursor, by time
 
 agora post download "candidate is up at v2a74980"
 agora post download --thread 1756900000.000100 --file results.md

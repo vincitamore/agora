@@ -47,6 +47,7 @@ import {
   writeRecord,
 } from "../src/session.mjs";
 import { FOLLOW_CAP, FOLLOW_IDLE_MINUTES, dropFollow, followThreads, readFollow, rootsOf, threadsOf } from "../src/follow.mjs";
+import { withThreads } from "../src/threads.mjs";
 import { formatTrailers, matchesAddress, parseTrailers } from "../src/trailers.mjs";
 import { queueCodex } from "../src/codex.mjs";
 import { clearWatchMode, touchWatchMode, watchModeSentinel } from "../src/harness.mjs";
@@ -67,7 +68,7 @@ const SCHEMA = {
     whoami: { args: ["<room>"], options: {}, does: "the identity this side posts as, per the transport" },
     read: {
       args: ["<room>"],
-      options: { "--thread <id>": "a thread inside the room", "--since <cursor>": "only what came after", "--limit <n>": "cap (default transport)" },
+      options: { "--thread <id>": "a thread inside the room", "--since <cursor>": "only what came after", "--limit <n>": "cap (default transport)", "--threads": "fold the room's live threads in: replies after --since, interleaved by time (Slack never shows them in a room read)" },
       does: "print messages ascending; never touches the saved cursor",
     },
     post: {
@@ -136,6 +137,7 @@ const OPTIONS = /** @type {const} */ ({
   thread: { type: "string" },
   since: { type: "string" },
   limit: { type: "string" },
+  threads: { type: "boolean", default: false },
   file: { type: "string" },
   trailer: { type: "string", multiple: true },
   to: { type: "string", multiple: true },
@@ -482,7 +484,19 @@ async function main(argv) {
       return EXIT.ok;
     }
     case "read": {
-      const msgs = await transport.read({ thread, since: values.since, limit: num(values.limit, "limit") });
+      if (values.threads && thread) throw new AgoraError(`--threads folds the room's live threads into the read; it cannot be combined with --thread`, EXIT.usage);
+      const limit = num(values.limit, "limit");
+      let msgs = await transport.read({ thread, since: values.since, limit });
+      if (values.threads && transport.threads) {
+        // On Slack a room read never contains replies, and a parent older than the cursor is
+        // not in the window even when its thread moved after it: a claim made in a thread is
+        // invisible to a plain read. Take a bounded horizon with no cursor, read the threads
+        // that moved, and fold them in by time.
+        const horizon = values.since ? await transport.read({ limit }) : msgs;
+        const folded = await withThreads(transport, msgs, horizon, { since: values.since });
+        msgs = folded.messages;
+        if (folded.threads.length) console.error(`agora: read ${folded.threads.length} live thread${folded.threads.length === 1 ? "" : "s"} into the room`);
+      } else if (values.threads) console.error(`agora: ${transport.kind} has no threads; --threads changes nothing here`);
       printMessages(msgs, json);
       return EXIT.ok;
     }
