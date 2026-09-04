@@ -358,7 +358,7 @@ test("cli: every watch ends with one watch-result line, on stderr in human outpu
     assert.equal(r.code, 0);
     const { elapsedMs, ...quiet } = JSON.parse(r.stderr.trim().split(/\r?\n/).at(-1) ?? "");
     assert.equal(typeof elapsedMs, "number", "how long this watch actually waited, beside the budget it was given");
-    assert.deepEqual(quiet, { type: "watch-result", room: "down", alias: "down", session: "w", bearer: "Fable", fired: false, delivered: 0, skipped: 0, filtered: 0, polls: 1, budgetSeconds: 0, cursor: null, threads: {}, evicted: [], following: 0, exit: 0 });
+    assert.deepEqual(quiet, { type: "watch-result", room: "down", alias: "down", session: "w", bearer: "Fable", fired: false, delivered: 0, skipped: 0, filtered: 0, polls: 1, budgetSeconds: 0, cursor: null, threads: {}, evicted: [], following: 0, session_wakes: 0, bytes_delivered: 0, exit: 0 });
     assert.equal(r.stdout, "", "nothing on stdout when nothing arrived");
 
     await agora(["post", "down", "from them"], { ...env, AGORA_SESSION: "them" });
@@ -1093,6 +1093,58 @@ test("cli: the cap does not take the thread under this session's own post while 
     r = await agora(["watch", "down", "--once", "--follow", "--json"], A);
     assert.equal(r.code, 42);
     assert.equal(JSON.parse(messages(r.stdout).at(-1) ?? "{}").text.split("\n")[0], "answering the request");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("cli: --digest renders author, cursor, first characters, never a summary; join prints usual --wake once", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const { cfgPath, root } = await room(dir);
+    const env = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "w", AGORA_ACTOR: "Fable/watch" };
+    const them = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "them", AGORA_ACTOR: "Codex" };
+
+    let r = await agora(["join", "down", "--as", "Fable/watch"], env);
+    assert.equal(r.code, 0);
+    assert.match(r.stderr, /usual --wake for role watch is all \(not applied\)/);
+
+    r = await agora(["join", "down", "--as", "Grok-4.6/forge"], { ...env, AGORA_SESSION: "g" });
+    assert.match(r.stderr, /usual --wake for role forge is mine \(not applied\)/);
+
+    await agora(["post", "down", "alpha-bravo-charlie-delta-echo-foxtrot-golf-hotel-india-juliet-kilo"], them);
+    r = await agora(["watch", "down", "--once", "--json", "--digest", "1"], env);
+    assert.equal(r.code, 42);
+    const digest = typed(r.stdout).find((/** @type {any} */ o) => o.type === "digest");
+    assert.ok(digest);
+    assert.equal(digest.messages[0].author, "Codex");
+    assert.ok(digest.messages[0].text.length <= 80, "a prefix of at most 80 characters, not a restatement of meaning");
+    assert.match(digest.messages[0].text, /^alpha-bravo-charlie/);
+    assert.equal(digest.messages[0].text.includes("\n"), false, "whitespace collapsed; the tool does not rephrase");
+    const result = typed(r.stdout).at(-1);
+    assert.equal(result.session_wakes, 1);
+    assert.equal(typeof result.bytes_delivered, "number");
+    assert.ok(result.bytes_delivered > 0);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("cli: --coalesce with --max-batch is one envelope; addressed-to-me flushes", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const { cfgPath, root } = await room(dir);
+    const env = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "w", AGORA_ACTOR: "Fable/watch" };
+    const them = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "them", AGORA_ACTOR: "Codex" };
+    await agora(["post", "down", "one"], them);
+    await agora(["post", "down", "two"], them);
+    let r = await agora(["watch", "down", "--once", "--json", "--coalesce", "30", "--max-batch", "2"], env);
+    assert.equal(r.code, 42);
+    const batchish = typed(r.stdout).filter((/** @type {any} */ o) => o.type === "message");
+    assert.equal(batchish.length, 2, "max-batch 2 flushes both in one watch; still one wake counted");
+    const result = typed(r.stdout).at(-1);
+    assert.equal(result.session_wakes, 1);
+    assert.equal(result.delivered, 2);
   } finally {
     await cleanup();
   }

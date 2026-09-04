@@ -120,6 +120,9 @@ const SCHEMA = {
         "--codex-thread <id>": "target task/thread (else AGORA_CODEX_THREAD, CODEX_THREAD_ID, then CODEX_SESSION_ID)",
         "--codex-bin <path>": "absolute Codex executable (else AGORA_CODEX_BIN, PATH, then `codex doctor`)",
         "--batch": "under --json, one object per poll carrying that poll's messages, instead of one object per message",
+        "--coalesce <s>": "hold deliveries for this many seconds, then one envelope naming every cursor; a message whose to: names this bearer flushes immediately",
+        "--max-batch <n>": "flush a coalesced window once this many messages are held",
+        "--digest <s>": "render each message as author, cursor, first 80 characters, one envelope per period; the tool never summarises what a message means. A room config key digest (seconds) enables it when the flag is omitted; never a per-transport default",
       },
       does: "deliver new messages since this session's saved cursor and advance it after delivery, skipping what this session posted; exit 42 when something arrived, 0 when nothing did, in every mode; always ends with one watch-result line. On each poll, a session on this seat that has gone dark and that has state in this room is announced to the room once, by whichever watch notices first, one post for the whole sweep",
     },
@@ -178,6 +181,9 @@ const OPTIONS = /** @type {const} */ ({
   "codex-thread": { type: "string" },
   "codex-bin": { type: "string" },
   batch: { type: "boolean", default: false },
+  coalesce: { type: "string" },
+  "max-batch": { type: "string" },
+  digest: { type: "string" },
   interval: { type: "string" },
   for: { type: "string" },
   reset: { type: "boolean", default: false },
@@ -249,6 +255,46 @@ function printMessages(msgs, json, alias) {
     const { raw: _raw, ...rest } = decorate(m);
     console.log(json ? JSON.stringify({ type: "message", alias, ...rest }) : human(rest) + "\n");
   }
+}
+
+/** First N characters of a message, whitespace collapsed. Rendering only; never a summary of meaning. */
+const DIGEST_CHARS = 80;
+
+/** @param {string} text */
+function digestPreview(text) {
+  const one = String(text).replace(/\s+/g, " ").trim();
+  return one.length <= DIGEST_CHARS ? one : one.slice(0, DIGEST_CHARS);
+}
+
+/**
+ * One rendered line per message (author, cursor, first N characters). The tool never says what
+ * the message means.
+ * @param {import('../src/core.mjs').Message[]} msgs @param {boolean} json @param {string} [alias]
+ */
+function printDigest(msgs, json, alias) {
+  if (json) {
+    console.log(JSON.stringify({
+      type: "digest",
+      alias,
+      messages: msgs.map((m) => ({ author: m.author.name, cursor: m.cursor, text: digestPreview(m.text) })),
+    }));
+    return;
+  }
+  for (const m of msgs) console.log(`${m.author.name} ${m.cursor} ${digestPreview(m.text)}`);
+}
+
+/**
+ * The usual --wake for a role segment: a suggestion join and doctor print once and never apply.
+ * `watch` is the thin seat-level reader (`all`); every other named role is a working bearer (`mine`).
+ * @param {string} name
+ * @returns {{ role: string, wake: "all" | "mine" } | undefined}
+ */
+function usualWake(name) {
+  const i = String(name).lastIndexOf("/");
+  if (i < 0) return undefined;
+  const role = name.slice(i + 1);
+  if (!role) return undefined;
+  return { role, wake: role === "watch" ? "all" : "mine" };
 }
 
 /** @param {string | undefined} s @param {string} what @param {number} [fallback] */
@@ -670,6 +716,8 @@ async function main(argv) {
       else
         console.error(`agora: the room read came back empty, so ${key} is unchanged; nothing follows`);
       for (const line of envPrefix(session, bearer)) console.error(`agora: ${line}`);
+      const usual = usualWake(bearer.name);
+      if (usual) console.error(`agora: usual --wake for role ${usual.role} is ${usual.wake} (not applied)`);
       printMessages(msgs.slice(-limit), json, roomAlias);
       return EXIT.ok;
     }
@@ -805,6 +853,11 @@ async function main(argv) {
       const interval = roomInterval(room, positive(values.interval, "interval"));
       const threadInterval = roomThreadInterval(room, positive(values["thread-interval"], "thread-interval"));
       const forSeconds = num(values.for, "for", 0) ?? 0;
+      const coalesceSeconds = positive(values.coalesce, "coalesce");
+      const maxBatch = positive(values["max-batch"], "max-batch");
+      const digestSeconds = positive(values.digest, "digest") ?? (Number(room.digest) > 0 ? Number(room.digest) : undefined);
+      // digest is rendering; when the flag or room key is set without --coalesce, the period is also the hold window
+      const holdSeconds = coalesceSeconds ?? digestSeconds;
       // the loop gives up before a poll that would land past the deadline, so a budget under one
       // interval is one poll in milliseconds -- exit 0 there means "nothing in 140 ms", not "in 10 s"
       if (forSeconds > 0 && forSeconds < interval)
@@ -873,7 +926,7 @@ async function main(argv) {
       if (!["all", "addressed", "mine"].includes(wakeMode)) throw new AgoraError(`--wake takes all, addressed, or mine`, EXIT.usage);
       /** @type {{ id?: string, name?: string } | undefined} */
       let seat;
-      if (wakeMode !== "all") {
+      if (wakeMode !== "all" || holdSeconds || maxBatch) {
         try {
           seat = await transport.whoami();
         } catch {
@@ -886,6 +939,9 @@ async function main(argv) {
         const forMe = to.some((a) => matchesAddress(a, bearer.name, seat));
         return wakeMode === "mine" ? forMe : to.length === 0 || forMe;
       };
+      /** A message whose to: names this bearer flushes a coalesced window immediately. */
+      const urgent = (/** @type {import('../src/core.mjs').Message} */ m) =>
+        parseTrailers(m.text).to.some((a) => matchesAddress(a, bearer.name, seat));
 
       /**
        * A session on this seat that went dark is announced to this room once; whichever watch
@@ -924,6 +980,13 @@ async function main(argv) {
         }
       };
 
+      let sessionWakes = 0;
+      let bytesDelivered = 0;
+      /** @param {string} s */
+      const countedLog = (s) => {
+        bytesDelivered += Buffer.byteLength(s) + 1;
+        console.log(s);
+      };
       let result;
       try {
         result = await watch(transport, {
@@ -934,15 +997,30 @@ async function main(argv) {
           mode,
           own: values.all ? undefined : () => readPosted(sdir),
           wake: wakeRule,
+          urgent: holdSeconds || maxBatch ? urgent : undefined,
+          coalesceSeconds: holdSeconds,
+          maxBatch,
           interval,
           forSeconds,
           threads,
           sweep,
           onBatch: async (msgs, batch) => {
+            sessionWakes += 1;
             // one object per poll instead of one per message: a consumer that wakes per line
             // otherwise wakes once per message and cannot tell which arrived together
-            if (json && values.batch)
-              console.log(JSON.stringify({
+            if (digestSeconds) {
+              if (json) countedLog(JSON.stringify({
+                type: "digest",
+                alias: roomAlias,
+                room: transport.room,
+                messages: msgs.map((m) => ({ author: m.author.name, cursor: m.cursor, text: digestPreview(m.text) })),
+                delivered: batch.delivered,
+                skipped: batch.skipped,
+                filtered: batch.filtered,
+              }));
+              else for (const m of msgs) countedLog(`${m.author.name} ${m.cursor} ${digestPreview(m.text)}`);
+            } else if (json && values.batch)
+              countedLog(JSON.stringify({
                 type: "batch",
                 alias: roomAlias,
                 room: transport.room,
@@ -954,7 +1032,14 @@ async function main(argv) {
                 skipped: batch.skipped,
                 filtered: batch.filtered,
               }));
-            else printMessages(msgs, json, roomAlias);
+            else if (json) {
+              for (const m of msgs) {
+                const { raw: _raw, ...rest } = decorate(m);
+                countedLog(JSON.stringify({ type: "message", alias: roomAlias, ...rest }));
+              }
+            } else {
+              for (const m of msgs) countedLog(human(decorate(m)) + "\n");
+            }
             if (codexQueue) await queueCodex(roomAlias, msgs, {
               ...codexQueue,
               onQueued: ({ thread: codexTarget, cursor }) => console.error(`agora: queued Codex thread ${codexTarget} delivery ${cursor}`),
@@ -988,6 +1073,8 @@ async function main(argv) {
         threads: result.threads,
         evicted,
         following: result.following || following,
+        session_wakes: sessionWakes,
+        bytes_delivered: bytesDelivered,
         exit,
       });
       if (json) console.log(line);

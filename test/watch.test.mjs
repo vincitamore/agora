@@ -549,3 +549,108 @@ test("a batch hands the caller the counts of THAT poll, beside the running total
     await cleanup();
   }
 });
+
+test("watch coalesce holds until the window, then one onBatch; cursor stays on disk until flush", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const t = localTransport({ transport: "local", path: path.join(dir, "r.ndjson") }, { actor });
+    const state = path.join(dir, "s");
+    let clock = 0;
+    /** @type {string[][]} */
+    const batches = [];
+    const p = watch(t, {
+      stateDir: state, key: "r", mode: "stream", interval: 5, forSeconds: 20,
+      coalesceSeconds: 10, maxBatch: 0,
+      onBatch: (m) => { batches.push(m.map((x) => x.text)); },
+      now: () => clock,
+      random: () => 0.5,
+      sleep: async (ms) => { clock += ms; if (clock === 5_000) await t.post("one"); if (clock === 10_000) await t.post("two"); },
+    });
+    const r = await p;
+    assert.equal(r.fired, true);
+    assert.equal(batches.length, 1, "one envelope for the window");
+    assert.deepEqual(batches[0], ["one", "two"]);
+    assert.equal(await readCursor(state, "r"), "2");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("watch coalesce: a message urgent for this bearer flushes immediately", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const t = localTransport({ transport: "local", path: path.join(dir, "r.ndjson") }, { actor });
+    await t.post("noise");
+    await t.post("for me\n\nto: Grok");
+    /** @type {string[][]} */
+    const batches = [];
+    const r = await watch(t, {
+      stateDir: path.join(dir, "s"), key: "r", mode: "once",
+      coalesceSeconds: 30,
+      urgent: (m) => /to: Grok/.test(m.text),
+      onBatch: (m) => { batches.push(m.map((x) => x.text)); },
+    });
+    assert.equal(r.fired, true);
+    assert.equal(batches.length, 1);
+    assert.deepEqual(batches[0], ["noise", "for me\n\nto: Grok"]);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("watch coalesce: maxBatch flushes at n; death before flush does not persist the cursor", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const t = localTransport({ transport: "local", path: path.join(dir, "r.ndjson") }, { actor });
+    const state = path.join(dir, "s");
+    await t.post("a");
+    /** @type {string[][]} */
+    const batches = [];
+    // window never elapses, maxBatch is 2, only one message: --once flushes what it holds on the way out
+    let r = await watch(t, {
+      stateDir: state, key: "r", mode: "once",
+      coalesceSeconds: 30, maxBatch: 2,
+      onBatch: (m) => { batches.push(m.map((x) => x.text)); },
+    });
+    assert.equal(r.fired, true, "--once still delivers the held window when it returns");
+    assert.deepEqual(batches, [["a"]]);
+
+    await t.post("b");
+    await t.post("c");
+    /** @type {string[]} */
+    const seen = [];
+    r = await watch(t, {
+      stateDir: state, key: "r", mode: "once",
+      coalesceSeconds: 30, maxBatch: 2,
+      onBatch: (m) => { seen.push(...m.map((x) => x.text)); },
+    });
+    assert.deepEqual(seen, ["b", "c"], "maxBatch 2 flushes without waiting for the window");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("watch coalesce: cursor is not on disk while the window is open", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const t = localTransport({ transport: "local", path: path.join(dir, "r.ndjson") }, { actor });
+    const state = path.join(dir, "s");
+    await t.post("held");
+    let clock = 0;
+    let sawCursorDuringHold = /** @type {string | undefined} */ (undefined);
+    await watch(t, {
+      stateDir: state, key: "r", mode: "stream", interval: 5, forSeconds: 8,
+      coalesceSeconds: 30,
+      onBatch: () => {},
+      now: () => clock,
+      random: () => 0.5,
+      sleep: async (ms) => {
+        sawCursorDuringHold = await readCursor(state, "r");
+        clock += ms;
+      },
+    });
+    assert.equal(sawCursorDuringHold, undefined, "disk cursor waits for the flush so a death re-delivers");
+  } finally {
+    await cleanup();
+  }
+});
