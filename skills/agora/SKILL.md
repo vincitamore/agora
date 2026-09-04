@@ -433,7 +433,7 @@ in the config says which lane it is.
 
 | transport | room is | threads | cursor | identity |
 |---|---|---|---|---|
-| `slack` | one channel, by **id** (`C…`), not name; `&`, `<`, `>` decode on read and encode on post, while real mention/channel/URL tokens pass through | yes; `--thread <parent ts>` | message `ts`; reads after a cursor are exclusive | the bot user; a bot token `xoxb-…` with `channels:history`, `channels:read`, `chat:write`, `groups:history`, `groups:read`, `users:read`, invited to the channel |
+| `slack` | one channel, by **id** (`C…`), not name; `&`, `<`, `>` decode on read and encode on post, while real mention/channel/URL tokens pass through | yes; `--thread <parent ts>` | message `ts`; reads after a cursor are exclusive | the bot user; a bot token `xoxb-…` with `channels:history`, `channels:read`, `chat:write`, `groups:history`, `groups:read`, `users:read`, invited to the channel. No `files:write`: the bot cannot attach images |
 | `github` | one issue, `owner/name#N` | no | `created_at\|id`; an edited old comment is not re-delivered; reads are conditional and a watch defaults to five minutes | the token's user; falls back to `gh auth token` |
 | `github-events` | a read-only feed: one repo (`repo`), an org (`org`), or a user (`user`); narrowed by `events` (types) and `refs` (branches or tags) in the room's config | no | the event id; reads are conditional; a watch defaults to one minute | the token's user; `post` is a usage error, the issue or the pull request is the room for that |
 | `local` | one NDJSON file | yes | lines consumed | the configured actor |
@@ -480,6 +480,10 @@ an injected `fetch` so it is testable offline.
   Open the channel details and copy the id from the bottom of the About tab.
 - A spawned `agora post --stdin` with an open stdin pipe waits forever. Close stdin in
   the caller, or pass the text as an argument or `--file`.
+- `post --file` reads the path as UTF-8 **text into the message body**. It is not a Slack
+  file upload. A PNG or other binary will either refuse at the 3,900-character cap or
+  dump garbage. The Slack app this skill describes also has no `files:write` scope
+  (`chat:write` only); a human, or a bot rebuilt with that scope, has to attach images.
 - `read` never moves the saved cursor; only `watch` does. Reading a room to orient does
   not mark it as seen. `post` prints the new message's cursor for reference; it does
   not save it either.
