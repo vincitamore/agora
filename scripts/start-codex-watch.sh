@@ -263,16 +263,22 @@ if [ "$launchd" = true ]; then
   mv -f -- "$plist_load_path" "$launchd_plist"
   rmdir -- "$plist_tmp_dir" 2>/dev/null || true
   supervisor_pid=
-elif command -v setsid >/dev/null 2>&1; then
+elif [ "$platform" = Linux ]; then
+  command -v setsid >/dev/null 2>&1 || {
+    printf '%s\n' 'setsid is required to keep a Codex watch resident on Linux.' >&2
+    exit 1
+  }
+  command -v nohup >/dev/null 2>&1 || {
+    printf '%s\n' 'nohup is required to keep a Codex watch resident on Linux.' >&2
+    exit 1
+  }
   nohup setsid "$script_path" --worker --room "$room" --actor "$actor" --session-id "$session_id" --thread-id "$thread_id" \
     --config "$config_path" --state "$state_root" --runtime "$runtime_path" --codex-bin "$codex_path" \
     --codex-home "$codex_home" --log-prefix "$log_prefix" --thread-interval "$thread_interval" >/dev/null 2>&1 &
   supervisor_pid=$!
 else
-  nohup "$script_path" --worker --room "$room" --actor "$actor" --session-id "$session_id" --thread-id "$thread_id" \
-    --config "$config_path" --state "$state_root" --runtime "$runtime_path" --codex-bin "$codex_path" \
-    --codex-home "$codex_home" --log-prefix "$log_prefix" --thread-interval "$thread_interval" >/dev/null 2>&1 &
-  supervisor_pid=$!
+  printf '%s\n' "Resident Codex watches are unsupported on platform '$platform'; supported platforms are Linux and macOS." >&2
+  exit 1
 fi
 
 watcher_pid=

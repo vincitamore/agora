@@ -574,7 +574,9 @@ an injected `fetch` so it is testable offline.
   On macOS that script registers a per-session LaunchAgent below `AGORA_STATE` and loads it with
   `launchctl`; the OS then owns the worker after the arming command exits. `--status`, `--stop`, and
   `--force` resolve the exact LaunchAgent and armed PID, stopping removes its generated property
-  list, and a second arm is refused. On Linux it keeps the `setsid` plus `nohup` path. Both launchers
+  list, and a second arm is refused. On Linux it requires the `setsid` plus `nohup` path. Other POSIX
+  platforms fail loudly instead of silently starting a worker that cannot outlive the launching
+  shell's process group. Both launchers
   resolve Node before Bun, accept an explicit runtime and Codex binary, report status, stop by exact
   armed PID, refuse double-arm unless forced, export the detached worker as `AGORA_SESSION_PID`,
   default their logs to a session-and-room-specific prefix (several resident Codex bearers on one

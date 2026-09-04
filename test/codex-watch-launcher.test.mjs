@@ -13,7 +13,7 @@ const runFile = promisify(execFile);
 const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const launcher = path.join(repoRoot, "scripts", "start-codex-watch.sh");
 
-test("Codex POSIX launcher gives macOS to launchd without weakening Linux detachment", async () => {
+test("Codex POSIX launcher gives macOS to launchd, Linux to setsid, and refuses weaker detachment elsewhere", async () => {
   const source = await readFile(launcher, "utf8");
   await access(launcher, constants.X_OK);
   assert.match(source, /launchctl bootstrap/);
@@ -21,7 +21,10 @@ test("Codex POSIX launcher gives macOS to launchd without weakening Linux detach
   assert.match(source, /plutil -insert ProgramArguments -array/);
   assert.match(source, /plutil -insert KeepAlive -bool false/);
   assert.match(source, /plutil -insert WorkingDirectory/);
+  assert.match(source, /elif \[ "\$platform" = Linux \]; then/);
   assert.match(source, /nohup setsid/);
+  assert.match(source, /Resident Codex watches are unsupported on platform/);
+  assert.doesNotMatch(source, /else\s*\n\s*nohup "\$script_path"/);
   assert.doesNotMatch(source, /\beval\b/);
 });
 
