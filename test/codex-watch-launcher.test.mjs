@@ -13,7 +13,7 @@ const runFile = promisify(execFile);
 const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const launcher = path.join(repoRoot, "scripts", "start-codex-watch.sh");
 
-test("Codex POSIX launcher gives macOS to launchd, Linux to setsid, and refuses weaker detachment elsewhere", async () => {
+test("Codex POSIX launcher gives macOS to launchd without weakening Linux detachment", async () => {
   const source = await readFile(launcher, "utf8");
   await access(launcher, constants.X_OK);
   assert.match(source, /launchctl bootstrap/);
@@ -21,11 +21,61 @@ test("Codex POSIX launcher gives macOS to launchd, Linux to setsid, and refuses 
   assert.match(source, /plutil -insert ProgramArguments -array/);
   assert.match(source, /plutil -insert KeepAlive -bool false/);
   assert.match(source, /plutil -insert WorkingDirectory/);
-  assert.match(source, /elif \[ "\$platform" = Linux \]; then/);
   assert.match(source, /nohup setsid/);
-  assert.match(source, /Resident Codex watches are unsupported on platform/);
-  assert.doesNotMatch(source, /else\s*\n\s*nohup "\$script_path"/);
   assert.doesNotMatch(source, /\beval\b/);
+});
+
+test("Codex POSIX launcher refuses an unsupported platform and Linux without setsid", {
+  skip: process.platform === "win32" ? "requires a POSIX executable-script boundary" : false,
+}, async (t) => {
+  const fixture = await tmp();
+  const shims = path.join(fixture.dir, "path shims");
+  const state = path.join(fixture.dir, "state");
+  const codex = path.join(fixture.dir, "fake codex");
+  const logPrefix = path.join(fixture.dir, "watch");
+  const session = `guard-test-${process.pid}`;
+  const args = [
+    "--room", "guard-test",
+    "--actor", "Codex/test",
+    "--session-id", session,
+    "--thread-id", session,
+    "--state", state,
+    "--runtime", process.execPath,
+    "--codex-bin", codex,
+    "--log-prefix", logPrefix,
+  ];
+
+  t.after(() => fixture.cleanup());
+  await mkdir(shims, { recursive: true });
+  await writeFile(codex, "#!/bin/sh\nexit 0\n");
+  await chmod(codex, 0o755);
+
+  /** @param {string} name @param {string} body */
+  const writeShim = async (name, body) => {
+    const shim = path.join(shims, name);
+    await writeFile(shim, `#!/bin/sh\n${body}\n`);
+    await chmod(shim, 0o755);
+  };
+
+  await writeShim("uname", "printf '%s\\n' FreeBSD");
+  await assert.rejects(runFile(launcher, args, {
+    env: { ...process.env, PATH: `${shims}${path.delimiter}${process.env.PATH ?? ""}` },
+  }), (/** @type {any} */ error) => {
+    assert.equal(error.code, 1);
+    assert.match(error.stderr, /unsupported on platform 'FreeBSD'; supported platforms are Linux and macOS/);
+    return true;
+  });
+
+  await writeShim("uname", "printf '%s\\n' Linux");
+  await writeShim("dirname", 'exec /usr/bin/dirname "$@"');
+  await writeShim("basename", 'exec /usr/bin/basename "$@"');
+  await assert.rejects(runFile(launcher, args, {
+    env: { ...process.env, PATH: shims },
+  }), (/** @type {any} */ error) => {
+    assert.equal(error.code, 1);
+    assert.match(error.stderr, /setsid is required to keep a Codex watch resident on Linux/);
+    return true;
+  });
 });
 
 const runLaunchdTest = process.platform === "darwin" && process.env.AGORA_TEST_LAUNCHD === "1";
