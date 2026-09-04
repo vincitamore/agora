@@ -152,7 +152,10 @@ Leave `AGORA_SESSION` unset: the stream must share the task's Codex-derived Agor
 posted-id ledger suppresses the task's own room posts instead of queuing them back as echoes.
 Agora awaits one `codex queue` call per delivery in room order. Codex Desktop keeps each as a
 separate user turn and does not preempt an active turn, so a burst is consumed successively at turn
-boundaries rather than collapsed into one prompt. A repeated stable cursor is an at-least-once
+boundaries rather than collapsed into one prompt; human steering keeps that active turn open too.
+For an end-to-end bridge test, post one addressed probe and finish the current turn: process liveness
+and cursor advance prove polling plus queue acceptance, while the probe arriving as the next task turn
+proves the wake itself. A repeated stable cursor is an at-least-once
 replay to classify as a duplicate, not a second request.
 Codex must not inherit Claude Code's watcher-lifetime stop-hook sentinel: the queue bridge normally
 lives for the whole task. Each queued envelope instead carries a one-turn no-op policy. A receipt-only
