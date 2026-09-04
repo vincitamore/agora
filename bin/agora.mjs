@@ -50,7 +50,7 @@ import {
   writeArmed,
   writeRecord,
 } from "../src/session.mjs";
-import { FOLLOW_CAP, FOLLOW_IDLE_MINUTES, aliasThreads, dropFollow, followThreads, readFollow, rootsOf, threadsOf } from "../src/follow.mjs";
+import { FOLLOW_CAP, FOLLOW_IDLE_MINUTES, aliasThreads, dropFollow, followableMessages, followThreads, readFollow, rootsOf, threadsOf } from "../src/follow.mjs";
 import { withThreads } from "../src/threads.mjs";
 import { carryState, carryWindow, foldRoom, renderCarry } from "../src/carry.mjs";
 import { formatTrailers, matchesAddress, parseTrailers, TRAILER_VALUE_MAX, trailerValueOk } from "../src/trailers.mjs";
@@ -341,10 +341,10 @@ function positive(s, what) {
  * still there, at its own room interval, plus one read per followed thread at its thread interval.
  * A registration whose pid is gone is a leftover from a killed process and counts for nothing.
  * @param {import('../src/core.mjs').Config} cfg @param {string} stateRoot
- * @returns {Promise<Map<string, { rate: number, budget: number, watches: number }>>}
+ * @returns {Promise<Map<string, { rate: number, roomReads: number, threadReads: number, followed: number, budget: number, watches: number }>>}
  */
 async function pollRates(cfg, stateRoot) {
-  /** @type {Map<string, { rate: number, budget: number, watches: number }>} */
+  /** @type {Map<string, { rate: number, roomReads: number, threadReads: number, followed: number, budget: number, watches: number }>} */
   const out = new Map();
   for (const { dir, key, armed } of await listArmed(stateRoot)) {
     // a registration from before a reboot names a pid that now belongs to something else
@@ -358,10 +358,19 @@ async function pollRates(cfg, stateRoot) {
     const ti = Number(armed.threadInterval);
     const interval = roomInterval(room, Number.isFinite(iv) && iv > 0 ? iv : undefined);
     const threadInterval = roomThreadInterval(room, Number.isFinite(ti) && ti > 0 ? ti : undefined);
-    const rate = 60 / interval + followed * (60 / threadInterval);
+    const roomReads = 60 / interval;
+    const threadReads = followed * (60 / threadInterval);
+    const rate = roomReads + threadReads;
     const budget = roomPollBudget(room);
-    const prev = out.get(room.transport) ?? { rate: 0, budget, watches: 0 };
-    out.set(room.transport, { rate: prev.rate + rate, budget: Math.max(prev.budget, budget), watches: prev.watches + 1 });
+    const prev = out.get(room.transport) ?? { rate: 0, roomReads: 0, threadReads: 0, followed: 0, budget, watches: 0 };
+    out.set(room.transport, {
+      rate: prev.rate + rate,
+      roomReads: prev.roomReads + roomReads,
+      threadReads: prev.threadReads + threadReads,
+      followed: prev.followed + followed,
+      budget: Math.max(prev.budget, budget),
+      watches: prev.watches + 1,
+    });
   }
   return out;
 }
@@ -549,7 +558,7 @@ async function main(argv) {
    * replied in. Those are the threads the answers arrive in, and a busy room's chatter is always
    * more recent than the request still being answered.
    * @param {string} dir @param {string} alias @param {import('../src/core.mjs').RoomConfig} r
-   * @param {string[]} ids @param {{ protect?: Iterable<string> }} [opts]
+   * @param {string[]} ids @param {{ protect?: Iterable<string>, admit?: Iterable<string> }} [opts]
    */
   async function follow(dir, alias, r, ids, opts = {}) {
     const cap = roomNumber(r, "followCap", FOLLOW_CAP);
@@ -557,6 +566,7 @@ async function main(argv) {
       cap,
       idleMinutes: roomNumber(r, "followIdleMinutes", FOLLOW_IDLE_MINUTES),
       protect: new Set([...(await readPosted(dir)), ...answered, ...(opts.protect ?? [])]),
+      ...(opts.admit === undefined ? {} : { admit: opts.admit }),
     });
     for (const id of res.evicted) {
       evicted.push(id);
@@ -742,12 +752,14 @@ async function main(argv) {
     }
     for (const [kind, r] of await pollRates(cfg, stateRoot)) {
       const rate = Math.round(r.rate * 10) / 10;
+      const roomReads = Math.round(r.roomReads * 10) / 10;
+      const threadReads = Math.round(r.threadReads * 10) / 10;
       const over = rate > r.budget;
       if (json) {
-        console.log(JSON.stringify({ type: "poll-rate", transport: kind, rate, budget: r.budget, watches: r.watches, over }));
+        console.log(JSON.stringify({ type: "poll-rate", transport: kind, rate, room_reads: roomReads, thread_reads: threadReads, followed: r.followed, budget: r.budget, watches: r.watches, over }));
         if (over) console.log(JSON.stringify({ type: "warning", code: "poll-budget", message: `this seat reads ${kind} ~${rate} times a minute against a budget of ${r.budget}; raise the intervals or follow fewer threads.` }));
       } else {
-        console.log(`\nseat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} watch${r.watches === 1 ? "" : "es"})`);
+        console.log(`\nseat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} watch${r.watches === 1 ? "" : "es"}; room-history ${roomReads} + thread-replies ${threadReads} from ${r.followed} follows = sum(followed x 60/threadInterval))`);
         if (over) console.log(`WARNING this seat reads ${kind} ~${rate} times a minute against a budget of ${r.budget}; raise the intervals or follow fewer threads.`);
       }
     }
@@ -1040,13 +1052,15 @@ async function main(argv) {
             key: (id) => cursorKey(roomAlias, id),
             cursor: async (id) => (await readCursorSeeded(sdir, stateRoot, cursorKey(roomAlias, id))).cursor,
             interval: threadInterval,
-            // what woke this session roots a followed thread: the answers to it land there, and a
-            // thread a human just answered in is one the cap must not take
+            // A human delivery may start a follow; agent/system traffic may start one only when it
+            // addresses this reader. Existing followed conversations still refresh on activity.
             note: async (msgs) => {
               const roots = transport.threads ? rootsOf(msgs) : threadsOf(msgs);
+              const admitted = followableMessages(msgs, bearer.name, seat);
+              const admittedRoots = transport.threads ? rootsOf(admitted) : threadsOf(admitted);
               const human = msgs.filter((m) => m.author.kind === "human");
               for (const id of transport.threads ? rootsOf(human) : threadsOf(human)) answered.add(id);
-              await follow(sdir, roomAlias, room, roots);
+              await follow(sdir, roomAlias, room, roots, { admit: admittedRoots });
             },
             drop: async (id) => { await dropFollow(sdir, cursorKey(roomAlias), id); },
           }
@@ -1056,7 +1070,7 @@ async function main(argv) {
       if (!["all", "addressed", "mine"].includes(wakeMode)) throw new AgoraError(`--wake takes all, addressed, or mine`, EXIT.usage);
       /** @type {{ id?: string, name?: string } | undefined} */
       let seat;
-      if (wakeMode !== "all" || holdSeconds || maxBatch) {
+      if (wakeMode !== "all" || holdSeconds || maxBatch || values.follow) {
         try {
           seat = await transport.whoami();
         } catch {
