@@ -32,13 +32,17 @@ export function localTransport(room, { actor, now = () => new Date() }) {
     async whoami() {
       return { id: actor.name, name: actor.name };
     },
+    validateCursor(cursor) {
+      const n = Number(cursor);
+      return Number.isInteger(n) && n >= 0 ? undefined : `a local room's cursor is the number of lines consumed (a non-negative whole number), not ${JSON.stringify(cursor)}`;
+    },
     async read({ thread, since, limit = 1000 } = {}) {
       const all = await lines();
       const start = since ? Number(since) : 0;
       if (!Number.isInteger(start) || start < 0) throw new AgoraError(`bad cursor "${since}" for a local room`);
       /** @type {import('../core.mjs').Message[]} */
       const out = [];
-      for (let i = start; i < all.length && out.length < limit; i++) {
+      for (let i = start; i < all.length; i++) {
         /** @type {Record<string, any>} */
         let rec;
         try {
@@ -59,7 +63,11 @@ export function localTransport(room, { actor, now = () => new Date() }) {
           raw: rec,
         });
       }
-      return out;
+      // A read without a cursor returns the NEWEST messages up to the limit, as every other
+      // transport does: taking the oldest of the window is what set `cursor --now` hundreds of
+      // messages back on a busy room and told `who` a bearer who spoke a second ago was silent.
+      // With a cursor the window starts where the reader left off, so the limit takes the front.
+      return since ? out.slice(0, limit) : out.slice(-limit);
     },
     async post(text, { thread } = {}) {
       await mkdir(path.dirname(file), { recursive: true });

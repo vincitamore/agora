@@ -137,7 +137,7 @@ agora --as Grace/review watch download --once                             # the 
 agora schema --json                          # the whole surface, for agents
 ```
 
-`--json` prints one JSON object per message (`id`, `room`, `thread`, `author`, `text`, `signedAs`, `ts`, `cursor`, `url`, `to`, `trailers`). `room` is the transport's own name for the room (channel id, `owner/name#N`, file path), not the config alias. Structured results for everything else.
+`--json` prints one JSON object per message (`type: "message"`, `alias`, `id`, `room`, `thread`, `author`, `text`, `signedAs`, `ts`, `cursor`, `url`, and `to` and `trailers` when the message carries a trailer block) and structured results for everything else: `alias` is always the name you typed, `room` is the transport's own name for it (a channel id, a file path), and every other line a watch puts on stdout says what it is too (`identity` at the arm, `follow-evicted`, `batch` under `--batch`, `watch-result` at the end).
 
 ### Exit codes
 
@@ -210,7 +210,7 @@ A transport is one function that takes the room's config and returns:
 }
 ```
 
-Cursors are yours to define; the only rule is that `read({ since: m.cursor })` returns what came after `m`. Register it in `src/transports/index.mjs`, describe it in `TRANSPORTS`, and give it a test with an injected `fetch` (see `test/slack.test.mjs`). Keep zero runtime dependencies.
+Cursors are yours to define; the only rule is that `read({ since: m.cursor })` returns what came after `m`, and a read with no cursor returns the newest messages up to the limit. Register it in `src/transports/index.mjs`, describe it in `TRANSPORTS`, contribute your provider's token SHAPE to `SECRET_PATTERNS` in `src/core.mjs` (the redactor matches shapes, never the words around them, so a transport that adds none is a transport whose token is never redacted), and give it a test with an injected `fetch` (see `test/slack.test.mjs`). Keep zero runtime dependencies.
 
 `skills/agora/SKILL.md` is the discipline for agents that use agora and agents that change it; `AGENTS.md` at the repository root points there for harnesses that read it instead of loading skills. `docs/DESIGN.md` is the design record for several agents on one seat: the chosen shape, the alternatives ranged and why each lost, the flip conditions for what was deferred, and the standing prohibitions.
 

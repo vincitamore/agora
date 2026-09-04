@@ -25,7 +25,12 @@ const execFileAsync = promisify(execFile);
  * @property {string} [url]
  * @property {unknown} [raw]
  */
-/** @typedef {{ id: string, cursor: string, url?: string }} PostResult */
+/**
+ * `ids` is present when the transport had to send one post as several messages: every id it
+ * produced, in order, `id` being the first. The caller records them all in the ledger (they are all
+ * this session's own) and follows the first, the rest as other names for it.
+ * @typedef {{ id: string, cursor: string, url?: string, ids?: string[] }} PostResult
+ */
 /** @typedef {{ thread?: string, since?: string, limit?: number }} ReadOptions */
 /** @typedef {{ thread?: string }} PostOptions */
 /**
@@ -37,10 +42,16 @@ const execFileAsync = promisify(execFile);
  * @property {() => Promise<{ id: string, name: string }>} whoami
  * @property {(opts?: ReadOptions) => Promise<Message[]>} read
  * @property {(text: string, opts?: PostOptions) => Promise<PostResult>} post
+ * @property {(cursor: string) => string | undefined} [validateCursor] why this string is not a
+ *   cursor here, or nothing. `cursor --set` asks before it writes, so a shape the transport can
+ *   never read is refused at the boundary instead of throwing on every later read.
+ * @property {(thread: string) => string | undefined} [validateThread] why this string is not a
+ *   thread id here, or nothing. Refused at the caller boundaries (`--thread`, `--re`); an id that
+ *   comes back out of this session's own follow set is dropped from the set, never a usage error.
  */
 /** @typedef {{ name: string, kind: ActorKind }} Actor */
 /** @typedef {{ transport: string, tokenEnv?: string, tokenFile?: string, [k: string]: unknown }} RoomConfig */
-/** @typedef {{ from?: string[], pidFrom?: string[], staleAfterHours?: number }} SessionConfig */
+/** @typedef {{ from?: string[], pidFrom?: string[], childFrom?: string[], staleAfterHours?: number }} SessionConfig */
 /** @typedef {{ actor: Actor, rooms: Record<string, RoomConfig>, state?: string, sign?: boolean, path?: string, session?: SessionConfig }} Config */
 
 export class AgoraError extends Error {
@@ -175,11 +186,18 @@ export function parseSignature(text) {
   return m ? m[1] : undefined;
 }
 
+/**
+ * Credential SHAPES, never the words around them. A context pattern (`Bearer <anything>`) catches
+ * nothing these miss -- agora builds its authorization header as a lowercase key inside a request
+ * object and never prints it -- and it ate the tool's own vocabulary: `bearer` is the noun for a
+ * signing identity here, so `a bearer path like Grace` redacted the word after it in every error a
+ * newcomer sees. A transport added later contributes its provider's token shape to this list; that
+ * clause is the whole safety argument for keeping the list shape-based.
+ */
 const SECRET_PATTERNS = [
   /xox[abprse]-[A-Za-z0-9-]+/g,
   /gh[pousr]_[A-Za-z0-9]{16,}/g,
   /github_pat_[A-Za-z0-9_]+/g,
-  /(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi,
 ];
 
 /** Strip anything that looks like a credential before it reaches a log or a room. @param {string} s */

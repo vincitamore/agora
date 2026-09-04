@@ -1,5 +1,5 @@
 // @ts-check
-import { jitter, readCursor, writeCursor, sleep as defaultSleep } from "./core.mjs";
+import { jitter, readCursor, redact, writeCursor, sleep as defaultSleep } from "./core.mjs";
 
 /**
  * @typedef {object} FollowedThreads
@@ -40,7 +40,7 @@ import { jitter, readCursor, writeCursor, sleep as defaultSleep } from "./core.m
  * @param {{
  *   stateDir: string, key: string, thread?: string, cursor?: string,
  *   mode?: 'once' | 'until-new' | 'stream', interval?: number, forSeconds?: number,
- *   onBatch: (msgs: import('./core.mjs').Message[]) => void | Promise<void>,
+ *   onBatch: (msgs: import('./core.mjs').Message[], batch: { delivered: number, skipped: number, filtered: number }) => void | Promise<void>,
  *   own?: () => Promise<Set<string>> | Set<string>,
  *   wake?: (m: import('./core.mjs').Message) => boolean,
  *   threads?: FollowedThreads,
@@ -51,7 +51,7 @@ import { jitter, readCursor, writeCursor, sleep as defaultSleep } from "./core.m
  * not); what it drops is counted as `filtered`, the cursor still advances past it, and `read`
  * still shows it. It is never automatic: a message from another agent is input, and routing on
  * its trailers is a flag the reader set.
- * @returns {Promise<{ fired: boolean, cursor?: string, polls: number, skipped: number, filtered: number, delivered: number, threads: Record<string, number> }>}
+ * @returns {Promise<{ fired: boolean, cursor?: string, polls: number, skipped: number, filtered: number, delivered: number, elapsedMs: number, following: number, threads: Record<string, number> }>}
  */
 export async function watch(transport, opts) {
   const { stateDir, key, thread, mode = "until-new", interval = 15, forSeconds = 0, onBatch, own, wake, threads, sweep } = opts;
@@ -69,7 +69,7 @@ export async function watch(transport, opts) {
   const start = now();
   let fired = false;
   let polls = 0;
-  const result = () => ({ fired, cursor, polls, skipped, filtered, delivered, threads: perThread });
+  const result = () => ({ fired, cursor, polls, skipped, filtered, delivered, elapsedMs: Math.max(0, now() - start), following: followed.size, threads: perThread });
   for (;;) {
     polls++;
     // the seat's own housekeeping rides on the poll: a sibling that went dark is announced here,
@@ -89,10 +89,27 @@ export async function watch(transport, opts) {
         if (!followed.has(id)) followed.set(id, { key: threads.key(id), cursor: await threads.cursor(id), lastRead: -Infinity });
         if (perThread[id] === undefined) perThread[id] = 0;
       }
+      // a thread that aged out of the set, or was evicted by the cap, stops being read and stops
+      // being reported: the result line names what this watch follows now, not what it once did
+      const live = new Set(ids);
+      for (const id of [...followed.keys()]) if (!live.has(id)) followed.delete(id);
+      for (const id of Object.keys(perThread)) if (!live.has(id)) delete perThread[id];
       for (const id of ids) {
         const st = followed.get(id);
         if (!st || now() - st.lastRead < threads.interval * 1000) continue;
         st.lastRead = now();
+        // The id came out of this session's own follow set, which a `post --thread` from another
+        // shell may have written mangled (an unquoted Slack ts loses its last digits under pwsh).
+        // A malformed id there is not a usage error -- the caller boundaries refuse those -- it is
+        // a key to drop, so the rest of the set keeps delivering.
+        const bad = transport.validateThread?.(id);
+        if (bad) {
+          console.error(redact(`agora: dropped follow ${id}: ${bad}`));
+          followed.delete(id);
+          delete perThread[id];
+          if (threads.drop) await threads.drop(id);
+          continue;
+        }
         /** @type {import('./core.mjs').Message[]} */
         let replies = [];
         try {
@@ -100,8 +117,9 @@ export async function watch(transport, opts) {
         } catch (err) {
           // one unreadable follow (truncated Slack ts → thread_not_found) must not kill the room watch
           const why = err instanceof Error ? err.message : String(err);
-          console.error(`agora: dropped follow ${id}: ${why}`);
+          console.error(redact(`agora: dropped follow ${id}: ${why}`));
           followed.delete(id);
+          delete perThread[id];
           if (threads.drop) await threads.drop(id);
           continue;
         }
@@ -120,11 +138,15 @@ export async function watch(transport, opts) {
       const merged = batch.filter((e) => !ids.has(e.m.id) && (ids.add(e.m.id), true));
       const posted = own ? await own() : new Set();
       const notMine = merged.filter((e) => !posted.has(e.m.id));
-      skipped += merged.length - notMine.length;
+      const skippedHere = merged.length - notMine.length;
+      skipped += skippedHere;
       const fresh = wake ? notMine.filter((e) => wake(e.m)) : notMine;
-      filtered += notMine.length - fresh.length;
+      const filteredHere = notMine.length - fresh.length;
+      filtered += filteredHere;
       if (fresh.length) {
-        await onBatch(fresh.map((e) => e.m));
+        // the counts of THIS poll, so a consumer taking one object per poll says what the poll did
+        // without subtracting running totals itself
+        await onBatch(fresh.map((e) => e.m), { delivered: fresh.length, skipped: skippedHere, filtered: filteredHere });
         delivered += fresh.length;
         // a message counts against a followed thread whether the thread read or the room read
         // was the one that carried it

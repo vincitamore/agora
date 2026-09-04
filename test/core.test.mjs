@@ -34,11 +34,16 @@ test("sign appends one signature line and never doubles it", () => {
   assert.equal(parseSignature("text\nnot signed"), undefined);
 });
 
-test("redact strips credential shapes", () => {
+test("redact strips credential shapes, and leaves the tool's own vocabulary alone", () => {
   assert.equal(redact("token xoxb-123-abc here"), "token [redacted] here");
   assert.equal(redact("ghp_abcdefghijklmnopqrstuvwxyz0123"), "[redacted]");
-  assert.equal(redact("Authorization: Bearer abc.def-ghi"), "Authorization: Bearer [redacted]");
+  assert.equal(redact("github_pat_11ABCDEFG0123456789"), "[redacted]");
   assert.equal(redact("plain"), "plain");
+  // the patterns are shapes, never the words around them: `bearer` is this tool's noun for a
+  // signing identity, and the context pattern that used to be here ate the word after it
+  assert.equal(redact("--as must be a bearer path like Grace or Grace/watch"), "--as must be a bearer path like Grace or Grace/watch");
+  assert.equal(redact("the bearer Grace/agora-orchestrator is gone"), "the bearer Grace/agora-orchestrator is gone");
+  assert.equal(redact("Authorization: Bearer xoxb-1-2-secret"), "Authorization: Bearer [redacted]", "a token inside a header is still caught by its shape");
 });
 
 test("cursor round trip and key sanitising", async () => {
