@@ -582,3 +582,35 @@ test("cli: a delivered top-level message roots a followed thread, and an answer 
     await cleanup();
   }
 });
+
+test("cli: read --threads folds thread replies in once, by time; with --thread it is a usage error", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const cfgPath = path.join(dir, "agora.json");
+    await writeFile(cfgPath, JSON.stringify({
+      actor: { name: "Grace", kind: "agent" },
+      rooms: { down: { transport: "local", path: path.join(dir, "down.ndjson") } },
+    }));
+    const root = path.join(dir, "state");
+    const A = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "a", CLAUDE_PID: "", AGORA_ACTOR: "Grace/review" };
+    const B = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "b", CLAUDE_PID: "", AGORA_ACTOR: "Codex" };
+
+    let r = await agora(["post", "down", "the ask"], A);
+    const parent = /posted (\S+)/.exec(r.stdout)?.[1];
+    assert.ok(parent);
+    r = await agora(["post", "down", "--thread", parent, "claim: it"], B);
+    const cursorBeforeReply = String(Number(/cursor (\S+)/.exec(r.stdout)?.[1]) - 1);
+    await agora(["post", "down", "a later top-level line"], B);
+
+    r = await agora(["read", "down", "--threads", "--since", cursorBeforeReply, "--json"], A);
+    assert.equal(r.code, 0, r.stderr);
+    const ids = r.stdout.trim().split(/\r?\n/).map((l) => JSON.parse(l)).map((m) => m.text.split("\n")[0]);
+    assert.deepEqual(ids, ["claim: it", "a later top-level line"], "the reply is in the read once, before the later line");
+
+    r = await agora(["read", "down", "--threads", "--thread", parent], A);
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /cannot be combined with --thread/);
+  } finally {
+    await cleanup();
+  }
+});
