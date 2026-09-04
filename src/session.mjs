@@ -745,6 +745,8 @@ export function pidAlive(pid, kill) {
  * @property {'once' | 'until-new' | 'stream'} [mode] what this watch is doing
  * @property {number} [threadInterval] seconds between reads of one followed thread
  * @property {boolean} [follow]
+ * @property {'all' | 'addressed' | 'mine'} [wake] what wakes it; absent means `all`, which is the
+ *   default the flag has always had, so a registration written before this field reads as `all`
  * @property {number} pid the watching process
  * @property {number} [harnessPid]
  * @property {number} [bootEpoch] the boot this pid belongs to; a pid outlives nothing across a reboot

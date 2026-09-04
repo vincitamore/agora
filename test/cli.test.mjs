@@ -8,6 +8,7 @@ import path from "node:path";
 import { existsSync } from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
 import { bootEpoch } from "../src/session.mjs";
+import { cacheTtls } from "../src/harness.mjs";
 import { tmp } from "./helpers.mjs";
 
 const run = promisify(execFile);
@@ -24,15 +25,19 @@ const messages = (stdout) => stdout.trim().split(/\r?\n/).filter((l) => l.trim()
 /** Every typed line of a `--json` run, parsed. @param {string} out */
 const typed = (out) => out.trim().split(/\r?\n/).filter((l) => l.trim()).map((l) => JSON.parse(l));
 
-/** @param {string[]} args @param {Record<string, string>} env */
-async function agora(args, env) {
+/**
+ * @param {string[]} args @param {Record<string, string>} env
+ * @param {{ cwd?: string }} [opts] where the child runs: `doctor` walks the working directory for
+ *   harness settings, so a test that writes one runs the child in its own temp tree, never here
+ */
+async function agora(args, env, opts = {}) {
   try {
     // the harness running the suite injects its own session id, pid and subagent marker, and the
     // tool reads all three: a test asserting what a watch printed must not depend on which harness
     // ran it. Cleared here, and a test that wants one sets it.
     const clean = { ...process.env };
     for (const name of ["CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_PID", "GROK_SESSION_ID", "GROK_PID", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "HERMES_SESSION_ID", "AGORA_SESSION_PID", "AGORA_SESSION", "AGORA_ACTOR", "AGORA_CONFIG", "AGORA_STATE"]) delete clean[name];
-    const child = run(process.execPath, [BIN, ...args], { env: { ...clean, ...env }, windowsHide: true });
+    const child = run(process.execPath, [BIN, ...args], { env: { ...clean, ...env }, windowsHide: true, ...(opts.cwd ? { cwd: opts.cwd } : {}) });
     child.child.stdin?.end(); // an open stdin pipe would make `post --stdin` wait forever
     const { stdout, stderr } = await child;
     return { code: 0, stdout, stderr };
@@ -487,13 +492,13 @@ test("cli: doctor adds up the reads a minute this seat's live watches are spendi
 
     let r = await agora(["doctor", "--offline"], env);
     assert.equal(r.code, 0, "a rate over its budget is a warning, never an exit code");
-    assert.match(r.stdout, /seat poll rate {2}~6 reads\/min on local \(budget 6, 1 watch; room-history 4 \+ thread-replies 2 from 2 follows = sum\(followed x 60\/threadInterval\)\)/, "the line names room and per-thread method spend");
+    assert.match(r.stdout, /seat poll rate {2}~6 reads\/min on local \(budget 6, 1 watch; room-history 4 \+ thread-replies 2 from 2 follows; sessions×followed×60\/threadInterval \+ sessions×60\/interval = 2×60\/60 \+ 60\/15\)/, "the counts and the arithmetic beside the number");
     assert.doesNotMatch(r.stdout, /WARNING this seat reads/);
 
     await writeFile(path.join(armedDir, "down.json"), JSON.stringify({ room: "down", interval: 5, pid: process.pid, startedAt: new Date().toISOString() }));
     r = await agora(["doctor", "--offline", "--json"], env);
     const rate = r.stdout.trim().split(/\r?\n/).map((/** @type {string} */ l) => JSON.parse(l)).find((/** @type {any} */ o) => o.type === "poll-rate");
-    assert.deepEqual(rate, { type: "poll-rate", transport: "local", rate: 12, room_reads: 12, thread_reads: 0, followed: 0, budget: 6, watches: 1, over: true });
+    assert.deepEqual(rate, { type: "poll-rate", transport: "local", rate: 12, room_reads: 12, thread_reads: 0, followed: 0, budget: 6, watches: 1, over: true, formula: "sessions×followed×60/threadInterval + sessions×60/interval", terms: ["60/5"] });
 
     // a registration whose process is gone is a leftover, and counts for nothing
     await writeFile(path.join(armedDir, "down.json"), JSON.stringify({ room: "down", interval: 5, pid: 2 ** 30, startedAt: new Date().toISOString() }));
@@ -1230,6 +1235,182 @@ test("cli: --coalesce with --max-batch is one envelope; addressed-to-me flushes"
     const result = typed(r.stdout).at(-1);
     assert.equal(result.session_wakes, 1);
     assert.equal(result.delivered, 2);
+  } finally {
+    await cleanup();
+  }
+});
+
+/**
+ * A seat with harness settings of its own: the child runs in `seat/`, so the working-directory walk
+ * finds `seat/.claude/settings.json` and never the machine's real one.
+ * @param {string} dir @param {Record<string, unknown>} [extra] room-config keys to add
+ */
+async function seat(dir, extra = {}) {
+  const { cfgPath, root } = await room(dir, extra);
+  const cwd = path.join(dir, "seat");
+  const settings = path.join(cwd, ".claude", "settings.json");
+  await mkdir(path.dirname(settings), { recursive: true });
+  return { cfgPath, root, cwd, settings };
+}
+
+/** One armed registration, written by hand so a test can name the pid, the cadence and the wake. @param {string} file @param {Record<string, unknown>} rec */
+const armWith = (file, rec) =>
+  writeFile(file, JSON.stringify({ room: "down", interval: 15, pid: process.pid, bootEpoch: bootEpoch(), startedAt: new Date().toISOString(), ...rec }));
+
+const CLAUDE_TTL_UNKNOWN = `unknown (defaults to 1h on a subscription's main conversation, 5m past plan usage or on an API key; set promptCacheTtl: "1h" to pin it)`;
+
+test("cli: doctor reads the prompt cache TTL where it is written, and warns only on a five-minute one under a live watch", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const { cfgPath, root, cwd, settings } = await seat(dir);
+    const env = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "a", CLAUDE_PID: "" };
+    const armed = path.join(root, "sessions", "a", "armed", "down.json");
+    await agora(["session", "--as", "Grace/watch"], env);
+    await mkdir(path.dirname(armed), { recursive: true });
+    await armWith(armed, { wake: "all" });
+    /** @param {{ code: number, stdout: string }} r */
+    const cache = (r) => typed(r.stdout).filter((/** @type {any} */ o) => o.type === "cache");
+    /** @param {{ code: number, stdout: string }} r */
+    const ttlWarning = (r) => typed(r.stdout).find((/** @type {any} */ o) => o.type === "warning" && o.code === "cache-ttl");
+
+    await writeFile(settings, JSON.stringify({ promptCacheTtl: "1h" }));
+    let r = await agora(["doctor", "--offline"], env, { cwd });
+    assert.equal(r.code, 0);
+    assert.match(r.stdout, /cache {2}claude-code {2}prompt cache ttl=1h \(from /, "the value it read, and where it read it");
+    assert.match(r.stdout, /cache {2}codex {8}prompt cache ttl=unknown \(OpenAI's equivalent is 24h cache retention/, "never a TTL it did not read");
+    assert.doesNotMatch(r.stdout, /prompt cache TTL is/, "an hour under a resident is what the doctrine asks for");
+
+    r = await agora(["doctor", "--offline", "--json"], env, { cwd });
+    assert.deepEqual(cache(r).map((/** @type {any} */ o) => o.harness), ["claude-code", "codex"]);
+    assert.deepEqual([cache(r)[0].ttl, cache(r)[0].value, cache(r)[0].source], [3600, "1h", settings]);
+    assert.deepEqual([cache(r)[1].ttl, cache(r)[1].value, cache(r)[1].source], [null, null, null], "Codex exposes nothing local to read");
+    assert.equal(ttlWarning(r), undefined);
+
+    // the same seat, dropped to the five-minute window: every wake past it pays a cold read
+    await writeFile(settings, JSON.stringify({ promptCacheTtl: "5m" }));
+    r = await agora(["doctor", "--offline", "--json"], env, { cwd });
+    assert.equal(r.code, 0, "a warning never changes doctor's exit");
+    assert.match(ttlWarning(r).message, /1 watch is armed on this seat and claude-code's prompt cache TTL is 5m \(read from /);
+    assert.match(ttlWarning(r).message, /Set promptCacheTtl: "1h" and re-arm/);
+    r = await agora(["doctor", "--offline"], env, { cwd });
+    assert.match(r.stdout, /WARNING 1 watch is armed on this seat and claude-code's prompt cache TTL is 5m/, "the human path says it too");
+
+    // nothing resident: the TTL is still reported, because it was read, but nobody is paying for it
+    await armWith(armed, { wake: "all", pid: 2 ** 30 });
+    r = await agora(["doctor", "--offline", "--json"], env, { cwd });
+    assert.equal(cache(r)[0].ttl, 300, "reported: it was read");
+    assert.equal(ttlWarning(r), undefined, "warned about: only when a watch is armed");
+
+    // the environment pins this process above any file, and the source says which
+    await armWith(armed, { wake: "all" });
+    r = await agora(["doctor", "--offline", "--json"], { ...env, CLAUDE_CODE_PROMPT_CACHE_TTL: "1h" }, { cwd });
+    assert.deepEqual([cache(r)[0].ttl, cache(r)[0].source], [3600, "CLAUDE_CODE_PROMPT_CACHE_TTL"]);
+    assert.equal(ttlWarning(r), undefined);
+
+    // and where nothing pins one, the label names neither a number nor a source
+    const claude = cacheTtls({}, dir, path.join(dir, "no-home")).find((c) => c.harness === "claude-code");
+    if (claude?.ttl === null) assert.deepEqual([claude.label, claude.value, claude.source], [CLAUDE_TTL_UNKNOWN, null, null]);
+    else assert.match(String(claude?.label), /\(from .+\)$/, "or it read one somewhere above this seat, and says where");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("cli: doctor warns when a watch polls near a TTL it read, and says nothing about a TTL it did not", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const { cfgPath, root, cwd, settings } = await seat(dir);
+    const env = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "a", CLAUDE_PID: "" };
+    const armed = path.join(root, "sessions", "a", "armed", "down.json");
+    await agora(["session", "--as", "Grace/watch"], env);
+    await mkdir(path.dirname(armed), { recursive: true });
+    /** @param {{ code: number, stdout: string }} r */
+    const near = (r) => typed(r.stdout).filter((/** @type {any} */ o) => o.type === "warning" && o.code === "interval-near-ttl");
+
+    await writeFile(settings, JSON.stringify({ promptCacheTtl: "5m" }));
+    await armWith(armed, { wake: "all", interval: 300 });
+    let r = await agora(["doctor", "--offline", "--json"], env, { cwd });
+    assert.equal(r.code, 0, "a warning never changes doctor's exit");
+    assert.equal(near(r).length, 1);
+    assert.equal(near(r)[0].alias, "down");
+    assert.match(near(r)[0].message, /a room interval of 300s against claude-code's prompt cache TTL of 300s \(5m, read from /, "both numbers, named");
+    assert.match(near(r)[0].message, /the cost curve peaks at the TTL, where every poll pays a cold read/);
+    assert.equal(near(r).some((/** @type {any} */ o) => /codex/.test(o.message)), false, "the TTL it did not read cannot be polled near");
+    r = await agora(["doctor", "--offline"], env, { cwd });
+    assert.match(r.stdout, /WARNING watch pid \d+ for a\/down has a room interval of 300s/);
+
+    // 1.5x the window is the edge of the peak; past it the cold reads are rare again
+    await armWith(armed, { wake: "all", interval: 450 });
+    assert.equal(near(await agora(["doctor", "--offline", "--json"], env, { cwd })).length, 1);
+    await armWith(armed, { wake: "all", interval: 451 });
+    assert.equal(near(await agora(["doctor", "--offline", "--json"], env, { cwd })).length, 0);
+    // and the default fifteen seconds sits deep inside the window, which is where it belongs
+    await armWith(armed, { wake: "all", interval: 15 });
+    assert.equal(near(await agora(["doctor", "--offline", "--json"], env, { cwd })).length, 0);
+
+    // the thread cadence is a cadence too, but only for a watch that follows threads
+    await writeFile(settings, JSON.stringify({ promptCacheTtl: "1h" }));
+    await armWith(armed, { wake: "all", interval: 15, threadInterval: 3600, follow: true });
+    r = await agora(["doctor", "--offline", "--json"], env, { cwd });
+    assert.equal(near(r).length, 1);
+    assert.match(near(r)[0].message, /a thread interval of 3600s against claude-code's prompt cache TTL of 3600s \(1h, read from /);
+    await armWith(armed, { wake: "all", interval: 15, threadInterval: 3600, follow: false });
+    assert.equal(near(await agora(["doctor", "--offline", "--json"], env, { cwd })).length, 0, "a cadence it never polls at costs nothing");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("cli: doctor names a room where no live watch wakes on all, and a watch records what wakes it", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const { cfgPath, root, cwd } = await seat(dir);
+    const A = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "a", CLAUDE_PID: "" };
+    const B = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "b", CLAUDE_PID: "" };
+    await agora(["session", "--as", "Grace/review"], A);
+    await agora(["session", "--as", "Opus/design"], B);
+    const armedA = path.join(root, "sessions", "a", "armed", "down.json");
+    const armedB = path.join(root, "sessions", "b", "armed", "down.json");
+    await mkdir(path.dirname(armedA), { recursive: true });
+    await mkdir(path.dirname(armedB), { recursive: true });
+    /** @param {{ code: number, stdout: string }} r */
+    const gap = (r) => typed(r.stdout).find((/** @type {any} */ o) => o.type === "warning" && o.code === "no-all-watch");
+
+    await armWith(armedA, { wake: "mine" });
+    await armWith(armedB, { wake: "addressed" });
+    let r = await agora(["doctor", "--offline", "--json"], A, { cwd });
+    assert.equal(r.code, 0, "a warning never changes doctor's exit");
+    assert.equal(gap(r).alias, "down");
+    assert.match(gap(r).message, /no watch on this seat will wake for an unaddressed request in down: its 2 live watches wake on addressed, mine/);
+    assert.match(gap(r).message, /Arm one thin bearer there with --wake all/);
+    r = await agora(["doctor", "--offline"], A, { cwd });
+    assert.match(r.stdout, /WARNING no watch on this seat will wake for an unaddressed request in down/);
+
+    // one thin bearer on `all` is the whole remedy
+    await armWith(armedA, { wake: "all" });
+    assert.equal(gap(await agora(["doctor", "--offline", "--json"], A, { cwd })), undefined);
+
+    // a registration written before the field carries no wake, and `all` is what the flag defaulted to
+    await armWith(armedA, {});
+    await armWith(armedB, {});
+    assert.equal(gap(await agora(["doctor", "--offline", "--json"], A, { cwd })), undefined);
+
+    // a watch that narrows itself says so in its registration while it runs
+    const C = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "c", AGORA_ACTOR: "Grace/watch", CLAUDE_PID: "" };
+    const armedC = path.join(root, "sessions", "c", "armed", "down.json");
+    const running = agora(["watch", "down", "--stream", "--for", "3", "--interval", "1", "--wake", "mine"], C);
+    let held;
+    for (let i = 0; i < 60 && !held; i++) {
+      if (existsSync(armedC)) held = JSON.parse(await readFile(armedC, "utf8"));
+      else await delay(50);
+    }
+    assert.equal(held?.wake, "mine", "the arm records what wakes it, so doctor can read it back");
+    await running;
+
+    // and a value the flag does not take is refused before anything is registered
+    r = await agora(["watch", "down", "--once", "--wake", "loud"], C);
+    assert.equal(r.code, 2);
+    assert.equal(existsSync(armedC), false);
   } finally {
     await cleanup();
   }
