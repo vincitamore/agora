@@ -49,6 +49,7 @@ import {
 import { FOLLOW_CAP, FOLLOW_IDLE_MINUTES, dropFollow, followThreads, readFollow, rootsOf, threadsOf } from "../src/follow.mjs";
 import { withThreads } from "../src/threads.mjs";
 import { formatTrailers, matchesAddress, parseTrailers, TRAILER_VALUE_MAX, trailerValueOk } from "../src/trailers.mjs";
+import { SLACK_TEXT_MAX, chunkAtLines, encodeSlackText } from "../src/transports/slack.mjs";
 import { queueCodex } from "../src/codex.mjs";
 import { clearWatchMode, touchWatchMode, watchModeSentinel } from "../src/harness.mjs";
 
@@ -77,6 +78,7 @@ const SCHEMA = {
         "--thread <id>": "reply in a thread",
         "--file <path>": "text from a file",
         "--stdin": "text from stdin",
+        "--split": "chunk a too-long Slack post at line boundaries; each chunk is signed; trailers on the last with part: i/n",
         "--no-sign": "omit the signature line",
         "--trailer <key: value>": `one trailer line, repeatable (the primitive; value at most ${TRAILER_VALUE_MAX} characters, shared with the named flags)`,
         "--to <addr>": "address a bearer, a seat or *, repeatable",
@@ -148,6 +150,7 @@ const OPTIONS = /** @type {const} */ ({
   exhibit: { type: "string", multiple: true },
   because: { type: "string" },
   stdin: { type: "boolean", default: false },
+  split: { type: "boolean", default: false },
   "no-sign": { type: "boolean", default: false },
   follow: { type: "boolean", default: false },
   "thread-interval": { type: "string" },
@@ -516,21 +519,50 @@ async function main(argv) {
       if (values.file) text = await readFile(values.file, "utf8");
       else if (values.stdin || text === "-") text = await readStdin();
       if (!text.trim()) throw new AgoraError(`nothing to post (give text, --file, or --stdin)`, EXIT.usage);
-      if (entries.length) text = `${text.replace(/\s+$/, "")}\n\n${formatTrailers(entries)}`;
+      const unsigned = text.replace(/\s+$/, "");
+      const trailerBlock = entries.length ? formatTrailers(entries) : "";
       const signIt = cfg.sign !== false && !values["no-sign"];
-      const body = signIt ? sign(text, cfg.actor) : text;
+      /** @param {string} piece */
+      const payload = (piece) => (signIt ? sign(piece, cfg.actor) : piece);
+      /** @param {string} piece */
+      const slackLen = (piece) => (transport.kind === "slack" ? encodeSlackText(payload(piece)).length : payload(piece).length);
+      const assembled = trailerBlock ? `${unsigned}\n\n${trailerBlock}` : unsigned;
       await identity();
-      const r = await transport.post(body, { thread });
-      await appendPosted(sdir, r.id);
+      /** @type {string[]} */
+      let pieces = [assembled];
+      if (values.split && transport.kind === "slack" && slackLen(assembled) > SLACK_TEXT_MAX) {
+        const partOverhead = 24; // "\n\npart: 99/99"
+        const budget = Math.max(1, SLACK_TEXT_MAX - partOverhead - (signIt ? 40 : 0) - Math.min(trailerBlock.length + 2, 200));
+        const chunks = chunkAtLines(unsigned, budget);
+        const n = chunks.length;
+        pieces = chunks.map((c, i) => {
+          const part = `part: ${i + 1}/${n}`;
+          const last = i === n - 1;
+          const block = last && trailerBlock ? `${trailerBlock}\n${part}` : part;
+          return `${c}\n\n${block}`;
+        });
+      }
+      /** @type {{ id: string, cursor: string, url?: string } | undefined} */
+      let last;
+      /** @type {string[]} */
+      const ids = [];
+      try {
+        for (const piece of pieces) {
+          last = await transport.post(payload(piece), { thread });
+          await appendPosted(sdir, last.id);
+          ids.push(last.id);
+        }
+      } catch (e) {
+        if (e instanceof AgoraError && /the limit is/.test(e.message) && !values.split)
+          throw new AgoraError(`${e.message}; pass --split to chunk at line boundaries`, EXIT.usage);
+        throw e;
+      }
+      const r = last;
+      if (!r) throw new AgoraError(`nothing posted`, EXIT.error);
       if (thread) await follow(sdir, roomAlias, room, [thread]);
-      // an answer with re: joins the thread under the message it answers: that is where the
-      // humans reply, and a channel-history read never shows it
       else if (values.re && transport.threads) await follow(sdir, roomAlias, room, [String(values.re)]);
-      // a top-level post roots the thread the humans and the other seat reply in. This session's
-      // own post is never delivered to its own watch, so the watch cannot learn the thread from
-      // delivery the way it learns every other root; it must be joined here, at the post
       else if (transport.threads) await follow(sdir, roomAlias, room, [r.id]);
-      console.log(json ? JSON.stringify({ ...r, room: transport.room, thread }) : `posted ${r.id}${r.url ? `  ${r.url}` : ""}  cursor ${r.cursor}`);
+      console.log(json ? JSON.stringify({ ...r, room: transport.room, thread, ...(ids.length > 1 ? { ids } : {}) }) : `posted ${ids.join(" ")}${r.url ? `  ${r.url}` : ""}  cursor ${r.cursor}`);
       return EXIT.ok;
     }
     case "watch": {
