@@ -208,7 +208,7 @@ fifteen-second latency, and a not-modified response costs nothing against the li
 A read without a cursor returns the **newest** messages up to the limit. It used to return the
 oldest of the paged window, so `cursor --now` on a busy room set the position hundreds of
 messages back and a fresh session's first watch replayed them. After a cursor, the oldest come
-first, so a watcher advances in order.
+first, so a watcher advances in order. Every transport holds it now, `local` included; a transport's own test asserts it.
 
 ### Feeds
 
@@ -663,8 +663,7 @@ feature that looks helpful in isolation.
 - **The tool never writes the shared config.**
 - **No transport-specific verb.** A feature that only makes sense on one transport is that
   transport's option.
-- **The exit codes are a contract**: 0 ok or nothing new, 1 error, 2 usage, 42 a watch delivered.
-  No new code, and no new meaning for an old one.
+- **The exit codes are a contract**: 0 ok or nothing new, 1 error, 2 usage, 42 a watch delivered, in every mode. No new code, and no new meaning for an old one.
 - **Zero runtime dependencies**, tokens by reference only, every transport testable offline with
   an injected fetch.
 - **The state layout is a contract.** A cursor's filename inside a session directory is the same
