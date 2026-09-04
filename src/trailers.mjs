@@ -16,11 +16,16 @@ import { parseSignature } from "./core.mjs";
  *
  * `ack: none` (emitted by `post --fyi`) licenses the reader's silence. The tool never filters,
  * suppresses or delays on an incoming `ack:` — honouring it is a judgement, not a code path.
+ *
+ * `withdraws: <id>` names one of the emitter's OWN earlier posts and takes back what it
+ * committed. It is not a `re:`: it implies no thread, changes no delivery, and renders like any
+ * other trailer. What it does is folded in `carry`, off this session's own ledger and no one
+ * else's, so a counterpart cannot withdraw anything of ours by naming it.
  * @typedef {{ key: string, value: string }} Trailer
  */
 
 /** The keys this tool knows. Order is the order the emitter writes them in. */
-export const KNOWN_KEYS = Object.freeze(["to", "re", "claim", "release", "verdict", "exhibit", "because", "ack"]);
+export const KNOWN_KEYS = Object.freeze(["to", "re", "withdraws", "claim", "release", "verdict", "exhibit", "because", "ack"]);
 
 /** One cap for parse and emit: a value past this, empty, or containing a newline, is not a trailer. */
 export const TRAILER_VALUE_MAX = 400;

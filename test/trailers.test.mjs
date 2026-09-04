@@ -108,6 +108,45 @@ test("what the emitter writes is what the parser reads back", () => {
   );
 });
 
+test("withdraws is a known trailer, and emitter and parser round-trip it", () => {
+  const text = [
+    "that run was the wrong branch",
+    "",
+    "withdraws: 1788449823.687169",
+    "verdict: withdrawn",
+    "exhibit: run 4419 line 12",
+    "",
+    "-- Grace/watch",
+  ].join("\n");
+  const r = parseTrailers(text);
+  assert.equal(r.body, "that run was the wrong branch");
+  assert.deepEqual(r.trailers, [
+    { key: "withdraws", value: "1788449823.687169" },
+    { key: "verdict", value: "withdrawn" },
+    { key: "exhibit", value: "run 4419 line 12" },
+  ]);
+  assert.deepEqual(r.to, [], "a withdrawal addresses nobody by itself");
+  assert.equal(formatTrailers(r.trailers), "withdraws: 1788449823.687169\nverdict: withdrawn\nexhibit: run 4419 line 12");
+
+  // repeatable, and written after `re:` and before the commitments it takes back
+  const block = formatTrailers([
+    { key: "withdraws", value: "m9" },
+    { key: "claim", value: "p.ts::f" },
+    { key: "re", value: "m1" },
+    { key: "withdraws", value: "m8" },
+  ]);
+  assert.equal(block, ["re: m1", "withdraws: m9", "withdraws: m8", "claim: p.ts::f"].join("\n"));
+  assert.deepEqual(parseTrailers(`body\n\n${block}`).trailers, [
+    { key: "re", value: "m1" },
+    { key: "withdraws", value: "m9" },
+    { key: "withdraws", value: "m8" },
+    { key: "claim", value: "p.ts::f" },
+  ], "what the emitter writes the parser reads back");
+
+  // and it is a known key on its own, so a block carrying nothing else is still a block
+  assert.deepEqual(parseTrailers("taking it back\n\nwithdraws: m4").trailers, [{ key: "withdraws", value: "m4" }]);
+});
+
 test("ack: none is a known trailer; honouring it is not the parser's job", () => {
   const r = parseTrailers("heads up, no receipt needed\n\nack: none\n\n-- Grace/watch");
   assert.equal(r.body, "heads up, no receipt needed");

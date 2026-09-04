@@ -51,6 +51,31 @@ kept going; the handover, which has one shot, was the surface that failed hardes
 is now the only failure that ends the verb: the threads are read one at a time, whatever cannot be
 read is named in `threadsUnread` with the reason, and the envelope always comes.
 
+**Found missing, in use: the withdrawal that named nothing.** `superseded` fired on a `re:`, which
+meant a retraction had to remember a second flag while being wrong about something. Measured over
+one day of a live room, four bearers, twenty-two verdicts: **not one carried a `re:` naming the
+verdict it withdrew**, so supersession never fired on real data at all, a withdrawn verdict sat
+beside the one that withdrew it indistinguishable in kind, and a successor would have inherited
+the withdrawn claim as live. Discipline did not arrive in a day and would not have. So the
+retraction is a key of its own, `withdraws:`, emitted by `post --withdraws <id>` and repeatable:
+
+- Its value names one of **this session's own earlier posts**, by message id or by cursor.
+- Naming an earlier own **verdict** moves that verdict out of `verdicts` into `superseded` with
+  `supersededBy` set to the withdrawing message, exactly as a `re:` on a verdict does.
+- Naming an earlier own **claim** hands that message's subjects back: they leave `claims` and are
+  recorded in `releases` against the withdrawing message, exactly as a `release:` does.
+- It does not have to be a verdict itself. `post --withdraws <id>` with nothing else takes back
+  what the named post committed, which is the whole point of not needing a second flag.
+- It is not a `re:`. It implies no thread, changes no delivery, and a read renders it like any
+  other trailer. A reader that does not know the key carries it and ignores it, so the versioning
+  story holds, and `re:` keeps superseding a verdict for the block that says it by answering.
+- Only this session's own posts are folded, here as everywhere: a counterpart's `withdraws:` names
+  nothing of ours and is rendered, never acted on.
+
+`post` warns once on stderr, and posts anyway, when a `--verdict` whose words read as a withdrawal
+carries neither `--withdraws` nor `--re`. It is advice about what the tool is about to emit, never
+a gate on content: the exit code is unchanged and the message goes.
+
 Standing content only: no dates, no counts that drift, nothing about which room is being used for
 what right now.
 
@@ -99,9 +124,9 @@ One object. Every field is derived at the call; the `from` column says from what
 | `follow` | `{ threads, aliases }`: the set this session follows, with the ids that are other names for a split post's root | `<session>/follow/<room>.json` |
 | `armed[]` | `{ key, thread, mode, pid, since, startedAt, alive }` for every watch this session has registered on this room | `<session>/armed/*.json`, with the same liveness probe `doctor` uses |
 | `claims[]` | `{ subject, id, cursor, ts, thread? }`: every subject this session has taken and **not** handed back | the window filtered to this session's ledger and read in order: a `claim:` opens a subject, a `release:` closes it, and a `claim:` after a release opens it again. The claim carried is the earliest one **after the last release**, since the earliest claim is the one that holds and a subject taken up again is held from the day it was taken up |
-| `releases[]` | the same shape, for every `release:` this session posted, whether or not the subject was taken up again afterwards | the same fold |
+| `releases[]` | the same shape, for every subject this session handed back, whether or not it was taken up again afterwards | the same fold: a `release:` naming the subject, or a `withdraws:` naming the earlier own post that claimed it, which hands back everything that post took. Either way the entry is located at the message that let it go |
 | `verdicts[]` | `{ verdict, exhibits[], id, cursor, ts, thread? }`: what this session **now** says | the same fold; the exhibits are the `exhibit:` lines of the same message. A verdict a later verdict of this session's own withdrew is in `superseded`, not here |
-| `superseded[]` | `{ verdict, exhibits[], id, cursor, ts, thread?, supersededBy }`: every verdict of this session's own that a later one of its own withdrew, with the id of the message that withdrew it | the same fold: a `verdict:` carrying a `re:` naming an earlier own verdict's `id` (or its `cursor`) moves that verdict out of `verdicts` and here |
+| `superseded[]` | `{ verdict, exhibits[], id, cursor, ts, thread?, supersededBy }`: every verdict of this session's own that a later post of its own withdrew, with the id of the message that withdrew it | the same fold: a `withdraws:` naming an earlier own verdict's `id` (or its `cursor`), or a `verdict:` carrying a `re:` that names one, moves that verdict out of `verdicts` and here |
 | `obligations[]` | `{ to[], id, cursor, ts }`: every message this session posted carrying a `to:` — what this side asked of someone else | the same fold |
 | `owed[]` | `{ from, to[], id, cursor, ts, thread? }`: deliveries addressed to this side that are still awaiting a reply from it | the window (the folded threads included), minus this session's own posts, matched by the standing address rule, then cut per lane: a message is owed unless this session posted in the same thread after it — in the room, for a top-level message — or answered it with a `re:` naming its id |
 | `threadsUnread[]` | `{ id, reason }` for every live thread the fold could not read, with the transport's own words for why (`rate limited`, `thread_not_found`, an id this transport cannot reach). Empty when the fold was complete, and always present. Not the same list as `threads[]`, which is the positions this session holds | the fold: each thread is read on its own, and a read that throws is recorded here instead of ending the envelope. Every list above is computed from a window with these threads missing from it, so a non-empty list here is the measure of how far to trust them |
@@ -125,8 +150,12 @@ message that withdrew it. Nothing is dropped, for the same reason `releases` is 
 successor that saw only the survivor could not tell a verdict that was withdrawn from one that was
 never posted, and would go looking for the exhibit again.
 
-The withdrawal is this session's own `re:` on this session's own post. A counterpart cannot
-supersede a verdict of ours by naming it, and nothing here reads their `re:` at all.
+`withdraws:` is the form to write it in, because it is the one that does not depend on
+remembering: `post --withdraws <id>` needs no verdict of its own and no thread, and it takes back a
+claim by the same name it takes back a verdict. `re:` still supersedes for the block that says it
+by answering. Either way the withdrawal is this session's own, on this session's own post: a
+counterpart cannot supersede a verdict of ours by naming it, and neither their `re:` nor their
+`withdraws:` is read here at all.
 
 ### Why `owed` is what arrived, cut per lane
 

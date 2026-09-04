@@ -582,6 +582,105 @@ test("cli: the trailer block is emitted above the signature, rendered above the 
   }
 });
 
+test("cli: --withdraws emits the line, and a withdrawal-shaped verdict that links nothing is warned about and still posted", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const cfgPath = path.join(dir, "agora.json");
+    await writeFile(cfgPath, JSON.stringify({
+      actor: { name: "Grace/watch", kind: "agent" },
+      rooms: { down: { transport: "local", path: path.join(dir, "down.ndjson") } },
+    }));
+    const env = { AGORA_CONFIG: cfgPath, AGORA_STATE: path.join(dir, "state"), AGORA_SESSION: "a", CLAUDE_PID: "" };
+
+    let r = await agora(["post", "down", "--verdict", "pass", "--exhibit", "run 4412 line 88", "--json", "it settles"], env);
+    assert.equal(r.code, 0);
+    const first = JSON.parse(r.stdout.trim());
+
+    // the measured gap: a verdict whose words say it takes something back, naming nothing. One
+    // line of advice on stderr, and the post goes -- the tool constrains what IT emits, never
+    // whether a message may be sent
+    r = await agora(["post", "down", "--verdict", "withdrawn: wrong branch", "--exhibit", "run 4419 line 12", "never mind"], env);
+    assert.equal(r.code, 0, "advice, never a refusal");
+    assert.match(r.stderr, /WARNING this verdict reads as a withdrawal/);
+    assert.match(r.stderr, /--withdraws <id>/);
+    assert.match(r.stdout, /^posted /m, "and it posted");
+
+    // every label the tool reads as a withdrawal, and one it does not
+    for (const label of ["withdraw that", "Withdrawn", "retract it", "retraction of the above", "corrected", "a correction", "reversed"]) {
+      const one = await agora(["post", "down", "--verdict", label, "--exhibit", "run 4419", "x"], env);
+      assert.equal(one.code, 0);
+      assert.match(one.stderr, /WARNING this verdict reads as a withdrawal/, `${label} reads as a withdrawal`);
+    }
+    const plain = await agora(["post", "down", "--verdict", "pass on the retry path", "--exhibit", "run 4420", "x"], env);
+    assert.equal(plain.code, 0);
+    assert.doesNotMatch(plain.stderr, /reads as a withdrawal/);
+
+    // linked, by id: the line is emitted and the warning is not
+    r = await agora(["post", "down", "--withdraws", first.id, "--verdict", "withdrawn", "--exhibit", "run 4419 line 12", "--json", "that was the wrong branch"], env);
+    assert.equal(r.code, 0);
+    assert.doesNotMatch(r.stderr, /reads as a withdrawal/, "it names what it withdraws, so there is nothing to advise");
+    const second = JSON.parse(r.stdout.trim());
+    let read = await agora(["read", "down", "--json"], env);
+    const posted = typed(read.stdout).find((/** @type {any} */ m) => m.id === second.id);
+    assert.equal(posted.text, `that was the wrong branch\n\nwithdraws: ${first.id}\nverdict: withdrawn\nexhibit: run 4419 line 12\n\n-- Grace/watch`);
+    assert.deepEqual(posted.trailers.map((/** @type {any} */ t) => t.key), ["withdraws", "verdict", "exhibit"]);
+
+    // repeatable, and it needs no verdict of its own; a `re:` also counts as the link
+    r = await agora(["post", "down", "--withdraws", first.id, "--withdraws", first.cursor, "taking both back"], env);
+    assert.equal(r.code, 0);
+    read = await agora(["read", "down", "--json"], env);
+    const bare = typed(read.stdout).at(-1);
+    assert.deepEqual(bare.trailers, [{ key: "withdraws", value: first.id }, { key: "withdraws", value: first.cursor }]);
+    r = await agora(["post", "down", "--re", first.id, "--verdict", "retracted", "--exhibit", "run 4421", "x"], env);
+    assert.equal(r.code, 0);
+    assert.doesNotMatch(r.stderr, /reads as a withdrawal/);
+
+    // and the fold reads it: the withdrawn verdict is superseded, not standing beside its successor
+    const carry = await agora(["carry", "down", "--json"], env);
+    assert.equal(carry.code, 0);
+    const c = JSON.parse(carry.stdout.trim());
+    assert.equal(c.verdicts.some((/** @type {any} */ v) => v.id === first.id), false);
+    assert.deepEqual(c.superseded.map((/** @type {any} */ v) => [v.id, v.verdict, v.supersededBy]), [[first.id, "pass", second.id]]);
+
+    r = await agora(["schema"], env);
+    assert.match(r.stdout, /--withdraws <id>/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("cli: a claim withdrawn by --withdraws leaves the open list and is carried as a release", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const cfgPath = path.join(dir, "agora.json");
+    await writeFile(cfgPath, JSON.stringify({
+      actor: { name: "Grace/watch", kind: "agent" },
+      rooms: { down: { transport: "local", path: path.join(dir, "down.ndjson") } },
+    }));
+    const env = { AGORA_CONFIG: cfgPath, AGORA_STATE: path.join(dir, "state"), AGORA_SESSION: "a", CLAUDE_PID: "" };
+
+    let r = await agora(["post", "down", "--claim", "src/fetch.ts::retryFetch", "--json", "taking it"], env);
+    assert.equal(r.code, 0);
+    const claim = JSON.parse(r.stdout.trim());
+    r = await agora(["post", "down", "--claim", "docs/x.md", "and this"], env);
+    assert.equal(r.code, 0);
+
+    r = await agora(["post", "down", "--withdraws", claim.cursor, "not mine after all"], env);
+    assert.equal(r.code, 0);
+    const withdrawal = JSON.parse((await agora(["read", "down", "--json"], env)).stdout.trim().split(/\r?\n/).at(-1) ?? "");
+
+    const carry = await agora(["carry", "down", "--json"], env);
+    const c = JSON.parse(carry.stdout.trim());
+    assert.deepEqual(c.claims.map((/** @type {any} */ x) => x.subject), ["docs/x.md"]);
+    assert.deepEqual(c.releases.map((/** @type {any} */ x) => [x.subject, x.id]), [["src/fetch.ts::retryFetch", withdrawal.id]]);
+
+    const human = await agora(["carry", "down"], env);
+    assert.match(human.stdout, /release {5}src\/fetch\.ts::retryFetch/);
+  } finally {
+    await cleanup();
+  }
+});
+
 test("cli: a room's note is printed with it, and doctor says when a local room sits somewhere that loses lines", async () => {
   const { dir, cleanup } = await tmp();
   try {
