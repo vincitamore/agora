@@ -36,6 +36,11 @@ import { jitter, readCursor, redact, writeCursor, sleep as defaultSleep } from "
  * dies mid-batch re-delivers next time instead of losing the batch. An all-own batch still advances
  * the cursor. `readCursor`/`writeCursor` here are the plain per-key file functions; the caller
  * chooses the directory (a session's own).
+ *
+ * `coalesceSeconds` / `maxBatch` hold fresh messages in memory and call `onBatch` once for the
+ * window. The cursor is not persisted while anything is held, so a death mid-window re-delivers
+ * (at-least-once unchanged). A message for which `urgent` is true flushes immediately, as does
+ * reaching `maxBatch`. Remaining held messages flush when the watch is about to return.
  * @param {import('./core.mjs').Transport} transport
  * @param {{
  *   stateDir: string, key: string, thread?: string, cursor?: string,
@@ -43,6 +48,8 @@ import { jitter, readCursor, redact, writeCursor, sleep as defaultSleep } from "
  *   onBatch: (msgs: import('./core.mjs').Message[], batch: { delivered: number, skipped: number, filtered: number }) => void | Promise<void>,
  *   own?: () => Promise<Set<string>> | Set<string>,
  *   wake?: (m: import('./core.mjs').Message) => boolean,
+ *   urgent?: (m: import('./core.mjs').Message) => boolean,
+ *   coalesceSeconds?: number, maxBatch?: number,
  *   threads?: FollowedThreads,
  *   sweep?: () => Promise<void> | void,
  *   sleep?: (ms: number) => Promise<void>, now?: () => number, random?: () => number,
@@ -54,10 +61,13 @@ import { jitter, readCursor, redact, writeCursor, sleep as defaultSleep } from "
  * @returns {Promise<{ fired: boolean, cursor?: string, polls: number, skipped: number, filtered: number, delivered: number, elapsedMs: number, following: number, threads: Record<string, number> }>}
  */
 export async function watch(transport, opts) {
-  const { stateDir, key, thread, mode = "until-new", interval = 15, forSeconds = 0, onBatch, own, wake, threads, sweep } = opts;
+  const { stateDir, key, thread, mode = "until-new", interval = 15, forSeconds = 0, onBatch, own, wake, urgent, threads, sweep } = opts;
   const sleep = opts.sleep ?? defaultSleep;
   const now = opts.now ?? Date.now;
   const random = opts.random ?? Math.random;
+  const coalesceSeconds = opts.coalesceSeconds && opts.coalesceSeconds > 0 ? opts.coalesceSeconds : 0;
+  const maxBatch = opts.maxBatch && opts.maxBatch > 0 ? opts.maxBatch : 0;
+  const holding = coalesceSeconds > 0 || maxBatch > 0;
   let skipped = 0;
   let filtered = 0;
   let delivered = 0;
@@ -69,7 +79,54 @@ export async function watch(transport, opts) {
   const start = now();
   let fired = false;
   let polls = 0;
+  /** @type {Array<{ m: import('./core.mjs').Message, thread?: string }>} */
+  const held = [];
+  /** @type {Set<string>} */
+  const heldIds = new Set();
+  let windowStart;
+  /** @type {string | undefined} */
+  let pendingRoomCursor;
+  /** @type {Map<string, string>} */
+  const pendingThreadCursors = new Map();
+  let windowSkipped = 0;
+  let windowFiltered = 0;
   const result = () => ({ fired, cursor, polls, skipped, filtered, delivered, elapsedMs: Math.max(0, now() - start), following: followed.size, threads: perThread });
+
+  /** Persist cursors seen during the window; only after the held batch is delivered. */
+  const persistPending = async () => {
+    if (pendingRoomCursor !== undefined) {
+      cursor = pendingRoomCursor;
+      await writeCursor(stateDir, key, cursor);
+    }
+    for (const [id, c] of pendingThreadCursors) {
+      const st = followed.get(id);
+      if (st) st.cursor = c;
+      await writeCursor(stateDir, threads ? threads.key(id) : id, c);
+    }
+    pendingRoomCursor = undefined;
+    pendingThreadCursors.clear();
+  };
+
+  const flush = async () => {
+    if (!held.length) return;
+    const msgs = held.map((e) => e.m);
+    const n = held.length;
+    await onBatch(msgs, { delivered: n, skipped: windowSkipped, filtered: windowFiltered });
+    delivered += n;
+    for (const e of held) {
+      const id = e.thread ?? e.m.thread;
+      if (id !== undefined && id in perThread) perThread[id] += 1;
+    }
+    if (threads?.note) await threads.note(msgs);
+    fired = true;
+    held.length = 0;
+    heldIds.clear();
+    windowStart = undefined;
+    windowSkipped = 0;
+    windowFiltered = 0;
+    await persistPending();
+  };
+
   for (;;) {
     polls++;
     // the seat's own housekeeping rides on the poll: a sibling that went dark is announced here,
@@ -143,35 +200,57 @@ export async function watch(transport, opts) {
       const fresh = wake ? notMine.filter((e) => wake(e.m)) : notMine;
       const filteredHere = notMine.length - fresh.length;
       filtered += filteredHere;
-      if (fresh.length) {
-        // the counts of THIS poll, so a consumer taking one object per poll says what the poll did
-        // without subtracting running totals itself
-        await onBatch(fresh.map((e) => e.m), { delivered: fresh.length, skipped: skippedHere, filtered: filteredHere });
-        delivered += fresh.length;
-        // a message counts against a followed thread whether the thread read or the room read
-        // was the one that carried it
-        for (const e of fresh) {
-          const id = e.thread ?? e.m.thread;
-          if (id !== undefined && id in perThread) perThread[id] += 1;
+      if (roomMsgs.length) pendingRoomCursor = roomMsgs[roomMsgs.length - 1].cursor;
+      for (const [id, c] of advanced) pendingThreadCursors.set(id, c);
+
+      if (!holding) {
+        if (fresh.length) {
+          // the counts of THIS poll, so a consumer taking one object per poll says what the poll did
+          // without subtracting running totals itself
+          await onBatch(fresh.map((e) => e.m), { delivered: fresh.length, skipped: skippedHere, filtered: filteredHere });
+          delivered += fresh.length;
+          // a message counts against a followed thread whether the thread read or the room read
+          // was the one that carried it
+          for (const e of fresh) {
+            const id = e.thread ?? e.m.thread;
+            if (id !== undefined && id in perThread) perThread[id] += 1;
+          }
+          fired = true;
+          if (threads?.note) await threads.note(fresh.map((e) => e.m));
         }
-        fired = true;
+        await persistPending();
+        if (fired && mode !== "stream") return result();
+      } else {
+        windowSkipped += skippedHere;
+        windowFiltered += filteredHere;
+        // advance the in-memory position so the next poll does not re-read; disk waits for flush
+        if (pendingRoomCursor !== undefined) cursor = pendingRoomCursor;
+        for (const [id, c] of pendingThreadCursors) {
+          const st = followed.get(id);
+          if (st) st.cursor = c;
+        }
+        let mustFlush = false;
+        for (const e of fresh) {
+          if (heldIds.has(e.m.id)) continue;
+          if (!held.length) windowStart = now();
+          held.push(e);
+          heldIds.add(e.m.id);
+          if (urgent?.(e.m)) mustFlush = true;
+        }
+        if (maxBatch > 0 && held.length >= maxBatch) mustFlush = true;
+        if (mustFlush) await flush();
+        if (fired && mode !== "stream") return result();
       }
-      if (roomMsgs.length) {
-        cursor = roomMsgs[roomMsgs.length - 1].cursor;
-        await writeCursor(stateDir, key, cursor);
-      }
-      for (const [id, c] of advanced) {
-        const st = followed.get(id);
-        if (!st) continue;
-        st.cursor = c;
-        await writeCursor(stateDir, st.key, c);
-      }
-      if (threads?.note && fresh.length) await threads.note(fresh.map((e) => e.m));
+    }
+    if (holding && held.length && coalesceSeconds > 0 && windowStart !== undefined && now() - windowStart >= coalesceSeconds * 1000) {
+      await flush();
       if (fired && mode !== "stream") return result();
     }
-    if (mode === "once") return result();
-    // give up when the next poll would land past the deadline, rather than after one poll too many
-    if (forSeconds > 0 && now() - start + interval * 1000 > forSeconds * 1000) return result();
+    const deadline = forSeconds > 0 && now() - start + interval * 1000 > forSeconds * 1000;
+    if (mode === "once" || deadline) {
+      await flush();
+      return result();
+    }
     await sleep(jitter(interval * 1000, random));
   }
 }

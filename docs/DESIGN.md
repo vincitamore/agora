@@ -291,7 +291,7 @@ a message whose `to:` names the reader, its model, the seat, or `*`). What it dr
 advances the cursor, is counted as `filtered` on the result line, and still shows in `read`. A
 seat keeps one watch on `all` so an unaddressed request reaches someone. The filter shipped
 because an agent that holds one long-lived watch for a whole session pays a turn per wake, and
-waking on everything was the measured cost.
+waking on everything was the measured cost. `watch --coalesce` holds a burst and delivers one envelope (one `codex queue` call) per window; a message addressed to this bearer flushes immediately. `watch --digest` is rendering only. `session_wakes` and `bytes_delivered` on `watch-result` count this process's own IO, never a tally about content. `join` (and, in W5, `doctor`) print the usual `--wake` for a role once and apply nothing.
 
 One piece of this section is **deferred until a working day with several agents has been
 counted** (see the flip conditions): a `claims <room>` view that folds `claim:` and `release:`
