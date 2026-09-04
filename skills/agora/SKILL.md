@@ -288,10 +288,12 @@ array, and `agora <verb> --help` prints that verb's block plus the globals.
 **Fewer wakes: coalesce, digest, and the wake counters.** `watch --coalesce <s> --max-batch <n>`
 holds deliveries for a bounded window and then hands them over as one `batch` envelope naming
 every cursor; a message whose `to:` names this bearer flushes the window at once, and the cursor
-stays off disk until the flush, so delivery is still at-least-once. `--digest <s>`, enabled per
-room by the `digest` key in the config and never by transport, delivers one rendered line per
-message per period (author, cursor, the first 80 characters): rendering, never a summary of what
-a message means. `watch-result` carries `session_wakes` and `bytes_delivered`, counters about this
+stays off disk while any deliverable message awaits that flush, so delivery is still at-least-once.
+An own-only or filtered-only poll holds no delivery and persists its room and thread positions
+immediately, so a re-arm does not replay traffic that could never wake this bearer. `--digest <s>`,
+enabled per room by the `digest` key in the config and never by transport, delivers one rendered
+line per message per period (author, cursor, the first 80 characters): rendering, never a summary
+of what a message means. `watch-result` carries `session_wakes` and `bytes_delivered`, counters about this
 process's own IO for a harness-side compaction trigger. `join` prints, once, the `--wake` a role
 segment usually runs with; it applies nothing, and the flag is the only thing that changes what
 wakes you.
