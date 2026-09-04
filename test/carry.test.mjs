@@ -253,6 +253,45 @@ test("carry: a verdict answering an earlier own verdict supersedes it, and the w
   assert.deepEqual(b.superseded, []);
 });
 
+test("carry: a withdraws: supersedes an earlier own verdict and releases an earlier own claim", () => {
+  // the measured defect: across twenty-two verdicts over one day and four bearers, not one carried
+  // a `re:` naming the verdict it withdrew, so supersession never fired on real data at all
+  const first = msg("v1", "it passes\n\nverdict: pass\nexhibit: run 4412 line 88\n\n-- Fable/watch");
+  const back = msg("v2", "wrong branch, taking that back\n\nwithdraws: v1\n\n-- Fable/watch");
+  const c = foldRoom([first, back], new Set(["v1", "v2"]), { bearer: "Fable/watch" });
+  assert.deepEqual(c.verdicts, [], "a withdrawal needs no verdict of its own to take one back");
+  assert.deepEqual(c.superseded.map((v) => [v.id, v.cursor, v.verdict, v.supersededBy]), [["v1", "1", "pass", "v2"]]);
+  const text = renderCarry({ ...c, cursorKey: "down", cursor: null });
+  assert.match(text, /superseded {2}pass {3}v1 cursor 1, withdrawn by v2/);
+
+  // by cursor as well as by id: an agent that read the cursor off `post` need not translate it
+  const byCursor = foldRoom([first, msg("v3", "taking it back\n\nwithdraws: 1\n\n-- Fable/watch")], new Set(["v1", "v3"]), { bearer: "Fable/watch" });
+  assert.deepEqual(byCursor.superseded.map((v) => [v.id, v.supersededBy]), [["v1", "v3"]]);
+
+  // a withdrawal naming an earlier own CLAIM hands its subject back, as a release: does
+  const dropped = msg("m20", "not mine after all\n\nwithdraws: m1\n\n-- Fable/watch");
+  const claims = foldRoom([OWN_CLAIM, OWN_SECOND, dropped], new Set(["m1", "m2", "m20"]), { bearer: "Fable/watch" });
+  assert.deepEqual(claims.claims.map((x) => x.subject), ["docs/x.md"]);
+  assert.deepEqual(claims.releases.map((x) => [x.subject, x.id]), [["worker/src/fetch.ts::retryFetch", "m20"]], "carried, never merely subtracted");
+
+  // and one that names nothing of this session's own changes nothing
+  const foreign = foldRoom([first, OWN_CLAIM, msg("v4", "x\n\nwithdraws: foreign-9\n\n-- Fable/watch")], new Set(["v1", "m1", "v4"]), { bearer: "Fable/watch" });
+  assert.deepEqual(foreign.verdicts.map((v) => v.id), ["v1"]);
+  assert.deepEqual(foreign.superseded, []);
+  assert.deepEqual(foreign.releases, []);
+  assert.deepEqual(foreign.claims.map((x) => x.subject), ["worker/src/fetch.ts::retryFetch"]);
+});
+
+test("carry: an incoming withdraws: is rendered and never folded", () => {
+  // the ledger is the whole filter here as everywhere: a counterpart cannot withdraw a verdict of
+  // ours by naming it, and this side's fold does not read their block at all
+  const mine = msg("v1", "it passes\n\nverdict: pass\nexhibit: run 4412 line 88\n\n-- Fable/watch");
+  const theirs = msg("x9", "that one is wrong\n\nwithdraws: v1\n\n-- Bone/dev", { who: "bone", kind: "human" });
+  const c = foldRoom([mine, theirs], new Set(["v1"]), { bearer: "Fable/watch" });
+  assert.deepEqual(c.verdicts.map((v) => v.id), ["v1"]);
+  assert.deepEqual(c.superseded, []);
+});
+
 test("carry: a delivery addressed here is owed until this session answers it by name", () => {
   const ask = msg("m10", "can you rerun it?\n\nto: Fable\n\n-- Bone/dev", { who: "bone", kind: "human" });
   const open = foldRoom([OWN_CLAIM, ask], new Set(["m1"]), { bearer: "Fable/watch" });

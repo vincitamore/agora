@@ -218,11 +218,11 @@ function namedIds(v) {
  * folded here into `claims`, `releases`, `verdicts`, `superseded` and `obligations` was written by
  * the reader asking for it: the ledger is the filter, so a message is in that set if and only if
  * this session posted it, and the `re:` that supersedes a verdict or clears a delivery is this
- * session's own on this session's own post. Nothing is routed, woken, filtered or suppressed
- * either way. `owed` does read an incoming `to:`, and it renders it: the addresses are printed as
- * they were written, this verb runs only because the reader ran it, and no delivery, cursor or
- * wake changes because of what it found -- the same line `read` has always drawn under an incoming
- * block.
+ * session's own on this session's own post, as is the `withdraws:` that takes one back. Nothing
+ * is routed, woken, filtered or suppressed either way. `owed` does read an incoming `to:`, and
+ * it renders it: the addresses are printed as they were written, this verb runs only because the
+ * reader ran it, and no delivery, cursor or wake changes because of what it found -- the same
+ * line `read` has always drawn under an incoming block.
  * @param {Message[]} msgs the window, ascending
  * @param {Set<string>} posted this session's ledger
  * @param {{ bearer: string, seat?: { id?: string, name?: string } }} who
@@ -247,6 +247,13 @@ export function foldRoom(msgs, posted, who) {
    * @type {Map<string, Ref & { subject: string }>}
    */
   const openClaims = new Map();
+  /**
+   * What each of this session's own posts claimed, under its id and under its cursor, so a later
+   * `withdraws:` naming that post by either can hand the same subjects back. Only posts already
+   * read are in it, which is what makes a withdrawal name an EARLIER post of this session's own.
+   * @type {Map<string, string[]>}
+   */
+  const claimedBy = new Map();
   /** ids this session named in a `re:` on a post of its own @type {Set<string>} */
   const answered = new Set();
   /** lane -> index of this session's newest own post in it @type {Map<string, number>} */
@@ -265,17 +272,41 @@ export function foldRoom(msgs, posted, who) {
     /** the messages this post answers, by id */
     const answers = trailers.filter((t) => t.key === "re").flatMap((t) => namedIds(t.value));
     for (const id of answers) answered.add(id);
+    /** the messages this post takes back, by id or cursor */
+    const withdrawn = trailers.filter((t) => t.key === "withdraws").flatMap((t) => namedIds(t.value));
+    // A `withdraws:` is the first-class retraction, and it is resolved before this message's own
+    // trailers because it is about the earlier ones: whatever the named post committed stops being
+    // committed, whether or not this post commits anything in its place. Measured on a live room:
+    // across twenty-two verdicts over one day and four bearers, not one carried a `re:` naming the
+    // verdict it withdrew, so supersession never fired at all and a withdrawn verdict sat beside
+    // the one that withdrew it. A link that depends on remembering a second flag while being wrong
+    // about something is a link nobody makes, so the retraction is a flag of its own.
+    for (const id of withdrawn) {
+      const at = verdicts.findIndex((v) => v.id === id || v.cursor === id);
+      if (at >= 0) superseded.push({ ...verdicts.splice(at, 1)[0], supersededBy: m.id });
+      // withdrawing the post that took a subject hands the subject back, exactly as a `release:`
+      // does, and is carried in the same list so a successor sees the retraction rather than a gap
+      for (const subject of claimedBy.get(id) ?? []) {
+        releases.push({ subject, ...ref });
+        openClaims.delete(subject);
+      }
+    }
+    /** @type {string[]} */
+    const claimedHere = [];
     for (const t of trailers) {
       if (t.key === "claim") {
+        claimedHere.push(t.value);
         if (!openClaims.has(t.value)) openClaims.set(t.value, { subject: t.value, ...ref });
       } else if (t.key === "release") {
         releases.push({ subject: t.value, ...ref });
         openClaims.delete(t.value);
       } else if (t.key === "verdict") {
-        // A retraction is a verdict answering an earlier verdict of this session's own: what it
-        // names stops being what this session says and becomes what it said. It is moved, never
+        // A retraction is also a verdict answering an earlier verdict of this session's own: what
+        // it names stops being what this session says and becomes what it said. It is moved, never
         // dropped -- a successor that saw only the survivor could not tell a verdict that was
         // withdrawn from one that was never posted, and would go looking for its exhibit again.
+        // `withdraws:` above is the same move said outright; this one stays for the block that
+        // says it by answering.
         for (const id of answers) {
           const at = verdicts.findIndex((v) => v.id === id || v.cursor === id);
           if (at >= 0) superseded.push({ ...verdicts.splice(at, 1)[0], supersededBy: m.id });
@@ -283,6 +314,9 @@ export function foldRoom(msgs, posted, who) {
         verdicts.push({ verdict: t.value, exhibits, ...ref });
       }
     }
+    // under both names a later `withdraws:` may use: an agent that read the cursor off `post`
+    // should not have to translate it into an id before it can take the claim back
+    if (claimedHere.length) for (const name of [m.id, m.cursor]) claimedBy.set(name, claimedHere);
     if (to.length) obligations.push({ to, ...ref });
   }
 

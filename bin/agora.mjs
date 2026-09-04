@@ -108,6 +108,7 @@ const SCHEMA = {
         "--trailer <key: value>": `one trailer line, repeatable (the primitive; value at most ${TRAILER_VALUE_MAX} characters, shared with the named flags; the cap counts UTF-16 code units, so an emoji spends two)`,
         "--to <addr>": "address a bearer, a seat or *, repeatable",
         "--re <id>": "the message this answers",
+        "--withdraws <id>": "take back one of your own earlier posts, by id or cursor, repeatable; in carry a withdrawn verdict moves to superseded and a withdrawn claim hands its subject back. Not a reply: it implies no thread and changes no delivery",
         "--claim <subject>": "announce you are working on it, repeatable",
         "--release <subject>": "hand it back, repeatable",
         "--verdict <line>": "a settled result; needs at least one --exhibit",
@@ -184,6 +185,7 @@ const OPTIONS = /** @type {const} */ ({
   trailer: { type: "string", multiple: true },
   to: { type: "string", multiple: true },
   re: { type: "string" },
+  withdraws: { type: "string", multiple: true },
   claim: { type: "string", multiple: true },
   release: { type: "string", multiple: true },
   verdict: { type: "string" },
@@ -409,7 +411,7 @@ function trailerEntries(values) {
       throw new AgoraError(`--trailer takes "<key>: <value>" (a lower-case key of up to 24 characters, a value of up to ${TRAILER_VALUE_MAX} UTF-16 code units, so an emoji spends two)`, EXIT.usage);
     out.push({ key, value });
   }
-  for (const key of ["to", "re", "claim", "release", "verdict", "exhibit", "because"]) {
+  for (const key of ["to", "re", "withdraws", "claim", "release", "verdict", "exhibit", "because"]) {
     const v = values[key];
     for (const value of Array.isArray(v) ? v : v === undefined ? [] : [String(v)]) {
       const trimmed = String(value).trim();
@@ -421,6 +423,13 @@ function trailerEntries(values) {
   if (values.fyi) out.push({ key: "ack", value: "none" });
   return out;
 }
+
+/**
+ * A verdict whose words say it takes something back. The link is the flag; this only notices that
+ * the words claim one, and `post` says so once and posts anyway -- the tool advises on what it is
+ * about to emit and never reads content to decide whether a message may be sent.
+ */
+const WITHDRAWAL_LABEL = /withdraw|withdrawn|retract|retraction|corrected|correction|reversed/i;
 
 /** The whole surface, or one verb's block with the globals under it. @param {string} [only] */
 function usage(only) {
@@ -971,6 +980,13 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       const entries = trailerEntries(values);
       if (entries.some((t) => t.key === "verdict") && !entries.some((t) => t.key === "exhibit"))
         throw new AgoraError(`--verdict needs at least one --exhibit: a claim is settled by an exhibit, not by agreement`, EXIT.usage);
+      // Advice, never a gate. Measured on a live room: across twenty-two verdicts over one day and
+      // four bearers, not one named the verdict it withdrew, so `carry` could not tell a withdrawn
+      // verdict from a standing one and a successor would inherit the withdrawn claim as live. The
+      // tool constrains only what IT emits, and only by saying so once: the post goes either way.
+      const saysWithdrawal = entries.find((t) => t.key === "verdict" && WITHDRAWAL_LABEL.test(t.value));
+      if (saysWithdrawal && !entries.some((t) => t.key === "withdraws" || t.key === "re"))
+        console.error(`agora: WARNING this verdict reads as a withdrawal ("${saysWithdrawal.value}") and names nothing it withdraws; pass --withdraws <id> with the id or cursor of the post it takes back, or a successor's carry shows both verdicts standing side by side. Posting it as given.`);
       let text = rest.join(" ");
       if (values.file) {
         try {

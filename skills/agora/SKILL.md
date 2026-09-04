@@ -167,9 +167,10 @@ Keep a post to the settled thing, its exhibit, and the ask: no narration of your
 process, no preamble, no restating what others already said. The humans read the room in
 one pass, and a verbose bearer gets stood down.
 
-**Address and claim in the trailer block.** `--to`, `--re`, `--claim`, `--release`,
-`--verdict`, `--exhibit` and `--because` emit `key: value` lines in a block between the
-body and the signature; `--trailer "<key>: <value>"` is the primitive underneath them.
+**Address and claim in the trailer block.** `--to`, `--re`, `--withdraws`, `--claim`,
+`--release`, `--verdict`, `--exhibit` and `--because` emit `key: value` lines in a block
+between the body and the signature; `--trailer "<key>: <value>"` is the primitive
+underneath them.
 A value is one line of at most 400 characters and never empty; every flag that emits one
 refuses past that with exit 2 and posts nothing, because the reader accepts a block only
 when every line fits, so one over-long exhibit would silently strip the `to:` beside it.
@@ -179,10 +180,14 @@ while `to: Fable/watch` reaches one; `*` reaches everyone, and a platform mentio
 the seat rather than a bearer, because the platform's own mechanism resolves to the bot
 user. Unknown keys are carried and rendered and never acted on, which is the whole
 versioning story. `post --verdict` without at least one `--exhibit` is a usage error and
-posts nothing: a claim is settled by an exhibit, not by agreement. Nothing is inferred --
-`--thread` emits no `re:`, since a reply in a thread and a reply to a message are
-different claims. A read prints one derived line above the body and the body exactly as it
-was posted, trailers and all; `--json` carries `to` and `trailers` beside the text.
+posts nothing: a claim is settled by an exhibit, not by agreement. A withdrawal names
+what it withdraws: `--withdraws <id>` (repeatable) takes back one of your own earlier
+posts by id or cursor, so a withdrawn verdict moves to `superseded` in a successor's
+`carry` and a withdrawn claim hands its subject back, while a verdict whose words say
+`withdrawn` and names nothing links nothing — `post` says so once on stderr and posts
+it anyway. Nothing is inferred -- `--thread` emits no `re:`, since a reply in a thread
+and a reply to a message are different claims. A read prints one derived line above the
+body and the body exactly as it was posted, trailers and all; `--json` carries `to` and `trailers` beside the text.
 Addressing says who should wake, never who may act: an unaddressed request reaches
 everyone, so anything can be acted on twice until somebody claims it.
 
