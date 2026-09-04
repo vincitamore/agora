@@ -25,7 +25,6 @@ import {
   ageHours,
   appendPosted,
   armedAlive,
-  childSession,
   claimDeparture,
   departures,
   departuresLine,
@@ -397,7 +396,6 @@ async function main(argv) {
   const record = verb === "session" || verb === "join" ? await readRecord(sdir) : await touchRecord(sdir);
   const bearer = resolveBearer(cfg, { as: values.as, env: process.env, record });
   cfg.actor = { ...cfg.actor, name: bearer.name }; // one string: the signature, the local transport's identity
-  const child = childSession(cfg, process.env);
   /**
    * Who this process is, on stderr. Under `--json` a watch also puts it on stdout at the arm, so a
    * monitor that only reads stdout can verify which session and bearer armed before the first poll.
@@ -421,7 +419,7 @@ async function main(argv) {
     const rec = await writeRecord(sdir, session, { bearer: bearer.name, label: values.label, ...hp });
     const line = `registered ${rec.bearer} as session ${session.slug} (from ${session.source})${rec.pid ? `  pid ${rec.pid} from ${rec.pidSource}` : `  no harness pid found (looked for ${hp.looked.join(", ")}); liveness unknown`}`;
     if (toStderr) console.error(`agora: ${line}`);
-    else if (json) console.log(JSON.stringify({ ...rec, dir: sdir, ...(child.child ? { child: true } : {}) }));
+    else if (json) console.log(JSON.stringify({ ...rec, dir: sdir }));
     else console.log(line);
     return rec;
   }
@@ -607,7 +605,6 @@ async function main(argv) {
         bearer: bearer.name,
         bearerSource: bearer.source,
         registered: Boolean(record),
-        ...(child.child ? { child: true } : {}),
       }));
       for (const r of rows) {
         const scope = await sessionScope(r.dir);
@@ -616,7 +613,6 @@ async function main(argv) {
     } else {
       console.log(`config  ${cfg.path}\nstate   ${sdir}\nsession ${session.slug} (from ${session.source})${record ? "" : "  (unregistered: run `agora session --as <bearer>`)"}\nbearer  ${bearer.name} (${cfg.actor.kind}, from ${bearer.source})`);
       for (const line of envPrefix(session, bearer)) console.log(line);
-      if (child.child) console.log(`WARNING this process is a subagent of session ${session.slug} (${child.source}); it shares that session's position and ledger.`);
       if (rows.length) {
         console.log("\nsessions with state here");
         for (const r of rows) {
@@ -757,10 +753,6 @@ async function main(argv) {
       await identity();
       if (!record)
         console.error(`agora: this session is unregistered and is signing as "${bearer.name}" (from ${bearer.source}); run \`agora session --as <Model>/<role>\` so the room can tell your sessions apart`);
-      // The harness hands a subagent its parent's session id, so this post lands in the parent's
-      // ledger and the parent's own watch will never deliver it. Visibility, never a refusal.
-      if (child.child)
-        console.error(`agora: WARNING this process is a subagent of session ${session.slug} (${child.source}); only the session holding the seat should post, and the parent's own watch will not see this message`);
       /** @type {string[]} */
       let pieces = [assembled];
       if (values.split && transport.kind === "slack" && slackLen(assembled) > SLACK_TEXT_MAX) {
@@ -802,7 +794,7 @@ async function main(argv) {
         await follow(sdir, roomAlias, room, [ids[0]]);
         if (ids.length > 1) await aliasThreads(sdir, cursorKey(roomAlias), ids[0], ids.slice(1));
       }
-      console.log(json ? JSON.stringify({ ...r, alias: roomAlias, room: transport.room, thread, ...(ids.length > 1 ? { ids } : {}), ...(child.child ? { child: true } : {}) }) : `posted ${ids.join(" ")}${r.url ? `  ${r.url}` : ""}  cursor ${r.cursor}`);
+      console.log(json ? JSON.stringify({ ...r, alias: roomAlias, room: transport.room, thread, ...(ids.length > 1 ? { ids } : {}) }) : `posted ${ids.join(" ")}${r.url ? `  ${r.url}` : ""}  cursor ${r.cursor}`);
       return EXIT.ok;
     }
     case "watch": {
@@ -996,7 +988,6 @@ async function main(argv) {
         threads: result.threads,
         evicted,
         following: result.following || following,
-        ...(child.child ? { child: true } : {}),
         exit,
       });
       if (json) console.log(line);

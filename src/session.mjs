@@ -312,24 +312,6 @@ export function harnessPid(cfg, env) {
   return { pid: undefined, pidSource: undefined, looked: from };
 }
 
-export const DEFAULT_CHILD_FROM = Object.freeze(["CLAUDE_CODE_CHILD_SESSION"]);
-
-/**
- * Is this process a subagent of the session that holds the seat? A harness that spawns a tool or
- * hook subprocess hands it the parent's session id, so it writes into the parent's ledger and its
- * post is skipped by the parent's own watch. The harness also sets a marker; reading it is the
- * visibility the design asks for. Never a refusal: a subagent may legitimately post.
- * @param {import('./core.mjs').Config} cfg @param {NodeJS.ProcessEnv} env
- * @returns {{ child: boolean, source?: string }}
- */
-export function childSession(cfg, env) {
-  const from = Array.isArray(cfg.session?.childFrom) ? cfg.session.childFrom.map(String) : [...DEFAULT_CHILD_FROM];
-  for (const name of from) {
-    const v = env[name];
-    if (v !== undefined && v !== "" && v !== "0" && v.toLowerCase() !== "false") return { child: true, source: name };
-  }
-  return { child: false };
-}
 
 /** @param {string} dir @returns {Promise<SessionRecord | undefined>} */
 export async function readRecord(dir) {

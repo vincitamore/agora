@@ -10,7 +10,6 @@ import {
   appendPosted,
   armedAlive,
   bootEpoch,
-  childSession,
   claimDeparture,
   departureLine,
   departures,
@@ -452,13 +451,6 @@ test("AGORA_SESSION set to a harness variable's raw value names the same session
   assert.deepEqual([own.slug, own.source], ["a-name-of-my-own", "AGORA_SESSION"]);
 });
 
-test("a subagent of the seat's session is visible, and never refused", () => {
-  assert.deepEqual(childSession(cfg, {}), { child: false });
-  assert.deepEqual(childSession(cfg, { CLAUDE_CODE_CHILD_SESSION: "1" }), { child: true, source: "CLAUDE_CODE_CHILD_SESSION" });
-  assert.deepEqual(childSession(cfg, { CLAUDE_CODE_CHILD_SESSION: "0" }), { child: false }, "unset, empty, 0 and false are not a subagent");
-  assert.deepEqual(childSession(cfg, { CLAUDE_CODE_CHILD_SESSION: "" }), { child: false });
-  assert.deepEqual(childSession({ ...cfg, session: { childFrom: ["MY_CHILD"] } }, { MY_CHILD: "yes", CLAUDE_CODE_CHILD_SESSION: "1" }), { child: true, source: "MY_CHILD" });
-});
 
 test("the identity line names bearer, session and their sources, and warns on a shared default with siblings", async () => {
   const { dir, cleanup } = await tmp();
