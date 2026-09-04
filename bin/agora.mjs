@@ -518,6 +518,10 @@ async function main(argv) {
       // an answer with re: joins the thread under the message it answers: that is where the
       // humans reply, and a channel-history read never shows it
       else if (values.re && transport.threads) await follow(sdir, roomAlias, room, [String(values.re)]);
+      // a top-level post roots the thread the humans and the other seat reply in. This session's
+      // own post is never delivered to its own watch, so the watch cannot learn the thread from
+      // delivery the way it learns every other root; it must be joined here, at the post
+      else if (transport.threads) await follow(sdir, roomAlias, room, [r.id]);
       console.log(json ? JSON.stringify({ ...r, room: transport.room, thread }) : `posted ${r.id}${r.url ? `  ${r.url}` : ""}  cursor ${r.cursor}`);
       return EXIT.ok;
     }

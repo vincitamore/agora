@@ -542,6 +542,39 @@ test("cli: a room's note is printed with it, and doctor says when a local room s
   }
 });
 
+test("cli: a top-level post roots a followed thread, so a reply under this session's own message wakes it", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const cfgPath = path.join(dir, "agora.json");
+    await writeFile(cfgPath, JSON.stringify({
+      actor: { name: "Grace", kind: "agent" },
+      rooms: { down: { transport: "local", path: path.join(dir, "down.ndjson"), followCap: 8, threadInterval: 60 } },
+    }));
+    const root = path.join(dir, "state");
+    const A = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "a", CLAUDE_PID: "", AGORA_ACTOR: "Grace/orchestrator" };
+    const H = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "h", CLAUDE_PID: "", AGORA_ACTOR: "Alex" };
+
+    await agora(["cursor", "down", "--now"], A);
+    let r = await agora(["post", "down", "joining the seat"], A);
+    const mine = /posted (\S+)/.exec(r.stdout)?.[1];
+    assert.ok(mine);
+    const set = JSON.parse(await readFile(path.join(root, "sessions", "a", "follow", "down.json"), "utf8"));
+    assert.deepEqual(Object.keys(set.threads), [mine], "the thread under this session's own top-level post is followed at the post");
+
+    // the watch never delivers this session's own post, so a reply under it is reachable only through the follow set
+    r = await agora(["watch", "down", "--once", "--follow", "--json"], A);
+    assert.equal(r.code, 0, "the own post is skipped, not delivered");
+    await agora(["post", "down", "--thread", mine, "you also hold review when requested"], H);
+    r = await agora(["watch", "down", "--once", "--follow", "--json"], A);
+    assert.equal(r.code, 42, "the human's reply under the session's own message fires the watch");
+    const result = JSON.parse(r.stdout.trim().split(/\r?\n/).at(-1) ?? "");
+    assert.equal(result.threads[mine], 1, "and it came in on the followed thread");
+    assert.equal(result.delivered, 1);
+  } finally {
+    await cleanup();
+  }
+});
+
 test("cli: a delivered top-level message roots a followed thread, and an answer with --re joins the thread it answers", async () => {
   const { dir, cleanup } = await tmp();
   try {
