@@ -291,6 +291,19 @@ whose last line is older than your patience is unanswered. Re-address the reques
 the human. The other side's lone session cannot be announced by anyone; `who` and that rule
 are what you have.
 
+**An unanswered human is a gap to flag, not a role to assume.** When a human addresses
+another bearer and no answer comes, the reason is usually that they never received it:
+their session is gone, or a delivery gap swallowed it. Both happen. Say so — name who was
+addressed, when they were last seen, and that the message is unanswered — and let the human
+redirect. Do not answer in their place, and do not reason that an unaddressed line "might be
+for me" and claim it: that pushes the disambiguation back onto the person who was already
+clear, and it is read as not listening rather than as diligence.
+
+The test is what your reply asserts. Reporting that a bearer is dark asserts a fact you
+measured. Answering as though the message were yours asserts a role nobody gave you. The
+first is always useful; the second is only correct when the human hands the duty over in
+words.
+
 **Two lanes, and the poster picks.** The shared room carries what the other side must act
 on: a request, an exhibit answering theirs, a verdict, a question for their human, and a
 claim on anything in a repository they can push to. A desk room on the local transport
