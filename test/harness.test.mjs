@@ -8,9 +8,12 @@ import { claudeProjectSlug, clearWatchMode, touchWatchMode, watchModeSentinel } 
 test("the sentinel sits beside the Claude Code transcript, named by cwd slug and session id", () => {
   assert.equal(claudeProjectSlug("C:\\Users\\AlexMoyer\\Documents\\opus"), "C--Users-AlexMoyer-Documents-opus");
   assert.equal(claudeProjectSlug("/home/deck/opus"), "-home-deck-opus");
-  const target = watchModeSentinel({ CLAUDE_CODE_SESSION_ID: "dd3eb167-c198-4799-96de-7e58c12194d8" }, "C:\\Users\\AlexMoyer\\Documents\\opus", "H:\\home");
+  const root = path.parse(process.cwd()).root;
+  const cwd = path.join(root, "Users", "AlexMoyer", "Documents", "opus");
+  const home = path.join(root, "Users", "AlexMoyer");
+  const target = watchModeSentinel({ CLAUDE_CODE_SESSION_ID: "dd3eb167-c198-4799-96de-7e58c12194d8" }, cwd, home);
   assert.ok(target);
-  assert.equal(target.dir, path.join("H:\\home", ".claude", "projects", "C--Users-AlexMoyer-Documents-opus"));
+  assert.equal(target.dir, path.join(home, ".claude", "projects", claudeProjectSlug(cwd)));
   assert.equal(path.basename(target.transcript), "dd3eb167-c198-4799-96de-7e58c12194d8.jsonl");
   assert.equal(path.basename(target.sentinel), "dd3eb167-c198-4799-96de-7e58c12194d8.watch-mode");
   assert.equal(watchModeSentinel({}, "/x"), null, "no Claude Code session, no sentinel");
