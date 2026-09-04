@@ -1,0 +1,49 @@
+name: test
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  suite:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm test
+      - run: npm run check
+      - name: launcher syntax
+        if: runner.os != 'Windows'
+        run: sh -n scripts/start-codex-watch.sh
+      - name: launcher syntax (pwsh)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $t = $null; $e = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile("$PWD/scripts/start-codex-watch.ps1", [ref]$t, [ref]$e)
+          if ($e.Count) { $e | ForEach-Object { $_.Message }; exit 1 }
+      - name: platform probe
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          echo "os: $(uname -a)"
+          for t in flock setsid nohup timeout gtimeout; do printf '%-9s %s\n' "$t" "$(command -v $t || echo absent)"; done
+          echo "exec bit on bin/agora.mjs: $(ls -l bin/agora.mjs | cut -c1-10)"
+          echo "index mode: $(git ls-files -s bin/agora.mjs | cut -c1-6)"
+          echo "sed --version: $(sed --version 2>&1 | head -1)"
+          node -e 'console.log("node", process.version, process.platform, process.arch)'
+          npm link >/dev/null 2>&1 && echo "npm link: $(command -v agora)" && agora schema --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log("schema verbs:",Object.keys(JSON.parse(s).verbs).join(" ")))'
+      - name: launcher smoke (status on a cold seat)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p "$HOME/.agora" && printf '{"actor":{"name":"CI","kind":"agent"},"rooms":{"t":{"transport":"local","path":"%s/t.ndjson"}}}' "$HOME/.agora" > "$HOME/.agora/config.json"
+          AGORA_SESSION=ci node bin/agora.mjs doctor --offline || true
+          sh scripts/start-codex-watch.sh --room t --status || true
