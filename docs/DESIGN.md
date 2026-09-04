@@ -166,9 +166,10 @@ safety and would replay the non-deliverable suffix after a re-arm.
 
 **One watch per session.** With `--follow`, the watch polls the room at `interval` and each
 **followed thread** at `threadInterval`, each thread keeping its own cursor under the session. A
-thread joins the follow set when this session posts into it or answers it with `re:`, when a
-delivered message carries it, or when a delivered message roots it (what wakes a session opens
-the thread under it);
+thread joins the follow set when this session posts into it or answers it with `re:`. A delivered
+human message may also join or root its thread; delivered agent/system traffic does so only when
+its `to:` names this bearer, its model, the seat, or everyone. Other broadcasts are still delivered
+but do not spend a follow slot;
 it leaves after `followIdleMinutes` with no activity; the set is capped at `followCap`, oldest
 evicted with a note. `--follow` is off by default. Merging the processes does not reduce the
 call count; what it reduces is processes, cursors, exit codes and the burden of remembering to
@@ -217,8 +218,9 @@ exit. A second watch on the same key is warned, never refused: two watches on on
 double-deliver, and the registration is what makes that visible. Each armed and session record also
 carries the package version plus git revision (or entry-file mtime outside a worktree). `doctor` and
 `session --list` compare a live resident with the installed build and name the pid to re-arm when it
-is older. `doctor` sums the registrations
-into the seat's poll rate per transport and warns above `pollBudget`.
+is older. `doctor` sums the registrations into the seat's poll rate per transport, reports
+room-history and thread-reply reads separately (the latter is the per-watch sum of
+`followed × 60/threadInterval`), and warns above `pollBudget`.
 
 Rooms on a record-shaped transport (an issue) default to a slow interval and send conditional
 requests, storing the validator beside the cursor so it survives a re-arm. A record does not need

@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { aliasThreads, dropFollow, followThreads, readFollow, rootOf, rootsOf, threadsOf } from "../src/follow.mjs";
+import { aliasThreads, dropFollow, followableMessages, followThreads, readFollow, rootOf, rootsOf, threadsOf } from "../src/follow.mjs";
 import { tmp } from "./helpers.mjs";
 
 /** @param {string} id @param {string} [thread] @returns {import('../src/core.mjs').Message} */
@@ -94,6 +94,54 @@ test("rootsOf names the thread a reply is in and the thread a top-level message 
   const msg = (id, thread) => /** @type {import("../src/core.mjs").Message} */ ({ id, room: "r", author: { id: "x", name: "x", kind: "agent" }, text: "", ts: "", cursor: id, ...(thread ? { thread } : {}) });
   assert.deepEqual(rootsOf([msg("a", "T2"), msg("b"), msg("c", "T2"), msg("d", "T3")]), ["T2", "b", "T3"]);
   assert.deepEqual(rootsOf([]), []);
+});
+
+test("follow admission keeps human deliveries and agent traffic addressed to this bearer, model, seat or everyone", () => {
+  /** @param {string} id @param {"human" | "agent" | "system"} kind @param {string} [to] */
+  const delivery = (id, kind, to) => /** @type {import("../src/core.mjs").Message} */ ({
+    id,
+    room: "r",
+    author: { id: `u-${id}`, name: id, kind },
+    text: to ? `${id}\n\nto: ${to}` : id,
+    ts: "",
+    cursor: id,
+  });
+  const msgs = [
+    delivery("human-elsewhere", "human", "Other/model"),
+    delivery("unaddressed-agent", "agent"),
+    delivery("other-agent", "agent", "Other/model"),
+    delivery("model", "agent", "Cal"),
+    delivery("bearer", "agent", "Cal/codex"),
+    delivery("seat-name", "agent", "example_bot"),
+    delivery("seat-mention", "agent", "<@USEAT>"),
+    delivery("everyone", "system", "*"),
+    delivery("unaddressed-system", "system"),
+  ];
+  assert.deepEqual(
+    followableMessages(msgs, "Cal/codex", { id: "USEAT", name: "example_bot" }).map((m) => m.id),
+    ["human-elsewhere", "model", "bearer", "seat-name", "seat-mention", "everyone"],
+  );
+});
+
+test("admission gates new roots without letting an active followed conversation age out", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const t0 = new Date("2026-09-03T09:00:00.000Z");
+    await followThreads(dir, "down", ["existing"], { now: t0 });
+    const active = new Date(t0.getTime() + 50 * 60_000);
+    const r = await followThreads(dir, "down", ["existing", "broadcast"], { admit: [], idleMinutes: 60, now: active });
+    assert.deepEqual(r.threads, ["existing"], "an unaddressed broadcast spends no new follow slot");
+    assert.deepEqual(r.added, []);
+
+    const later = new Date(t0.getTime() + 100 * 60_000);
+    const kept = await followThreads(dir, "down", [], { idleMinutes: 60, now: later });
+    assert.deepEqual(kept.threads, ["existing"], "activity refreshed the existing conversation despite admission being closed");
+
+    const admitted = await followThreads(dir, "down", ["addressed"], { admit: ["addressed"], now: later });
+    assert.deepEqual(admitted.added, ["addressed"]);
+  } finally {
+    await cleanup();
+  }
 });
 
 test("the cap keeps the threads the answers arrive in: this session's own roots and what a human just replied in", async () => {

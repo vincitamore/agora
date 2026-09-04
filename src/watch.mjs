@@ -13,7 +13,7 @@ import { jitter, readCursor, redact, writeCursor, sleep as defaultSleep } from "
  * @property {(thread: string) => string} key the cursor key for one thread
  * @property {(thread: string) => Promise<string | undefined>} cursor its saved position
  * @property {number} interval seconds between reads of one thread
- * @property {(msgs: import('./core.mjs').Message[]) => Promise<void> | void} [note] record activity from a delivered batch
+ * @property {(msgs: import('./core.mjs').Message[]) => Promise<void> | void} [note] record activity from a delivered batch; the caller decides which conversations qualify for new follow admission
  * @property {(id: string) => Promise<void> | void} [drop] remove a thread the transport can no longer read
  */
 

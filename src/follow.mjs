@@ -2,6 +2,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { writeFileAtomic } from "./core.mjs";
+import { matchesAddress, parseTrailers } from "./trailers.mjs";
 
 /**
  * The threads one session follows in one room, and when each last carried activity.
@@ -118,6 +119,21 @@ export function rootsOf(msgs) {
   return out;
 }
 
+/**
+ * Messages whose conversation this reader should start following. A human's delivery always
+ * qualifies: the answer lands under what they said. Agent and system traffic qualifies only when
+ * its `to:` names this bearer, its model, the seat, or everyone. The message is still delivered
+ * when it does not qualify; this decides only whether later replies spend the reader's follow
+ * budget.
+ * @param {import('./core.mjs').Message[]} msgs
+ * @param {string} bearer
+ * @param {{ id?: string, name?: string }} [seat]
+ */
+export function followableMessages(msgs, bearer, seat) {
+  return msgs.filter((m) => m.author.kind === "human"
+    || parseTrailers(m.text).to.some((address) => matchesAddress(address, bearer, seat)));
+}
+
 /** Oldest activity first: the order the cap evicts in. @param {FollowSet} set */
 function byActivity(set) {
   return Object.entries(set.threads).sort((a, b) => (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : a[0] < b[0] ? -1 : 1));
@@ -135,7 +151,10 @@ function byActivity(set) {
  * is protected the cap still binds -- the oldest protected one leaves, and `protectedEvicted` says
  * it did, so the caller can say so out loud.
  * @param {string} dir @param {string} key @param {string[]} ids
- * @param {{ cap?: number, idleMinutes?: number, now?: Date, protect?: Iterable<string> }} [opts]
+ * `admit`, when present, names which roots may be added. Activity still refreshes a root already in
+ * the set, so narrowing automatic admission never makes an existing conversation age out while it
+ * is active.
+ * @param {{ cap?: number, idleMinutes?: number, now?: Date, protect?: Iterable<string>, admit?: Iterable<string> }} [opts]
  * @returns {Promise<{ threads: string[], added: string[], expired: string[], evicted: string[], protectedEvicted: string[] }>}
  */
 export async function followThreads(dir, key, ids, opts = {}) {
@@ -145,17 +164,21 @@ export async function followThreads(dir, key, ids, opts = {}) {
   const set = await readFollow(dir, key);
   const aliases = { ...(set.aliases ?? {}) };
   const protect = new Set([...(opts.protect ?? [])].map((id) => aliases[id] ?? id));
+  const admit = opts.admit === undefined
+    ? undefined
+    : new Set([...opts.admit].map((id) => aliases[id] ?? id));
   const before = new Set(Object.keys(set.threads));
   // activity on one chunk of a split post is activity on the post
   ids = ids.map((id) => aliases[id] ?? id);
-  for (const id of ids) set.threads[id] = now.toISOString();
-  const added = ids.filter((id) => !before.has(id));
+  const active = ids.filter((id) => before.has(id) || admit === undefined || admit.has(id));
+  for (const id of active) set.threads[id] = now.toISOString();
+  const added = active.filter((id) => !before.has(id));
 
   /** @type {string[]} */
   const expired = [];
   const floor = now.getTime() - idleMinutes * 60_000;
   for (const [id, at] of byActivity(set)) {
-    if (ids.includes(id)) continue; // just active
+    if (active.includes(id)) continue; // just active
     if (new Date(at).getTime() < floor) {
       expired.push(id);
       delete set.threads[id];
@@ -184,7 +207,7 @@ export async function followThreads(dir, key, ids, opts = {}) {
 
   // noting activity on a thread already in the set is a change too: it is what moves the thread
   // off the eviction end. A poll that adds nothing and expires nothing writes nothing.
-  if (ids.length || expired.length || evicted.length) await writeFollow(dir, key, { ...set, aliases });
+  if (active.length || expired.length || evicted.length) await writeFollow(dir, key, { ...set, aliases });
   // every root, then the other names it goes by: a reply under a chunk is read like any other
   const roots = byActivity(set).map(([id]) => id);
   const also = Object.entries(aliases).filter(([, root]) => root in set.threads).map(([alias]) => alias);

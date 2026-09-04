@@ -487,13 +487,13 @@ test("cli: doctor adds up the reads a minute this seat's live watches are spendi
 
     let r = await agora(["doctor", "--offline"], env);
     assert.equal(r.code, 0, "a rate over its budget is a warning, never an exit code");
-    assert.match(r.stdout, /seat poll rate {2}~6 reads\/min on local \(budget 6, 1 watch\)/, "four room reads a minute plus one for each followed thread");
+    assert.match(r.stdout, /seat poll rate {2}~6 reads\/min on local \(budget 6, 1 watch; room-history 4 \+ thread-replies 2 from 2 follows = sum\(followed x 60\/threadInterval\)\)/, "the line names room and per-thread method spend");
     assert.doesNotMatch(r.stdout, /WARNING this seat reads/);
 
     await writeFile(path.join(armedDir, "down.json"), JSON.stringify({ room: "down", interval: 5, pid: process.pid, startedAt: new Date().toISOString() }));
     r = await agora(["doctor", "--offline", "--json"], env);
     const rate = r.stdout.trim().split(/\r?\n/).map((/** @type {string} */ l) => JSON.parse(l)).find((/** @type {any} */ o) => o.type === "poll-rate");
-    assert.deepEqual(rate, { type: "poll-rate", transport: "local", rate: 12, budget: 6, watches: 1, over: true });
+    assert.deepEqual(rate, { type: "poll-rate", transport: "local", rate: 12, room_reads: 12, thread_reads: 0, followed: 0, budget: 6, watches: 1, over: true });
 
     // a registration whose process is gone is a leftover, and counts for nothing
     await writeFile(path.join(armedDir, "down.json"), JSON.stringify({ room: "down", interval: 5, pid: 2 ** 30, startedAt: new Date().toISOString() }));
@@ -660,7 +660,7 @@ test("cli: a delivered top-level message roots a followed thread, and an answer 
     const B = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "b", CLAUDE_PID: "", AGORA_ACTOR: "peer" };
 
     await agora(["cursor", "down", "--now"], A);
-    let r = await agora(["post", "down", "which lane was it"], B);
+    let r = await agora(["post", "down", "which lane was it", "--to", "Grace/review"], B);
     const question = /posted (\S+)/.exec(r.stdout)?.[1];
     assert.ok(question);
     r = await agora(["watch", "down", "--once", "--follow", "--json"], A);
@@ -683,6 +683,42 @@ test("cli: a delivered top-level message roots a followed thread, and an answer 
     await agora(["post", "down", "answering the second", "--re", second], A);
     set = JSON.parse(await readFile(path.join(root, "sessions", "a", "follow", "down.json"), "utf8"));
     assert.ok(second in set.threads, "an answer with --re joins the thread under the message it answers");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("cli: delivered agent broadcasts spend no follow slot unless addressed to this reader", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const cfgPath = path.join(dir, "agora.json");
+    await writeFile(cfgPath, JSON.stringify({
+      actor: { name: "Grace", kind: "agent" },
+      rooms: { down: { transport: "local", path: path.join(dir, "down.ndjson"), followCap: 8 } },
+    }));
+    const root = path.join(dir, "state");
+    const A = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "a", CLAUDE_PID: "", AGORA_ACTOR: "Grace/review" };
+    const B = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "b", CLAUDE_PID: "", AGORA_ACTOR: "Cal/codex" };
+    const followFile = path.join(root, "sessions", "a", "follow", "down.json");
+
+    await agora(["cursor", "down", "--now"], A);
+    let r = await agora(["post", "down", "unaddressed agent broadcast"], B);
+    assert.ok(/posted (\S+)/.exec(r.stdout)?.[1]);
+    r = await agora(["post", "down", "addressed elsewhere", "--to", "Other/model"], B);
+    assert.ok(/posted (\S+)/.exec(r.stdout)?.[1]);
+
+    r = await agora(["watch", "down", "--once", "--follow", "--json", "--wake", "all"], A);
+    assert.equal(r.code, 42, "both messages are still delivered");
+    assert.equal(typed(r.stdout).filter((o) => o.type === "message").length, 2);
+    assert.equal(existsSync(followFile), false, "delivery does not imply following agent traffic meant for nobody here");
+
+    r = await agora(["post", "down", "addressed here", "--to", "Grace"], B);
+    const addressed = /posted (\S+)/.exec(r.stdout)?.[1];
+    assert.ok(addressed);
+    r = await agora(["watch", "down", "--once", "--follow", "--json", "--wake", "all"], A);
+    assert.equal(r.code, 42);
+    const secondSet = JSON.parse(await readFile(followFile, "utf8"));
+    assert.deepEqual(Object.keys(secondSet.threads), [addressed], "an address naming the model admits the new conversation");
   } finally {
     await cleanup();
   }
@@ -877,7 +913,7 @@ test("cli: an evicted follow is named on stdout under --json and on the result l
     assert.match(r.stderr, /every followed thread is one this session rooted or one a human just replied in, so the oldest of those left/, "both roots are this session's own, so the cap took the oldest protected one");
 
     await agora(["cursor", "down", "--now"], A);
-    await agora(["post", "down", "a third, from them"], B);
+    await agora(["post", "down", "a third, from them", "--to", "Grace/watch"], B);
     r = await agora(["watch", "down", "--once", "--follow", "--json"], A);
     assert.equal(r.code, 42);
     const result = typed(r.stdout).at(-1);
@@ -1109,7 +1145,7 @@ test("cli: the cap does not take the thread under this session's own post while 
 
     // a top-level message from the other seat roots a thread of its own and breaches the cap; the
     // thread this session rooted is where its own answer will arrive, so it is not the one to go
-    await agora(["post", "down", "unrelated chatter"], B);
+    await agora(["post", "down", "unrelated chatter", "--to", "Grace/orchestrator"], B);
     r = await agora(["watch", "down", "--once", "--follow", "--json"], A);
     assert.equal(r.code, 42);
     assert.deepEqual(Object.keys(JSON.parse(await readFile(followFile, "utf8")).threads), [mine], "the ledger says this session rooted it, and the ledger outlives the process");
