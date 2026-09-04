@@ -14,10 +14,21 @@ import { writeFileAtomic } from "./core.mjs";
  *
  * The file is re-read on every use, so a `post --thread` from a sibling process joins a
  * watch that is already running, and nothing is held in a process that can die.
- * @typedef {{ threads: Record<string, string> }} FollowSet
+ *
+ * `aliases` maps a thread id onto the root it belongs to. One post that the transport had to send
+ * as several messages is several thread ids and one conversation: a human answering under the
+ * second chunk is answering the post. The aliases are read like any other followed thread and
+ * evicted with their root, and they never spend a slot of their own.
+ * @typedef {{ threads: Record<string, string>, aliases?: Record<string, string> }} FollowSet
  */
 
-export const FOLLOW_CAP = 8;
+/**
+ * How many threads one session follows in one room at once. Measured on a four-seat room: at 8 the
+ * watch evicted eight threads inside twenty minutes, several of them claims still being answered.
+ * The cost of raising it is reads: sessions x followed x 60/threadInterval per minute, which is what
+ * `doctor`'s poll budget adds up. A room sets its own with `followCap`.
+ */
+export const FOLLOW_CAP = 16;
 export const FOLLOW_IDLE_MINUTES = 60;
 
 /** @param {string} dir @param {string} key */
@@ -33,10 +44,32 @@ export async function readFollow(dir, key) {
     /** @type {Record<string, string>} */
     const out = {};
     for (const [id, at] of Object.entries(threads)) if (typeof at === "string") out[id] = at;
-    return { threads: out };
+    /** @type {Record<string, string>} */
+    const aliases = {};
+    const raw = parsed && typeof parsed.aliases === "object" && parsed.aliases ? parsed.aliases : {};
+    for (const [id, root] of Object.entries(raw)) if (typeof root === "string" && root !== id) aliases[id] = root;
+    return { threads: out, ...(Object.keys(aliases).length ? { aliases } : {}) };
   } catch {
     return { threads: {} };
   }
+}
+
+/**
+ * Record `ids` as other names for `root`: the further messages one post became. Activity on any of
+ * them is activity on the root, a reply under any of them is read, and none of them is a slot.
+ * @param {string} dir @param {string} key @param {string} root @param {string[]} ids
+ */
+export async function aliasThreads(dir, key, root, ids) {
+  const set = await readFollow(dir, key);
+  const aliases = { ...(set.aliases ?? {}) };
+  for (const id of ids) if (id !== root) aliases[id] = root;
+  await writeFollow(dir, key, { ...set, aliases });
+  return aliases;
+}
+
+/** The root a thread id belongs to: itself, unless it is another name for one. @param {FollowSet} set @param {string} id */
+export function rootOf(set, id) {
+  return set.aliases?.[id] ?? id;
 }
 
 /** @param {string} dir @param {string} key @param {FollowSet} set */
@@ -47,9 +80,16 @@ export async function writeFollow(dir, key, set) {
 /** Drop one thread from the set. A truncated Slack ts that 404s must leave, or the next poll puts it back. @param {string} dir @param {string} key @param {string} id */
 export async function dropFollow(dir, key, id) {
   const set = await readFollow(dir, key);
+  const aliases = { ...(set.aliases ?? {}) };
+  if (id in aliases) {
+    delete aliases[id];
+    await writeFollow(dir, key, { ...set, aliases });
+    return true;
+  }
   if (!(id in set.threads)) return false;
   delete set.threads[id];
-  await writeFollow(dir, key, set);
+  for (const [alias, root] of Object.entries(aliases)) if (root === id) delete aliases[alias];
+  await writeFollow(dir, key, { ...set, aliases });
   return true;
 }
 
@@ -86,16 +126,28 @@ function byActivity(set) {
 /**
  * Note activity on `ids`, drop what has gone idle, cap the set, and write it back.
  * Pass no ids to read the set forward without adding to it (what a poll does).
+ *
+ * `protect` names the threads the humans answer in: a thread this session itself rooted, and one
+ * whose last delivered message was a human's reply. The cap evicts by least-recent activity, and a
+ * busy room's chatter is more recent than the request the operator is still answering, so without
+ * this the set drops exactly the threads that matter. Protection is computed by the caller from the
+ * ledger and the batch it is noting; nothing new is stored to hold it. When every followed thread
+ * is protected the cap still binds -- the oldest protected one leaves, and `protectedEvicted` says
+ * it did, so the caller can say so out loud.
  * @param {string} dir @param {string} key @param {string[]} ids
- * @param {{ cap?: number, idleMinutes?: number, now?: Date }} [opts]
- * @returns {Promise<{ threads: string[], added: string[], expired: string[], evicted: string[] }>}
+ * @param {{ cap?: number, idleMinutes?: number, now?: Date, protect?: Iterable<string> }} [opts]
+ * @returns {Promise<{ threads: string[], added: string[], expired: string[], evicted: string[], protectedEvicted: string[] }>}
  */
 export async function followThreads(dir, key, ids, opts = {}) {
   const cap = opts.cap ?? FOLLOW_CAP;
   const idleMinutes = opts.idleMinutes ?? FOLLOW_IDLE_MINUTES;
   const now = opts.now ?? new Date();
   const set = await readFollow(dir, key);
+  const aliases = { ...(set.aliases ?? {}) };
+  const protect = new Set([...(opts.protect ?? [])].map((id) => aliases[id] ?? id));
   const before = new Set(Object.keys(set.threads));
+  // activity on one chunk of a split post is activity on the post
+  ids = ids.map((id) => aliases[id] ?? id);
   for (const id of ids) set.threads[id] = now.toISOString();
   const added = ids.filter((id) => !before.has(id));
 
@@ -112,14 +164,29 @@ export async function followThreads(dir, key, ids, opts = {}) {
 
   /** @type {string[]} */
   const evicted = [];
+  /** @type {string[]} */
+  const protectedEvicted = [];
+  const over = () => Object.keys(set.threads).length > Math.max(0, cap);
   for (const [id] of byActivity(set)) {
-    if (Object.keys(set.threads).length <= Math.max(0, cap)) break;
+    if (!over()) break;
+    if (protect.has(id)) continue;
     evicted.push(id);
     delete set.threads[id];
   }
+  // the cap binds even when everything left is protected; it just says which it took
+  for (const [id] of byActivity(set)) {
+    if (!over()) break;
+    evicted.push(id);
+    protectedEvicted.push(id);
+    delete set.threads[id];
+  }
+  for (const id of evicted) for (const [alias, root] of Object.entries(aliases)) if (root === id) delete aliases[alias];
 
   // noting activity on a thread already in the set is a change too: it is what moves the thread
   // off the eviction end. A poll that adds nothing and expires nothing writes nothing.
-  if (ids.length || expired.length || evicted.length) await writeFollow(dir, key, set);
-  return { threads: byActivity(set).map(([id]) => id), added, expired, evicted };
+  if (ids.length || expired.length || evicted.length) await writeFollow(dir, key, { ...set, aliases });
+  // every root, then the other names it goes by: a reply under a chunk is read like any other
+  const roots = byActivity(set).map(([id]) => id);
+  const also = Object.entries(aliases).filter(([, root]) => root in set.threads).map(([alias]) => alias);
+  return { threads: [...roots, ...also], added, expired, evicted, protectedEvicted };
 }

@@ -311,6 +311,31 @@ function followed(ids, interval) {
   };
 }
 
+/**
+ * A mutable follow set that records what the watch dropped, the way the on-disk one is written back.
+ * @param {string[]} ids @param {number} interval
+ */
+function followSet(ids, interval) {
+  /** @type {string[]} */
+  const dropped = [];
+  const live = [...ids];
+  return {
+    dropped,
+    live,
+    set: {
+      ids: () => [...live],
+      key: (/** @type {string} */ id) => `r#${id}`,
+      cursor: async () => undefined,
+      interval,
+      drop: (/** @type {string} */ id) => {
+        dropped.push(id);
+        const at = live.indexOf(id);
+        if (at >= 0) live.splice(at, 1);
+      },
+    },
+  };
+}
+
 test("--follow reaches a thread reply, reads the room every poll and each thread at its own cadence", async () => {
   const { dir, cleanup } = await tmp();
   try {
@@ -414,6 +439,112 @@ test("a merged batch is delivered in ts order across the room and the threads it
       onBatch: (m) => { once.push(...m.map((x) => x.text)); },
     });
     assert.deepEqual(once, ["shared"]);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a thread that leaves the follow set stops being read and stops being reported", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const room = countingRoom();
+    room.say("T1", "in the first thread", 100);
+    room.say("T2", "in the second", 101);
+    const follow = followSet(["T1", "T2"], 1);
+    /** @type {string[]} */
+    const seen = [];
+    const r = await watch(room.transport, {
+      stateDir: path.join(dir, "s"), key: "r", mode: "stream", interval: 5, forSeconds: 12,
+      threads: follow.set,
+      onBatch: (m) => { seen.push(...m.map((x) => x.text)); },
+      now: room.now, random: () => 0.5,
+      // T1 ages out of the set between polls, exactly as followIdleMinutes or the cap would drop it
+      sleep: async (ms) => { room.tick(ms); const at = follow.live.indexOf("T1"); if (at >= 0) follow.live.splice(at, 1); },
+    });
+    assert.deepEqual(seen, ["in the first thread", "in the second"]);
+    assert.deepEqual(Object.keys(r.threads), ["T2"], "the result names what this watch follows now, not what it once did");
+    assert.equal(r.following, 1);
+    const readsAfterDrop = room.reads.threads.T1;
+    assert.equal(readsAfterDrop, 1, "and a dropped thread is not read again");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a malformed id in this session's own follow set is dropped, never a usage error; the rest keeps delivering", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const room = countingRoom();
+    room.say("T1", "the answer to the claim", 100);
+    // a pwsh shell that ate the last digits of a Slack ts wrote this into the follow file
+    const follow = followSet(["1788529730.98", "T1"], 1);
+    const transport = /** @type {import('../src/core.mjs').Transport} */ ({
+      ...room.transport,
+      validateThread: (/** @type {string} */ id) => (/^[0-9]{10}\.[0-9]{6}$|^T/.test(id) ? undefined : `not a thread id here (an unquoted timestamp loses its last digits under pwsh)`),
+    });
+    /** @type {string[]} */
+    const seen = [];
+    const r = await watch(transport, {
+      stateDir: path.join(dir, "s"), key: "r", mode: "once",
+      threads: follow.set,
+      onBatch: (m) => { seen.push(...m.map((x) => x.text)); },
+    });
+    assert.deepEqual(seen, ["the answer to the claim"], "the good thread still delivers");
+    assert.deepEqual(follow.dropped, ["1788529730.98"], "and the bad key is gone from the set");
+    assert.deepEqual(Object.keys(r.threads), ["T1"]);
+    assert.equal(room.reads.threads["1788529730.98"], undefined, "the transport was never asked for it");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a followed thread the transport cannot read is dropped and the room watch carries on", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const room = countingRoom();
+    room.say("", "in the channel", 100);
+    const follow = followSet(["T404"], 1);
+    const transport = /** @type {import('../src/core.mjs').Transport} */ ({
+      ...room.transport,
+      read: async (/** @type {import('../src/core.mjs').ReadOptions} */ o = {}) => {
+        if (o.thread === "T404") throw new Error("thread_not_found");
+        return room.transport.read(o);
+      },
+    });
+    /** @type {string[]} */
+    const seen = [];
+    const r = await watch(transport, {
+      stateDir: path.join(dir, "s"), key: "r", mode: "once",
+      threads: follow.set,
+      onBatch: (m) => { seen.push(...m.map((x) => x.text)); },
+    });
+    assert.deepEqual(seen, ["in the channel"]);
+    assert.deepEqual(follow.dropped, ["T404"]);
+    assert.deepEqual(r.threads, {}, "a dropped thread leaves no key behind in the result");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a batch hands the caller the counts of THAT poll, beside the running totals", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const t = localTransport({ transport: "local", path: path.join(dir, "r.ndjson") }, { actor });
+    const mine = await t.post("my own line");
+    await t.post("for the other one" + String.fromCharCode(10) + String.fromCharCode(10) + "to: Codex");
+    await t.post("for anyone");
+    /** @type {Array<{ delivered: number, skipped: number, filtered: number }>} */
+    const batches = [];
+    const r = await watch(t, {
+      stateDir: path.join(dir, "s"), key: "r", mode: "once",
+      own: () => new Set([mine.id]),
+      wake: (m) => !/to: Codex/.test(m.text),
+      onBatch: (_m, batch) => { batches.push(batch); },
+    });
+    assert.deepEqual(batches, [{ delivered: 1, skipped: 1, filtered: 1 }]);
+    assert.deepEqual([r.delivered, r.skipped, r.filtered], [1, 1, 1]);
+    assert.equal(typeof r.elapsedMs, "number");
+    assert.equal(r.following, 0);
   } finally {
     await cleanup();
   }

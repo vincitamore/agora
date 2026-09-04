@@ -10,11 +10,14 @@ import {
   appendPosted,
   armedAlive,
   bootEpoch,
+  childSession,
   claimDeparture,
   departureLine,
   departures,
+  departuresLine,
   etagCache,
   harnessPid,
+  hasRoomState,
   identityLine,
   listRecords,
   listSessions,
@@ -24,10 +27,12 @@ import {
   readPosted,
   readArmed,
   readRecord,
+  releaseDeparture,
   removeSession,
   resolveBearer,
   resolveSession,
   sessionDir,
+  sessionScope,
   sessionTag,
   touchRecord,
   writeArmed,
@@ -343,7 +348,9 @@ test("listRecords: every session with state, registered or not, with its livenes
     const rows = await listRecords(dir);
     assert.deepEqual(rows.map((r) => [r.slug, r.state]), [["a", "live"], ["b", "unregistered"]]);
     assert.equal(harnessPid(cfg, { CLAUDE_PID: "77" }).pid, 77);
-    assert.deepEqual(harnessPid(cfg, { CLAUDE_PID: "nope" }), { pid: undefined, pidSource: undefined });
+    assert.equal(harnessPid(cfg, { GROK_PID: "78" }).pid, 78, "a Grok Build seat is probeable too");
+    // with no pid the caller says WHICH variable the harness failed to inject: that is the remedy
+    assert.deepEqual(harnessPid(cfg, { CLAUDE_PID: "nope" }), { pid: undefined, pidSource: undefined, looked: ["AGORA_SESSION_PID", "CLAUDE_PID", "GROK_PID"] });
     assert.equal(harnessPid({ ...cfg, session: { pidFrom: ["MY_PID"] } }, { MY_PID: "5", CLAUDE_PID: "6" }).pidSource, "MY_PID");
   } finally {
     await cleanup();
@@ -363,6 +370,12 @@ test("departures: gone past the grace and within the stale horizon, not yet anno
     await mk("blip", "Fable/review", 1, 3); // gone but touched a minute ago: a restart, not a departure
     await mk("ancient", "Grok/build", 80 * 60, 4); // gone for days: pruned, never announced
     await mk("alive", "Codex", 30, process.pid); // still running
+    await mk("elsewhere", "Fable/build", 30, 5); // gone, but never touched this room: not this room's news
+    // a session is announced in a room it was actually in: a saved position for the key, or a watch
+    // armed on it. Without this a fresh room opens with obituaries for bearers it never met.
+    for (const slug of ["quiet", "blip", "ancient", "alive"]) await writeCursor(sessionDir(dir, { slug, source: "x", explicit: true }), "r", "1");
+    await writeCursor(sessionDir(dir, { slug: "elsewhere", source: "x", explicit: true }), "another", "1");
+    await writeCursor(sessionDir(dir, { slug: "quiet", source: "x", explicit: true }), "another", "1"); // in both rooms: each is told once
     const kill = (/** @type {number} */ pid) => { if (pid !== process.pid) dead(); };
     const boot = bootEpoch();
     let gone = await departures(dir, { selfSlug: "me", roomKey: "r", kill, boot });
@@ -377,12 +390,74 @@ test("departures: gone past the grace and within the stale horizon, not yet anno
     gone = await departures(dir, { selfSlug: "me", roomKey: "r", kill, boot });
     assert.deepEqual(gone, [], "announced in this room: not again");
     gone = await departures(dir, { selfSlug: "me", roomKey: "another", kill, boot });
-    assert.deepEqual(gone.map((g) => g.slug), ["quiet"], "another room has not been told");
+    assert.deepEqual(gone.map((g) => g.slug), ["elsewhere", "quiet"], "another room has not been told, and it is the room `elsewhere` was in");
+    // the claim is what makes exactly one watcher the announcer; kept over a failed post it makes
+    // nobody the announcer, in that room, for every session on the seat
+    await releaseDeparture(sessionDir(dir, { slug: "quiet", source: "x", explicit: true }), "r");
+    gone = await departures(dir, { selfSlug: "me", roomKey: "r", kill, boot });
+    assert.deepEqual(gone.map((g) => g.slug), ["quiet"], "a released claim is retried by the next poll");
+    assert.equal(await claimDeparture(gone[0].dir, "r", "me"), true);
     gone = await departures(dir, { selfSlug: "quiet", roomKey: "third", kill, boot });
-    assert.deepEqual(gone, [], "a session never announces itself");
+    assert.deepEqual(gone, [], "a session never announces itself, and no session has state in a third room");
   } finally {
     await cleanup();
   }
+});
+
+test("one sweep is one post: a roster naming every bearer that went dark, and no count", async () => {
+  const rec = (/** @type {string} */ bearer, /** @type {string} */ lastSeen) => /** @type {any} */ ({ bearer, lastSeen, slug: bearer, source: "x", bootEpoch: 1, startedAt: lastSeen });
+  const one = departuresLine([rec("Opus/design", "2026-09-04T11:20:00.000Z")], ["Fable/watch"]);
+  assert.match(one, /^Opus\/design is no longer running \(last seen 2026-09-04T11:20:00Z\)\./, "one departure reads exactly as it always did");
+  const many = departuresLine(
+    [rec("Fable/build", "2026-09-03T13:02:00.000Z"), rec("Fable/review", "2026-09-04T03:51:00.000Z"), rec("Opus/design", "2026-09-04T11:20:00.000Z")],
+    ["Fable/orchestrator"],
+    [{ bearer: "Grok-4.6/general", lastSeen: "2026-09-04T11:00:00.000Z" }],
+  );
+  assert.match(many, /^Fable\/build, Fable\/review and Opus\/design are no longer running \(last seen 2026-09-03T13:02:00Z, 2026-09-04T03:51:00Z, 2026-09-04T11:20:00Z, in that order\)\./);
+  assert.match(many, /Requests addressed to them will not be answered; re-address them\. Still here on this seat: Fable\/orchestrator\./);
+  assert.match(many, /liveness not provable from this process: Grok-4\.6\/general \(last seen 2026-09-04T11:00:00Z\)/);
+  assert.doesNotMatch(many, /\b3\b/, "bearers are named; no count is emitted");
+});
+
+test("a session's scope is the rooms it holds a position in and the watches it armed, by name", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const s = { slug: "a", source: "x", explicit: true };
+    const sdir = sessionDir(dir, s);
+    assert.deepEqual(await sessionScope(sdir), { rooms: [], armed: [] });
+    await writeCursor(sdir, "down", "3");
+    await writeCursor(sdir, "down#T1", "4");
+    await writeArmed(sdir, "down", { room: "down", mode: "stream", interval: 15, pid: process.pid, startedAt: new Date().toISOString() });
+    const scope = await sessionScope(sdir);
+    assert.deepEqual(scope.rooms, ["down", "down#T1"]);
+    assert.deepEqual(scope.armed, [{ key: "down", room: "down", mode: "stream", pid: process.pid }]);
+    assert.equal(await hasRoomState(sdir, "down"), true);
+    assert.equal(await hasRoomState(sdir, "down#T1"), true, "a thread of the room counts as the room");
+    assert.equal(await hasRoomState(sdir, "other"), false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("AGORA_SESSION set to a harness variable's raw value names the same session, not a second one", async () => {
+  const env = { CLAUDE_CODE_SESSION_ID: "2bfa6030-9abd-48d4-835f-53c4123fb0ed" };
+  const derived = resolveSession(cfg, env);
+  assert.equal(derived.slug, "claude-code-2bfa6030-9abd-48d4-835f-53c4123fb0ed");
+  // what a reader copies out of `doctor` is the variable's value; setting it must not fork a second
+  // session directory (a second ledger, a second position) out of one harness session
+  const copied = resolveSession(cfg, { ...env, AGORA_SESSION: env.CLAUDE_CODE_SESSION_ID });
+  assert.equal(copied.slug, derived.slug);
+  assert.equal(copied.source, "AGORA_SESSION (CLAUDE_CODE_SESSION_ID)");
+  const own = resolveSession(cfg, { ...env, AGORA_SESSION: "a-name-of-my-own" });
+  assert.deepEqual([own.slug, own.source], ["a-name-of-my-own", "AGORA_SESSION"]);
+});
+
+test("a subagent of the seat's session is visible, and never refused", () => {
+  assert.deepEqual(childSession(cfg, {}), { child: false });
+  assert.deepEqual(childSession(cfg, { CLAUDE_CODE_CHILD_SESSION: "1" }), { child: true, source: "CLAUDE_CODE_CHILD_SESSION" });
+  assert.deepEqual(childSession(cfg, { CLAUDE_CODE_CHILD_SESSION: "0" }), { child: false }, "unset, empty, 0 and false are not a subagent");
+  assert.deepEqual(childSession(cfg, { CLAUDE_CODE_CHILD_SESSION: "" }), { child: false });
+  assert.deepEqual(childSession({ ...cfg, session: { childFrom: ["MY_CHILD"] } }, { MY_CHILD: "yes", CLAUDE_CODE_CHILD_SESSION: "1" }), { child: true, source: "MY_CHILD" });
 });
 
 test("the identity line names bearer, session and their sources, and warns on a shared default with siblings", async () => {

@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { dropFollow, followThreads, readFollow, rootsOf, threadsOf } from "../src/follow.mjs";
+import { aliasThreads, dropFollow, followThreads, readFollow, rootOf, rootsOf, threadsOf } from "../src/follow.mjs";
 import { tmp } from "./helpers.mjs";
 
 /** @param {string} id @param {string} [thread] @returns {import('../src/core.mjs').Message} */
@@ -94,4 +94,59 @@ test("rootsOf names the thread a reply is in and the thread a top-level message 
   const msg = (id, thread) => /** @type {import("../src/core.mjs").Message} */ ({ id, room: "r", author: { id: "x", name: "x", kind: "agent" }, text: "", ts: "", cursor: id, ...(thread ? { thread } : {}) });
   assert.deepEqual(rootsOf([msg("a", "T2"), msg("b"), msg("c", "T2"), msg("d", "T3")]), ["T2", "b", "T3"]);
   assert.deepEqual(rootsOf([]), []);
+});
+
+test("the cap keeps the threads the answers arrive in: this session's own roots and what a human just replied in", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const t0 = new Date("2026-09-03T09:00:00.000Z");
+    const at = (/** @type {number} */ n) => new Date(t0.getTime() + n * 1000);
+    // MINE is the oldest by activity and would go first; it is the thread under this session's own
+    // request, which is exactly where the operator answers
+    await followThreads(dir, "down", ["MINE"], { cap: 2, now: at(0) });
+    await followThreads(dir, "down", ["chatter"], { cap: 2, now: at(1) });
+    const r = await followThreads(dir, "down", ["newest"], { cap: 2, now: at(2), protect: ["MINE"] });
+    assert.deepEqual(r.evicted, ["chatter"], "a busy room's chatter is always more recent than the request still being answered");
+    assert.deepEqual(r.protectedEvicted, []);
+    assert.deepEqual(r.threads, ["MINE", "newest"]);
+
+    // the cap still binds when everything left is protected; it just says which one it took
+    const all = await followThreads(dir, "down", ["third"], { cap: 2, now: at(3), protect: ["MINE", "newest", "third"] });
+    assert.deepEqual(all.evicted, ["MINE"]);
+    assert.deepEqual(all.protectedEvicted, ["MINE"], "so the caller can say so out loud");
+    assert.deepEqual(all.threads, ["newest", "third"]);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("the ids of one post the transport had to split are one followed conversation", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const t0 = new Date("2026-09-03T09:00:00.000Z");
+    await followThreads(dir, "down", ["p1"], { cap: 2, now: t0 });
+    // sender-side only: these are the ids this session's own post produced, from the post result,
+    // never anything read off a delivered message
+    await aliasThreads(dir, "down", "p1", ["p2", "p3"]);
+    const set = await readFollow(dir, "down");
+    assert.deepEqual(set.aliases, { p2: "p1", p3: "p1" });
+    assert.equal(rootOf(set, "p2"), "p1");
+    assert.equal(rootOf(set, "other"), "other");
+
+    const r = await followThreads(dir, "down", [], { cap: 2, now: new Date(t0.getTime() + 1000) });
+    assert.deepEqual(r.threads, ["p1", "p2", "p3"], "a reply under any chunk is read");
+    assert.deepEqual(Object.keys((await readFollow(dir, "down")).threads), ["p1"], "and the chunks spend no slot of their own");
+
+    // activity on a chunk is activity on the post
+    await followThreads(dir, "down", ["later"], { cap: 2, now: new Date(t0.getTime() + 2000) });
+    const moved = await followThreads(dir, "down", ["p3"], { cap: 2, now: new Date(t0.getTime() + 3000) });
+    assert.deepEqual(moved.threads.slice(0, 2), ["later", "p1"], "the root moved off the eviction end, not a fourth entry");
+
+    const out = await followThreads(dir, "down", ["fresh"], { cap: 1, now: new Date(t0.getTime() + 4000) });
+    assert.deepEqual(out.evicted, ["later", "p1"]);
+    assert.deepEqual(out.threads, ["fresh"], "the chunks leave with their root");
+    assert.equal((await readFollow(dir, "down")).aliases, undefined);
+  } finally {
+    await cleanup();
+  }
 });

@@ -51,12 +51,21 @@ export function sessionTag(varName) {
  * @returns {Session}
  */
 export function resolveSession(cfg, env, warn = () => {}) {
+  const from = Array.isArray(cfg.session?.from) ? cfg.session.from.map(String) : [...DEFAULT_SESSION_FROM];
   const explicit = env.AGORA_SESSION;
   if (explicit !== undefined) {
     if (!SESSION_RE.test(explicit)) throw new AgoraError(`AGORA_SESSION must match ${SESSION_RE} (got ${JSON.stringify(explicit)})`, EXIT.usage);
+    // The raw value is what a reader copies out of `doctor`, which prints the harness variable's
+    // value beside the slug derived from it. Setting AGORA_SESSION to that raw value must not fork
+    // a second session directory (a second ledger, a second position) out of one harness session:
+    // it names the same session, so it resolves to the same tagged slug.
+    for (const varName of from) {
+      if (SECRET_NAME.test(varName)) continue;
+      if (env[varName] !== undefined && env[varName] !== "" && env[varName] === explicit && SESSION_RE.test(explicit))
+        return { slug: `${sessionTag(varName)}-${explicit}`, source: `AGORA_SESSION (${varName})`, explicit: true };
+    }
     return { slug: explicit, source: "AGORA_SESSION", explicit: true };
   }
-  const from = Array.isArray(cfg.session?.from) ? cfg.session.from.map(String) : [...DEFAULT_SESSION_FROM];
   for (const varName of from) {
     if (SECRET_NAME.test(varName)) {
       warn(`session.from names ${varName}, which looks like a credential; skipped`);
@@ -279,7 +288,7 @@ export function hasLegacyState(stateRoot) {
  * @property {string} lastSeen
  */
 
-export const DEFAULT_PID_FROM = Object.freeze(["AGORA_SESSION_PID", "CLAUDE_PID"]);
+export const DEFAULT_PID_FROM = Object.freeze(["AGORA_SESSION_PID", "CLAUDE_PID", "GROK_PID"]);
 const recordPath = (/** @type {string} */ dir) => path.join(dir, "session.json");
 
 /** Seconds since the epoch at which this machine booted; a pid is meaningless across a reboot. */
@@ -296,9 +305,30 @@ export function harnessPid(cfg, env) {
   const from = Array.isArray(cfg.session?.pidFrom) ? cfg.session.pidFrom.map(String) : [...DEFAULT_PID_FROM];
   for (const name of from) {
     const v = Number(env[name]);
-    if (Number.isInteger(v) && v > 0) return { pid: v, pidSource: name };
+    if (Number.isInteger(v) && v > 0) return { pid: v, pidSource: name, looked: from };
   }
-  return { pid: undefined, pidSource: undefined };
+  // `looked` is what the caller says out loud when there is no pid: liveness-unknown is a fact
+  // about which variable the harness failed to inject, and naming it is the whole remedy.
+  return { pid: undefined, pidSource: undefined, looked: from };
+}
+
+export const DEFAULT_CHILD_FROM = Object.freeze(["CLAUDE_CODE_CHILD_SESSION"]);
+
+/**
+ * Is this process a subagent of the session that holds the seat? A harness that spawns a tool or
+ * hook subprocess hands it the parent's session id, so it writes into the parent's ledger and its
+ * post is skipped by the parent's own watch. The harness also sets a marker; reading it is the
+ * visibility the design asks for. Never a refusal: a subagent may legitimately post.
+ * @param {import('./core.mjs').Config} cfg @param {NodeJS.ProcessEnv} env
+ * @returns {{ child: boolean, source?: string }}
+ */
+export function childSession(cfg, env) {
+  const from = Array.isArray(cfg.session?.childFrom) ? cfg.session.childFrom.map(String) : [...DEFAULT_CHILD_FROM];
+  for (const name of from) {
+    const v = env[name];
+    if (v !== undefined && v !== "" && v !== "0" && v.toLowerCase() !== "false") return { child: true, source: name };
+  }
+  return { child: false };
 }
 
 /** @param {string} dir @returns {Promise<SessionRecord | undefined>} */
@@ -434,9 +464,57 @@ export async function departures(stateRoot, opts) {
     const age = ageHours(r.record, now);
     if (age < grace || age > stale) continue;
     if (existsSync(path.join(departedDir(r.dir), `${opts.roomKey}.json`))) continue;
+    // a session that never touched this room is not announced in it: a fresh room otherwise opens
+    // with obituaries for bearers it never met, taken from the whole seat's roster
+    if (!(await hasRoomState(r.dir, opts.roomKey))) continue;
     out.push({ slug: r.slug, dir: r.dir, record: r.record });
   }
   return out;
+}
+
+/**
+ * Did this session ever have state in this room? A saved position for the key (or for a thread of
+ * it) or a watch armed on it. Read off the files that already exist; nothing new is recorded to
+ * answer it.
+ * @param {string} dir a session directory @param {string} roomKey
+ */
+export async function hasRoomState(dir, roomKey) {
+  const scope = await sessionScope(dir);
+  const mine = (/** @type {string} */ key) => key === roomKey || key.startsWith(`${roomKey}#`);
+  return scope.rooms.some(mine) || scope.armed.some((a) => mine(a.key));
+}
+
+/**
+ * What one session holds, by name: the room keys it has a saved position for, and the watches it
+ * has armed. Names only -- no cursor value, no room content. `doctor` and `session --list` print it
+ * so "three live sessions" can be read as which rooms they are actually in.
+ * @param {string} dir a session directory
+ * @returns {Promise<{ rooms: string[], armed: Array<{ key: string, room: string, thread?: string, mode?: string, pid: number }> }>}
+ */
+export async function sessionScope(dir) {
+  /** @type {string[]} */
+  let rooms = [];
+  try {
+    rooms = (await readdir(dir)).filter((f) => f.endsWith(".cursor")).map((f) => f.slice(0, -".cursor".length)).sort();
+  } catch {
+    rooms = [];
+  }
+  /** @type {Array<{ key: string, room: string, thread?: string, mode?: string, pid: number }>} */
+  const armed = [];
+  /** @type {string[]} */
+  let files = [];
+  try {
+    files = await readdir(armedDir(dir));
+  } catch {
+    files = [];
+  }
+  for (const f of files.sort()) {
+    if (!f.endsWith(".json")) continue;
+    const key = f.slice(0, -".json".length);
+    const rec = await readArmed(dir, key);
+    if (rec) armed.push({ key, room: rec.room, ...(rec.thread ? { thread: rec.thread } : {}), ...(rec.mode ? { mode: rec.mode } : {}), pid: rec.pid });
+  }
+  return { rooms, armed };
 }
 
 /**
@@ -458,6 +536,16 @@ export async function claimDeparture(dir, roomKey, by) {
 }
 
 /**
+ * Give the claim back. A post that failed announced nothing, and a claim kept over a failure
+ * silences that departure in that room for every watcher on the seat, permanently -- which is the
+ * exact silence the mechanism exists to end. Releasing lets the next poll, or another watcher, try.
+ * @param {string} dir the departed session's directory @param {string} roomKey
+ */
+export async function releaseDeparture(dir, roomKey) {
+  await rm(path.join(departedDir(dir), `${roomKey}.json`), { force: true });
+}
+
+/**
  * The line a sibling posts for a session that went dark. It names who is still here so a
  * request can be re-addressed rather than re-sent into silence. A session whose liveness
  * cannot be probed from here (a harness that injects no pid, another OS user's process) is
@@ -474,6 +562,24 @@ export function departureLine(gone, live, unknown = []) {
   const named = unknown.map((u) => typeof u === "string" ? u : u.lastSeen ? `${u.bearer} (last seen ${new Date(u.lastSeen).toISOString().replace(/\.\d{3}Z$/, "Z")})` : u.bearer);
   const maybe = named.length ? ` Also registered here, liveness not provable from this process: ${named.join(", ")}.` : "";
   return `${gone.bearer} is no longer running (last seen ${seen}). Requests addressed to it will not be answered; re-address them. ${others}${maybe}`;
+}
+
+/**
+ * One sweep, one post. A reboot leaves every recent record dark at once, and a paragraph each is
+ * the loudest machine traffic in a room humans read in one pass. Bearers and last-seen times are
+ * named; no count is emitted, because a roster is what a reader re-addresses against and a number
+ * is not.
+ * @param {SessionRecord[]} gone @param {string[]} live @param {Array<string | { bearer: string, lastSeen?: string }>} [unknown]
+ */
+export function departuresLine(gone, live, unknown = []) {
+  if (gone.length === 1) return departureLine(gone[0], live, unknown);
+  const names = gone.map((g) => g.bearer);
+  const seen = gone.map((g) => new Date(g.lastSeen).toISOString().replace(/\.\d{3}Z$/, "Z"));
+  const list = `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+  const others = live.length ? `Still here on this seat: ${live.join(", ")}.` : "No other session is provably live on this seat.";
+  const named = unknown.map((u) => typeof u === "string" ? u : u.lastSeen ? `${u.bearer} (last seen ${new Date(u.lastSeen).toISOString().replace(/\.\d{3}Z$/, "Z")})` : u.bearer);
+  const maybe = named.length ? ` Also registered here, liveness not provable from this process: ${named.join(", ")}.` : "";
+  return `${list} are no longer running (last seen ${seen.join(", ")}, in that order). Requests addressed to them will not be answered; re-address them. ${others}${maybe}`;
 }
 
 const ETAG_MAX = 64;
@@ -537,6 +643,7 @@ export function pidAlive(pid, kill) {
  * @property {string} room the room alias
  * @property {string} [thread]
  * @property {number} interval seconds between room polls
+ * @property {'once' | 'until-new' | 'stream'} [mode] what this watch is doing
  * @property {number} [threadInterval] seconds between reads of one followed thread
  * @property {boolean} [follow]
  * @property {number} pid the watching process

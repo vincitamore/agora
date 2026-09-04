@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { claudeProjectSlug, clearWatchMode, touchWatchMode, watchModeSentinel } from "../src/harness.mjs";
+import { claudeProjectSlug, clearWatchMode, readWatchMode, touchWatchMode, watchModeSentinel } from "../src/harness.mjs";
 
 test("the sentinel sits beside the Claude Code transcript, named by cwd slug and session id", () => {
   assert.equal(claudeProjectSlug("C:\\Users\\AlexMoyer\\Documents\\opus"), "C--Users-AlexMoyer-Documents-opus");
@@ -34,14 +34,49 @@ test("touch writes only beside an existing transcript; clear removes it; absent 
     assert.equal(fromSubdir.transcript, target.transcript, "a watch armed from a subdirectory finds the project root's transcript");
     target = fromSubdir;
     const now = new Date("2026-09-03T23:40:00.000Z");
-    assert.equal(await touchWatchMode(target, { now }), true);
-    assert.equal(await readFile(target.sentinel, "utf8"), "2026-09-03T23:40:00.000Z\n");
-    await touchWatchMode(target);
+    assert.equal(await touchWatchMode(target, { now }), "created", "the path is worth announcing exactly once");
+    assert.deepEqual(JSON.parse(await readFile(target.sentinel, "utf8")), { pid: process.pid, at: "2026-09-03T23:40:00.000Z" });
+    assert.equal(await touchWatchMode(target), "refreshed", "a refresh is not an announcement");
     assert.ok((await stat(target.sentinel)).isFile());
     await clearWatchMode(target);
     await assert.rejects(stat(target.sentinel));
     await clearWatchMode(target);
     await clearWatchMode(null);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("the sentinel has an owner: a short watch leaving does not un-suppress a resident one", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "agora-harness-"));
+  try {
+    const env = { CLAUDE_CODE_SESSION_ID: "abcdef12-0000-4000-8000-000000000001" };
+    const target = watchModeSentinel(env, "/some/where", home);
+    assert.ok(target);
+    await mkdir(target.dir, { recursive: true });
+    await writeFile(target.transcript, "", "utf8");
+
+    // the resident stream (this process) owns it; a one-shot watch in the same session is another pid
+    assert.equal(await touchWatchMode(target), "created");
+    const other = process.pid + 1_000_000; // a pid nothing answers
+    assert.equal(await touchWatchMode(target, { pid: other }), "refreshed");
+    assert.equal(JSON.parse(await readFile(target.sentinel, "utf8")).pid, process.pid, "a live owner keeps the file");
+    await clearWatchMode(target, { pid: other });
+    assert.ok((await stat(target.sentinel)).isFile(), "the short watch left the resident one's suppression alone");
+    assert.equal(JSON.parse(await readFile(target.sentinel, "utf8")).pid, process.pid);
+    await clearWatchMode(target);
+    await assert.rejects(stat(target.sentinel), "the owner clears it");
+
+    // an owner that is gone (killed without clearing) is not an owner: the next watch adopts the file
+    await writeFile(target.sentinel, JSON.stringify({ pid: other, at: "2026-09-03T23:40:00.000Z" }), "utf8");
+    assert.equal(await touchWatchMode(target), "refreshed");
+    assert.equal(JSON.parse(await readFile(target.sentinel, "utf8")).pid, process.pid);
+
+    // a bare-timestamp sentinel from an older build is unowned and adopted the same way
+    await writeFile(target.sentinel, "2026-09-03T23:40:00.000Z\n", "utf8");
+    assert.deepEqual(await readWatchMode(target), { at: "2026-09-03T23:40:00.000Z" });
+    await clearWatchMode(target);
+    await assert.rejects(stat(target.sentinel));
   } finally {
     await rm(home, { recursive: true, force: true });
   }
