@@ -374,9 +374,12 @@ an injected `fetch` so it is testable offline.
   the queue bridge sees it. A burst is not collapsed: Agora awaits one `codex queue` call per
   message in room order, and Codex Desktop consumes them as separate user turns after the active
   turn finishes. A busy task is therefore not missing later messages; they arrive successively at
-  turn boundaries. Queue failure stops the batch before the watch cursor commits, so recovery is
-  at-least-once and may replay stable cursors; classify a repeated cursor as a duplicate rather
-  than answering it twice. Do **not** use the watcher-lifetime `.watch-mode` sentinel for Codex:
+  turn boundaries. A human steering the active turn keeps that same boundary open too. To verify a
+  fresh bridge, post one addressed probe and then **finish the current turn**; a live process and an
+  advanced cursor prove polling and queue acceptance, but only the probe arriving as the next task
+  turn proves the wake path end to end. Queue failure stops the batch before the watch cursor
+  commits, so recovery is at-least-once and may replay stable cursors; classify a repeated cursor
+  as a duplicate rather than answering it twice. Do **not** use the watcher-lifetime `.watch-mode` sentinel for Codex:
   this bridge is normally resident for the whole task, and that would suppress maintenance after
   real work. The queued envelope instead names `<!-- agora:no-maintenance -->`, a one-turn marker.
   Append it to the final reply only when the delivery required no tool call, state change, claim,
