@@ -52,7 +52,7 @@ import {
 } from "../src/session.mjs";
 import { FOLLOW_CAP, FOLLOW_IDLE_MINUTES, aliasThreads, dropFollow, followThreads, readFollow, rootsOf, threadsOf } from "../src/follow.mjs";
 import { withThreads } from "../src/threads.mjs";
-import { carryState, foldRoom, renderCarry } from "../src/carry.mjs";
+import { carryState, carryWindow, foldRoom, renderCarry } from "../src/carry.mjs";
 import { formatTrailers, matchesAddress, parseTrailers, TRAILER_VALUE_MAX, trailerValueOk } from "../src/trailers.mjs";
 import { SLACK_TEXT_MAX, chunkAtLines, encodeSlackText } from "../src/transports/slack.mjs";
 import { codexLiveness, codexSpawnWarning, codexThread, queueCodex, resolveCodexBinary } from "../src/codex.mjs";
@@ -146,9 +146,9 @@ const SCHEMA = {
       args: ["<room>"],
       options: {
         "--limit <n>": "how many recent messages to fold this session's own posts out of (default 200)",
-        "--threads": "fold the room's live threads into that window, as `read --threads` does",
+        "--no-threads": "read the room alone. The room's live threads are folded into the window by default, as `read --threads` does, because on a transport whose room read omits replies a release posted in a thread would leave the claim it closed standing in the envelope; this buys one read back and accepts that",
       },
-      does: "what this session would hand to whoever holds the seat next: seat, bearer, session key and the source of each; this session's cursor for the room and every thread it holds one for; its follow set; its armed watches; and, from one bounded read folded against its own posted ledger, the claims it has not released, every release, every verdict with its exhibits, the messages it addressed to someone, and the deliveries addressed to it that it has not posted since. Derived at the call, stored nowhere, and no message text: a commitment is named by its trailer value and located by its id and cursor",
+      does: "what this session would hand to whoever holds the seat next: seat, bearer, session key and the source of each; this session's cursor for the room and every thread it holds one for; its follow set; its armed watches; and, from one bounded read of the room with its live threads folded in, read against its own posted ledger, the claims it has not released, every release, every verdict that still stands, every verdict a later one of its own withdrew, the messages it addressed to someone, and the deliveries addressed to it it has neither spoken after nor answered by name. Derived at the call, stored nowhere, and no message text: a commitment is named by its trailer value and located by its id and cursor",
     },
     session: {
       args: [],
@@ -185,6 +185,7 @@ const OPTIONS = /** @type {const} */ ({
   stdin: { type: "boolean", default: false },
   split: { type: "boolean", default: false },
   "no-sign": { type: "boolean", default: false },
+  "no-threads": { type: "boolean", default: false },
   fyi: { type: "boolean", default: false },
   follow: { type: "boolean", default: false },
   "thread-interval": { type: "string" },
@@ -818,12 +819,15 @@ async function main(argv) {
       // Nothing here is written. The positions, follow set and armed registrations are read off the
       // files that already exist, and the room is read once with no cursor, which moves nothing.
       const limit = positive(values.limit, "limit") ?? 200;
-      let msgs = await transport.read({ thread, limit });
-      if (values.threads && transport.threads) {
-        const folded = await withThreads(transport, msgs, msgs, {});
-        msgs = folded.messages;
-        if (folded.threads.length) console.error(`agora: read ${folded.threads.length} live thread${folded.threads.length === 1 ? "" : "s"} into the room`);
-      } else if (values.threads) console.error(`agora: ${transport.kind} has no threads; --threads changes nothing here`);
+      // The thread fold is the default here, not a flag as it is on `read`: a commitment posted as
+      // a thread reply is absent from a room read on Slack, and an envelope that missed a release
+      // hands a successor a claim its predecessor let go of. `--no-threads` buys the extra reads
+      // back and says so.
+      const wantThreads = !values["no-threads"];
+      const window = await carryWindow(transport, { limit, thread, threads: wantThreads });
+      const msgs = window.messages;
+      if (window.threads.length) console.error(`agora: read ${window.threads.length} live thread${window.threads.length === 1 ? "" : "s"} into the room`);
+      else if (wantThreads && !thread && !transport.threads) console.error(`agora: ${transport.kind} has no threads; the window is the room read alone`);
       // the same call `--wake addressed` makes, and for the same reason: an address may name the
       // seat rather than a bearer, and a transport that cannot say who it is leaves bearer
       // addressing working on its own
