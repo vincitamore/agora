@@ -1,6 +1,7 @@
 // @ts-check
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { writeFileAtomic } from "./core.mjs";
 
 /**
  * The threads one session follows in one room, and when each last carried activity.
@@ -40,9 +41,7 @@ export async function readFollow(dir, key) {
 
 /** @param {string} dir @param {string} key @param {FollowSet} set */
 export async function writeFollow(dir, key, set) {
-  const file = followPath(dir, key);
-  await mkdir(path.dirname(file), { recursive: true });
-  await writeFile(file, JSON.stringify(set, null, 2) + "\n", "utf8");
+  await writeFileAtomic(followPath(dir, key), JSON.stringify(set, null, 2) + "\n");
 }
 
 /** Drop one thread from the set. A truncated Slack ts that 404s must leave, or the next poll puts it back. @param {string} dir @param {string} key @param {string} id */

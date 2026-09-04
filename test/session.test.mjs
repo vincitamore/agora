@@ -2,28 +2,35 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { readFile } from "node:fs/promises";
-import { readCursor, readCursorFile, writeCursor } from "../src/core.mjs";
+import { readFile, readdir, writeFile } from "node:fs/promises";
+import { AgoraError, readCursor, readCursorFile, writeCursor } from "../src/core.mjs";
 import {
   BEARER_RE,
+  DEFAULT_SESSION_FROM,
   appendPosted,
+  armedAlive,
   bootEpoch,
   claimDeparture,
   departureLine,
   departures,
+  etagCache,
   harnessPid,
   identityLine,
   listRecords,
   listSessions,
   liveness,
+  postedPids,
   readCursorSeeded,
   readPosted,
+  readArmed,
   readRecord,
+  removeSession,
   resolveBearer,
   resolveSession,
   sessionDir,
   sessionTag,
   touchRecord,
+  writeArmed,
   writeRecord,
 } from "../src/session.mjs";
 import { actor, tmp } from "./helpers.mjs";
@@ -31,12 +38,25 @@ import { actor, tmp } from "./helpers.mjs";
 const cfg = /** @type {import('../src/core.mjs').Config} */ ({ actor, rooms: { r: { transport: "local", path: "r.ndjson" } } });
 
 test("session key: AGORA_SESSION, then the first set harness variable, then default", () => {
+  assert.deepEqual(DEFAULT_SESSION_FROM, [
+    "CLAUDE_CODE_SESSION_ID",
+    "GROK_SESSION_ID",
+    "CODEX_THREAD_ID",
+    "CODEX_SESSION_ID",
+    "HERMES_SESSION_ID",
+  ]);
   assert.deepEqual(resolveSession(cfg, { AGORA_SESSION: "grace-a" }), { slug: "grace-a", source: "AGORA_SESSION", explicit: true });
   assert.deepEqual(resolveSession(cfg, { CLAUDE_CODE_SESSION_ID: "2bfa6030-9abd-48d4-835f-53c4123fb0ed" }), {
     slug: "claude-code-2bfa6030-9abd-48d4-835f-53c4123fb0ed", source: "CLAUDE_CODE_SESSION_ID", explicit: false,
   });
   assert.deepEqual(resolveSession(cfg, { CODEX_SESSION_ID: "01a06940-dfba-7360-ae3f-20e45b7b41d1" }), {
     slug: "codex-01a06940-dfba-7360-ae3f-20e45b7b41d1", source: "CODEX_SESSION_ID", explicit: false,
+  });
+  assert.deepEqual(resolveSession(cfg, { CODEX_THREAD_ID: "thread-123", CODEX_SESSION_ID: "session-123" }), {
+    slug: "codex-thread-thread-123", source: "CODEX_THREAD_ID", explicit: false,
+  });
+  assert.deepEqual(resolveSession(cfg, { HERMES_SESSION_ID: "hermes-123" }), {
+    slug: "hermes-hermes-123", source: "HERMES_SESSION_ID", explicit: false,
   });
   assert.deepEqual(resolveSession(cfg, {}), { slug: "default", source: "default", explicit: false });
   assert.equal(sessionTag("GROK_SESSION_ID"), "grok");
@@ -55,6 +75,36 @@ test("session key: a harness value that is not a key is skipped; a credential-sh
   assert.match(warned[0], /MY_TOKEN.*credential/);
   assert.doesNotMatch(warned.join("\n"), /xoxb/, "a credential-shaped variable's value is never printed");
   assert.match(warned[1], /HARNESS_SESSION_ID.*skipped/);
+});
+
+test("a session key is one safe directory name: `.` and `..` are refused, and no recursive remove runs outside sessions/", async () => {
+  const usage = (/** @type {unknown} */ e) => e instanceof AgoraError && e.exitCode === 2;
+  for (const bad of ["..", "."]) {
+    assert.throws(() => resolveSession(cfg, { AGORA_SESSION: bad }), usage, `AGORA_SESSION=${bad} is a usage error`);
+    assert.throws(() => resolveSession(cfg, { AGORA_SESSION: bad }), /AGORA_SESSION must match/);
+    assert.throws(() => sessionDir("/state", { slug: bad, source: "AGORA_SESSION", explicit: true }), usage, `sessionDir refuses ${bad}`);
+  }
+  assert.throws(() => sessionDir("/state", { slug: "a/b", source: "x", explicit: true }), usage, "and anything else that is not one name");
+  // a harness variable holding a path-relative name is skipped, not turned into a slug
+  const s = resolveSession({ ...cfg, session: { from: ["H_ID"] } }, { H_ID: ".." }, () => {});
+  assert.deepEqual(s, { slug: "default", source: "default", explicit: false });
+
+  const { dir, cleanup } = await tmp();
+  try {
+    const one = { slug: "s1", source: "AGORA_SESSION", explicit: true };
+    await writeCursor(sessionDir(dir, one), "r", "17");
+    await writeCursor(dir, "r", "3"); // the shared file every unseeded session seeds from
+    await assert.rejects(() => removeSession(dir), /refusing to remove/, "the state root is not a session directory");
+    await assert.rejects(() => removeSession(path.join(dir, "sessions")), /refusing to remove/, "nor is sessions/ itself");
+    await assert.rejects(() => removeSession(path.join(dir, "sessions", "s1", "..")), /refusing to remove/, "nor is a path that traverses out of one");
+    await assert.rejects(() => removeSession(path.join(dir, "sessions", "s1"), path.join(dir, "elsewhere")), /does not name a directory/, "nor one under another state root");
+    assert.equal(await readCursor(sessionDir(dir, one), "r"), "17", "nothing was removed");
+    await removeSession(path.join(dir, "sessions", "s1"), dir);
+    assert.deepEqual(await listSessions(dir), [], "the one session it does name is removed");
+    assert.equal(await readCursor(dir, "r"), "3", "the shared file is untouched");
+  } finally {
+    await cleanup();
+  }
 });
 
 test("bearer: --as, then AGORA_ACTOR, then the config; paths validated at the boundary", () => {
@@ -105,6 +155,98 @@ test("cursor --reset leaves a null position, which is not an absence: it never r
     assert.deepEqual(f, { exists: true, cursor: undefined });
     assert.deepEqual(await readCursorSeeded(sdir, dir, "r"), { cursor: undefined, seeded: false }, "reads from the start, does not fall back to 17");
     assert.deepEqual(await readCursorSeeded(sdir, dir, "absent"), { cursor: undefined, seeded: false });
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a torn cursor file is an error naming the file, never an absence seeded over", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const sdir = sessionDir(dir, { slug: "s1", source: "AGORA_SESSION", explicit: true });
+    await writeCursor(dir, "r", "3"); // the shared seed, well behind
+    await writeCursor(sdir, "r", "9"); // this session's real position
+    const file = path.join(sdir, "r.cursor");
+    const torn = '{"cursor":"9';
+    await writeFile(file, torn, "utf8"); // what a half-finished write leaves
+    await assert.rejects(
+      () => readCursorFile(sdir, "r"),
+      (e) => e instanceof AgoraError && e.exitCode === 1 && e.message.includes(file) && /inspect it or delete it/.test(e.message),
+      "the error names the file and says what to do about it",
+    );
+    // the regression: a torn file read as an absence seeds from the stale root cursor, overwrites
+    // the real position with it, and re-delivers everything between 3 and 9
+    await assert.rejects(() => readCursorSeeded(sdir, dir, "r"), /inspect it or delete it/);
+    assert.equal(await readFile(file, "utf8"), torn, "the damaged file is left as it was, never overwritten with the seed");
+    assert.equal((await readCursorFile(dir, "r")).cursor, "3", "and the shared file is still only ever read");
+    assert.deepEqual(await readCursorFile(sdir, "absent"), { exists: false, cursor: undefined }, "an absent file is still an absence");
+    assert.deepEqual(await readCursorFile(path.join(dir, "no", "such", "dir"), "r"), { exists: false, cursor: undefined });
+  } finally {
+    await cleanup();
+  }
+});
+
+test("every state write is a rename into place: nothing half-written, no temp file left behind", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const s = { slug: "s1", source: "AGORA_SESSION", explicit: true };
+    const sdir = sessionDir(dir, s);
+    await writeCursor(sdir, "r", "42");
+    await writeRecord(sdir, s, { bearer: "Grace/watch", pid: process.pid, pidSource: "TEST" });
+    await writeArmed(sdir, "r", { room: "r", interval: 15, pid: process.pid, startedAt: new Date().toISOString() });
+    await etagCache(sdir).set("r", 'W/"abc"');
+    await appendPosted(sdir, "m1");
+
+    const names = (await readdir(sdir, { recursive: true })).map(String);
+    assert.deepEqual(names.filter((n) => n.includes(".tmp-")), [], "no temp file survives a write");
+    assert.equal(await readCursor(sdir, "r"), "42");
+    assert.equal((await readRecord(sdir))?.bearer, "Grace/watch", "the record parses whole");
+    assert.equal((await readArmed(sdir, "r"))?.room, "r");
+    assert.equal(await etagCache(sdir).get("r"), 'W/"abc"');
+    assert.ok((await readPosted(sdir)).has("m1"));
+    // and the bytes on disk are the complete document, not a prefix of it
+    for (const f of ["r.cursor", "session.json", "etags.json"]) JSON.parse(await readFile(path.join(sdir, f), "utf8"));
+  } finally {
+    await cleanup();
+  }
+});
+
+test("the posted-id ledger keeps every id under concurrent appends from two callers", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const caller = async (/** @type {string} */ tag, /** @type {number} */ n) => {
+      /** @type {string[]} */
+      const ids = [];
+      for (let i = 0; i < n; i++) {
+        const id = `${tag}${i}`;
+        ids.push(id);
+        await appendPosted(dir, id); // two callers interleaving, as two processes of one session do
+      }
+      return ids;
+    };
+    const [a, b] = await Promise.all([caller("a", 100), caller("b", 100)]);
+    const ids = await readPosted(dir);
+    for (const id of [...a, ...b]) assert.ok(ids.has(id), `${id} is in the ledger`);
+    assert.equal(ids.size, 200, "200 concurrent appends, 200 ids");
+    assert.equal((await postedPids(dir)).size, 1);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("the ring rotates the file whole, so an id appended across the rotation is not dropped", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const caller = async (/** @type {string} */ tag, /** @type {number} */ n) => {
+      for (let i = 0; i < n; i++) await appendPosted(dir, `${tag}${i}`);
+    };
+    await Promise.all([caller("a", 700), caller("b", 700)]); // 1400 crosses the rotation point
+    const ids = await readPosted(dir);
+    for (let i = 0; i < 700; i++) {
+      assert.ok(ids.has(`a${i}`), `a${i} survived the rotation`);
+      assert.ok(ids.has(`b${i}`), `b${i} survived the rotation`);
+    }
+    assert.deepEqual((await readdir(dir)).filter((f) => f.includes("rotating")), [], "the rotation lock is released");
   } finally {
     await cleanup();
   }
@@ -162,6 +304,34 @@ test("liveness: a matching boot and an answering pid is live; ESRCH or a reboot 
   assert.equal(liveness(rec, { kill: eperm, boot: 1000 }), "live");
   assert.equal(liveness({ ...rec, pid: undefined }, { kill: () => {}, boot: 1000 }), "unknown");
   assert.equal(liveness({ ...rec, pid: process.pid, bootEpoch: bootEpoch() }), "live", "this process, for real");
+});
+
+test("an armed registration carries the boot it belongs to, so a pid reused after a reboot is not a live watch", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const sdir = sessionDir(dir, { slug: "s1", source: "AGORA_SESSION", explicit: true });
+    await writeArmed(sdir, "r", { room: "r", interval: 15, pid: process.pid, startedAt: new Date().toISOString() });
+    const armed = await readArmed(sdir, "r");
+    assert.ok(armed && typeof armed.bootEpoch === "number", "the registration is stamped with this boot");
+    assert.ok(Math.abs(armed.bootEpoch - bootEpoch()) <= 2);
+    const boot = armed.bootEpoch;
+    const esrch = () => { const e = /** @type {NodeJS.ErrnoException} */ (new Error("gone")); e.code = "ESRCH"; throw e; };
+
+    assert.equal(armedAlive(armed, { kill: () => {}, boot }), true);
+    assert.equal(armedAlive(armed, { kill: () => {}, boot: boot + 9000 }), false, "the machine rebooted; this pid belongs to something else now");
+    assert.equal(armedAlive(armed, { kill: esrch, boot }), false, "same boot, no such process");
+    assert.equal(armedAlive(armed), true, "this process, for real");
+    assert.equal(
+      armedAlive({ room: "r", interval: 15, pid: process.pid, startedAt: "t" }, { kill: () => {}, boot: 1 }),
+      true,
+      "a registration from a build that stamped no boot epoch falls back to the pid",
+    );
+
+    await writeArmed(sdir, "r", { ...armed, bootEpoch: 1234 });
+    assert.equal((await readArmed(sdir, "r"))?.bootEpoch, 1234, "a boot epoch already on the record is kept");
+  } finally {
+    await cleanup();
+  }
 });
 
 test("listRecords: every session with state, registered or not, with its liveness", async () => {
