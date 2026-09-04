@@ -8,7 +8,7 @@ import path from "node:path";
 
 const execFileAsync = promisify(execFile);
 
-/** @typedef {'human' | 'agent' | 'unknown'} ActorKind */
+/** @typedef {'human' | 'agent' | 'unknown' | 'system'} ActorKind */
 /** @typedef {{ id: string, name: string, kind: ActorKind }} Author */
 /**
  * A message as every transport reports it. `cursor` is opaque to callers and

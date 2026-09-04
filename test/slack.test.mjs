@@ -41,6 +41,28 @@ test("slack room needs a channel id", () => {
   assert.throws(() => slackTransport({ transport: "slack", channel: "#general" }, { token: "x" }), /channel id/);
 });
 
+test("slack system subtypes are delivered as author.kind system, not skipped", async () => {
+  const { fetch } = fakeFetch([
+    ["users.info", () => ({ body: { ok: true, user: { id: "U2", real_name: "peer" } } })],
+    ["conversations.history", () => ({
+      body: {
+        ok: true,
+        has_more: false,
+        messages: [
+          { ts: "1756900000.000100", user: "U2", text: "hello" },
+          { ts: "1756900000.000200", user: "U2", subtype: "channel_purpose", text: "set the channel description: x" },
+          { ts: "1756900000.000250", user: "U2", subtype: "channel_join", text: "joined" },
+        ],
+      },
+    })],
+  ]);
+  const t = slackTransport({ transport: "slack", channel: "C1" }, { token: "x", fetch });
+  const msgs = await t.read();
+  assert.deepEqual(msgs.map((m) => m.author.kind), ["human", "system"]);
+  assert.equal(/** @type {any} */ (msgs[1]).subtype, "channel_purpose");
+  assert.equal(msgs[1].text, "set the channel description: x");
+});
+
 test("slack history: ascending, pages, skips joins and thread replies, names users, kinds", async () => {
   const { t, calls } = make();
   const msgs = await t.read();

@@ -2,6 +2,8 @@
 import { AgoraError, EXIT, jitter, parseSignature, sleep as defaultSleep } from "../core.mjs";
 
 const SKIP_SUBTYPES = new Set(["channel_join", "channel_leave", "group_join", "group_leave"]);
+/** Subtypes that are still a person (or bot) speaking, not a platform event. */
+const SPEECH_SUBTYPES = new Set(["bot_message", "thread_broadcast", "me_message", "file_share"]);
 
 /** Slack splits a chat.postMessage around this many characters; refuse past it unless the caller chunks. */
 export const SLACK_TEXT_MAX = 3900;
@@ -120,7 +122,9 @@ export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep
 
   /** @param {any} m @param {string | undefined} thread */
   async function toMessage(m, thread) {
-    const isBot = Boolean(m.bot_id) || m.subtype === "bot_message";
+    const subtype = typeof m.subtype === "string" ? m.subtype : undefined;
+    const isBot = Boolean(m.bot_id) || subtype === "bot_message";
+    const isSystem = Boolean(subtype) && !SPEECH_SUBTYPES.has(subtype);
     const id = String(m.user ?? m.bot_id ?? "unknown");
     let name = m.username ?? m.bot_profile?.name ?? m.user_profile?.real_name;
     if (!name) name = m.user ? await userName(m.user) : id;
@@ -129,12 +133,13 @@ export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep
       id: String(m.ts),
       room: channel,
       thread: thread ?? (m.thread_ts && m.thread_ts !== m.ts ? String(m.thread_ts) : undefined),
-      author: { id, name: String(name), kind: isBot ? "agent" : "human" },
+      author: { id, name: String(name), kind: isSystem ? "system" : isBot ? "agent" : "human" },
       text,
       signedAs: parseSignature(text),
       ts: new Date(Number(m.ts) * 1000).toISOString(),
       cursor: String(m.ts),
       raw: m,
+      ...(subtype ? { subtype } : {}),
     });
   }
 
