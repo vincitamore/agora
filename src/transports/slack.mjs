@@ -1,7 +1,63 @@
 // @ts-check
-import { AgoraError, jitter, parseSignature, sleep as defaultSleep } from "../core.mjs";
+import { AgoraError, EXIT, jitter, parseSignature, sleep as defaultSleep } from "../core.mjs";
 
 const SKIP_SUBTYPES = new Set(["channel_join", "channel_leave", "group_join", "group_leave"]);
+
+/** Slack splits a chat.postMessage around this many characters; refuse past it unless the caller chunks. */
+export const SLACK_TEXT_MAX = 3900;
+
+/** Split text so each piece is at most `budget` characters, preferring line boundaries. @param {string} text @param {number} budget */
+export function chunkAtLines(text, budget) {
+  if (budget < 1) throw new AgoraError(`chunk budget must be positive`, EXIT.usage);
+  if (text.length <= budget) return [text];
+  const lines = text.split(/\n/);
+  /** @type {string[]} */
+  const out = [];
+  let cur = "";
+  for (const line of lines) {
+    const candidate = cur.length ? `${cur}\n${line}` : line;
+    if (candidate.length <= budget) {
+      cur = candidate;
+      continue;
+    }
+    if (cur) out.push(cur);
+    if (line.length <= budget) cur = line;
+    else {
+      for (let i = 0; i < line.length; i += budget) out.push(line.slice(i, i + budget));
+      cur = "";
+    }
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
+const KEEP_TOKEN = /<@U[A-Z0-9]+(?:\|[^>]*)?>|<#C[A-Z0-9]+(?:\|[^>]*)?>|<https?:\/\/[^>]+>/g;
+const THREAD_TS = /^\d{10}\.\d{6}$/;
+
+/** True only for a Slack message ts (10 digits, a dot, 6 digits). Callers refuse; read() does not. @param {unknown} id */
+export function validateThread(id) {
+  return typeof id === "string" && THREAD_TS.test(id);
+}
+
+/** Slack's API entity-encodes & < > on the way out. Decode so a reader sees the text that was posted. @param {string} text */
+export function decodeSlackText(text) {
+  return String(text).replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+}
+
+/** Escape & < > on the way in, except recognised mention / channel / URL tokens. @param {string} text */
+export function encodeSlackText(text) {
+  const s = String(text);
+  /** @param {string} plain */
+  const esc = (plain) => plain.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  let out = "";
+  let last = 0;
+  for (const m of s.matchAll(KEEP_TOKEN)) {
+    out += esc(s.slice(last, m.index));
+    out += m[0];
+    last = /** @type {number} */ (m.index) + m[0].length;
+  }
+  return out + esc(s.slice(last));
+}
 
 /**
  * A room that is one Slack channel; threads are Slack threads (`thread` = the parent ts).
@@ -36,6 +92,9 @@ export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep
         await sleep(jitter(Math.max(1, wait) * 1000, random));
         continue;
       }
+      if (!res.ok) {
+        throw new AgoraError(`slack ${method}: HTTP ${res.status}`);
+      }
       /** @type {any} */
       const body = await res.json();
       if (!body.ok) throw new AgoraError(`slack ${method}: ${body.error ?? "not ok"}`);
@@ -65,7 +124,7 @@ export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep
     const id = String(m.user ?? m.bot_id ?? "unknown");
     let name = m.username ?? m.bot_profile?.name ?? m.user_profile?.real_name;
     if (!name) name = m.user ? await userName(m.user) : id;
-    const text = String(m.text ?? "");
+    const text = decodeSlackText(String(m.text ?? ""));
     return /** @type {import('../core.mjs').Message} */ ({
       id: String(m.ts),
       room: channel,
@@ -121,8 +180,12 @@ export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep
       return out;
     },
     async post(text, { thread } = {}) {
+      const payload = encodeSlackText(text);
+      if (payload.length > SLACK_TEXT_MAX) {
+        throw new AgoraError(`slack post is ${payload.length} rendered characters (trailers and signature included); the limit is ${SLACK_TEXT_MAX}`, EXIT.usage);
+      }
       /** @type {Record<string, string>} */
-      const params = { channel, text };
+      const params = { channel, text: payload };
       if (thread) params.thread_ts = thread;
       const body = await call("chat.postMessage", params, { post: true });
       return { id: String(body.ts), cursor: String(body.ts) };

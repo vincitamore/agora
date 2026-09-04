@@ -1,7 +1,7 @@
 // @ts-check
 import test from "node:test";
 import assert from "node:assert/strict";
-import { slackTransport } from "../src/transports/slack.mjs";
+import { slackTransport, decodeSlackText, encodeSlackText, SLACK_TEXT_MAX, chunkAtLines, validateThread } from "../src/transports/slack.mjs";
 import { fakeFetch } from "./helpers.mjs";
 
 const history = [
@@ -121,4 +121,50 @@ test("slack whoami and api errors", async () => {
   const { fetch } = fakeFetch([["conversations.history", () => ({ body: { ok: false, error: "not_in_channel" } })]]);
   const t2 = slackTransport({ transport: "slack", channel: "C1" }, { token: "x", fetch });
   await assert.rejects(() => t2.read(), /not_in_channel/);
+});
+
+test("slack encodes & < > on post except mention/channel/url tokens, and decodes them on read", async () => {
+  assert.equal(encodeSlackText("n > 1 and sessions/<s>/"), "n &gt; 1 and sessions/&lt;s&gt;/");
+  assert.equal(encodeSlackText("hi <@U0BUTHS6LUR> see <https://example.com|x>"), "hi <@U0BUTHS6LUR> see <https://example.com|x>");
+  assert.equal(decodeSlackText("n &gt; 1 and sessions/&lt;s&gt;/"), "n > 1 and sessions/<s>/");
+  assert.equal(decodeSlackText("&amp;lt;"), "&lt;");
+  const { t, calls } = make();
+  await t.post("n > 1");
+  assert.equal(JSON.parse(String(calls.at(-1)?.init?.body)).text, "n &gt; 1");
+  const { fetch } = fakeFetch([
+    ["users.info", () => ({ body: { ok: true, user: { id: "U2", real_name: "bone" } } })],
+    ["conversations.history", () => ({ body: { ok: true, messages: [{ ts: "1756900000.000100", user: "U2", text: "n &gt; 1" }], has_more: false } })],
+  ]);
+  const t2 = slackTransport({ transport: "slack", channel: "C1" }, { token: "x", fetch });
+  assert.equal((await t2.read())[0].text, "n > 1");
+});
+
+test("slack post refuses past SLACK_TEXT_MAX with exit 2", async () => {
+  const { t, calls } = make();
+  const err = await t.post("x".repeat(SLACK_TEXT_MAX + 1)).then(() => undefined, (e) => e);
+  assert.equal(err?.exitCode, 2);
+  assert.match(String(err?.message), /limit is 3900/);
+  assert.equal(calls.filter((c) => String(c.url).includes("chat.postMessage")).length, 0);
+  await t.post("x".repeat(SLACK_TEXT_MAX));
+  assert.equal(calls.filter((c) => String(c.url).includes("chat.postMessage")).length, 1);
+});
+
+test("validateThread is the Slack ts predicate; read does not refuse a malformed id", async () => {
+  assert.equal(validateThread("1788459640.119699"), true);
+  assert.equal(validateThread("1788459640.1197"), false);
+  assert.equal(validateThread(1788459640.1197), false);
+  const { t } = make();
+  await t.read({ thread: "1788459640.1197" });
+});
+
+test("chunkAtLines prefers line boundaries and hard-splits a long line", () => {
+  assert.deepEqual(chunkAtLines("ab\ncd", 3), ["ab", "cd"]);
+  assert.deepEqual(chunkAtLines("abcd", 2), ["ab", "cd"]);
+  assert.deepEqual(chunkAtLines("short", 40), ["short"]);
+});
+
+test("slack 5xx HTML does not reach JSON.parse", async () => {
+  const fetch = async () => new Response("<html>nope", { status: 502, headers: { "content-type": "text/html" } });
+  const t = slackTransport({ transport: "slack", channel: "C1" }, { token: "x", fetch: /** @type {typeof globalThis.fetch} */ (fetch) });
+  await assert.rejects(() => t.read(), /HTTP 502/);
 });
