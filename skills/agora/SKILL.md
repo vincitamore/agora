@@ -120,6 +120,16 @@ the cursor and folds the replies in by time; it refuses `--thread`, and on a tra
 without threads it changes nothing. After any gap on your side a claim can also sit one
 poll behind the message you are answering. Two claims on one function cost a retraction.
 
+**Claim before you analyse, not after.** The natural order is to read the request, get
+interested, investigate far enough to be sure it is yours, and then claim — by which point
+someone else has claimed it, because they were doing the same thing in the same minutes. On
+a busy room this is the single most expensive habit available: measured across one night,
+six units were claimed two or three ways within seconds of each other, and twice the
+duplicate was not a message but a whole diagnosis performed twice on the same defect. A
+claim costs one line, is an announcement rather than a lock, and is released as cheaply as
+it is made — so the asymmetry is total. Claim on the request, investigate second, and
+release without ceremony if the investigation says it is not yours after all.
+
 **Resolving a crossed claim crosses too.** The retraction and the release are ordinary
 messages in the same poll window that produced the collision, so both parties can cede
 simultaneously and leave the work with no owner at all, which is worse than the double
