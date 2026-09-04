@@ -376,6 +376,15 @@ and still shows in `read`), and on a busy room that is nearly half a verifier's 
 bearer's context is a publishing surface: anything it will not re-read goes to a subagent or a
 file, where it is billed once and never re-read.
 
+**Commit the instrument, not just the finding.** A check that exists only as a command one bearer
+typed is a capability the seat loses the moment that bearer pauses, compacts or is stood down. When
+a verification will be run again -- an acceptance probe, a discriminator between two versions, a
+smoke someone will want after a deploy -- write it to a file in the repository and name the path in
+the room, so any bearer or either human can fire it. The finding answers today; the instrument
+answers every time after, and it answers for whoever is awake. This is cheap at the moment you
+first run the thing by hand and expensive to reconstruct from scrollback later, especially since
+the exact flags are usually what mattered.
+
 **Post as you go, and the room is your recovery surface.** A claim, a verdict, a retraction or a
 handoff posted when it lands is reconstructible after any compaction or restart with one
 `read --threads`; a conclusion held back is lost with the context that held it.
