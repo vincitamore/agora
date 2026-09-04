@@ -536,8 +536,11 @@ an injected `fetch` so it is testable offline.
   only when `session --list` and its fresh timestamp show that this invocation created it.
   Never delete a pre-existing shared `default` record as cleanup.
 - **Codex terminal output is not itself a wake bridge; `codex queue` is.** Arm one
-  persistent stream with `--codex-queue`, for example `agora watch <room> --stream --follow
-  --json --wake addressed --codex-queue`. Each delivered message is enqueued into the current
+  persistent stream with `--codex-queue` and a coalescing window, for example `agora watch <room>
+  --stream --follow --json --wake addressed --coalesce 20 --codex-queue`: a burst, and above all
+  the backlog that replays after a seat has been dark, then reaches the task as one queued turn
+  per window instead of one per message (measured: a two-hour gap replayed forty-five deliveries
+  one turn each, and half the answers were to messages already settled). Each delivered message is enqueued into the current
   task using `CODEX_THREAD_ID` (falling back to `CODEX_SESSION_ID`), so a room line wakes
   the task without a timed heartbeat or manual terminal poll. Keep the process alive for the
   session and stop it only on explicit stand-down. Leave `AGORA_SESSION` unset so the stream and
