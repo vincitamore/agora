@@ -37,6 +37,7 @@ import {
   readArmed,
   readCursorSeeded,
   readPosted,
+  inheritSession,
   readRecord,
   releaseDeparture,
   removeArmed,
@@ -51,6 +52,7 @@ import {
 } from "../src/session.mjs";
 import { FOLLOW_CAP, FOLLOW_IDLE_MINUTES, aliasThreads, dropFollow, followThreads, readFollow, rootsOf, threadsOf } from "../src/follow.mjs";
 import { withThreads } from "../src/threads.mjs";
+import { carryState, foldRoom, renderCarry } from "../src/carry.mjs";
 import { formatTrailers, matchesAddress, parseTrailers, TRAILER_VALUE_MAX, trailerValueOk } from "../src/trailers.mjs";
 import { SLACK_TEXT_MAX, chunkAtLines, encodeSlackText } from "../src/transports/slack.mjs";
 import { codexLiveness, codexSpawnWarning, codexThread, queueCodex, resolveCodexBinary } from "../src/codex.mjs";
@@ -140,9 +142,17 @@ const SCHEMA = {
       options: { "--limit <n>": "how many recent messages to read back (default 200)", "--thread <id>": "a thread inside the room" },
       does: "who has spoken in the room and when, from a bounded read that never touches a cursor, merged with whether each of this seat's sessions is still running; the horizon it read to is printed with it",
     },
+    carry: {
+      args: ["<room>"],
+      options: {
+        "--limit <n>": "how many recent messages to fold this session's own posts out of (default 200)",
+        "--threads": "fold the room's live threads into that window, as `read --threads` does",
+      },
+      does: "what this session would hand to whoever holds the seat next: seat, bearer, session key and the source of each; this session's cursor for the room and every thread it holds one for; its follow set; its armed watches; and, from one bounded read folded against its own posted ledger, the claims it has not released, every release, every verdict with its exhibits, the messages it addressed to someone, and the deliveries addressed to it that it has not posted since. Derived at the call, stored nowhere, and no message text: a commitment is named by its trailer value and located by its id and cursor",
+    },
     session: {
       args: [],
-      options: { "--as <bearer>": "register this session as this bearer (idempotent)", "--label <name>": "a human label for the record", "--list": "every session with state here, with liveness", "--prune": "remove sessions whose process is gone and whose last write is older than session.staleAfterHours", "--dry-run": "with --prune: name them, remove nothing", "--forget": "remove this session's record and state" },
+      options: { "--as <bearer>": "register this session as this bearer (idempotent)", "--label <name>": "a human label for the record", "--list": "every session with state here, with liveness", "--prune": "remove sessions whose process is gone and whose last write is older than session.staleAfterHours", "--dry-run": "with --prune or --inherit: say what would happen, change nothing", "--forget": "remove this session's record and state", "--inherit <key>": "take over another session's positions, follow set (aliases included) and posted ledger; the source is never touched and its record is not copied, so register with --as afterwards", "--force": "with --inherit: take the source's position in rooms this session already holds one in" },
       does: "this session's record: who it is, written once, read on every later call",
     },
     join: {
@@ -200,6 +210,8 @@ const OPTIONS = /** @type {const} */ ({
   prune: { type: "boolean", default: false },
   "dry-run": { type: "boolean", default: false },
   forget: { type: "boolean", default: false },
+  inherit: { type: "string" },
+  force: { type: "boolean", default: false },
   help: { type: "boolean", short: "h", default: false },
 });
 
@@ -587,6 +599,16 @@ async function main(argv) {
       if (!rows.length && !json) console.log(`nothing to prune (gone and last seen more than ${stale}h ago)`);
       return EXIT.ok;
     }
+    if (values.inherit !== undefined) {
+      // A successor takes the seat with its predecessor's positions and ledger; the record is not
+      // among them, so `session --as` after this is what puts a live bearer back in the room.
+      const plan = await inheritSession(stateRoot, String(values.inherit), session, { force: values.force, dryRun: values["dry-run"] });
+      const what = `${plan.cursors.length} cursor${plan.cursors.length === 1 ? "" : "s"} (${plan.cursors.join(", ") || "none"}), ${plan.follow.length} follow set${plan.follow.length === 1 ? "" : "s"} (${plan.follow.join(", ") || "none"}), ${plan.ledger.lines} posted id${plan.ledger.lines === 1 ? "" : "s"} appended from ${plan.ledger.files.join(" + ") || "no ledger"}`;
+      if (json) console.log(JSON.stringify({ type: "inherit", ...plan }));
+      else console.log(`${plan.dryRun ? "would inherit" : "inherited"} from ${plan.from}: ${what}${plan.forced ? `; --force took ${plan.from}'s position in ${plan.conflicts.join(", ")}` : ""}`);
+      if (!plan.dryRun) console.error(`agora: ${plan.from}'s record was not copied; run \`agora session --as <Model>/<role>\` so this session signs as itself`);
+      return EXIT.ok;
+    }
     if (values.forget) {
       await removeSession(sdir);
       console.log(json ? JSON.stringify({ slug: session.slug, removed: true }) : `forgot session ${session.slug}: its record, cursors and ledger are gone`);
@@ -790,6 +812,40 @@ async function main(argv) {
       const horizon = msgs.length ? `read ${msgs.length} messages back to ${msgs[0].ts}` : "read 0 messages";
       if (json) console.log(JSON.stringify({ type: "who-horizon", messages: msgs.length, oldest: msgs[0]?.ts ?? null, newest: msgs.at(-1)?.ts ?? null }));
       else console.log(`\n${horizon}; a bearer whose last line is older than your patience is unanswered: re-address, or ask the human`);
+      return EXIT.ok;
+    }
+    case "carry": {
+      // Nothing here is written. The positions, follow set and armed registrations are read off the
+      // files that already exist, and the room is read once with no cursor, which moves nothing.
+      const limit = positive(values.limit, "limit") ?? 200;
+      let msgs = await transport.read({ thread, limit });
+      if (values.threads && transport.threads) {
+        const folded = await withThreads(transport, msgs, msgs, {});
+        msgs = folded.messages;
+        if (folded.threads.length) console.error(`agora: read ${folded.threads.length} live thread${folded.threads.length === 1 ? "" : "s"} into the room`);
+      } else if (values.threads) console.error(`agora: ${transport.kind} has no threads; --threads changes nothing here`);
+      // the same call `--wake addressed` makes, and for the same reason: an address may name the
+      // seat rather than a bearer, and a transport that cannot say who it is leaves bearer
+      // addressing working on its own
+      /** @type {{ id?: string, name?: string } | undefined} */
+      let seat;
+      try {
+        seat = await transport.whoami();
+      } catch {
+        seat = undefined;
+      }
+      const state = await carryState(sdir, stateRoot, roomAlias);
+      const folded = foldRoom(msgs, await readPosted(sdir), { bearer: bearer.name, seat });
+      const carry = {
+        type: "carry",
+        room: { alias: roomAlias, transport: transport.kind, room: transport.room, ...(typeof room.note === "string" ? { note: room.note } : {}) },
+        seat: seat ? { id: seat.id ?? null, name: seat.name ?? null } : null,
+        bearer: { name: bearer.name, source: bearer.source },
+        session: { slug: session.slug, source: session.source, registered: Boolean(record) },
+        ...state,
+        ...folded,
+      };
+      console.log(json ? JSON.stringify(carry) : renderCarry(carry));
       return EXIT.ok;
     }
     case "whoami": {
