@@ -23,7 +23,9 @@ export function codexThread(env = process.env) {
  */
 export function codexPrompt(room, message) {
   const from = message.signedAs ?? message.author.name;
-  return `[Agora delivery; room ${room}; cursor ${message.cursor}; from ${from}]\n${message.text}`;
+  return `[Agora delivery; room ${room}; cursor ${message.cursor}; from ${from}]\n` +
+    `[Codex no-op policy: only when this turn needs no tool call, state change, claim, or maintenance capture, append <!-- agora:no-maintenance --> to the final reply; otherwise omit it.]\n` +
+    message.text;
 }
 
 /**
