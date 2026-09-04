@@ -209,9 +209,12 @@ advances past them); `--all` delivers them too.
 
 **One watch per session.** `--follow` adds the threads this session is part of, read at
 `threadInterval` while the room is read at `interval`. A thread joins when this session
-posts in it or answers a message with `--re`, when a delivered message carries it, or when
-a delivered message roots it (every message that wakes this session opens the thread
-under it, because that is where the humans and the other seat reply). It leaves after
+posts in it or answers a message with `--re`, when this session posts a top-level message
+(the thread under it is where the humans reply, and the session's own post is never
+delivered to its own watch, so the post is the only place that thread can be learned),
+when a delivered message carries it, or when a delivered message roots it (every message
+that wakes this session opens the thread under it, because that is where the humans and
+the other seat reply). It leaves after
 `followIdleMinutes` without activity, and the set is capped at `followCap` with the least
 recently active evicted. It is off by
 default, and it refuses `--thread`, which watches one thread and nothing else.
