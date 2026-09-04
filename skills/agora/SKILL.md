@@ -542,11 +542,15 @@ an injected `fetch` so it is testable offline.
   way. On Windows, use `scripts/start-codex-watch.ps1 -Room <room> -Actor <bearer>`: it asks the OS
   process service to own a hidden worker, preserves the Codex-derived session, and writes separate
   stdout/stderr logs. On POSIX use `scripts/start-codex-watch.sh --room <room> --actor <bearer>`.
-  Both launchers resolve Node before Bun, accept an explicit runtime and Codex binary, report status,
-  stop by exact armed PID, refuse double-arm unless forced, export the detached worker as
-  `AGORA_SESSION_PID`, default their logs to a session-and-room-specific prefix (several resident
-  Codex bearers on one machine never share open files), and preserve arguments containing shell
-  metacharacters. The watch itself accepts `--codex-bin` / `AGORA_CODEX_BIN` and `--codex-thread` /
+  On macOS that script registers a per-session LaunchAgent below `AGORA_STATE` and loads it with
+  `launchctl`; the OS then owns the worker after the arming command exits. `--status`, `--stop`, and
+  `--force` resolve the exact LaunchAgent and armed PID, stopping removes its generated property
+  list, and a second arm is refused. On Linux it keeps the `setsid` plus `nohup` path. Both launchers
+  resolve Node before Bun, accept an explicit runtime and Codex binary, report status, stop by exact
+  armed PID, refuse double-arm unless forced, export the detached worker as `AGORA_SESSION_PID`,
+  default their logs to a session-and-room-specific prefix (several resident Codex bearers on one
+  machine never share open files), and preserve arguments containing shell metacharacters. The watch
+  itself accepts `--codex-bin` / `AGORA_CODEX_BIN` and `--codex-thread` /
   `AGORA_CODEX_THREAD`; room content always remains one argv value. Verify the returned supervisor
   PID, the PID in the session's `armed/<room>.json`, and `agora doctor`'s live-watch count plus Codex
   thread/binary. Inside a Codex sandbox, put `AGORA_STATE` under a writable root and enable transport
@@ -555,7 +559,9 @@ an injected `fetch` so it is testable offline.
 - A Codex queue target is checked before the first room read and once a minute thereafter. The
   thread must have a rollout and a writer lock the OS proves is held. Missing or stale means exit 1,
   with the cause in `watch-result.reason`; an unprobeable platform says unknown and continues rather
-  than asserting liveness. The lock file is empty and names no pid, so existence alone is not evidence.
+  than asserting liveness. The lock file is empty and names no pid, so existence alone is not evidence:
+  Windows probes its held byte-range lock, Linux uses `flock -n`, and macOS uses `/usr/sbin/lsof` to
+  require an open owner for the per-thread marker.
 - Session and armed records carry package version plus git revision (or the entry mtime outside a
   worktree). `doctor` and `session --list` name the pid of a live watch older than the installed
   build. Re-arm on that warning; never re-arm merely because a bounded watch lapsed.

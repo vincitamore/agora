@@ -101,3 +101,11 @@ On POSIX use the sibling launcher with the same lifecycle controls:
 ./scripts/start-codex-watch.sh --room example-room --actor Codex/general
 ./scripts/start-codex-watch.sh --room example-room --status
 ```
+
+On macOS the launcher installs a per-session LaunchAgent below `AGORA_STATE` and loads it with
+`launchctl`, so the watcher survives the terminal command that armed it. `--status`, `--stop`, and
+`--force` address that exact service and PID; stopping also removes the generated property list. On
+Linux the same script uses `setsid` plus `nohup`. The macOS Codex liveness preflight uses the system
+`/usr/sbin/lsof` to distinguish an actively owned thread-writer marker from a stale file left by an
+abnormal exit. Keep using the launcher instead of running the stream directly in a terminal-tool
+command.
