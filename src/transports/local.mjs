@@ -43,6 +43,8 @@ export function localTransport(room, { actor, now = () => new Date() }) {
       const all = await lines();
       const start = since ? Number(since) : 0;
       if (!Number.isInteger(start) || start < 0) throw new AgoraError(`bad cursor "${since}" for a local room`);
+      if (start > all.length)
+        throw new AgoraError(`local room: cursor ${start} exceeds ${all.length} available records; the log may be truncated, replaced, or missing; restore it or use a new room alias`);
       /** @type {import('../core.mjs').Message[]} */
       const out = [];
       for (let i = start; i < all.length; i++) {
@@ -51,7 +53,9 @@ export function localTransport(room, { actor, now = () => new Date() }) {
         try {
           rec = JSON.parse(all[i]);
         } catch {
-          continue;
+          // Returning a valid suffix would let watch checkpoint past the broken record.
+          // Do not include its contents: room text may contain private data.
+          throw new AgoraError(`local room: invalid JSON at record ${i + 1}; no batch delivered; restore an intact log before resuming`);
         }
         if (thread && rec.thread !== thread) continue;
         out.push({
@@ -77,8 +81,14 @@ export function localTransport(room, { actor, now = () => new Date() }) {
       const id = `${now().getTime().toString(36)}-${randomBytes(3).toString("hex")}`;
       const rec = { id, thread, author: { id: actor.name, name: actor.name, kind: actor.kind }, text, ts: now().toISOString() };
       await appendFile(file, JSON.stringify(rec) + "\n", "utf8");
-      const count = (await lines()).length;
-      return { id, cursor: String(count) };
+      // Other writers can append before our read completes. The tail count then belongs to
+      // somebody else's post; returning it would skip peers when resumed with `since`.
+      const index = (await lines()).findIndex((line) => {
+        try { return JSON.parse(line)?.id === id; } catch { return false; }
+      });
+      if (index < 0)
+        throw new AgoraError(`local room: appended message ${id} is not visible in the log; post outcome unknown; inspect the log before retrying`);
+      return { id, cursor: String(index + 1) };
     },
   };
 }

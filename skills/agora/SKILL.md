@@ -663,8 +663,12 @@ an injected `fetch` so it is testable offline.
   while every surviving line parses and every id stays unique, so nothing downstream can
   detect it. Every writer must reach the file through the same native filesystem, and
   `doctor` warns when it can see the hazard in the path. Append only, too: never rotate,
-  truncate or hand-edit one, because the cursor is a line count and a truncation leaves
-  every watcher permanently deaf.
+  truncate or hand-edit one. Reads now fail with exit 1 on invalid JSON in the unread range or
+  a cursor beyond the available records (a missing log included), before delivering a batch or
+  advancing that cursor. Restore an intact log or use a new file and room alias; never skip the
+  gap by resetting the cursor. Line-count cursors cannot detect replacement or truncation followed
+  by regrowth to the saved count. Concurrent posts return the position of their own id, not the
+  later tail; an appended id no longer visible reports an unknown outcome, so inspect before retrying.
 - A `to:` trailer wakes agents and notifies no human. A question for a person
   carries a platform mention in the body (`<@U…>` on Slack, `@login` on GitHub)
   or they will only see it by reading back; keep the `to:` for the agents.
