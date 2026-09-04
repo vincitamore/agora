@@ -50,7 +50,7 @@ import { FOLLOW_CAP, FOLLOW_IDLE_MINUTES, dropFollow, followThreads, readFollow,
 import { withThreads } from "../src/threads.mjs";
 import { formatTrailers, matchesAddress, parseTrailers, TRAILER_VALUE_MAX, trailerValueOk } from "../src/trailers.mjs";
 import { SLACK_TEXT_MAX, chunkAtLines, encodeSlackText } from "../src/transports/slack.mjs";
-import { queueCodex } from "../src/codex.mjs";
+import { codexSpawnWarning, codexThread, queueCodex, resolveCodexBinary } from "../src/codex.mjs";
 import { clearWatchMode, touchWatchMode, watchModeSentinel } from "../src/harness.mjs";
 
 const require = createRequire(import.meta.url);
@@ -103,7 +103,9 @@ const SCHEMA = {
         "--for <s>": "give up after this many seconds (default: never)",
         "--all": "deliver this side's own posts too (skipped by default)",
         "--wake <all|addressed|mine>": "what wakes this watch: everything (default); everything except messages addressed to someone else; only messages addressed to you, your model, the seat, or everyone. Filtered messages still advance the cursor and still show in read",
-        "--codex-queue": "queue each delivery into this Codex Desktop task through `codex queue` (requires CODEX_THREAD_ID or CODEX_SESSION_ID)",
+        "--codex-queue": "queue each delivery into this Codex task through `codex queue`",
+        "--codex-thread <id>": "target task/thread (else AGORA_CODEX_THREAD, CODEX_THREAD_ID, then CODEX_SESSION_ID)",
+        "--codex-bin <path>": "absolute Codex executable (else AGORA_CODEX_BIN, PATH, then `codex doctor`)",
       },
       does: "deliver new messages since this session's saved cursor and advance it after delivery, skipping what this session posted; exit 42 when something arrived, 0 when nothing did; always ends with one watch-result line. On each poll, a session on this seat that has gone dark is announced to the room once, by whichever watch notices first",
     },
@@ -159,6 +161,8 @@ const OPTIONS = /** @type {const} */ ({
   all: { type: "boolean", default: false },
   wake: { type: "string" },
   "codex-queue": { type: "boolean", default: false },
+  "codex-thread": { type: "string" },
+  "codex-bin": { type: "string" },
   interval: { type: "string" },
   for: { type: "string" },
   reset: { type: "boolean", default: false },
@@ -421,6 +425,29 @@ async function main(argv) {
         if (report.warning) console.log(`${"".padEnd(16)} WARNING ${report.warning}`);
       }
     }
+    /** @type {{ type: string, thread: string | null, threadSource: string | null, binary: string | null, binaryError: string | null, sandbox: { CODEX_SANDBOX: string | null, CODEX_SANDBOX_NETWORK_DISABLED: string | null } }} */
+    const codexReport = {
+      type: "codex",
+      thread: codexThread(process.env) ?? null,
+      threadSource: process.env.CODEX_THREAD_ID ? "CODEX_THREAD_ID" : process.env.CODEX_SESSION_ID ? "CODEX_SESSION_ID" : null,
+      binary: null,
+      binaryError: null,
+      sandbox: {
+        CODEX_SANDBOX: process.env.CODEX_SANDBOX ?? null,
+        CODEX_SANDBOX_NETWORK_DISABLED: process.env.CODEX_SANDBOX_NETWORK_DISABLED ?? null,
+      },
+    };
+    try {
+      codexReport.binary = await resolveCodexBinary();
+    } catch (e) {
+      codexReport.binaryError = redact(e instanceof Error ? e.message : String(e));
+    }
+    if (json) console.log(JSON.stringify(codexReport));
+    else {
+      console.log(`\ncodex  thread=${codexReport.thread ?? "missing"}${codexReport.threadSource ? ` (from ${codexReport.threadSource})` : ""}`);
+      console.log(`       binary=${codexReport.binary ?? `unavailable (${codexReport.binaryError})`}`);
+      console.log(`       CODEX_SANDBOX=${codexReport.sandbox.CODEX_SANDBOX ?? "unset"}  CODEX_SANDBOX_NETWORK_DISABLED=${codexReport.sandbox.CODEX_SANDBOX_NETWORK_DISABLED ?? "unset"}`);
+    }
     if (!json) {
       console.log(`config  ${cfg.path}\nstate   ${sdir}\nsession ${session.slug} (from ${session.source})${record ? "" : "  (unregistered: run `agora session --as <bearer>`)"}\nbearer  ${bearer.name} (${cfg.actor.kind}, from ${bearer.source})`);
       const rows = await listRecords(stateRoot);
@@ -527,6 +554,8 @@ async function main(argv) {
       /** @param {string} piece */
       const slackLen = (piece) => (transport.kind === "slack" ? encodeSlackText(payload(piece)).length : payload(piece).length);
       const assembled = trailerBlock ? `${unsigned}\n\n${trailerBlock}` : unsigned;
+      const codexWarning = codexSpawnWarning(process.env);
+      if (codexWarning) console.error(`agora: WARNING ${codexWarning}`);
       await identity();
       /** @type {string[]} */
       let pieces = [assembled];
@@ -572,6 +601,16 @@ async function main(argv) {
       const key = cursorKey(roomAlias, thread);
       const interval = roomInterval(room, num(values.interval, "interval"));
       const threadInterval = roomThreadInterval(room, num(values["thread-interval"], "thread-interval"));
+      /** @type {{ thread: string, bin: string } | undefined} */
+      let codexQueue;
+      if (values["codex-queue"]) {
+        const codexTarget = String(values["codex-thread"] ?? process.env.AGORA_CODEX_THREAD ?? codexThread(process.env) ?? "").trim();
+        if (!codexTarget)
+          throw new AgoraError(`--codex-queue needs --codex-thread, AGORA_CODEX_THREAD, CODEX_THREAD_ID, or CODEX_SESSION_ID`, EXIT.usage);
+        const codexBin = await resolveCodexBinary({ bin: values["codex-bin"] === undefined ? undefined : String(values["codex-bin"]) });
+        codexQueue = { thread: codexTarget, bin: codexBin };
+        console.error(`agora: Codex queue armed for thread ${codexTarget} via ${codexBin}`);
+      }
       await identity();
       const seeded = await readCursorSeeded(sdir, stateRoot, key);
       if (seeded.seeded) console.error(`agora: no position saved for this session yet; seeded from the shared ${key}.cursor (${seeded.cursor})`);
@@ -671,7 +710,10 @@ async function main(argv) {
           sweep,
           onBatch: async (msgs) => {
             printMessages(msgs, json);
-            if (values["codex-queue"]) await queueCodex(roomAlias, msgs);
+            if (codexQueue) await queueCodex(roomAlias, msgs, {
+              ...codexQueue,
+              onQueued: ({ thread: codexTarget, cursor }) => console.error(`agora: queued Codex thread ${codexTarget} delivery ${cursor}`),
+            });
           },
         });
       } finally {

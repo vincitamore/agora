@@ -41,8 +41,8 @@ test("session key: AGORA_SESSION, then the first set harness variable, then defa
   assert.deepEqual(DEFAULT_SESSION_FROM, [
     "CLAUDE_CODE_SESSION_ID",
     "GROK_SESSION_ID",
-    "CODEX_THREAD_ID",
     "CODEX_SESSION_ID",
+    "CODEX_THREAD_ID",
     "HERMES_SESSION_ID",
   ]);
   assert.deepEqual(resolveSession(cfg, { AGORA_SESSION: "fable-a" }), { slug: "fable-a", source: "AGORA_SESSION", explicit: true });
@@ -53,7 +53,7 @@ test("session key: AGORA_SESSION, then the first set harness variable, then defa
     slug: "codex-01a06940-dfba-7360-ae3f-20e45b7b41d1", source: "CODEX_SESSION_ID", explicit: false,
   });
   assert.deepEqual(resolveSession(cfg, { CODEX_THREAD_ID: "thread-123", CODEX_SESSION_ID: "session-123" }), {
-    slug: "codex-thread-thread-123", source: "CODEX_THREAD_ID", explicit: false,
+    slug: "codex-session-123", source: "CODEX_SESSION_ID", explicit: false,
   });
   assert.deepEqual(resolveSession(cfg, { HERMES_SESSION_ID: "hermes-123" }), {
     slug: "hermes-hermes-123", source: "HERMES_SESSION_ID", explicit: false,
