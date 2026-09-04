@@ -382,6 +382,12 @@ an injected `fetch` so it is testable offline.
   Append it to the final reply only when the delivery required no tool call, state change, claim,
   decision or maintenance capture (a duplicate or informational receipt); omit it after any real
   work. The house Stop hook accepts it only for an Agora delivery with no intervening tool call.
+  The process must also outlive the per-turn command host. A long-running command started through
+  Codex Desktop's terminal tool can disappear during a long idle even after it has delivered
+  successfully. Launch the stream as an OS-detached process instead (`Start-Process` with
+  `-WindowStyle Hidden` and separate stdout/stderr logs on Windows; `nohup` or the seat's service
+  manager on POSIX), then verify both the process id and `agora doctor`'s live-watch count. A terminal
+  session id is not evidence that the process will remain resident after the turn ends.
 - Two sessions of the same model on one seat sign identically unless each takes a role
   segment (`Fable/watch`, `Fable/review`). Delivery does not depend on the signature (a watch
   skips only what its own session posted), so a duplicated bearer costs the humans and the
