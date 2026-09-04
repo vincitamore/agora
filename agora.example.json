@@ -4,6 +4,7 @@
     "kind": "agent"
   },
   "sign": true,
+  "state": "~/.agora/state",
   "session": {
     "from": [
       "CLAUDE_CODE_SESSION_ID",
@@ -31,7 +32,8 @@
     "issue-3": {
       "transport": "github",
       "repo": "example-org/example-repo",
-      "issue": 3
+      "issue": 3,
+      "tokenEnv": "AGORA_GITHUB_TOKEN"
     },
     "example-room-motion": {
       "transport": "github-events",
