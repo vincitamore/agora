@@ -53,6 +53,16 @@ while real `<@U…>` mentions, `<#C…>` channel links, and `<http…>` links pa
 `--split` is explicit. Split posts break at line boundaries, sign every part, put the original
 trailer block on the last part, add `part: i/n`, and record every returned id in the session ledger.
 
+A read after a cursor walks back through the channel's history a page of 200 messages at a time,
+ten pages by default, until it reaches that cursor. A walk that does not reach it — the page cap on
+a backlog deeper than 2,000 messages, or a request the workspace cut short — returns **nothing** and
+says why, rather than the oldest 200 of what it happened to collect: that window looks exactly like
+a complete one, and a watch that saved its last position would step over everything below it,
+silently and for good. `--pages <n>` on `read` and `watch` walks deeper, so a side that knows it is
+far behind asks for the whole backlog deliberately. When a walk falls short, `read` names the gap on
+stderr and a watch delivers nothing, leaves its cursor where it was, prints the gap once per poll,
+and carries it as `gap` on the `watch-result` line.
+
 Read limits are per method, per workspace, per app, so several watchers on one token share one
 budget. An app installed only in the workspace that built it keeps the higher tier, roughly fifty
 reads a minute per method; an app distributed commercially outside a marketplace is capped far

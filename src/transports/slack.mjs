@@ -8,6 +8,13 @@ const SPEECH_SUBTYPES = new Set(["bot_message", "thread_broadcast", "me_message"
 /** Slack splits a chat.postMessage around this many characters; refuse past it unless the caller chunks. */
 export const SLACK_TEXT_MAX = 3900;
 
+/**
+ * Pages of history one read walks before it gives up, unless the caller asks for more (`--pages`).
+ * Ten pages is 2,000 messages: enough for any live room, and a bearer that knows it is further
+ * behind than that walks deeper deliberately rather than having the tool decide for it.
+ */
+export const SLACK_READ_PAGES = 10;
+
 /** Split text so each piece is at most `budget` characters, preferring line boundaries. @param {string} text @param {number} budget */
 export function chunkAtLines(text, budget) {
   if (budget < 1) throw new AgoraError(`chunk budget must be positive`, EXIT.usage);
@@ -151,7 +158,7 @@ export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep
       const body = await call("auth.test", {});
       return { id: String(body.user_id), name: String(body.user) };
     },
-    async read({ thread, since, limit = 200 } = {}) {
+    async read({ thread, since, limit = 200, pages = SLACK_READ_PAGES } = {}) {
       /** @type {Record<string, string>} */
       const base = { channel, limit: "200" };
       if (since) {
@@ -163,9 +170,29 @@ export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep
       /** @type {any[]} */
       const raw = [];
       let cursor;
-      for (let page = 0; page < 10; page++) {
-        const body = await call(method, cursor ? { ...base, cursor } : base);
-        for (const m of body.messages ?? []) {
+      /** the deepest position the walk reached: the oldest message of the last page it took */
+      let oldestFetched;
+      /** true while Slack still has older messages beyond the page just taken */
+      let deeper = false;
+      /** why the walk stopped before the cursor, when something other than the cap stopped it */
+      let stopped;
+      let walked = 0;
+      for (let page = 0; page < pages; page++) {
+        /** @type {any} */
+        let body;
+        try {
+          body = await call(method, cursor ? { ...base, cursor } : base);
+        } catch (e) {
+          // nothing collected yet is a failed read and stays a thrown error; a walk cut short after
+          // real pages is the same fact as the cap -- an unreached cursor, reported as a gap
+          if (!walked) throw e;
+          stopped = e instanceof Error ? e.message : String(e);
+          break;
+        }
+        walked++;
+        const pageMessages = body.messages ?? [];
+        if (pageMessages.length) oldestFetched = String(pageMessages[pageMessages.length - 1].ts);
+        for (const m of pageMessages) {
           if (thread && m.ts === thread) continue; // the parent is not a reply
           if (since && Number(m.ts) <= Number(since)) continue;
           if (SKIP_SUBTYPES.has(m.subtype)) continue;
@@ -173,14 +200,29 @@ export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep
           raw.push(m);
         }
         cursor = body.response_metadata?.next_cursor || undefined;
-        if (!cursor || !body.has_more) break;
+        deeper = Boolean(cursor && body.has_more);
+        if (!deeper) break;
+      }
+      // A read after a cursor pages until it reaches that cursor. When it cannot -- the page cap, or
+      // a walk cut short -- the oldest `limit` of what it did collect is NOT the oldest unseen: it is
+      // a window from the middle of the backlog that looks exactly like a complete one, and the
+      // watcher that saves its last cursor steps over everything below it, permanently and silently.
+      // So the read returns nothing and says why. Never a silent jump.
+      if (since && (deeper || stopped)) {
+        const out = /** @type {import('../core.mjs').ReadResult} */ ([]);
+        out.gap = {
+          reason: stopped ? `the walk stopped after ${walked} of ${pages} pages: ${stopped}` : `backlog deeper than ${pages} pages`,
+          ...(oldestFetched ? { oldestFetched } : {}),
+          pages,
+        };
+        return out;
       }
       raw.sort((a, b) => Number(a.ts) - Number(b.ts));
       // After a cursor, the oldest `limit` come first so a watcher advances in order and the next
       // poll continues. Without one, the newest `limit`: a read to orient, or `cursor --now`,
       // wants the latest messages, not the oldest of the paged window.
       const window = since ? raw.slice(0, limit) : raw.slice(-limit);
-      const out = [];
+      const out = /** @type {import('../core.mjs').ReadResult} */ ([]);
       for (const m of window) out.push(await toMessage(m, thread));
       return out;
     },

@@ -5,7 +5,7 @@ import path from "node:path";
 import { localTransport } from "../src/transports/local.mjs";
 import { slackTransport } from "../src/transports/slack.mjs";
 import { watch } from "../src/watch.mjs";
-import { readCursor } from "../src/core.mjs";
+import { readCursor, writeCursor } from "../src/core.mjs";
 import { actor, fakeFetch, tmp } from "./helpers.mjs";
 
 test("watch once: nothing, then something, then nothing again; cursor persists", async () => {
@@ -841,6 +841,44 @@ test("a guard stops before the next transport read and carries a machine-readabl
     assert.equal(result.polls, 0);
     assert.equal(result.reason, "the delivery target is no longer live");
     assert.equal(result.fired, false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("watch: a room read that could not reach the cursor delivers nothing, advances nothing, and carries the gap", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const stamp = (/** @type {number} */ n) => `1700000000.${String(n).padStart(6, "0")}`;
+    const newestFirst = Array.from({ length: 2500 }, (_, i) => ({ ts: stamp(i + 1), user: "U2", username: "fixture", text: `message ${i + 1}` })).reverse();
+    const { fetch } = fakeFetch([
+      ["conversations.history", (url) => {
+        const oldest = url.searchParams.get("oldest") ?? "";
+        const eligible = newestFirst.filter((m) => m.ts > oldest);
+        const offset = Number(url.searchParams.get("cursor") ?? 0);
+        const end = offset + Number(url.searchParams.get("limit") ?? 200);
+        const more = end < eligible.length;
+        return { body: { ok: true, messages: eligible.slice(offset, end), has_more: more, response_metadata: { next_cursor: more ? String(end) : "" } } };
+      }],
+    ]);
+    const t = slackTransport({ transport: "slack", channel: "C1" }, { token: "x", fetch });
+    const state = path.join(dir, "state");
+    await writeCursor(state, "r", stamp(0));
+
+    /** @type {string[][]} */
+    const batches = [];
+    const r = await watch(t, { stateDir: state, key: "r", mode: "once", onBatch: (m) => { batches.push(m.map((x) => x.text)); } });
+    assert.equal(r.fired, false, "nothing is delivered out of a backlog the walk could not reach the cursor through");
+    assert.equal(batches.length, 0);
+    assert.deepEqual(r.gap, { reason: "backlog deeper than 10 pages", oldestFetched: stamp(501), pages: 10 });
+    assert.equal(await readCursor(state, "r"), stamp(0), "and the saved position did not move");
+
+    // the same watch told to walk deeper delivers the oldest unseen and advances through them
+    const deep = await watch(t, { stateDir: state, key: "r", mode: "once", pages: 13, onBatch: (m) => { batches.push(m.map((x) => x.text)); } });
+    assert.equal(deep.fired, true);
+    assert.equal(deep.gap, undefined);
+    assert.deepEqual([batches[0][0], batches[0].at(-1)], ["message 1", "message 200"]);
+    assert.equal(await readCursor(state, "r"), stamp(200));
   } finally {
     await cleanup();
   }

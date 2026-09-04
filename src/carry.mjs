@@ -256,7 +256,11 @@ export function foldRoom(msgs, posted, who) {
   const claimedBy = new Map();
   /** ids this session named in a `re:` on a post of its own @type {Set<string>} */
   const answered = new Set();
-  /** lane -> index of this session's newest own post in it @type {Map<string, number>} */
+  /**
+   * thread -> index of this session's newest own post in it. Threads only: at top level a later
+   * post of this session's own is not a receipt for what came before it.
+   * @type {Map<string, number>}
+   */
   const spokeIn = new Map();
 
   let lastOwn = -1;
@@ -325,10 +329,14 @@ export function foldRoom(msgs, posted, who) {
    * that this session has not spoken after in the same conversation and has not answered by name.
    *
    * The lane matters on a transport with threads. A room read is not one conversation there, and a
-   * top-level post is no receipt for a question asked in a thread four hours earlier: each thread
-   * is cut at this session's own newest post in that thread, the room at its own newest top-level
-   * post. A `re:` naming the message is the explicit form of the same receipt and reaches across
-   * lanes, since an answer by name is an answer wherever it was posted.
+   * top-level post is no receipt for a question asked in a thread four hours earlier: a thread is
+   * cut at this session's own newest post in it, because a reply in a thread is about the thread.
+   *
+   * The room is not cut that way. At top level a post is not addressed to anything -- two requests
+   * arrive, one line goes out answering the first, and cutting the lane at that line would clear
+   * BOTH, silently, on exactly the seat that is behind. So a top-level delivery clears only by a
+   * `re:` naming it, which is what the thread lane already has: an answer by name is an answer
+   * wherever it was posted, and at top level it is the only receipt there is.
    *
    * This is what arrived and is unanswered, never what this session addressed to someone else --
    * that is `obligations`, and computing this from those `to:` lines is how a seat owing a receipt
@@ -338,7 +346,7 @@ export function foldRoom(msgs, posted, who) {
   const owed = [];
   for (const [i, m] of msgs.entries()) {
     if (posted.has(m.id) || answered.has(m.id)) continue;
-    if ((spokeIn.get(lane(m)) ?? -1) > i) continue;
+    if (lane(m) !== ROOM_LANE && (spokeIn.get(lane(m)) ?? -1) > i) continue;
     const { to } = parseTrailers(m.text);
     if (!to.some((a) => matchesAddress(a, who.bearer, who.seat))) continue;
     owed.push({ from: m.signedAs ?? m.author.name, to, id: m.id, cursor: m.cursor, ts: m.ts, ...(m.thread ? { thread: m.thread } : {}) });

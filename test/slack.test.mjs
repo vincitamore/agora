@@ -95,6 +95,73 @@ test("slack history without a cursor returns the newest messages up to the limit
   assert.deepEqual((await t.read()).map((m) => m.text).length, 9);
 });
 
+/**
+ * A channel with `count` messages, served newest-first, 200 to a page, exactly as Slack pages
+ * `conversations.history`: the cursor is the offset into what is older than `oldest`.
+ * @param {number} count
+ */
+function deepBacklog(count) {
+  const stamp = (/** @type {number} */ n) => `1700000000.${String(n).padStart(6, "0")}`;
+  const newestFirst = Array.from({ length: count }, (_, i) => ({ ts: stamp(i + 1), user: "U2", username: "fixture", text: `message ${i + 1}` })).reverse();
+  const { fetch, calls } = fakeFetch([
+    ["conversations.history", (url) => {
+      const oldest = url.searchParams.get("oldest") ?? "";
+      const eligible = newestFirst.filter((m) => m.ts > oldest);
+      const offset = Number(url.searchParams.get("cursor") ?? 0);
+      const end = offset + Number(url.searchParams.get("limit") ?? 200);
+      const more = end < eligible.length;
+      return { body: { ok: true, messages: eligible.slice(offset, end), has_more: more, response_metadata: { next_cursor: more ? String(end) : "" } } };
+    }],
+  ]);
+  const t = slackTransport({ transport: "slack", channel: "C1" }, { token: "x", fetch });
+  return { t, calls, stamp };
+}
+
+test("slack read after a cursor it cannot reach returns nothing and a gap, never a window from the middle of the backlog", async () => {
+  // the measured P0: 2,500 unseen at 200 a page. Ten pages collect the newest 2,000 and the OLDEST
+  // 200 of those are messages 501-700 -- a window that looks complete. A watch saving 700 as its
+  // position steps over 1-500 permanently.
+  const { t, calls, stamp } = deepBacklog(2500);
+  const capped = await t.read({ since: stamp(0), limit: 200 });
+  assert.equal(capped.length, 0, "nothing is delivered rather than the middle of the backlog");
+  assert.deepEqual(capped.gap, { reason: "backlog deeper than 10 pages", oldestFetched: stamp(501), pages: 10 });
+  assert.equal(calls.length, 10, "the default cap is ten pages");
+
+  const walked = await t.read({ since: stamp(0), limit: 200, pages: 13 });
+  assert.equal(walked.gap, undefined, "a walk that reached the cursor has no gap");
+  assert.deepEqual(walked.map((m) => m.text), Array.from({ length: 200 }, (_, i) => `message ${i + 1}`), "the oldest unseen 200, in order");
+  assert.equal(calls.length, 10 + 13);
+});
+
+test("slack: with no cursor the page cap is not a gap, and a walk cut short after real pages is", async () => {
+  // without a cursor the read promises the NEWEST `limit`, and the first page already holds them:
+  // there is no unseen backlog to step over, so the cap is not a gap
+  const { t, stamp } = deepBacklog(2500);
+  const newest = await t.read({ limit: 3 });
+  assert.equal(newest.gap, undefined);
+  assert.deepEqual(newest.map((m) => m.text), ["message 2498", "message 2499", "message 2500"]);
+
+  // a walk stopped by the transport after real pages is the same fact as the cap: an unreached
+  // cursor. A first page that fails is a failed read and still throws.
+  let page = 0;
+  const { fetch } = fakeFetch([
+    ["conversations.history", () => {
+      page++;
+      if (page > 2) return { body: { ok: false, error: "ratelimited" } };
+      return { body: { ok: true, messages: [{ ts: stamp(1000 - page), user: "U2", text: `p${page}` }], has_more: true, response_metadata: { next_cursor: String(page) } } };
+    }],
+  ]);
+  const t2 = slackTransport({ transport: "slack", channel: "C1" }, { token: "x", fetch, sleep: async () => {} });
+  const cut = await t2.read({ since: stamp(1), limit: 200 });
+  assert.equal(cut.length, 0);
+  assert.match(String(cut.gap?.reason), /the walk stopped after 2 of 10 pages: slack conversations\.history: ratelimited/);
+  assert.equal(cut.gap?.oldestFetched, stamp(998));
+
+  const dead = fakeFetch([["conversations.history", () => ({ body: { ok: false, error: "not_in_channel" } })]]);
+  const t3 = slackTransport({ transport: "slack", channel: "C1" }, { token: "x", fetch: dead.fetch, sleep: async () => {} });
+  await assert.rejects(() => t3.read({ since: stamp(1) }), /not_in_channel/, "nothing collected is a failed read, not a gap");
+});
+
 test("slack history since a cursor is exclusive", async () => {
   const { t, calls } = make();
   const msgs = await t.read({ since: "1756900000.000300" });
