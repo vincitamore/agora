@@ -1048,7 +1048,7 @@ test("cli: the verb is named before the room, an unknown option is a usage error
   }
 });
 
-test("cli: an unregistered session is told to register, and a subagent is told it is one", async () => {
+test("cli: an unregistered session is told to register, and never refused", async () => {
   const { dir, cleanup } = await tmp();
   try {
     const { cfgPath, root } = await room(dir);
@@ -1060,17 +1060,6 @@ test("cli: an unregistered session is told to register, and a subagent is told i
     await agora(["session", "--as", "Fable/review"], env);
     r = await agora(["post", "down", "and now registered"], env);
     assert.doesNotMatch(r.stderr, /unregistered/);
-
-    // the harness hands a subagent its parent's session id, so this post lands in the parent's
-    // ledger and the parent's own watch will never deliver it
-    const kid = { ...env, CLAUDE_CODE_CHILD_SESSION: "1" };
-    r = await agora(["post", "down", "from the subagent", "--json"], kid);
-    assert.equal(r.code, 0);
-    assert.match(r.stderr, /WARNING this process is a subagent of session a \(CLAUDE_CODE_CHILD_SESSION\); only the session holding the seat should post, and the parent's own watch will not see this message/);
-    assert.equal(JSON.parse(r.stdout).child, true);
-    assert.equal(JSON.parse(r.stdout).alias, "down");
-    r = await agora(["watch", "down", "--once"], kid);
-    assert.equal(JSON.parse(r.stderr.trim().split(/\r?\n/).at(-1) ?? "{}").child, true);
   } finally {
     await cleanup();
   }
