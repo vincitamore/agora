@@ -4,6 +4,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { setTimeout as delay } from "node:timers/promises";
 import { AgoraError, EXIT } from "./core.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -233,6 +234,11 @@ export function codexPrompt(room, message) {
  *   run?: typeof execFileAsync,
  *   bin?: string,
  *   thread?: string,
+ *   timeoutMs?: number,
+ *   attempts?: number,
+ *   signal?: AbortSignal,
+ *   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>,
+ *   onRetry?: (failure: { room: string, cursor: string, thread: string, attempt: number, attempts: number, delayMs: number, reason: string }) => void,
  *   onQueued?: (delivery: { thread: string, cursor: string, bin: string, message: import('./core.mjs').Message }) => void | Promise<void>,
  * }} [opts]
  */
@@ -243,16 +249,41 @@ export async function queueCodex(room, messages, opts = {}) {
     throw new AgoraError(`--codex-queue needs --codex-thread, AGORA_CODEX_THREAD, CODEX_THREAD_ID, or CODEX_SESSION_ID`, EXIT.usage);
   const bin = await resolveCodexBinary({ env, bin: opts.bin });
   const run = opts.run ?? execFileAsync;
+  const timeout = opts.timeoutMs ?? 30_000;
+  const attempts = opts.attempts ?? 3;
+  if (!Number.isFinite(timeout) || timeout <= 0 || !Number.isInteger(attempts) || attempts < 1 || attempts > 5)
+    throw new AgoraError("Codex queue timeout must be positive and attempts an integer from 1 to 5", EXIT.usage);
+  const sleep = opts.sleep ?? ((ms, signal) => delay(ms, undefined, { signal }));
   for (const message of messages) {
-    try {
-      await run(bin, ["queue", "--thread", thread, "--message", codexPrompt(room, message)], {
-        windowsHide: true,
-        env: /** @type {NodeJS.ProcessEnv} */ (env),
-      });
-      await opts.onQueued?.({ thread, cursor: message.cursor, bin, message });
-    } catch (error) {
-      const why = error instanceof Error ? error.message : String(error);
-      throw new AgoraError(`could not queue delivery into Codex task ${thread}: ${why}`, EXIT.error);
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        opts.signal?.throwIfAborted();
+        await run(bin, ["queue", "--thread", thread, "--message", codexPrompt(room, message)], {
+          windowsHide: true,
+          env: /** @type {NodeJS.ProcessEnv} */ (env),
+          timeout,
+          killSignal: "SIGKILL",
+          signal: opts.signal,
+        });
+        break;
+      } catch (error) {
+        // execFile's message includes the complete argv (the private room body). Report only
+        // bounded failure metadata, never echo the queued prompt or raw subprocess diagnostics.
+        const err = /** @type {NodeJS.ErrnoException & { signal?: string, stderr?: string }} */ (error ?? {});
+        const reason = opts.signal?.aborted ? "cancelled" : err.signal ? `terminated (${err.signal}; timeout ${timeout}ms)`
+          : `queue failed (${typeof err.code === "number" ? `exit ${err.code}` : ["ENOENT", "EACCES", "EPERM"].includes(String(err.code)) ? err.code : "execution error"})`;
+        const permanent = opts.signal?.aborted || ["ENOENT", "EACCES", "EPERM"].includes(String(err.code));
+        if (permanent || attempt === attempts)
+          throw new AgoraError(`could not queue delivery ${room}/${message.cursor} into Codex task ${thread} after ${attempt} attempt(s): ${reason}; acceptance unknown, cursor not acknowledged; inspect the queue before re-arming to replay the pending suffix`, EXIT.error);
+        const failure = { room, cursor: message.cursor, thread, attempt, attempts, delayMs: 1000 * 2 ** (attempt - 1), reason };
+        if (opts.onRetry) opts.onRetry(failure);
+        else console.error(`agora: ${JSON.stringify({ type: "codex-queue-retry", ...failure, acceptance: "unknown" })}`);
+        try { await sleep(failure.delayMs, opts.signal); }
+        catch { throw new AgoraError(`Codex queue retry cancelled for ${room}/${message.cursor}; cursor not acknowledged`, EXIT.error); }
+      }
     }
+    // A checkpoint failure is NOT a queue failure: the effect already happened. Never retry
+    // injection here; leaving the cursor behind exposes the existing at-least-once replay window.
+    await opts.onQueued?.({ thread, cursor: message.cursor, bin, message });
   }
 }

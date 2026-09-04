@@ -660,6 +660,8 @@ export function departureLine(gone, live, unknown = []) {
   const others = live.length ? `Still here on this seat: ${live.join(", ")}.` : "No other session is provably live on this seat.";
   const named = unknown.map((u) => typeof u === "string" ? u : u.lastSeen ? `${u.bearer} (last seen ${new Date(u.lastSeen).toISOString().replace(/\.\d{3}Z$/, "Z")})` : u.bearer);
   const maybe = named.length ? ` Also registered here, liveness not provable from this process: ${named.join(", ")}.` : "";
+  if (gone.pidSource === "AGORA_SESSION_PID")
+    return `${gone.bearer}'s recorded delivery/session process is no longer running (last seen ${seen}). Conversation liveness is unknown: a stopped supervisor is not evidence that the bearer departed. Delivery may be unavailable; verify with the bearer or operator before reassigning work. ${others}${maybe}`;
   return `${gone.bearer} is no longer running (last seen ${seen}). Requests addressed to it will not be answered; re-address them. ${others}${maybe}`;
 }
 
@@ -678,6 +680,8 @@ export function departuresLine(gone, live, unknown = []) {
   const others = live.length ? `Still here on this seat: ${live.join(", ")}.` : "No other session is provably live on this seat.";
   const named = unknown.map((u) => typeof u === "string" ? u : u.lastSeen ? `${u.bearer} (last seen ${new Date(u.lastSeen).toISOString().replace(/\.\d{3}Z$/, "Z")})` : u.bearer);
   const maybe = named.length ? ` Also registered here, liveness not provable from this process: ${named.join(", ")}.` : "";
+  if (gone.some((g) => g.pidSource === "AGORA_SESSION_PID"))
+    return `Recorded delivery/session processes stopped for ${list} (last seen ${seen.join(", ")}, in that order). Supervisor-based records do not establish conversation departure. Delivery may be unavailable; verify with the bearers or operator before reassigning work. ${others}${maybe}`;
   return `${list} are no longer running (last seen ${seen.join(", ")}, in that order). Requests addressed to them will not be answered; re-address them. ${others}${maybe}`;
 }
 
