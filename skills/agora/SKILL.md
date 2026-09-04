@@ -524,8 +524,10 @@ an injected `fetch` so it is testable offline.
   and ledger out of one session.
 - `agora doctor --json` emits `identity` (config, state, session, sessionSource, bearer,
   bearerSource, registered), one `session` per row with the rooms it holds a position in and
-  the watches it has armed, one `warning` per warning with a `code`, one `room` per room, and
-  `poll-rate` per transport.
+  the watches it has armed, one `warning` per warning with a `code` (the four a resident bearer
+  is preflighted on are `cache-ttl`, `interval-near-ttl`, `no-all-watch` and `poll-budget`),
+  one `room` per room, one `cache` per harness carrying the prompt cache TTL this seat can read,
+  and `poll-rate` per transport with the formula behind the number.
 - A session with no harness pid is named with the variables that were looked for
   (`AGORA_SESSION_PID`, `CLAUDE_PID`, `GROK_PID`); registering a bearer a live session on the
   seat already carries warns and names that session.

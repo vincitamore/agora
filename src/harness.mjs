@@ -1,6 +1,6 @@
 // @ts-check
 import { execFile } from "node:child_process";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -92,13 +92,96 @@ function codexTranscript(env, _cwd, home) {
 }
 
 /**
+ * A harness's prompt-cache TTL as this seat can actually read it. `ttl` is seconds when a value was
+ * read off a file or the environment, and null when nothing on this machine says. Nothing here
+ * asserts a TTL that was not read: an unset Claude Code setting reports unknown with the two things
+ * that decide it, and Codex exposes no local setting at all.
+ * @typedef {{ ttl: number | null, value: string | null, source: string | null, label: string }} CacheTtl
+ */
+
+/** What Claude Code's TTL is when nothing on this machine pins it. Two branches, neither measurable from here. */
+const CLAUDE_TTL_UNKNOWN = `unknown (defaults to 1h on a subscription's main conversation, 5m past plan usage or on an API key; set promptCacheTtl: "1h" to pin it)`;
+
+/** Codex has no local setting to read: retention is a property of the request OpenAI serves. */
+const CODEX_TTL_UNKNOWN = `unknown (OpenAI's equivalent is 24h cache retention, carried in the request rather than written in a setting this seat can read)`;
+
+/**
+ * Seconds from a TTL as a settings file or an environment variable writes it (`"1h"`, `"5m"`,
+ * `"300"`, `300`), or nothing when the value is not one. A value that does not parse is not a TTL
+ * that was read, so the caller reports unknown rather than guessing at the intent.
+ * @param {unknown} raw
+ * @returns {{ seconds: number, value: string } | undefined}
+ */
+export function parseCacheTtl(raw) {
+  const text = typeof raw === "number" && Number.isFinite(raw) ? `${raw}s` : typeof raw === "string" ? raw.trim() : "";
+  const m = /^(\d+(?:\.\d+)?)\s*(s|sec|secs|seconds|m|min|mins|minutes|h|hr|hrs|hours)?$/i.exec(text);
+  if (!m) return undefined;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n) || n <= 0) return undefined;
+  const unit = (m[2] ?? "s").toLowerCase();
+  const scale = unit.startsWith("h") ? 3600 : unit.startsWith("m") ? 60 : 1;
+  return { seconds: Math.round(n * scale), value: text };
+}
+
+/** A JSON object off disk, or nothing. A settings file that is absent, unreadable or malformed says nothing. @param {string} file */
+function readJsonFile(file) {
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8"));
+    return parsed && typeof parsed === "object" ? /** @type {Record<string, unknown>} */ (parsed) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Claude Code's `promptCacheTtl`, in the order the harness itself resolves it: the environment
+ * pinned on this process, then the settings beside each directory from the working directory up
+ * (`settings.local.json` before the shared `settings.json`), then the user's own settings.
+ * @param {NodeJS.ProcessEnv} env @param {string} cwd @param {string} home
+ * @returns {CacheTtl}
+ */
+function claudeCacheTtl(env, cwd, home) {
+  /** @type {Array<[string, unknown]>} */
+  const candidates = [["CLAUDE_CODE_PROMPT_CACHE_TTL", env.CLAUDE_CODE_PROMPT_CACHE_TTL]];
+  for (let root = path.resolve(cwd); ; root = path.dirname(root)) {
+    for (const name of ["settings.local.json", "settings.json"]) {
+      const file = path.join(root, ".claude", name);
+      candidates.push([file, readJsonFile(file)?.promptCacheTtl]);
+    }
+    if (path.dirname(root) === root) break;
+  }
+  const userSettings = path.join(home, ".claude", "settings.json");
+  candidates.push([userSettings, readJsonFile(userSettings)?.promptCacheTtl]);
+  for (const [source, raw] of candidates) {
+    const parsed = parseCacheTtl(raw);
+    if (parsed) return { ttl: parsed.seconds, value: parsed.value, source, label: `${parsed.value} (from ${source})` };
+  }
+  return { ttl: null, value: null, source: null, label: CLAUDE_TTL_UNKNOWN };
+}
+
+/** @returns {CacheTtl} */
+function codexCacheTtl() {
+  return { ttl: null, value: null, source: null, label: CODEX_TTL_UNKNOWN };
+}
+
+/**
  * One declarative inventory for harness-specific transcript state. Adding a harness extends this
  * table; the watcher and stop-hook courtesy do not grow another harness branch of their own.
  */
 export const HARNESS_DESCRIPTORS = Object.freeze([
-  Object.freeze({ name: "claude-code", sessionEnv: "CLAUDE_CODE_SESSION_ID", transcript: claudeTranscript }),
-  Object.freeze({ name: "codex", sessionEnv: "CODEX_SESSION_ID", transcript: codexTranscript }),
+  Object.freeze({ name: "claude-code", sessionEnv: "CLAUDE_CODE_SESSION_ID", transcript: claudeTranscript, cacheTtl: claudeCacheTtl }),
+  Object.freeze({ name: "codex", sessionEnv: "CODEX_SESSION_ID", transcript: codexTranscript, cacheTtl: codexCacheTtl }),
 ]);
+
+/**
+ * What every known harness's prompt-cache TTL is on this seat, derived at the call from settings
+ * and environment only. Nothing is written and nothing is remembered between calls.
+ * @param {NodeJS.ProcessEnv} env @param {string} cwd @param {string} [home]
+ * @returns {Array<CacheTtl & { harness: string }>}
+ */
+export function cacheTtls(env, cwd, home = os.homedir()) {
+  return HARNESS_DESCRIPTORS.map((d) => ({ harness: d.name, ...d.cacheTtl(env, cwd, home) }));
+}
 
 /**
  * Where this session's watch-mode sentinel lives, or null when the process is not

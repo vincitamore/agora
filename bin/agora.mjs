@@ -56,7 +56,14 @@ import { carryState, carryWindow, foldRoom, renderCarry } from "../src/carry.mjs
 import { formatTrailers, matchesAddress, parseTrailers, TRAILER_VALUE_MAX, trailerValueOk } from "../src/trailers.mjs";
 import { SLACK_TEXT_MAX, chunkAtLines, encodeSlackText } from "../src/transports/slack.mjs";
 import { codexLiveness, codexSpawnWarning, codexThread, queueCodex, resolveCodexBinary } from "../src/codex.mjs";
-import { buildLabel, buildPredates, clearWatchMode, installedBuild, touchWatchMode, watchModeSentinel } from "../src/harness.mjs";
+import { buildLabel, buildPredates, cacheTtls, clearWatchMode, installedBuild, touchWatchMode, watchModeSentinel } from "../src/harness.mjs";
+
+/**
+ * The arithmetic `doctor`'s poll rate is: the threads every watching session follows, each read at
+ * the thread interval, plus one room read per session per interval. Printed beside the number with
+ * the terms filled in, so the rate can be checked rather than trusted.
+ */
+const POLL_RATE_FORMULA = "sessions×followed×60/threadInterval + sessions×60/interval";
 
 const require = createRequire(import.meta.url);
 const { version } = require("../package.json");
@@ -160,7 +167,7 @@ const SCHEMA = {
       options: { "--as <bearer>": "register this session as this bearer", "--label <name>": "a human label for this session's record", "--limit <n>": "how many recent messages to show (default 20)" },
       does: "register, start this session's cursor at the latest message, and show the recent messages: session --as, cursor --now, read, in one call",
     },
-    doctor: { args: [], options: { "--offline": "skip the identity check" }, does: "config, token presence per room, identity per room, this session and bearer and where each came from" },
+    doctor: { args: [], options: { "--offline": "skip the identity check" }, does: "config, token presence per room, identity per room, this session and bearer and where each came from, the harness prompt-cache TTL where this seat can read one, and the reads a minute this seat spends with the arithmetic behind the number; three preflights for a resident bearer warn when a watch is armed against a five-minute TTL (cache-ttl), when a watch polls within half to one and a half times a TTL that was read (interval-near-ttl), and when no live watch in a room wakes on all (no-all-watch). Everything is derived at the call and nothing is written" },
     schema: { args: [], options: { "--json": "the whole surface as JSON, protocol included" }, does: "this description" },
   },
 };
@@ -340,11 +347,14 @@ function positive(s, what) {
  * Reads a minute this seat is spending, per transport: every registered watch whose process is
  * still there, at its own room interval, plus one read per followed thread at its thread interval.
  * A registration whose pid is gone is a leftover from a killed process and counts for nothing.
+ *
+ * `terms` carries the arithmetic behind the number, one term per read this seat is paying for, so
+ * the printed rate can be checked against the intervals that produced it instead of trusted.
  * @param {import('../src/core.mjs').Config} cfg @param {string} stateRoot
- * @returns {Promise<Map<string, { rate: number, roomReads: number, threadReads: number, followed: number, budget: number, watches: number }>>}
+ * @returns {Promise<Map<string, { rate: number, roomReads: number, threadReads: number, followed: number, budget: number, watches: number, terms: string[] }>>}
  */
 async function pollRates(cfg, stateRoot) {
-  /** @type {Map<string, { rate: number, roomReads: number, threadReads: number, followed: number, budget: number, watches: number }>} */
+  /** @type {Map<string, { rate: number, roomReads: number, threadReads: number, followed: number, budget: number, watches: number, terms: string[] }>} */
   const out = new Map();
   for (const { dir, key, armed } of await listArmed(stateRoot)) {
     // a registration from before a reboot names a pid that now belongs to something else
@@ -362,7 +372,8 @@ async function pollRates(cfg, stateRoot) {
     const threadReads = followed * (60 / threadInterval);
     const rate = roomReads + threadReads;
     const budget = roomPollBudget(room);
-    const prev = out.get(room.transport) ?? { rate: 0, roomReads: 0, threadReads: 0, followed: 0, budget, watches: 0 };
+    const prev = out.get(room.transport) ?? { rate: 0, roomReads: 0, threadReads: 0, followed: 0, budget, watches: 0, terms: [] };
+    const terms = [...prev.terms, ...(followed ? [`${followed}×60/${threadInterval}`] : []), `60/${interval}`];
     out.set(room.transport, {
       rate: prev.rate + rate,
       roomReads: prev.roomReads + roomReads,
@@ -370,6 +381,7 @@ async function pollRates(cfg, stateRoot) {
       followed: prev.followed + followed,
       budget: Math.max(prev.budget, budget),
       watches: prev.watches + 1,
+      terms,
     });
   }
   return out;
@@ -698,6 +710,18 @@ async function main(argv) {
       console.log(`       binary=${codexReport.binary ?? `unavailable (${codexReport.binaryError})`}`);
       console.log(`       CODEX_SANDBOX=${codexReport.sandbox.CODEX_SANDBOX ?? "unset"}  CODEX_SANDBOX_NETWORK_DISABLED=${codexReport.sandbox.CODEX_SANDBOX_NETWORK_DISABLED ?? "unset"}`);
     }
+    // What the harness charges this seat for a wake that lands past the window, read off settings
+    // and environment at the call and stored nowhere. A TTL that was not read is reported unknown:
+    // the tool never asserts a number it did not see, and an unknown one raises nothing.
+    const caches = cacheTtls(process.env, process.cwd());
+    if (json) for (const c of caches) console.log(JSON.stringify({ type: "cache", harness: c.harness, ttl: c.ttl, value: c.value, source: c.source, label: c.label }));
+    else {
+      console.log("");
+      for (const c of caches) console.log(`cache  ${c.harness.padEnd(12)} prompt cache ttl=${c.label}`);
+    }
+    // The armed registrations this seat is actually paying for; a pid that is gone is a leftover.
+    const armedHere = (await listArmed(stateRoot)).filter((a) => armedAlive(a.armed));
+
     const rows = await listRecords(stateRoot);
     const live = rows.filter((r) => r.record && r.state !== "gone");
     /** @type {Map<string, string[]>} */
@@ -712,6 +736,51 @@ async function main(argv) {
       warnings.push({ code: "default-session", message: `the session key is "default", so every session with no harness id shares one position and one ledger; set AGORA_SESSION.` });
     for (const r of rows)
       warnings.push(...await watchBuildWarnings(r.dir, r.slug));
+
+    // A resident bearer pays for its context, not for the room: a wake that lands past the prompt
+    // cache TTL re-reads the whole conversation cold. So the three preflights, all derived from
+    // what was read above and nothing else.
+    if (armedHere.length)
+      for (const c of caches)
+        if (c.ttl === 300)
+          warnings.push({
+            code: "cache-ttl",
+            message: `${armedHere.length} watch${armedHere.length === 1 ? " is" : "es are"} armed on this seat and ${c.harness}'s prompt cache TTL is ${c.value} (read from ${c.source}); every wake that lands past that window pays a cold read of the whole context. Set promptCacheTtl: "1h" and re-arm.`,
+          });
+    // The cost curve peaks AT the TTL: inside the window each poll keeps the prefix warm for free,
+    // well past it the cold reads are rare, and at it every poll pays one. Silent when no TTL was
+    // read -- a cadence cannot be near a number nobody has.
+    for (const a of armedHere) {
+      const r = cfg.rooms[a.armed.room];
+      if (!r) continue;
+      const iv = Number(a.armed.interval);
+      const ti = Number(a.armed.threadInterval);
+      /** @type {Array<[string, number]>} */
+      const cadences = [["room interval", roomInterval(r, Number.isFinite(iv) && iv > 0 ? iv : undefined)]];
+      // the thread interval is a cadence this watch pays only when it follows threads
+      if (a.armed.follow) cadences.push(["thread interval", roomThreadInterval(r, Number.isFinite(ti) && ti > 0 ? ti : undefined)]);
+      for (const c of caches)
+        if (typeof c.ttl === "number")
+          for (const [what, seconds] of cadences)
+            if (seconds >= c.ttl * 0.5 && seconds <= c.ttl * 1.5)
+              warnings.push({
+                code: "interval-near-ttl",
+                alias: a.armed.room,
+                message: `watch pid ${a.armed.pid} for ${a.slug}/${a.key} has a ${what} of ${seconds}s against ${c.harness}'s prompt cache TTL of ${c.ttl}s (${c.value}, read from ${c.source}); the cost curve peaks at the TTL, where every poll pays a cold read. Poll well inside the window or well past it.`,
+              });
+    }
+    // One thin bearer per seat holds the watch on `all`. Where every live watch in a room is
+    // narrowed, an unaddressed request in that room wakes nobody here and nobody is told.
+    /** @type {Map<string, string[]>} */
+    const wakesByRoom = new Map();
+    for (const a of armedHere) wakesByRoom.set(a.armed.room, [...(wakesByRoom.get(a.armed.room) ?? []), a.armed.wake ?? "all"]);
+    for (const [alias, wakes] of wakesByRoom)
+      if (!wakes.includes("all"))
+        warnings.push({
+          code: "no-all-watch",
+          alias,
+          message: `no watch on this seat will wake for an unaddressed request in ${alias}: its ${wakes.length} live watch${wakes.length === 1 ? "" : "es"} wake on ${[...new Set(wakes)].sort().join(", ")}. Arm one thin bearer there with --wake all.`,
+        });
 
     if (json) {
       // everything the human path prints, typed: an agent told to take its session and bearer from
@@ -756,10 +825,11 @@ async function main(argv) {
       const threadReads = Math.round(r.threadReads * 10) / 10;
       const over = rate > r.budget;
       if (json) {
-        console.log(JSON.stringify({ type: "poll-rate", transport: kind, rate, room_reads: roomReads, thread_reads: threadReads, followed: r.followed, budget: r.budget, watches: r.watches, over }));
+        console.log(JSON.stringify({ type: "poll-rate", transport: kind, rate, room_reads: roomReads, thread_reads: threadReads, followed: r.followed, budget: r.budget, watches: r.watches, over, formula: POLL_RATE_FORMULA, terms: r.terms }));
         if (over) console.log(JSON.stringify({ type: "warning", code: "poll-budget", message: `this seat reads ${kind} ~${rate} times a minute against a budget of ${r.budget}; raise the intervals or follow fewer threads.` }));
       } else {
-        console.log(`\nseat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} watch${r.watches === 1 ? "" : "es"}; room-history ${roomReads} + thread-replies ${threadReads} from ${r.followed} follows = sum(followed x 60/threadInterval))`);
+        console.log(`
+seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} watch${r.watches === 1 ? "" : "es"}; room-history ${roomReads} + thread-replies ${threadReads} from ${r.followed} follows; ${POLL_RATE_FORMULA} = ${r.terms.join(" + ")})`);
         if (over) console.log(`WARNING this seat reads ${kind} ~${rate} times a minute against a budget of ${r.budget}; raise the intervals or follow fewer threads.`);
       }
     }
@@ -1031,6 +1101,11 @@ async function main(argv) {
       const watchMode = mode === "once" ? null : watchModeSentinel(process.env, process.cwd());
       if ((await touchWatchMode(watchMode)) === "created")
         console.error(`agora: watch-mode sentinel ${watchMode?.sentinel} (the stop hook stays quiet while this watch runs)`);
+      // Named before the registration is written, so a rejected value never leaves an armed record
+      // behind, and so the record says what wakes this watch: `doctor` reads it back to tell a seat
+      // whose every watch is narrowed that nothing here will wake for an unaddressed request.
+      const wakeMode = /** @type {'all' | 'addressed' | 'mine'} */ (values.wake ?? "all");
+      if (!["all", "addressed", "mine"].includes(wakeMode)) throw new AgoraError(`--wake takes all, addressed, or mine`, EXIT.usage);
       await writeArmed(sdir, key, {
         room: roomAlias,
         thread,
@@ -1038,6 +1113,7 @@ async function main(argv) {
         interval,
         threadInterval,
         follow: values.follow,
+        wake: wakeMode,
         pid: process.pid,
         build,
         ...(harnessPid(cfg, process.env).pid !== undefined ? { harnessPid: harnessPid(cfg, process.env).pid } : {}),
@@ -1066,8 +1142,6 @@ async function main(argv) {
           }
         : undefined;
 
-      const wakeMode = values.wake ?? "all";
-      if (!["all", "addressed", "mine"].includes(wakeMode)) throw new AgoraError(`--wake takes all, addressed, or mine`, EXIT.usage);
       /** @type {{ id?: string, name?: string } | undefined} */
       let seat;
       if (wakeMode !== "all" || holdSeconds || maxBatch || values.follow) {

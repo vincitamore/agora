@@ -206,6 +206,12 @@ watcher PID in the session's
 Session and armed records carry the package version and git revision (or entry-file mtime outside a
 worktree); `doctor` and `session --list` name the PID of any live resident older than the installed
 build and tell it to re-arm.
+`agora doctor` runs three preflights for a resident bearer, all derived at the call and stored
+nowhere: `cache-ttl` reads the harness prompt-cache TTL where a settings file or an environment
+variable makes it readable and warns when a watch is armed against a five-minute one,
+`interval-near-ttl` warns when a watch polls within half to one and a half times a TTL it actually
+read, naming both numbers, and `no-all-watch` names a room where every live watch on this seat
+wakes on something narrower than `all`.
 Before a Codex queue watch reads the room, its target must have both a rollout and a live writer
 marker. Windows probes the held byte-range lock, Linux uses `flock -n`, and macOS checks the marker's
 open owner with the system `lsof`; a stale marker fails the watch at exit 1, while an unavailable
