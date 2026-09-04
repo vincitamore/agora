@@ -637,7 +637,7 @@ test("cli: read --threads folds thread replies in once, by time; with --thread i
 
     r = await agora(["read", "down", "--threads", "--since", cursorBeforeReply, "--json"], A);
     assert.equal(r.code, 0, r.stderr);
-    const ids = r.stdout.trim().split(/\r?\n/).map((l) => JSON.parse(l)).map((m) => m.text.split("\n")[0]);
+    const ids = r.stdout.trim().split(/\r?\n/).map((/** @type {string} */ l) => JSON.parse(l)).map((/** @type {{ text: string }} */ m) => m.text.split("\n")[0]);
     assert.deepEqual(ids, ["claim: it", "a later top-level line"], "the reply is in the read once, before the later line");
 
     r = await agora(["read", "down", "--threads", "--thread", parent], A);
