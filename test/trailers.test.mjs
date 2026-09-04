@@ -108,6 +108,13 @@ test("what the emitter writes is what the parser reads back", () => {
   );
 });
 
+test("ack: none is a known trailer; honouring it is not the parser's job", () => {
+  const r = parseTrailers("heads up, no receipt needed\n\nack: none\n\n-- Grace/watch");
+  assert.equal(r.body, "heads up, no receipt needed");
+  assert.deepEqual(r.trailers, [{ key: "ack", value: "none" }]);
+  assert.deepEqual(formatTrailers(r.trailers), "ack: none");
+});
+
 test("an address matches a bearer by whole segments, from the left", () => {
   const seat = { id: "UBOT", name: "example_bot" };
   const table = [

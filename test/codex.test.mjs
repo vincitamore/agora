@@ -1,8 +1,9 @@
 // @ts-check
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { codexPrompt, codexSpawnWarning, codexThread, queueCodex, resolveCodexBinary } from "../src/codex.mjs";
+import { codexHome, codexLiveness, codexPrompt, codexRollout, codexSpawnWarning, codexThread, probeCodexWriterLock, queueCodex, resolveCodexBinary } from "../src/codex.mjs";
 
 const message = /** @type {import('../src/core.mjs').Message} */ ({
   id: "m1",
@@ -16,6 +17,49 @@ test("Codex task identity prefers CODEX_THREAD_ID and falls back to CODEX_SESSIO
   assert.equal(codexThread({ CODEX_THREAD_ID: "thread", CODEX_SESSION_ID: "session" }), "thread");
   assert.equal(codexThread({ CODEX_SESSION_ID: "session" }), "session");
   assert.equal(codexThread({}), undefined);
+});
+
+test("Codex liveness requires both a rollout and the thread-store writer marker", () => {
+  const env = { CODEX_HOME: path.resolve("fixture", "codex-home") };
+  const thread = "01a06c9b-a40b-7121-84a7-82c8cedb3325";
+  const rollout = path.join(env.CODEX_HOME, "sessions", "2026", "09", "04", `rollout-now-${thread}.jsonl`);
+  const lock = path.join(env.CODEX_HOME, "thread-writer-locks", `${thread}.lock`);
+  assert.equal(codexHome(env), env.CODEX_HOME);
+  assert.deepEqual(codexLiveness(thread, env, { rollout: () => undefined }), {
+    state: "gone",
+    reason: `Codex thread ${thread} has no rollout under ${path.join(env.CODEX_HOME, "sessions")}`,
+  });
+  assert.match(codexLiveness(thread, env, { rollout: () => rollout, exists: () => false }).reason ?? "", /no writer lock/);
+  assert.deepEqual(codexLiveness(thread, env, { rollout: () => rollout, exists: (file) => file === lock, probe: () => "active" }), { state: "live", rollout, lock });
+  assert.match(codexLiveness(thread, env, { rollout: () => rollout, exists: () => true, probe: () => "stale" }).reason ?? "", /stale writer lock/);
+  assert.equal(codexLiveness(thread, env, { rollout: () => rollout, exists: () => true, probe: () => "unknown" }).state, "unknown");
+});
+
+test("Codex writer-lock probing distinguishes an active Windows lock and a stale Linux lock", () => {
+  const busy = () => { const error = /** @type {NodeJS.ErrnoException} */ (new Error("busy")); error.code = "EBUSY"; throw error; };
+  const denied = () => { const error = /** @type {NodeJS.ErrnoException} */ (new Error("denied")); error.code = "EACCES"; throw error; };
+  assert.equal(probeCodexWriterLock("x", { platform: "win32", read: /** @type {any} */ (busy) }), "active");
+  assert.equal(probeCodexWriterLock("x", { platform: "win32", read: /** @type {any} */ (denied) }), "unknown", "permission denial is not proof that Codex holds the lock");
+  assert.equal(probeCodexWriterLock("x", { platform: "win32", read: /** @type {any} */ (() => Buffer.alloc(0)) }), "stale");
+  assert.equal(probeCodexWriterLock("x", { platform: "linux", run: /** @type {any} */ (() => ({ status: 1 })) }), "active");
+  assert.equal(probeCodexWriterLock("x", { platform: "linux", run: /** @type {any} */ (() => ({ status: 0 })) }), "stale");
+  assert.equal(probeCodexWriterLock("x", { platform: "darwin" }), "unknown");
+});
+
+test("Codex rollout discovery follows CODEX_HOME recursively", async () => {
+  const { mkdtemp, mkdir, rm, writeFile } = await import("node:fs/promises");
+  const os = await import("node:os");
+  const home = await mkdtemp(path.join(os.tmpdir(), "agora-codex-home-"));
+  try {
+    const thread = "01a06c9b-a40b-7121-84a7-82c8cedb3325";
+    const dir = path.join(home, "sessions", "2026", "09", "04");
+    await mkdir(dir, { recursive: true });
+    const rollout = path.join(dir, `rollout-now-${thread}.jsonl`);
+    await writeFile(rollout, "");
+    assert.equal(codexRollout(thread, { CODEX_HOME: home }), rollout);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
 });
 
 test("Codex warns only when the current thread differs from the stable seat session", () => {
@@ -74,6 +118,25 @@ test("Codex queue sends each delivery in order to the current task", async () =>
   assert.match(calls[1].args[4], /from Grace\/review/);
 });
 
+test("Codex queue awaits each acceptance checkpoint before starting the next delivery", async () => {
+  const second = { ...message, id: "m2", cursor: "2", text: "next" };
+  /** @type {string[]} */
+  const order = [];
+  await queueCodex("example-room", [message, second], {
+    env: { CODEX_THREAD_ID: "task-123" },
+    bin: process.execPath,
+    run: /** @type {any} */ (async (/** @type {string} */ _file, /** @type {string[]} */ args) => {
+      order.push(`queue:${args[4].includes("cursor 2") ? "2" : "1"}`);
+      return { stdout: "", stderr: "" };
+    }),
+    onQueued: async ({ message: accepted }) => {
+      await new Promise((resolve) => setImmediate(resolve));
+      order.push(`checkpoint:${accepted.cursor}`);
+    },
+  });
+  assert.deepEqual(order, ["queue:1", "checkpoint:1788475881.165359", "queue:2", "checkpoint:2"]);
+});
+
 test("Codex queue serializes a burst instead of starting later deliveries concurrently", async () => {
   /** @type {() => void} */
   let releaseFirst = () => {};
@@ -119,4 +182,27 @@ test("Codex queue keeps peer-authored shell metacharacters in one argv value", a
   assert.equal(calls.length, 1);
   assert.equal(calls[0].args[4].endsWith(text), true);
   assert.equal(calls[0].options.shell, undefined);
+});
+
+test("both Codex launchers record the detached worker as the session pid", async () => {
+  const root = path.resolve(import.meta.dirname, "..");
+  const [powershell, posix] = await Promise.all([
+    readFile(path.join(root, "scripts", "start-codex-watch.ps1"), "utf8"),
+    readFile(path.join(root, "scripts", "start-codex-watch.sh"), "utf8"),
+  ]);
+  assert.match(powershell, /\$env:AGORA_SESSION_PID = \[string\]\$PID/);
+  assert.match(posix, /AGORA_SESSION_PID=\$\$/);
+  assert.match(posix, /exec "\$runtime_path"/, "exec preserves the worker pid in the Node watch");
+});
+
+test("Codex launcher default logs are isolated by session and room", async () => {
+  const root = path.resolve(import.meta.dirname, "..");
+  const [powershell, posix] = await Promise.all([
+    readFile(path.join(root, "scripts", "start-codex-watch.ps1"), "utf8"),
+    readFile(path.join(root, "scripts", "start-codex-watch.sh"), "utf8"),
+  ]);
+  assert.match(powershell, /agora-codex-watch-\$SessionId-\$safeRoom/);
+  assert.match(posix, /agora-codex-watch-\$session_id-\$safe_room/);
+  assert.doesNotMatch(powershell, /\[string\]\$LogPrefix\s*=\s*\(Join-Path[^\r\n]+['"]agora-codex-watch['"]/);
+  assert.doesNotMatch(posix, /^log_prefix=\$\{TMPDIR:-\/tmp\}\/agora-codex-watch$/m);
 });

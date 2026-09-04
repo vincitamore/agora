@@ -3,6 +3,7 @@
 import { parseArgs } from "node:util";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import {
   AgoraError,
   EXIT,
@@ -52,11 +53,13 @@ import { FOLLOW_CAP, FOLLOW_IDLE_MINUTES, aliasThreads, dropFollow, followThread
 import { withThreads } from "../src/threads.mjs";
 import { formatTrailers, matchesAddress, parseTrailers, TRAILER_VALUE_MAX, trailerValueOk } from "../src/trailers.mjs";
 import { SLACK_TEXT_MAX, chunkAtLines, encodeSlackText } from "../src/transports/slack.mjs";
-import { codexSpawnWarning, codexThread, queueCodex, resolveCodexBinary } from "../src/codex.mjs";
-import { clearWatchMode, touchWatchMode, watchModeSentinel } from "../src/harness.mjs";
+import { codexLiveness, codexSpawnWarning, codexThread, queueCodex, resolveCodexBinary } from "../src/codex.mjs";
+import { buildLabel, buildPredates, clearWatchMode, installedBuild, touchWatchMode, watchModeSentinel } from "../src/harness.mjs";
 
 const require = createRequire(import.meta.url);
 const { version } = require("../package.json");
+const entryFile = fileURLToPath(import.meta.url);
+const projectRoot = fileURLToPath(new URL("../", import.meta.url));
 
 const SCHEMA = {
   name: "agora",
@@ -101,6 +104,7 @@ const SCHEMA = {
         "--verdict <line>": "a settled result; needs at least one --exhibit",
         "--exhibit <locator>": `what settles it, repeatable (same ${TRAILER_VALUE_MAX}-character cap as --trailer)`,
         "--because <text>": `the reasoning behind it (same ${TRAILER_VALUE_MAX}-character cap as --trailer)`,
+        "--fyi": "emit ack: none, licensing the reader's silence. Honouring it is a judgement; the tool never filters, suppresses or delays on an incoming ack:",
       },
       does: "post one message signed as this session's bearer, with any trailers in a block above the signature; prints id and cursor",
     },
@@ -171,6 +175,7 @@ const OPTIONS = /** @type {const} */ ({
   stdin: { type: "boolean", default: false },
   split: { type: "boolean", default: false },
   "no-sign": { type: "boolean", default: false },
+  fyi: { type: "boolean", default: false },
   follow: { type: "boolean", default: false },
   "thread-interval": { type: "string" },
   once: { type: "boolean", default: false },
@@ -378,6 +383,8 @@ function trailerEntries(values) {
       out.push({ key, value: trimmed });
     }
   }
+  // --fyi emits ack: none. Honouring that trailer is a judgement; this function only writes it.
+  if (values.fyi) out.push({ key: "ack", value: "none" });
   return out;
 }
 
@@ -436,10 +443,12 @@ async function main(argv) {
 
   const cfg = await loadConfig(values.config);
   const json = Boolean(values.json);
+  const build = await installedBuild({ version, root: projectRoot, entry: entryFile });
   const session = resolveSession(cfg, process.env, (line) => console.error(`agora: ${line}`));
   const stateRoot = stateDir(cfg);
   const sdir = sessionDir(stateRoot, session);
-  const record = verb === "session" || verb === "join" ? await readRecord(sdir) : await touchRecord(sdir);
+  const processOwner = harnessPid(cfg, process.env);
+  const record = verb === "session" || verb === "join" ? await readRecord(sdir) : await touchRecord(sdir, { build, ...processOwner });
   const bearer = resolveBearer(cfg, { as: values.as, env: process.env, record });
   cfg.actor = { ...cfg.actor, name: bearer.name }; // one string: the signature, the local transport's identity
   /**
@@ -462,7 +471,7 @@ async function main(argv) {
     for (const t of twin)
       console.error(`agora: WARNING a live session on this seat already carries the bearer ${bearer.name} (session ${t.slug}, pid ${t.record?.pid ?? "-"}); the room cannot tell them apart. Give each a role segment (${bearer.name}/watch, ${bearer.name}/review).`);
     const hp = harnessPid(cfg, process.env);
-    const rec = await writeRecord(sdir, session, { bearer: bearer.name, label: values.label, ...hp });
+    const rec = await writeRecord(sdir, session, { bearer: bearer.name, label: values.label, build, ...hp });
     const line = `registered ${rec.bearer} as session ${session.slug} (from ${session.source})${rec.pid ? `  pid ${rec.pid} from ${rec.pidSource}` : `  no harness pid found (looked for ${hp.looked.join(", ")}); liveness unknown`}`;
     if (toStderr) console.error(`agora: ${line}`);
     else if (json) console.log(JSON.stringify({ ...rec, dir: sdir }));
@@ -478,6 +487,32 @@ async function main(argv) {
       ? `  watching ${scope.armed.map((a) => `${a.room}${a.thread ? `#${a.thread}` : ""} (${a.mode ?? "watch"}, pid ${a.pid})`).join(", ")}`
       : "";
     return `${" ".repeat(4)}${rooms}${armed}`;
+  }
+
+  /** A live resident holding older code is not a lapse: it needs an intentional re-arm. */
+  /** @param {string} dir @param {string} slug */
+  async function watchBuildWarnings(dir, slug) {
+    /** @type {Array<{ code: string, message: string }>} */
+    const out = [];
+    const scope = await sessionScope(dir);
+    for (const item of scope.armed) {
+      const armed = await readArmed(dir, item.key);
+      if (!armed || !armedAlive(armed)) continue;
+      const older = buildPredates(armed.build, build);
+      if (older === false) continue;
+      if (older === true) {
+        out.push({
+          code: "stale-watch-build",
+          message: `live watch pid ${armed.pid} for ${slug}/${item.key} loaded ${buildLabel(armed.build)}, older than installed ${buildLabel(build)}; re-arm it to dogfood the current build`,
+        });
+      } else if (!armed.build) {
+        out.push({
+          code: "unknown-watch-build",
+          message: `live watch pid ${armed.pid} for ${slug}/${item.key} recorded no build identity; re-arm it once so freshness becomes measurable`,
+        });
+      }
+    }
+    return out;
   }
 
   /** What this process did to its own follow set while it ran: named threads, and how many remain. */
@@ -533,6 +568,10 @@ async function main(argv) {
         else {
           console.log(`${r.slug === session.slug ? "*" : " "} ${r.record ? recordLine(r.record, r.state) : `${"(unregistered)".padEnd(18)} ${r.slug.padEnd(30)} ${r.state}`}`);
           console.log(await scopeLine(r.dir));
+        }
+        for (const warning of await watchBuildWarnings(r.dir, r.slug)) {
+          if (json) console.log(JSON.stringify({ type: "warning", ...warning }));
+          else console.log(`WARNING ${warning.message}`);
         }
       }
       if (!rows.length && !json) console.log("no sessions have state here");
@@ -638,6 +677,8 @@ async function main(argv) {
       warnings.push({ code: "unsigned-multi", message: `signing is off and several sessions are live: no line in the room can be attributed to a bearer.` });
     if (session.slug === "default")
       warnings.push({ code: "default-session", message: `the session key is "default", so every session with no harness id shares one position and one ledger; set AGORA_SESSION.` });
+    for (const r of rows)
+      warnings.push(...await watchBuildWarnings(r.dir, r.slug));
 
     if (json) {
       // everything the human path prints, typed: an agent told to take its session and bearer from
@@ -652,13 +693,18 @@ async function main(argv) {
         bearerSource: bearer.source,
         registered: Boolean(record),
       }));
+      console.log(JSON.stringify({ type: "build", build }));
+      const usual = usualWake(bearer.name);
+      if (usual) console.log(JSON.stringify({ type: "suggestion", code: "usual-wake", role: usual.role, wake: usual.wake, applied: false }));
       for (const r of rows) {
         const scope = await sessionScope(r.dir);
         console.log(JSON.stringify({ type: "session", slug: r.slug, state: r.state, ...(r.record ?? {}), rooms: scope.rooms, armed: scope.armed, here: r.slug === session.slug }));
       }
     } else {
-      console.log(`config  ${cfg.path}\nstate   ${sdir}\nsession ${session.slug} (from ${session.source})${record ? "" : "  (unregistered: run `agora session --as <bearer>`)"}\nbearer  ${bearer.name} (${cfg.actor.kind}, from ${bearer.source})`);
+      console.log(`config  ${cfg.path}\nstate   ${sdir}\nbuild   ${buildLabel(build)}\nsession ${session.slug} (from ${session.source})${record ? "" : "  (unregistered: run `agora session --as <bearer>`)"}\nbearer  ${bearer.name} (${cfg.actor.kind}, from ${bearer.source})`);
       for (const line of envPrefix(session, bearer)) console.log(line);
+      const usual = usualWake(bearer.name);
+      if (usual) console.log(`usual --wake for role ${usual.role} is ${usual.wake} (not applied)`);
       if (rows.length) {
         console.log("\nsessions with state here");
         for (const r of rows) {
@@ -864,6 +910,9 @@ async function main(argv) {
         console.error(`agora: --for ${forSeconds} is shorter than the ${interval}s poll interval, so this is a single poll (use --once, or lower --interval)`);
       /** @type {{ thread: string, bin: string } | undefined} */
       let codexQueue;
+      let nextCodexLivenessCheck = 0;
+      /** @type {string | undefined} */
+      let lastCodexUnknown;
       if (values["codex-queue"]) {
         const codexTarget = String(values["codex-thread"] ?? process.env.AGORA_CODEX_THREAD ?? codexThread(process.env) ?? "").trim();
         if (!codexTarget)
@@ -872,6 +921,18 @@ async function main(argv) {
         codexQueue = { thread: codexTarget, bin: codexBin };
         console.error(`agora: Codex queue armed for thread ${codexTarget} via ${codexBin}`);
       }
+      const codexGuard = codexQueue ? () => {
+        const now = Date.now();
+        if (now < nextCodexLivenessCheck) return undefined;
+        nextCodexLivenessCheck = now + 60_000;
+        const health = codexLiveness(codexQueue.thread, process.env);
+        if (health.state === "gone") return health.reason;
+        if (health.state === "unknown" && health.reason !== lastCodexUnknown) {
+          lastCodexUnknown = health.reason;
+          console.error(`agora: WARNING ${health.reason}; continuing because liveness is not disproved`);
+        }
+        return undefined;
+      } : undefined;
       await identity({ typed: true });
       const seeded = await readCursorSeeded(sdir, stateRoot, key);
       if (seeded.seeded) console.error(`agora: no position saved for this session yet; seeded from the shared ${key}.cursor (${seeded.cursor})`);
@@ -898,6 +959,7 @@ async function main(argv) {
         threadInterval,
         follow: values.follow,
         pid: process.pid,
+        build,
         ...(harnessPid(cfg, process.env).pid !== undefined ? { harnessPid: harnessPid(cfg, process.env).pid } : {}),
         since: seeded.cursor ?? null,
         startedAt: new Date().toISOString(),
@@ -1004,6 +1066,7 @@ async function main(argv) {
           forSeconds,
           threads,
           sweep,
+          guard: codexGuard,
           onBatch: async (msgs, batch) => {
             sessionWakes += 1;
             // one object per poll instead of one per message: a consumer that wakes per line
@@ -1042,7 +1105,10 @@ async function main(argv) {
             }
             if (codexQueue) await queueCodex(roomAlias, msgs, {
               ...codexQueue,
-              onQueued: ({ thread: codexTarget, cursor }) => console.error(`agora: queued Codex thread ${codexTarget} delivery ${cursor}`),
+              onQueued: async ({ thread: codexTarget, cursor, message }) => {
+                await batch.checkpoint(message);
+                console.error(`agora: queued Codex thread ${codexTarget} delivery ${cursor}; cursor checkpointed`);
+              },
             });
           },
         });
@@ -1053,8 +1119,9 @@ async function main(argv) {
       // 42 means a watch delivered, in every mode: the schema and the design's contract line both
       // state it without a carve-out, and a bounded --stream is the shape a harness with no monitor
       // primitive is told to run, which read every delivery as "nothing arrived"
-      const exit = result.fired ? EXIT.fired : EXIT.ok;
-      if (!json && !result.fired) console.error(`nothing new after ${result.polls} poll${result.polls === 1 ? "" : "s"}${result.skipped ? ` (${result.skipped} of our own skipped)` : ""}${result.filtered ? ` (${result.filtered} not for us, still readable)` : ""}`);
+      const exit = result.reason ? EXIT.error : result.fired ? EXIT.fired : EXIT.ok;
+      if (!json && !result.fired && !result.reason) console.error(`nothing new after ${result.polls} poll${result.polls === 1 ? "" : "s"}${result.skipped ? ` (${result.skipped} of our own skipped)` : ""}${result.filtered ? ` (${result.filtered} not for us, still readable)` : ""}`);
+      if (result.reason) console.error(`agora: ${result.reason}`);
       // one machine-readable line, fired or not: an exit code does not survive a wrapper
       const line = JSON.stringify({
         type: "watch-result",
@@ -1075,6 +1142,7 @@ async function main(argv) {
         following: result.following || following,
         session_wakes: sessionWakes,
         bytes_delivered: bytesDelivered,
+        ...(result.reason ? { reason: result.reason } : {}),
         exit,
       });
       if (json) console.log(line);

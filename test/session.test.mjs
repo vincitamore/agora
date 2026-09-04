@@ -279,16 +279,21 @@ test("the session record: written once, bearer replaced on re-register, startedA
     const s = { slug: "s1", source: "AGORA_SESSION", explicit: true };
     const sdir = sessionDir(dir, s);
     assert.equal(await readRecord(sdir), undefined);
-    const first = await writeRecord(sdir, s, { bearer: "Grace/watch", label: "the watch", pid: 4242, pidSource: "CLAUDE_PID", now: new Date("2020-01-01T00:00:00Z") });
+    const oldBuild = { version: "0.1.0", source: /** @type {const} */ ("git"), git: "a".repeat(40), at: "2020-01-01T00:00:00.000Z" };
+    const currentBuild = { version: "0.1.0", source: /** @type {const} */ ("git"), git: "b".repeat(40), at: "2020-01-01T02:00:00.000Z" };
+    const first = await writeRecord(sdir, s, { bearer: "Grace/watch", label: "the watch", pid: 4242, pidSource: "CLAUDE_PID", build: oldBuild, now: new Date("2020-01-01T00:00:00Z") });
     assert.equal(first.startedAt, "2020-01-01T00:00:00.000Z");
     const second = await writeRecord(sdir, s, { bearer: "Opus/watch", now: new Date("2020-01-01T01:00:00Z") });
     assert.equal(second.bearer, "Opus/watch");
     assert.equal(second.label, "the watch", "label kept");
     assert.equal(second.pid, 4242, "pid kept");
+    assert.deepEqual(second.build, oldBuild, "build kept when a caller cannot identify one");
     assert.equal(second.startedAt, first.startedAt, "startedAt kept");
     assert.equal(second.lastSeen, "2020-01-01T01:00:00.000Z");
-    const touched = await touchRecord(sdir);
+    const touched = await touchRecord(sdir, { build: currentBuild, pid: 5151, pidSource: "AGORA_SESSION_PID" });
     assert.ok(touched && touched.lastSeen > second.lastSeen);
+    assert.deepEqual(touched.build, currentBuild, "the record says which build its latest command loaded");
+    assert.deepEqual([touched.pid, touched.pidSource], [5151, "AGORA_SESSION_PID"], "a launcher pid exported after registration refreshes the record");
     assert.deepEqual(resolveBearer(cfg, { env: {}, record: touched }), { name: "Opus/watch", source: "session" });
     assert.deepEqual(resolveBearer(cfg, { env: { AGORA_ACTOR: "Grok" }, record: touched }), { name: "Grok", source: "AGORA_ACTOR" }, "env still beats the record");
     assert.equal(await touchRecord(sessionDir(dir, { slug: "none", source: "x", explicit: true })), undefined);
@@ -314,9 +319,11 @@ test("an armed registration carries the boot it belongs to, so a pid reused afte
   const { dir, cleanup } = await tmp();
   try {
     const sdir = sessionDir(dir, { slug: "s1", source: "AGORA_SESSION", explicit: true });
-    await writeArmed(sdir, "r", { room: "r", interval: 15, pid: process.pid, startedAt: new Date().toISOString() });
+    const build = { version: "0.1.0", source: /** @type {const} */ ("mtime"), at: "2026-09-04T20:00:00.000Z" };
+    await writeArmed(sdir, "r", { room: "r", interval: 15, pid: process.pid, build, startedAt: new Date().toISOString() });
     const armed = await readArmed(sdir, "r");
     assert.ok(armed && typeof armed.bootEpoch === "number", "the registration is stamped with this boot");
+    assert.deepEqual(armed.build, build, "the resident records the code it loaded when it armed");
     assert.ok(Math.abs(armed.bootEpoch - bootEpoch()) <= 2);
     const boot = armed.bootEpoch;
     const esrch = () => { const e = /** @type {NodeJS.ErrnoException} */ (new Error("gone")); e.code = "ESRCH"; throw e; };
@@ -333,6 +340,7 @@ test("an armed registration carries the boot it belongs to, so a pid reused afte
 
     await writeArmed(sdir, "r", { ...armed, bootEpoch: 1234 });
     assert.equal((await readArmed(sdir, "r"))?.bootEpoch, 1234, "a boot epoch already on the record is kept");
+    assert.deepEqual((await sessionScope(sdir)).armed[0].build, build, "doctor/session scope carry the build identity");
   } finally {
     await cleanup();
   }

@@ -1,6 +1,9 @@
 // @ts-check
 import { jitter, readCursor, redact, writeCursor, sleep as defaultSleep } from "./core.mjs";
 
+/** @typedef {{ room?: string, threads: Map<string, string> }} CursorCheckpoint */
+/** @typedef {{ delivered: number, skipped: number, filtered: number, checkpoint: (message: import('./core.mjs').Message | string) => Promise<void> }} BatchInfo */
+
 /**
  * @typedef {object} FollowedThreads
  * What a watch needs to poll the threads this session is following. The caller owns the set (it
@@ -45,11 +48,12 @@ import { jitter, readCursor, redact, writeCursor, sleep as defaultSleep } from "
  * @param {{
  *   stateDir: string, key: string, thread?: string, cursor?: string,
  *   mode?: 'once' | 'until-new' | 'stream', interval?: number, forSeconds?: number,
- *   onBatch: (msgs: import('./core.mjs').Message[], batch: { delivered: number, skipped: number, filtered: number }) => void | Promise<void>,
+ *   onBatch: (msgs: import('./core.mjs').Message[], batch: BatchInfo) => void | Promise<void>,
  *   own?: () => Promise<Set<string>> | Set<string>,
  *   wake?: (m: import('./core.mjs').Message) => boolean,
  *   urgent?: (m: import('./core.mjs').Message) => boolean,
  *   coalesceSeconds?: number, maxBatch?: number,
+ *   guard?: () => string | undefined | Promise<string | undefined>,
  *   threads?: FollowedThreads,
  *   sweep?: () => Promise<void> | void,
  *   sleep?: (ms: number) => Promise<void>, now?: () => number, random?: () => number,
@@ -57,11 +61,12 @@ import { jitter, readCursor, redact, writeCursor, sleep as defaultSleep } from "
  * `wake` is the reader's own choice of what wakes it (a message addressed to someone else need
  * not); what it drops is counted as `filtered`, the cursor still advances past it, and `read`
  * still shows it. It is never automatic: a message from another agent is input, and routing on
- * its trailers is a flag the reader set.
- * @returns {Promise<{ fired: boolean, cursor?: string, polls: number, skipped: number, filtered: number, delivered: number, elapsedMs: number, following: number, threads: Record<string, number> }>}
+ * its trailers is a flag the reader set. An incoming `ack:` is never consulted here: honouring
+ * `ack: none` is a judgement, not a filter, suppress, or delay.
+ * @returns {Promise<{ fired: boolean, cursor?: string, polls: number, skipped: number, filtered: number, delivered: number, elapsedMs: number, following: number, threads: Record<string, number>, reason?: string }>}
  */
 export async function watch(transport, opts) {
-  const { stateDir, key, thread, mode = "until-new", interval = 15, forSeconds = 0, onBatch, own, wake, urgent, threads, sweep } = opts;
+  const { stateDir, key, thread, mode = "until-new", interval = 15, forSeconds = 0, onBatch, own, wake, urgent, threads, sweep, guard } = opts;
   const sleep = opts.sleep ?? defaultSleep;
   const now = opts.now ?? Date.now;
   const random = opts.random ?? Math.random;
@@ -79,7 +84,9 @@ export async function watch(transport, opts) {
   const start = now();
   let fired = false;
   let polls = 0;
-  /** @type {Array<{ m: import('./core.mjs').Message, thread?: string }>} */
+  /** @type {string | undefined} */
+  let reason;
+  /** @type {Array<{ m: import('./core.mjs').Message, thread?: string, checkpoint?: CursorCheckpoint }>} */
   const held = [];
   /** @type {Set<string>} */
   const heldIds = new Set();
@@ -88,9 +95,13 @@ export async function watch(transport, opts) {
   let pendingRoomCursor;
   /** @type {Map<string, string>} */
   const pendingThreadCursors = new Map();
+  /** Cursor changes since the last externally acknowledged delivery. */
+  let checkpointRoomCursor;
+  /** @type {Map<string, string>} */
+  const checkpointThreadCursors = new Map();
   let windowSkipped = 0;
   let windowFiltered = 0;
-  const result = () => ({ fired, cursor, polls, skipped, filtered, delivered, elapsedMs: Math.max(0, now() - start), following: followed.size, threads: perThread });
+  const result = () => ({ fired, cursor, polls, skipped, filtered, delivered, elapsedMs: Math.max(0, now() - start), following: followed.size, threads: perThread, ...(reason ? { reason } : {}) });
 
   /** Persist cursors seen during the window; only after the held batch is delivered. */
   const persistPending = async () => {
@@ -105,13 +116,45 @@ export async function watch(transport, opts) {
     }
     pendingRoomCursor = undefined;
     pendingThreadCursors.clear();
+    checkpointRoomCursor = undefined;
+    checkpointThreadCursors.clear();
+  };
+
+  /**
+   * An adapter can have accepted the first external side effect before a later item fails. Its
+   * acknowledgement advances only through that accepted prefix; the unacknowledged suffix remains
+   * at-least-once. Calls must follow delivery order, which is the order `msgs` is handed to it.
+   * @param {Array<{ m: import('./core.mjs').Message, checkpoint?: CursorCheckpoint }>} entries
+   * @param {{ delivered: number, skipped: number, filtered: number }} counts
+   * @returns {BatchInfo}
+   */
+  const batchInfo = (entries, counts) => {
+    let next = 0;
+    const byId = new Map(entries.map((e, index) => [e.m.id, index]));
+    const info = { ...counts };
+    return /** @type {BatchInfo} */ (Object.defineProperty(info, "checkpoint", {
+      enumerable: false,
+      /** @param {import('./core.mjs').Message | string} message */
+      value: async (message) => {
+        const id = typeof message === "string" ? message : message.id;
+        const index = byId.get(id);
+        if (index === undefined) throw new Error(`cannot checkpoint delivery ${id}: it is not in this batch`);
+        if (index !== next) throw new Error(`cannot checkpoint delivery ${id}: expected ${entries[next]?.m.id ?? "the end of the batch"}`);
+        const point = entries[index].checkpoint;
+        if (!point) throw new Error(`cannot checkpoint delivery ${id}: no cursor position was recorded`);
+        if (point.room !== undefined) await writeCursor(stateDir, key, point.room);
+        for (const [threadId, c] of point.threads)
+          await writeCursor(stateDir, threads ? threads.key(threadId) : threadId, c);
+        next++;
+      },
+    }));
   };
 
   const flush = async () => {
     if (!held.length) return;
     const msgs = held.map((e) => e.m);
     const n = held.length;
-    await onBatch(msgs, { delivered: n, skipped: windowSkipped, filtered: windowFiltered });
+    await onBatch(msgs, batchInfo(held, { delivered: n, skipped: windowSkipped, filtered: windowFiltered }));
     delivered += n;
     for (const e of held) {
       const id = e.thread ?? e.m.thread;
@@ -128,12 +171,17 @@ export async function watch(transport, opts) {
   };
 
   for (;;) {
+    reason = await guard?.();
+    if (reason) {
+      await flush();
+      return result();
+    }
     polls++;
     // the seat's own housekeeping rides on the poll: a sibling that went dark is announced here,
     // before the read, so the announcement is in the room for everyone else's next poll and in
     // this session's ledger for its own
     if (sweep) await sweep();
-    /** @type {Array<{ m: import('./core.mjs').Message, thread?: string }>} */
+    /** @type {Array<{ m: import('./core.mjs').Message, thread?: string, checkpoint?: CursorCheckpoint }>} */
     const batch = [];
     const roomMsgs = await transport.read({ thread, since: cursor });
     for (const m of roomMsgs) batch.push({ m });
@@ -174,6 +222,11 @@ export async function watch(transport, opts) {
         } catch (err) {
           // one unreadable follow (truncated Slack ts → thread_not_found) must not kill the room watch
           const why = err instanceof Error ? err.message : String(err);
+          // a 429 or 5xx is transient: drop is permanent and the replies then stop arriving
+          if (/rate limited|\b429\b|\b5\d\d\b/i.test(why)) {
+            console.error(redact(`agora: follow ${id}: ${why}; keeping it for the next poll`));
+            continue;
+          }
           console.error(redact(`agora: dropped follow ${id}: ${why}`));
           followed.delete(id);
           delete perThread[id];
@@ -199,6 +252,27 @@ export async function watch(transport, opts) {
       skipped += skippedHere;
       const fresh = wake ? notMine.filter((e) => wake(e.m)) : notMine;
       const filteredHere = notMine.length - fresh.length;
+      // Preserve the source of every cursor: a room delivery and a followed-thread delivery share
+      // one merged timeline but advance different files. Own and filtered messages before an
+      // accepted delivery are safe to include in that delivery's checkpoint.
+      const sources = new Map();
+      for (const e of batch) {
+        let source = sources.get(e.m.id);
+        if (!source) sources.set(e.m.id, source = { threads: new Map() });
+        if (e.thread === undefined) source.room = e.m.cursor;
+        else source.threads.set(e.thread, e.m.cursor);
+      }
+      const freshIds = new Set(fresh.map((e) => e.m.id));
+      for (const e of merged) {
+        const source = sources.get(e.m.id);
+        if (source?.room !== undefined) checkpointRoomCursor = source.room;
+        if (source) for (const [threadId, c] of source.threads) checkpointThreadCursors.set(threadId, c);
+        if (freshIds.has(e.m.id)) {
+          e.checkpoint = { room: checkpointRoomCursor, threads: new Map(checkpointThreadCursors) };
+          checkpointRoomCursor = undefined;
+          checkpointThreadCursors.clear();
+        }
+      }
       filtered += filteredHere;
       if (roomMsgs.length) pendingRoomCursor = roomMsgs[roomMsgs.length - 1].cursor;
       for (const [id, c] of advanced) pendingThreadCursors.set(id, c);
@@ -207,7 +281,7 @@ export async function watch(transport, opts) {
         if (fresh.length) {
           // the counts of THIS poll, so a consumer taking one object per poll says what the poll did
           // without subtracting running totals itself
-          await onBatch(fresh.map((e) => e.m), { delivered: fresh.length, skipped: skippedHere, filtered: filteredHere });
+          await onBatch(fresh.map((e) => e.m), batchInfo(fresh, { delivered: fresh.length, skipped: skippedHere, filtered: filteredHere }));
           delivered += fresh.length;
           // a message counts against a followed thread whether the thread read or the room read
           // was the one that carried it

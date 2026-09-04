@@ -284,6 +284,7 @@ export function hasLegacyState(stateRoot) {
  * @property {number} [pid]
  * @property {string} [pidSource]
  * @property {number} bootEpoch
+ * @property {import('./harness.mjs').BuildIdentity} [build] code the last command in this session loaded
  * @property {string} startedAt
  * @property {string} lastSeen
  */
@@ -327,7 +328,7 @@ export async function readRecord(dir) {
  * Write or update this session's record (idempotent). `bearer` and `label` replace what is there;
  * `startedAt` is kept from the first write.
  * @param {string} dir @param {Session} session
- * @param {{ bearer: string, label?: string, pid?: number, pidSource?: string, now?: Date }} fields
+ * @param {{ bearer: string, label?: string, pid?: number, pidSource?: string, build?: import('./harness.mjs').BuildIdentity, now?: Date }} fields
  */
 export async function writeRecord(dir, session, fields) {
   const now = (fields.now ?? new Date()).toISOString();
@@ -340,6 +341,7 @@ export async function writeRecord(dir, session, fields) {
     bearer: fields.bearer,
     ...(fields.pid !== undefined ? { pid: fields.pid, pidSource: fields.pidSource } : prev?.pid !== undefined ? { pid: prev.pid, pidSource: prev.pidSource } : {}),
     bootEpoch: prev?.bootEpoch ?? bootEpoch(),
+    ...(fields.build !== undefined ? { build: fields.build } : prev?.build !== undefined ? { build: prev.build } : {}),
     startedAt: prev?.startedAt ?? now,
     lastSeen: now,
   };
@@ -347,11 +349,20 @@ export async function writeRecord(dir, session, fields) {
   return rec;
 }
 
-/** Mark the record as seen now, if there is one. @param {string} dir */
-export async function touchRecord(dir) {
+/** Mark the record as seen now, if there is one, and refresh facts the harness exposes on every call.
+ * @param {string} dir
+ * @param {{ build?: import('./harness.mjs').BuildIdentity, pid?: number, pidSource?: string }} [fields]
+ */
+export async function touchRecord(dir, fields = {}) {
   const rec = await readRecord(dir);
   if (!rec) return undefined;
   rec.lastSeen = new Date().toISOString();
+  if (fields.build) rec.build = fields.build;
+  if (fields.pid !== undefined) {
+    rec.pid = fields.pid;
+    rec.pidSource = fields.pidSource;
+    rec.bootEpoch = bootEpoch();
+  }
   await writeFileAtomic(recordPath(dir), JSON.stringify(rec, null, 2) + "\n");
   return rec;
 }
@@ -471,7 +482,7 @@ export async function hasRoomState(dir, roomKey) {
  * has armed. Names only -- no cursor value, no room content. `doctor` and `session --list` print it
  * so "three live sessions" can be read as which rooms they are actually in.
  * @param {string} dir a session directory
- * @returns {Promise<{ rooms: string[], armed: Array<{ key: string, room: string, thread?: string, mode?: string, pid: number }> }>}
+ * @returns {Promise<{ rooms: string[], armed: Array<{ key: string, room: string, thread?: string, mode?: string, pid: number, build?: import('./harness.mjs').BuildIdentity }> }>}
  */
 export async function sessionScope(dir) {
   /** @type {string[]} */
@@ -481,7 +492,7 @@ export async function sessionScope(dir) {
   } catch {
     rooms = [];
   }
-  /** @type {Array<{ key: string, room: string, thread?: string, mode?: string, pid: number }>} */
+  /** @type {Array<{ key: string, room: string, thread?: string, mode?: string, pid: number, build?: import('./harness.mjs').BuildIdentity }>} */
   const armed = [];
   /** @type {string[]} */
   let files = [];
@@ -494,7 +505,7 @@ export async function sessionScope(dir) {
     if (!f.endsWith(".json")) continue;
     const key = f.slice(0, -".json".length);
     const rec = await readArmed(dir, key);
-    if (rec) armed.push({ key, room: rec.room, ...(rec.thread ? { thread: rec.thread } : {}), ...(rec.mode ? { mode: rec.mode } : {}), pid: rec.pid });
+    if (rec) armed.push({ key, room: rec.room, ...(rec.thread ? { thread: rec.thread } : {}), ...(rec.mode ? { mode: rec.mode } : {}), pid: rec.pid, ...(rec.build ? { build: rec.build } : {}) });
   }
   return { rooms, armed };
 }
@@ -631,6 +642,7 @@ export function pidAlive(pid, kill) {
  * @property {number} pid the watching process
  * @property {number} [harnessPid]
  * @property {number} [bootEpoch] the boot this pid belongs to; a pid outlives nothing across a reboot
+ * @property {import('./harness.mjs').BuildIdentity} [build] code this resident loaded when it armed
  * @property {string | null} [since] the cursor it started from
  * @property {string} startedAt
  */

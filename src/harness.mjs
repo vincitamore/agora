@@ -1,14 +1,18 @@
 // @ts-check
-import { existsSync } from "node:fs";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { existsSync, readdirSync } from "node:fs";
+import { readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { pidAlive } from "./session.mjs";
+
+const execFileAsync = promisify(execFile);
 
 /**
  * Harness-side courtesies a long-lived watch owes the session that hosts it.
  *
- * Claude Code runs a stop hook at the end of every turn, and a persistent watch
+ * Some harnesses run a stop hook at the end of every turn, and a persistent watch
  * turns every delivery into a turn: without a signal, a maintenance checklist
  * fires after each message and the agent spends a turn answering it, for hours.
  * The hook honours a session-scoped sentinel beside the session transcript,
@@ -17,7 +21,7 @@ import { pidAlive } from "./session.mjs";
  * suppression exists exactly as long as the watch does and is never a thing a
  * session has to remember to arm or to clear.
  *
- * The file is one per Claude Code SESSION and a session may run several watches at
+ * The file is one per harness session and a session may run several watches at
  * once, so it carries the pid of the watch that owns it: a 140 ms `--once` watch
  * inside a session hosting a resident stream must not delete the stream's
  * suppression on its way out. A watch clears the sentinel only when the recorded pid
@@ -26,44 +30,136 @@ import { pidAlive } from "./session.mjs";
  * A watch whose owner is no longer running takes ownership. A `--once` watch writes
  * no sentinel at all: a single poll cannot span a turn.
  *
- * The transcript lives at `~/.claude/projects/<slug of the project root>/<session id>.jsonl`,
- * the slug being the path with every character outside [A-Za-z0-9] replaced by
- * `-`; the project root is the nearest ancestor of cwd that holds it. The sentinel is written only when that transcript exists: a wrong slug
- * or a foreign harness gets nothing, never a stray file.
+ * Each harness descriptor knows where that harness keeps its transcript. The sentinel is written
+ * only beside a transcript that exists: a wrong id or a foreign harness gets nothing, never a
+ * stray file. This is especially important for Codex, whose no-maintenance marker is only the
+ * second line of defence after the watcher-lifetime sentinel.
  */
 
 const SESSION_ID = /^[A-Za-z0-9-]{8,128}$/;
 
-/** @typedef {{ dir: string, transcript: string, sentinel: string }} WatchModeSentinel */
+/** @typedef {{ harness: string, dir: string, transcript: string, sentinel: string }} WatchModeSentinel */
+
+/**
+ * The identity of the code a resident process loaded. `at` makes a recorded build comparable to
+ * the installed one; `git` is present when the entry point lives in a worktree, otherwise `at` is
+ * the entry file's mtime.
+ * @typedef {{ version: string, source: 'git' | 'mtime', at: string, git?: string }} BuildIdentity
+ */
 
 /** Claude Code's project directory name for a working directory. @param {string} cwd */
 export function claudeProjectSlug(cwd) {
   return cwd.replace(/[^A-Za-z0-9]/g, "-");
 }
 
+/** @param {string} root @param {(file: string) => boolean} accepts */
+function findFile(root, accepts) {
+  const stack = [root];
+  while (stack.length) {
+    const dir = /** @type {string} */ (stack.pop());
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const file = path.join(dir, entry.name);
+      if (entry.isDirectory()) stack.push(file);
+      else if (entry.isFile() && accepts(file)) return file;
+    }
+  }
+  return undefined;
+}
+
+/** @param {NodeJS.ProcessEnv} env @param {string} cwd @param {string} home */
+function claudeTranscript(env, cwd, home) {
+  const id = env.CLAUDE_CODE_SESSION_ID;
+  if (!id || !SESSION_ID.test(id)) return undefined;
+  for (let root = path.resolve(cwd); ; root = path.dirname(root)) {
+    const file = path.join(home, ".claude", "projects", claudeProjectSlug(root), `${id}.jsonl`);
+    if (existsSync(file)) return file;
+    if (path.dirname(root) === root) return undefined;
+  }
+}
+
+/** @param {NodeJS.ProcessEnv} env @param {string} _cwd @param {string} home */
+function codexTranscript(env, _cwd, home) {
+  const id = env.CODEX_SESSION_ID;
+  if (!id || !SESSION_ID.test(id)) return undefined;
+  const sessions = path.join(env.CODEX_HOME || path.join(home, ".codex"), "sessions");
+  return findFile(sessions, (file) => path.basename(file).startsWith("rollout-") && path.basename(file).endsWith(`-${id}.jsonl`));
+}
+
+/**
+ * One declarative inventory for harness-specific transcript state. Adding a harness extends this
+ * table; the watcher and stop-hook courtesy do not grow another harness branch of their own.
+ */
+export const HARNESS_DESCRIPTORS = Object.freeze([
+  Object.freeze({ name: "claude-code", sessionEnv: "CLAUDE_CODE_SESSION_ID", transcript: claudeTranscript }),
+  Object.freeze({ name: "codex", sessionEnv: "CODEX_SESSION_ID", transcript: codexTranscript }),
+]);
+
 /**
  * Where this session's watch-mode sentinel lives, or null when the process is not
- * hosted by Claude Code.
+ * hosted by a known harness with a transcript on disk.
  * @param {NodeJS.ProcessEnv} env @param {string} cwd @param {string} [home]
  * @returns {WatchModeSentinel | null}
  */
 export function watchModeSentinel(env, cwd, home = os.homedir()) {
-  const id = env.CLAUDE_CODE_SESSION_ID;
-  if (!id || !SESSION_ID.test(id)) return null;
-  // The transcript is filed under the project the session was started in, and a
-  // watch is usually armed from a subdirectory of it (a repo inside the tree, a
-  // worktree). Walk up from cwd and take the first ancestor that has this
-  // session's transcript; with none found, fall back to cwd so touch writes nothing.
-  const candidates = [];
-  for (let dir = path.resolve(cwd); ; dir = path.dirname(dir)) {
-    candidates.push(dir);
-    if (path.dirname(dir) === dir) break;
+  for (const descriptor of HARNESS_DESCRIPTORS) {
+    const transcript = descriptor.transcript(env, cwd, home);
+    if (!transcript) continue;
+    const parsed = path.parse(transcript);
+    return {
+      harness: descriptor.name,
+      dir: parsed.dir,
+      transcript,
+      sentinel: path.join(parsed.dir, `${parsed.name}.watch-mode`),
+    };
   }
-  const targets = candidates.map((root) => {
-    const dir = path.join(home, ".claude", "projects", claudeProjectSlug(root));
-    return { dir, transcript: path.join(dir, `${id}.jsonl`), sentinel: path.join(dir, `${id}.watch-mode`) };
-  });
-  return targets.find((t) => existsSync(t.transcript)) ?? targets[0];
+  return null;
+}
+
+/**
+ * Identify the installed build without trusting a package manager or a process title. A git
+ * worktree gives the strongest identity; an installed/copied entry point falls back to its mtime.
+ * @param {{ version: string, root: string, entry: string, run?: typeof execFileAsync, fileStat?: typeof stat }} opts
+ * @returns {Promise<BuildIdentity>}
+ */
+export async function installedBuild(opts) {
+  const run = opts.run ?? execFileAsync;
+  try {
+    const result = await run("git", ["-C", opts.root, "show", "-s", "--format=%H%n%cI", "HEAD"], {
+      windowsHide: true,
+      maxBuffer: 64 * 1024,
+    });
+    const [git, at] = String(result.stdout).trim().split(/\r?\n/);
+    if (/^[0-9a-f]{40}$/i.test(git) && !Number.isNaN(Date.parse(at)))
+      return { version: opts.version, source: "git", git, at: new Date(at).toISOString() };
+  } catch {
+    // A copied package or release archive is not a worktree; its entry mtime is its build marker.
+  }
+  const info = await (opts.fileStat ?? stat)(opts.entry);
+  return { version: opts.version, source: "mtime", at: info.mtime.toISOString() };
+}
+
+/** @param {BuildIdentity | undefined} build */
+export function buildLabel(build) {
+  if (!build) return "unknown";
+  return build.git ? `${build.version}+${build.git.slice(0, 8)}` : `${build.version}+mtime:${build.at}`;
+}
+
+/** Is a resident's loaded build older than the installed build? Unknown is named separately.
+ * @param {BuildIdentity | undefined} recorded @param {BuildIdentity} installed
+ */
+export function buildPredates(recorded, installed) {
+  if (!recorded) return undefined;
+  if (recorded.version === installed.version && recorded.git && recorded.git === installed.git) return false;
+  const before = Date.parse(recorded.at);
+  const now = Date.parse(installed.at);
+  if (Number.isNaN(before) || Number.isNaN(now)) return undefined;
+  return before < now || (before === now && (recorded.version !== installed.version || recorded.git !== installed.git));
 }
 
 /**
