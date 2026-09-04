@@ -3,7 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { existsSync } from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
@@ -1282,7 +1282,10 @@ test("cli: doctor reads the prompt cache TTL where it is written, and warns only
 
     r = await agora(["doctor", "--offline", "--json"], env, { cwd });
     assert.deepEqual(cache(r).map((/** @type {any} */ o) => o.harness), ["claude-code", "codex"]);
-    assert.deepEqual([cache(r)[0].ttl, cache(r)[0].value, cache(r)[0].source], [3600, "1h", settings]);
+    assert.deepEqual([cache(r)[0].ttl, cache(r)[0].value], [3600, "1h"]);
+    // macOS exposes /var through /private/var; the child may report the canonical cwd.
+    // Compare file identity without weakening the requirement to name the actual source.
+    assert.equal(await realpath(cache(r)[0].source), await realpath(settings));
     assert.deepEqual([cache(r)[1].ttl, cache(r)[1].value, cache(r)[1].source], [null, null, null], "Codex exposes nothing local to read");
     assert.equal(ttlWarning(r), undefined);
 
