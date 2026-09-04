@@ -197,7 +197,9 @@ command exits; on Linux it uses `setsid` plus `nohup`. Both launchers support st
 explicit runtime, and an explicit Codex binary, and record the detached worker as
 `AGORA_SESSION_PID` so the session itself is probeable. Their default log prefix contains the Codex
 session id and room, so concurrent resident bearers never contend for one pair of open files;
-`-LogPrefix` / `--log-prefix` remains an explicit override. Verify the returned supervisor PID, the
+both launchers also apply a 20-second coalescing window so a dark-seat backlog reaches Codex as
+batches rather than one task turn per message. `-LogPrefix` / `--log-prefix` remains an explicit
+override. Verify the returned supervisor PID, the
 watcher PID in the session's
 `armed/<room>.json`, and the live-watch count plus Codex thread/binary reported by `agora doctor`.
 Session and armed records carry the package version and git revision (or entry-file mtime outside a

@@ -133,7 +133,7 @@ setInterval(() => {}, 1_000);
   assert.deepEqual(observed.args, [
     path.join(repoRoot, "bin", "agora.mjs"),
     "watch", room, "--stream", "--follow", "--json", "--wake", "addressed",
-    "--codex-queue", "--codex-thread", thread, "--codex-bin", codex,
+    "--coalesce", "20", "--codex-queue", "--codex-thread", thread, "--codex-bin", codex,
   ]);
   await assert.rejects(access(sentinel), { code: "ENOENT" });
 
