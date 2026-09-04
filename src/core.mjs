@@ -1,5 +1,5 @@
 // @ts-check
-import { readFile, writeFile, mkdir, rm } from "node:fs/promises";
+import { readFile, writeFile, mkdir, rename, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { execFile } from "node:child_process";
@@ -213,10 +213,16 @@ export function fragilePath(resolved) {
   return undefined;
 }
 
-/** @param {Config} cfg */
+/**
+ * Where this seat's state lives: the environment first, then the config, then the default. The
+ * environment is above the config for the same reason `--config` is above `AGORA_CONFIG`: a
+ * worker started with an explicit `AGORA_STATE` (what `scripts/start-codex-watch.ps1` does) must
+ * not be silently redirected by a `state` key someone left in the shared config.
+ * @param {Config} cfg
+ */
 export function stateDir(cfg) {
-  if (cfg.state) return expandHome(cfg.state);
   if (process.env.AGORA_STATE) return expandHome(process.env.AGORA_STATE);
+  if (cfg.state) return expandHome(cfg.state);
   return path.join(homedir(), ".agora", "state");
 }
 
@@ -227,18 +233,57 @@ export function cursorKey(alias, thread) {
 }
 
 /**
+ * The one way this tool writes a state file: a sibling temp file, then a rename into place. A
+ * plain `writeFile` is a truncate followed by a write, so a crash or a concurrent reader sees a
+ * half-written file, and a half-written cursor reads as *absent*, which sends the seed path over
+ * a real position. The rename is atomic, so a reader sees the old bytes or the new ones and never
+ * a torn file. (`fs.promises.rename` replaces an existing file on Windows as well as on POSIX;
+ * measured here before this was relied on.) The temp name carries the pid, so two processes
+ * writing the same file do not share a temp file, and it is removed on failure rather than left
+ * beside the state it was meant to become.
+ * @param {string} file @param {string} data
+ */
+export async function writeFileAtomic(file, data) {
+  await mkdir(path.dirname(file), { recursive: true });
+  const tmp = `${file}.tmp-${process.pid}`;
+  try {
+    await writeFile(tmp, data, "utf8");
+    await rename(tmp, file);
+  } catch (e) {
+    await rm(tmp, { force: true });
+    throw e;
+  }
+}
+
+/**
  * A cursor file that exists with `cursor: null` is a position ("read from the start"), distinct from
  * a file that is absent (no position saved here yet). `cursor --reset` writes the former.
+ * A file that is present but unreadable is neither: it is an error, never an absence. Reported as
+ * an absence it would be seeded over by `readCursorSeeded`, which destroys the position *and* the
+ * evidence, and replays the room from wherever the shared seed sits.
  * @param {string} dir @param {string} key @returns {Promise<{ exists: boolean, cursor: string | undefined }>}
  */
 export async function readCursorFile(dir, key) {
+  const file = path.join(dir, `${key}.cursor`);
+  let raw;
   try {
-    const raw = await readFile(path.join(dir, `${key}.cursor`), "utf8");
-    const parsed = JSON.parse(raw);
-    return { exists: true, cursor: typeof parsed.cursor === "string" ? parsed.cursor : undefined };
-  } catch {
-    return { exists: false, cursor: undefined };
+    raw = await readFile(file, "utf8");
+  } catch (e) {
+    const code = /** @type {NodeJS.ErrnoException} */ (e).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return { exists: false, cursor: undefined };
+    throw new AgoraError(`${file}: cannot be read (${code ?? String(e)}); inspect it or delete it to start over`);
   }
+  /** @type {unknown} */
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    throw new AgoraError(`${file}: not valid JSON (${e instanceof Error ? e.message : String(e)}); inspect it or delete it to start over`);
+  }
+  if (!parsed || typeof parsed !== "object")
+    throw new AgoraError(`${file}: not a cursor file (expected an object with a cursor); inspect it or delete it to start over`);
+  const cursor = /** @type {Record<string, unknown>} */ (parsed).cursor;
+  return { exists: true, cursor: typeof cursor === "string" ? cursor : undefined };
 }
 
 /** @param {string} dir @param {string} key @returns {Promise<string | undefined>} */
@@ -248,9 +293,8 @@ export async function readCursor(dir, key) {
 
 /** @param {string} dir @param {string} key @param {string | undefined} cursor undefined records "from the start" */
 export async function writeCursor(dir, key, cursor) {
-  await mkdir(dir, { recursive: true });
   const file = path.join(dir, `${key}.cursor`);
-  await writeFile(file, JSON.stringify({ cursor: cursor ?? null, at: new Date().toISOString() }) + "\n", "utf8");
+  await writeFileAtomic(file, JSON.stringify({ cursor: cursor ?? null, at: new Date().toISOString() }) + "\n");
 }
 
 /** Remove a saved cursor file entirely, so a session may seed again from the legacy file. @param {string} dir @param {string} key */

@@ -1,7 +1,9 @@
 // @ts-check
 import test from "node:test";
 import assert from "node:assert/strict";
-import { cursorKey, fragilePath, jitter, parseSignature, readCursor, redact, roomInterval, roomThreadInterval, sign, validateConfig, writeCursor } from "../src/core.mjs";
+import path from "node:path";
+import { homedir } from "node:os";
+import { cursorKey, fragilePath, jitter, parseSignature, readCursor, redact, roomInterval, roomThreadInterval, sign, stateDir, validateConfig, writeCursor } from "../src/core.mjs";
 import { actor, tmp } from "./helpers.mjs";
 
 test("validateConfig accepts a minimal config", () => {
@@ -51,6 +53,28 @@ test("cursor round trip and key sanitising", async () => {
     assert.equal(await readCursor(dir, key), undefined);
   } finally {
     await cleanup();
+  }
+});
+
+test("the state root: AGORA_STATE first, then the config, then ~/.agora/state", () => {
+  const before = process.env.AGORA_STATE;
+  try {
+    const bare = /** @type {import('../src/core.mjs').Config} */ ({ actor, rooms: { a: { transport: "local", path: "x.ndjson" } } });
+    const pinned = { ...bare, state: "/from-config/state" };
+
+    process.env.AGORA_STATE = "/from-env/state";
+    assert.equal(stateDir(pinned), "/from-env/state", "a worker started with an explicit state root keeps it");
+    assert.equal(stateDir(bare), "/from-env/state");
+
+    delete process.env.AGORA_STATE;
+    assert.equal(stateDir(pinned), "/from-config/state", "the config is next");
+    assert.equal(stateDir(bare), path.join(homedir(), ".agora", "state"), "then the default");
+
+    process.env.AGORA_STATE = "~/env-state";
+    assert.equal(stateDir(pinned), path.join(homedir(), "env-state"), "~ expands on the way out");
+  } finally {
+    if (before === undefined) delete process.env.AGORA_STATE;
+    else process.env.AGORA_STATE = before;
   }
 });
 

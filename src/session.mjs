@@ -1,9 +1,9 @@
 // @ts-check
-import { appendFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { AgoraError, EXIT, readCursorFile, writeCursor } from "./core.mjs";
+import { AgoraError, EXIT, readCursorFile, writeCursor, writeFileAtomic } from "./core.mjs";
 
 /**
  * A session is the unit of state: one running agent, on one machine, for as long as it lives.
@@ -16,14 +16,21 @@ import { AgoraError, EXIT, readCursorFile, writeCursor } from "./core.mjs";
  * never sanitised where it is used. No bearer and no session string is ever part of a cursor filename.
  */
 
-export const SESSION_RE = /^[A-Za-z0-9._-]{1,64}$/;
+/**
+ * A session key is one safe directory name. `.` and `..` match every other rule and are not names:
+ * `path.join` normalises them away, so a key of `..` resolves the session directory to the state
+ * root itself and `session --forget` deletes every session's cursors, ledgers and records.
+ */
+export const SESSION_RE = /^(?!\.\.?$)[A-Za-z0-9._-]{1,64}$/;
 /** A bearer is a path: model, then optionally what this session is for. `Fable`, `Fable/watch`, `Opus/design`. */
 export const BEARER_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}(?:\/[A-Za-z0-9][A-Za-z0-9._-]{0,31})*$/;
 export const BEARER_MAX = 64;
 export const DEFAULT_SESSION_FROM = Object.freeze([
   "CLAUDE_CODE_SESSION_ID",
   "GROK_SESSION_ID",
+  "CODEX_THREAD_ID",
   "CODEX_SESSION_ID",
+  "HERMES_SESSION_ID",
 ]);
 const SECRET_NAME = /token|secret|password|apikey|api_key|bearer/i;
 const LEDGER_MAX = 2000;
@@ -66,9 +73,26 @@ export function resolveSession(cfg, env, warn = () => {}) {
   return { slug: "default", source: "default", explicit: false };
 }
 
+/**
+ * Belt to `SESSION_RE`'s braces: whatever produced the slug, the directory it names must be a
+ * strict child of `<state>/sessions`. Nothing here is destructive on its own, but `--forget`
+ * removes this directory recursively, so the one check worth making twice is that it is a session
+ * directory and not the state root.
+ * @param {string} sessionsBase @param {string} dir @param {string} what
+ */
+function assertUnderSessions(sessionsBase, dir, what) {
+  const base = path.resolve(sessionsBase);
+  const resolved = path.resolve(dir);
+  if (resolved === base || path.dirname(resolved) !== base)
+    throw new AgoraError(`${what} does not name a directory directly under ${base}`, EXIT.usage);
+}
+
 /** @param {string} stateRoot @param {Session} session */
 export function sessionDir(stateRoot, session) {
-  return path.join(stateRoot, "sessions", session.slug);
+  const base = path.join(stateRoot, "sessions");
+  const dir = path.join(base, session.slug);
+  assertUnderSessions(base, dir, `session key ${JSON.stringify(session.slug)}`);
+  return dir;
 }
 
 /** Every session that has state under this root, by slug. @param {string} stateRoot */
@@ -103,6 +127,8 @@ export function resolveBearer(cfg, { as, env, record }) {
  * The saved position for this session. Absent in the session directory: seed once, read-only, from the
  * file of the same name at the state root (the single-session layout), and write it forward. A file
  * that exists but holds null (after `cursor --reset`) is a position, not an absence: it never seeds.
+ * A file that exists but cannot be read raises out of `readCursorFile` rather than reporting an
+ * absence, so a damaged position is never seeded over and replayed from the shared file.
  * @param {string} dir the session directory
  * @param {string} legacyDir the state root
  * @param {string} key
@@ -118,27 +144,77 @@ export async function readCursorSeeded(dir, legacyDir, key) {
 }
 
 const ledgerPath = (/** @type {string} */ dir) => path.join(dir, "posted.jsonl");
+/** The rotated half of the ring. The ledger is read as both files, oldest first. */
+const ledgerPrevPath = (/** @type {string} */ dir) => path.join(dir, "posted.1.jsonl");
+const ROTATE_LOCK_STALE_MS = 60_000;
 
-/** Record a message this session posted. Append-only; kept to the last LEDGER_KEEP ids once it passes LEDGER_MAX. @param {string} dir @param {string} id */
+/** @param {string} file */
+async function ledgerLines(file) {
+  try {
+    return (await readFile(file, "utf8")).split(/\r?\n/).filter((l) => l.trim());
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The ring, done by rotating the file whole rather than rewriting its tail.
+ *
+ * A read-modify-write truncation loses every id a sibling process of this session appended between
+ * the read and the write, and an own-post id that is lost is a self-echo delivered to the agent
+ * that wrote it -- the one failure the ledger exists to prevent. Renaming loses nothing: an append
+ * already in flight holds the old file open and its bytes land in the rotated file, which
+ * `readPosted` reads too, and an append that starts after the rename opens the new one. Only
+ * rotator against rotator has to be excluded, or a second rotator would move a nearly-empty file
+ * over the thousand ids the first one just rotated; that is what the exclusive-create lock is for,
+ * and a lock left behind by a killed process is swept after a minute. Losing the lock race is not
+ * an error: the next append rotates.
+ * @param {string} dir
+ */
+async function rotateLedger(dir) {
+  const file = ledgerPath(dir);
+  if ((await ledgerLines(file)).length <= LEDGER_KEEP) return;
+  const lock = `${file}.rotating`;
+  try {
+    // not writeFileAtomic: an exclusive create IS the atom here, and a rename would overwrite the
+    // holder's lock rather than lose the race to it
+    await writeFile(lock, `${process.pid}\n`, { encoding: "utf8", flag: "wx" });
+  } catch (e) {
+    if (/** @type {NodeJS.ErrnoException} */ (e).code !== "EEXIST") throw e;
+    const held = await stat(lock).catch(() => undefined);
+    if (!held || Date.now() - held.mtimeMs < ROTATE_LOCK_STALE_MS) return;
+    await rm(lock, { force: true });
+    return;
+  }
+  try {
+    // another rotator may have won and released between the count above and the lock
+    if ((await ledgerLines(file)).length > LEDGER_KEEP) await rename(file, ledgerPrevPath(dir));
+  } finally {
+    await rm(lock, { force: true });
+  }
+}
+
+/**
+ * Record a message this session posted. The append itself is one O_APPEND write, which the
+ * filesystem orders against every sibling process's; the ring is a rotation, never a rewrite.
+ * The read set is the two files together, so it holds between LEDGER_KEEP and LEDGER_MAX ids.
+ * @param {string} dir @param {string} id
+ */
 export async function appendPosted(dir, id) {
   await mkdir(dir, { recursive: true });
-  const file = ledgerPath(dir);
-  await appendFile(file, JSON.stringify({ id, pid: process.pid, at: new Date().toISOString() }) + "\n", "utf8");
-  const lines = (await readFile(file, "utf8")).split(/\r?\n/).filter((l) => l.trim());
-  if (lines.length > LEDGER_MAX) await writeFile(file, lines.slice(-LEDGER_KEEP).join("\n") + "\n", "utf8");
+  await appendFile(ledgerPath(dir), JSON.stringify({ id, pid: process.pid, at: new Date().toISOString() }) + "\n", "utf8");
+  await rotateLedger(dir);
+}
+
+/** Every ledger line this session wrote, oldest file first. @param {string} dir */
+async function postedLines(dir) {
+  return [...(await ledgerLines(ledgerPrevPath(dir))), ...(await ledgerLines(ledgerPath(dir)))];
 }
 
 /** The ids this session posted. @param {string} dir */
 export async function readPosted(dir) {
   const out = new Set();
-  let raw;
-  try {
-    raw = await readFile(ledgerPath(dir), "utf8");
-  } catch {
-    return out;
-  }
-  for (const line of raw.split(/\r?\n/)) {
-    if (!line.trim()) continue;
+  for (const line of await postedLines(dir)) {
     try {
       const rec = JSON.parse(line);
       if (typeof rec.id === "string") out.add(rec.id);
@@ -152,17 +228,12 @@ export async function readPosted(dir) {
 /** How many distinct processes posted from this session. @param {string} dir */
 export async function postedPids(dir) {
   const pids = new Set();
-  try {
-    for (const line of (await readFile(ledgerPath(dir), "utf8")).split(/\r?\n/)) {
-      if (!line.trim()) continue;
-      try {
-        pids.add(JSON.parse(line).pid);
-      } catch {
-        /* skip */
-      }
+  for (const line of await postedLines(dir)) {
+    try {
+      pids.add(JSON.parse(line).pid);
+    } catch {
+      /* skip */
     }
-  } catch {
-    /* no ledger */
   }
   return pids;
 }
@@ -260,8 +331,7 @@ export async function writeRecord(dir, session, fields) {
     startedAt: prev?.startedAt ?? now,
     lastSeen: now,
   };
-  await mkdir(dir, { recursive: true });
-  await writeFile(recordPath(dir), JSON.stringify(rec, null, 2) + "\n", "utf8");
+  await writeFileAtomic(recordPath(dir), JSON.stringify(rec, null, 2) + "\n");
   return rec;
 }
 
@@ -270,7 +340,7 @@ export async function touchRecord(dir) {
   const rec = await readRecord(dir);
   if (!rec) return undefined;
   rec.lastSeen = new Date().toISOString();
-  await writeFile(recordPath(dir), JSON.stringify(rec, null, 2) + "\n", "utf8");
+  await writeFileAtomic(recordPath(dir), JSON.stringify(rec, null, 2) + "\n");
   return rec;
 }
 
@@ -279,9 +349,21 @@ export async function removeRecord(dir) {
   await rm(recordPath(dir), { force: true });
 }
 
-/** @param {string} dir remove a session directory entirely (cursors, ledger, record) */
-export async function removeSession(dir) {
-  await rm(dir, { recursive: true, force: true });
+/**
+ * Remove a session directory entirely (cursors, ledger, record). The only recursive delete in the
+ * tool, so it re-derives what it is being asked to remove instead of trusting the caller: the path
+ * must be one validated session name directly inside a `sessions` directory. A caller that can
+ * name the state root passes it and the check is exact.
+ * @param {string} dir @param {string} [stateRoot]
+ */
+export async function removeSession(dir, stateRoot) {
+  const resolved = path.resolve(dir);
+  const slug = path.basename(resolved);
+  const parent = path.dirname(resolved);
+  if (path.basename(parent) !== "sessions" || !SESSION_RE.test(slug))
+    throw new AgoraError(`refusing to remove ${resolved}: a session directory is one validated name under <state>/sessions`, EXIT.usage);
+  if (stateRoot !== undefined) assertUnderSessions(path.join(stateRoot, "sessions"), resolved, resolved);
+  await rm(resolved, { recursive: true, force: true });
 }
 
 /**
@@ -295,6 +377,10 @@ export async function removeSession(dir) {
 export function liveness(rec, deps = {}) {
   if (rec.pid === undefined) return "unknown";
   const boot = deps.boot ?? bootEpoch();
+  // A clock step larger than the tolerance (an NTP correction after a resume) moves the derived boot
+  // epoch and reads every live sibling on the seat as gone, which announces them as departed. Widen
+  // this only on a measurement: sample bootEpoch() across resumes and NTP steps on the seats that
+  // run watches and take the largest observed jump, not a guess.
   if (Math.abs(boot - rec.bootEpoch) > 2) return "gone";
   try {
     (deps.kill ?? ((pid, sig) => process.kill(pid, sig)))(rec.pid, 0);
@@ -361,6 +447,8 @@ export async function departures(stateRoot, opts) {
 export async function claimDeparture(dir, roomKey, by) {
   await mkdir(departedDir(dir), { recursive: true });
   try {
+    // not writeFileAtomic, for the same reason as the ledger's rotation lock: the exclusive create
+    // is what makes exactly one watcher the announcer, and a rename would overwrite the winner
     await writeFile(path.join(departedDir(dir), `${roomKey}.json`), JSON.stringify({ roomKey, by, at: new Date().toISOString() }) + "\n", { encoding: "utf8", flag: "wx" });
     return true;
   } catch (e) {
@@ -421,8 +509,7 @@ export function etagCache(dir) {
       map[key] = value;
       const keys = Object.keys(map);
       const kept = keys.length > ETAG_MAX ? Object.fromEntries(keys.slice(-ETAG_KEEP).map((k) => [k, map[k]])) : map;
-      await mkdir(dir, { recursive: true });
-      await writeFile(etagPath(dir), JSON.stringify(kept, null, 2) + "\n", "utf8");
+      await writeFileAtomic(etagPath(dir), JSON.stringify(kept, null, 2) + "\n");
     },
   };
 }
@@ -454,6 +541,7 @@ export function pidAlive(pid, kill) {
  * @property {boolean} [follow]
  * @property {number} pid the watching process
  * @property {number} [harnessPid]
+ * @property {number} [bootEpoch] the boot this pid belongs to; a pid outlives nothing across a reboot
  * @property {string | null} [since] the cursor it started from
  * @property {string} startedAt
  */
@@ -471,10 +559,26 @@ export async function readArmed(dir, key) {
   }
 }
 
-/** @param {string} dir @param {string} key @param {ArmedWatch} rec */
+/**
+ * Stamps the boot this registration belongs to, like a `SessionRecord`, so a leftover from before
+ * a reboot cannot be read as live by a process that happens to reuse the pid.
+ * @param {string} dir @param {string} key @param {ArmedWatch} rec
+ */
 export async function writeArmed(dir, key, rec) {
-  await mkdir(armedDir(dir), { recursive: true });
-  await writeFile(armedPath(dir, key), JSON.stringify(rec, null, 2) + "\n", "utf8");
+  await writeFileAtomic(armedPath(dir, key), JSON.stringify({ ...rec, bootEpoch: rec.bootEpoch ?? bootEpoch() }, null, 2) + "\n");
+}
+
+/**
+ * Is the watch this registration names still running? The pid alone is not enough: pids are reused,
+ * and a registration written before a reboot names a pid that now belongs to something else, so the
+ * seat warns about a watch that is not there and `doctor` counts it into the poll budget. A record
+ * from an older build carries no boot epoch; it falls back to the pid, which is what it always was.
+ * @param {ArmedWatch} armed
+ * @param {{ kill?: (pid: number, sig: 0) => void, boot?: number }} [deps]
+ */
+export function armedAlive(armed, deps = {}) {
+  if (typeof armed.bootEpoch === "number" && Math.abs((deps.boot ?? bootEpoch()) - armed.bootEpoch) > 2) return false;
+  return pidAlive(armed.pid, deps.kill);
 }
 
 /** @param {string} dir @param {string} key */
