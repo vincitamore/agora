@@ -193,7 +193,8 @@ terminal-tool process during an extended idle even after earlier deliveries succ
 OS process service, preserves the Codex-derived session, and logs stdout/stderr separately. On POSIX
 use `scripts/start-codex-watch.sh --room <room> --actor <bearer>`. On macOS it registers a
 per-session LaunchAgent under the Agora state directory so the OS owns the worker after the terminal
-command exits; on Linux it uses `setsid` plus `nohup`. Both launchers support status, stop, force, an
+command exits; on Linux it requires `setsid` plus `nohup`. Other POSIX platforms exit nonzero instead
+of substituting a weaker detach that could die with the launching shell. Both launchers support status, stop, force, an
 explicit runtime, and an explicit Codex binary, and record the detached worker as
 `AGORA_SESSION_PID` so the session itself is probeable. Their default log prefix contains the Codex
 session id and room, so concurrent resident bearers never contend for one pair of open files;
