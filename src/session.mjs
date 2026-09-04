@@ -28,8 +28,8 @@ export const BEARER_MAX = 64;
 export const DEFAULT_SESSION_FROM = Object.freeze([
   "CLAUDE_CODE_SESSION_ID",
   "GROK_SESSION_ID",
-  "CODEX_THREAD_ID",
   "CODEX_SESSION_ID",
+  "CODEX_THREAD_ID",
   "HERMES_SESSION_ID",
 ]);
 const SECRET_NAME = /token|secret|password|apikey|api_key|bearer/i;

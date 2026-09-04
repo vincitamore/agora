@@ -5,3 +5,6 @@ agora.json
 *.token
 *.tsbuildinfo
 .worktrees/
+
+# workspace-local agora state (Codex sandbox seats)
+.agora-state/
