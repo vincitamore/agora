@@ -25,15 +25,19 @@ A2A is an inter-agent application protocol, MCP is a client/tool integration int
 
 ## New findings with reproducible exhibits
 
-Run `node scripts/probe-delivery-boundaries.mjs`. It uses injected Slack responses and a pure carry fold: no credentials, live room, or persisted session state. Each line names its acceptance bar; exit 1 means at least one is unmet. These probes intentionally sit outside the existing test gate until the corresponding fixes land.
+Run `node scripts/probe-delivery-boundaries.mjs`. It uses injected Slack responses and a pure carry fold: no credentials, live room, or persisted session state. Each line names its acceptance bar; exit 1 means at least one is unmet. W9 (`9a3eed0`) shipped fixes for R1 and R2 with regression tests in the Node gate. The standalone probes now assert capped-read refusal, explicit deeper-page recovery, and exact top-level receipts. The original reproduced behavior below is retained as the motivation, not current behavior.
 
 ### R1 — a large Slack backlog can be skipped
+
+**Fixed in W9.** A capped read after a cursor now returns no messages and an explicit gap; the watch leaves its cursor unchanged. `--pages` permits deliberate recovery beyond the default budget. The fixture checks both ten-page refusal and recovery of messages 1–200 with thirteen pages. Broader interruption and concurrent-arrival stress testing remains part of the roadmap.
 
 **Reproduced.** `src/transports/slack.mjs` pages backward at most ten times, sorts the collected window, then returns its oldest `limit` messages. With 2,500 unseen messages in 200-message pages, the first returned batch is messages **501–700**, where **1–200** are required. The probe reports ten requests. Once a watch checkpoints the returned prefix, messages 1–500 are behind its cursor. This is a source-and-fixture demonstration, not a claim of observed production loss.
 
 Required outcome: resumable pagination that yields the oldest unseen prefix, or an explicit incomplete/error result that prevents a cursor jump. Simply increasing the page cap relocates the failure. Acceptance: resume through more than ten pages and receive every expected id; add interruption, retry and concurrent-arrival cases. A finite read budget must expose incompleteness without dropping the unvisited prefix.
 
 ### R2 — answering A can erase an unanswered B from carry
+
+**Fixed at top level in W9.** Top-level receipts must name the message they acknowledge, so `re: A` leaves B owed. Thread-local conversational inference is still a separate design question; this fix does not claim exact receipts throughout every thread.
 
 **Reproduced.** `foldRoom` in `src/carry.mjs` cuts `owed` at this session's newest own post in the same lane. Two addressed top-level requests A and B followed by an own post explicitly carrying `re: A` yield `owed: []`. B has never been acknowledged. This matches the documented lane heuristic, so it is a semantic weakness in that contract, not an implementation deviation from it.
 

@@ -27,11 +27,18 @@ const slack = slackTransport({ transport: "slack", channel: "CTEST" }, {
   },
 });
 const first = await slack.read({ since: stamp(0), limit: 200 });
+const capped = {
+  probe: "slack-capped-backlog-refuses-cursor-jump",
+  pass: first.length === 0 && first.gap?.oldestFetched === stamp(501) && first.gap?.pages === 10,
+  expectedMessages: 0, actualMessages: first.length, gap: first.gap, requests,
+};
+requests = 0;
+const recovered = await slack.read({ since: stamp(0), limit: 200, pages: 13 });
 const pagination = {
   probe: "slack-backlog-oldest-unseen",
-  pass: first.length === 200 && first[0]?.cursor === stamp(1) && first.at(-1)?.cursor === stamp(200),
-  expectedFirst: stamp(1), actualFirst: first[0]?.cursor,
-  expectedLast: stamp(200), actualLast: first.at(-1)?.cursor, requests,
+  pass: !recovered.gap && recovered.length === 200 && recovered.every((m, i) => m.cursor === stamp(i + 1)),
+  expectedFirst: stamp(1), actualFirst: recovered[0]?.cursor,
+  expectedLast: stamp(200), actualLast: recovered.at(-1)?.cursor, requests,
 };
 
 const message = (id, text, name) => ({
@@ -50,5 +57,5 @@ const acknowledgement = {
   expectedOwed: ["2"], actualOwed: folded.owed.map((m) => m.id),
 };
 
-for (const result of [pagination, acknowledgement]) console.log(JSON.stringify(result));
-process.exitCode = [pagination, acknowledgement].every((p) => p.pass) ? 0 : 1;
+for (const result of [capped, pagination, acknowledgement]) console.log(JSON.stringify(result));
+process.exitCode = [capped, pagination, acknowledgement].every((p) => p.pass) ? 0 : 1;
