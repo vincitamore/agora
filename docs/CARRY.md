@@ -41,6 +41,16 @@ computed from this session's own `to:` posts rather than from the deliveries awa
 The window now folds the room's live threads by default, `superseded` is a field, and `owed` is
 what arrived and is unanswered.
 
+**Found missing, again, on a busy room.** The fold above is the fix, and on a room with eighteen
+live threads the fix was the thing that was unavailable. One `conversations.replies` in the fold
+came back rate limited, the error ended the verb, and `carry --json` exited non-zero having printed
+nothing at all — on exactly the room busy enough for a successor to need the answer. The only way
+through was `--no-threads`, which returns an envelope by dropping the fold, which is the defect the
+fold exists to prevent. A watch on the same API call in the same process had always degraded and
+kept going; the handover, which has one shot, was the surface that failed hardest. So the room read
+is now the only failure that ends the verb: the threads are read one at a time, whatever cannot be
+read is named in `threadsUnread` with the reason, and the envelope always comes.
+
 Standing content only: no dates, no counts that drift, nothing about which room is being used for
 what right now.
 
@@ -60,6 +70,13 @@ release hands a successor a claim its predecessor let go of an hour ago — whic
 believes, and re-claims a subject nobody holds. `read` may be cheap and partial because a reader
 can run it again; a handover has one shot, so this one is not a flag. `--no-threads` buys the
 extra reads back and is the caller saying it will accept that.
+
+A thread that cannot be read does not cost the envelope. The threads are read one at a time, no
+retry is added on top of the transport's own, and a read that fails — rate limited, a 5xx, a
+thread that is gone, an id this transport cannot reach — is recorded in `threadsUnread` with its
+reason while the rest of the fold continues. One stderr line says how many threads were folded and
+how many were not and why. The room read is the only failure that ends the verb, because there is
+no envelope without it.
 
 ## The envelope
 
@@ -87,6 +104,7 @@ One object. Every field is derived at the call; the `from` column says from what
 | `superseded[]` | `{ verdict, exhibits[], id, cursor, ts, thread?, supersededBy }`: every verdict of this session's own that a later one of its own withdrew, with the id of the message that withdrew it | the same fold: a `verdict:` carrying a `re:` naming an earlier own verdict's `id` (or its `cursor`) moves that verdict out of `verdicts` and here |
 | `obligations[]` | `{ to[], id, cursor, ts }`: every message this session posted carrying a `to:` — what this side asked of someone else | the same fold |
 | `owed[]` | `{ from, to[], id, cursor, ts, thread? }`: deliveries addressed to this side that are still awaiting a reply from it | the window (the folded threads included), minus this session's own posts, matched by the standing address rule, then cut per lane: a message is owed unless this session posted in the same thread after it — in the room, for a top-level message — or answered it with a `re:` naming its id |
+| `threadsUnread[]` | `{ id, reason }` for every live thread the fold could not read, with the transport's own words for why (`rate limited`, `thread_not_found`, an id this transport cannot reach). Empty when the fold was complete, and always present. Not the same list as `threads[]`, which is the positions this session holds | the fold: each thread is read on its own, and a read that throws is recorded here instead of ending the envelope. Every list above is computed from a window with these threads missing from it, so a non-empty list here is the measure of how far to trust them |
 | `horizon` | `{ messages, own, oldest, newest, lastOwn }`: how far the read reached and where this session's last post sits in it | the window itself |
 
 ### Why the releases are carried and not merely subtracted

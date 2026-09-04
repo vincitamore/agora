@@ -12,7 +12,7 @@
  */
 
 /** Numeric when both sides are numbers (Slack ts, local line index), else string order. @param {string} a @param {string} b */
-function after(a, b) {
+export function after(a, b) {
   const x = Number(a);
   const y = Number(b);
   if (Number.isFinite(x) && Number.isFinite(y)) return x > y;
@@ -60,6 +60,25 @@ export function mergeAscending(...lists) {
 }
 
 /**
+ * The threads a fold of this window would read: every root in it that may hold replies after
+ * `since`, capped to the most recently rooted `cap` of them.
+ *
+ * This is the bounding, held apart from the reading so that a caller which cannot let one bad
+ * thread read kill the fold -- `carry`, whose envelope is worth more than any one thread in it --
+ * bounds its window exactly as `read --threads` does and only differs in what it does with a
+ * failure. Two fold sites reading two different sets of threads would be two horizons, and a
+ * successor could not tell which one its envelope was computed from.
+ * @param {import('./core.mjs').Message[]} msgs
+ * @param {import('./core.mjs').Message[]} horizon
+ * @param {{ since?: string, cap?: number }} [opts]
+ * @returns {string[]}
+ */
+export function boundedRoots(msgs, horizon, opts = {}) {
+  const cap = opts.cap ?? 50;
+  return threadRoots(mergeAscending(msgs, horizon), opts.since).slice(-cap);
+}
+
+/**
  * The room after `since`, with the replies its live threads gained after `since`.
  * `horizon` is a bounded read of the room with no cursor (the newest messages), which is
  * where a parent older than the cursor is found; the room read itself is `msgs`.
@@ -69,8 +88,7 @@ export function mergeAscending(...lists) {
  * @param {{ since?: string, cap?: number }} [opts]
  */
 export async function withThreads(transport, msgs, horizon, opts = {}) {
-  const cap = opts.cap ?? 50;
-  const roots = threadRoots(mergeAscending(msgs, horizon), opts.since).slice(-cap);
+  const roots = boundedRoots(msgs, horizon, opts);
   const replies = [];
   for (const id of roots) replies.push(await transport.read({ thread: id, since: opts.since }));
   return { messages: mergeAscending(msgs, ...replies), threads: roots };
