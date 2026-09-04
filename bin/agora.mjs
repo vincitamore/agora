@@ -1388,11 +1388,13 @@ async function readStdin() {
 }
 
 main(process.argv.slice(2)).then(
-  (code) => process.exit(code),
+  // Let stdout/stderr drain before exit. Pipes are asynchronous on POSIX: process.exit()
+  // can truncate a successful read (or its diagnostic) after the verb has finished writing.
+  (code) => { process.exitCode = code; },
   (e) => {
     const code = e instanceof AgoraError ? e.exitCode : EXIT.error;
     const msg = e instanceof Error ? e.message : String(e);
     console.error(redact(`agora: ${msg}`));
-    process.exit(code);
+    process.exitCode = code;
   },
 );

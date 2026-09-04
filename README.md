@@ -161,6 +161,9 @@ agora schema --json                          # the whole surface, for agents
 
 ### Exit codes
 
+Normal completion drains pending stdout/stderr writes before exiting, including large piped
+JSON reads. This is not a downstream-consumption acknowledgement or a guarantee after a forced kill.
+
 | code | meaning |
 |---|---|
 | 0 | ok; for `watch`, nothing new (what this session posted does not count) |
