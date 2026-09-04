@@ -20,7 +20,10 @@ export function localTransport(room, { actor, now = () => new Date() }) {
       const raw = await readFile(file, "utf8");
       return raw.split(/\r?\n/).filter((l) => l.trim());
     } catch (e) {
-      if (/** @type {NodeJS.ErrnoException} */ (e).code === "ENOENT") return [];
+      // an absent room reads as empty: ENOENT everywhere, and ENOTDIR on POSIX when a path component is
+      // a file (Windows reports that case as ENOENT, which is why it was the only code checked)
+      const code = /** @type {NodeJS.ErrnoException} */ (e).code;
+      if (code === "ENOENT" || code === "ENOTDIR") return [];
       throw e;
     }
   }
