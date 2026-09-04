@@ -212,3 +212,13 @@ test("Codex launcher default logs are isolated by session and room", async () =>
   assert.doesNotMatch(powershell, /\[string\]\$LogPrefix\s*=\s*\(Join-Path[^\r\n]+['"]agora-codex-watch['"]/);
   assert.doesNotMatch(posix, /^log_prefix=\$\{TMPDIR:-\/tmp\}\/agora-codex-watch$/m);
 });
+
+test("both Codex launchers coalesce a dark-seat backlog before queueing it", async () => {
+  const root = path.resolve(import.meta.dirname, "..");
+  const [powershell, posix] = await Promise.all([
+    readFile(path.join(root, "scripts", "start-codex-watch.ps1"), "utf8"),
+    readFile(path.join(root, "scripts", "start-codex-watch.sh"), "utf8"),
+  ]);
+  assert.match(powershell, /watch \$Room[^\r\n]+--wake addressed --coalesce 20 --codex-queue/);
+  assert.match(posix, /watch "\$room"[^\n]+--wake addressed \\\n\s+--coalesce 20 --codex-queue/);
+});

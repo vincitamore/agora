@@ -163,7 +163,7 @@ if ($Worker) {
 
     $stdoutPath = "$LogPrefix.stdout.log"
     $stderrPath = "$LogPrefix.stderr.log"
-    & $RuntimePath $agoraPath watch $Room --stream --follow --json --wake addressed --codex-queue --codex-thread $ThreadId --codex-bin $CodexPath 1>> $stdoutPath 2>> $stderrPath
+    & $RuntimePath $agoraPath watch $Room --stream --follow --json --wake addressed --coalesce 20 --codex-queue --codex-thread $ThreadId --codex-bin $CodexPath 1>> $stdoutPath 2>> $stderrPath
     exit $LASTEXITCODE
 }
 
