@@ -63,7 +63,7 @@ import { buildLabel, buildPredates, cacheTtls, clearWatchMode, installedBuild, t
  * the thread interval, plus one room read per session per interval. Printed beside the number with
  * the terms filled in, so the rate can be checked rather than trusted.
  */
-const POLL_RATE_FORMULA = "sessions×followed×60/threadInterval + sessions×60/interval";
+const POLL_RATE_FORMULA = "Σ_watch(followed×60/threadInterval + 60/interval)";
 
 const require = createRequire(import.meta.url);
 const { version } = require("../package.json");
@@ -350,15 +350,15 @@ function positive(s, what) {
  * still there, at its own room interval, plus one read per followed thread at its thread interval.
  * A registration whose pid is gone is a leftover from a killed process and counts for nothing.
  *
- * `terms` carries the arithmetic behind the number, one term per read this seat is paying for, so
- * the printed rate can be checked against the intervals that produced it instead of trusted.
+ * `watchRates` carries the arithmetic behind the number, one row per live watch, so the printed
+ * rate can be checked against the intervals that produced it and the expensive process identified.
  * @param {import('../src/core.mjs').Config} cfg @param {string} stateRoot
- * @returns {Promise<Map<string, { rate: number, roomReads: number, threadReads: number, followed: number, budget: number, watches: number, terms: string[] }>>}
+ * @returns {Promise<Map<string, { rate: number, roomReads: number, threadReads: number, followed: number, budget: number, watches: number, terms: string[], watchRates: Array<{ session: string, room: string, pid: number | null, followed: number, interval: number, threadInterval: number, roomReads: number, threadReads: number, rate: number }> }>>}
  */
 async function pollRates(cfg, stateRoot) {
-  /** @type {Map<string, { rate: number, roomReads: number, threadReads: number, followed: number, budget: number, watches: number, terms: string[] }>} */
+  /** @type {Map<string, { rate: number, roomReads: number, threadReads: number, followed: number, budget: number, watches: number, terms: string[], watchRates: Array<{ session: string, room: string, pid: number | null, followed: number, interval: number, threadInterval: number, roomReads: number, threadReads: number, rate: number }> }>} */
   const out = new Map();
-  for (const { dir, key, armed } of await listArmed(stateRoot)) {
+  for (const { slug, dir, key, armed } of await listArmed(stateRoot)) {
     // a registration from before a reboot names a pid that now belongs to something else
     if (!armedAlive(armed)) continue;
     const room = cfg.rooms[armed.room];
@@ -374,7 +374,8 @@ async function pollRates(cfg, stateRoot) {
     const threadReads = followed * (60 / threadInterval);
     const rate = roomReads + threadReads;
     const budget = roomPollBudget(room);
-    const prev = out.get(room.transport) ?? { rate: 0, roomReads: 0, threadReads: 0, followed: 0, budget, watches: 0, terms: [] };
+    const prev = out.get(room.transport) ?? { rate: 0, roomReads: 0, threadReads: 0, followed: 0, budget, watches: 0, terms: [], watchRates: [] };
+    const watchRate = { session: slug, room: armed.room, pid: armed.pid ?? null, followed, interval, threadInterval, roomReads, threadReads, rate };
     const terms = [...prev.terms, ...(followed ? [`${followed}×60/${threadInterval}`] : []), `60/${interval}`];
     out.set(room.transport, {
       rate: prev.rate + rate,
@@ -384,6 +385,7 @@ async function pollRates(cfg, stateRoot) {
       budget: Math.max(prev.budget, budget),
       watches: prev.watches + 1,
       terms,
+      watchRates: [...prev.watchRates, watchRate],
     });
   }
   return out;
@@ -834,11 +836,28 @@ async function main(argv) {
       const threadReads = Math.round(r.threadReads * 10) / 10;
       const over = rate > r.budget;
       if (json) {
-        console.log(JSON.stringify({ type: "poll-rate", transport: kind, rate, room_reads: roomReads, thread_reads: threadReads, followed: r.followed, budget: r.budget, watches: r.watches, over, formula: POLL_RATE_FORMULA, terms: r.terms }));
+        console.log(JSON.stringify({
+          type: "poll-rate", transport: kind, rate, room_reads: roomReads, thread_reads: threadReads,
+          followed: r.followed, budget: r.budget, watches: r.watches, over,
+          formula: POLL_RATE_FORMULA, terms: r.terms,
+          watch_rates: r.watchRates.map((w) => ({
+            session: w.session, room: w.room, pid: w.pid, followed: w.followed,
+            interval: w.interval, thread_interval: w.threadInterval,
+            rate: Math.round(w.rate * 10) / 10,
+            room_reads: Math.round(w.roomReads * 10) / 10,
+            thread_reads: Math.round(w.threadReads * 10) / 10,
+          })),
+        }));
         if (over) console.log(JSON.stringify({ type: "warning", code: "poll-budget", message: `this seat reads ${kind} ~${rate} times a minute against a budget of ${r.budget}; raise the intervals or follow fewer threads.` }));
       } else {
         console.log(`
-seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} watch${r.watches === 1 ? "" : "es"}; room-history ${roomReads} + thread-replies ${threadReads} from ${r.followed} follows; ${POLL_RATE_FORMULA} = ${r.terms.join(" + ")})`);
+seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} watch${r.watches === 1 ? "" : "es"}; room-history ${roomReads} + thread-replies ${threadReads} from ${r.followed} follows; ${POLL_RATE_FORMULA})`);
+        for (const w of r.watchRates) {
+          const watchRate = Math.round(w.rate * 10) / 10;
+          const watchRoomReads = Math.round(w.roomReads * 10) / 10;
+          const watchThreadReads = Math.round(w.threadReads * 10) / 10;
+          console.log(`  ${w.session} ${w.room} pid ${w.pid ?? "unknown"}: ~${watchRate} reads/min = room ${watchRoomReads} (60/${w.interval}) + threads ${watchThreadReads} (${w.followed}×60/${w.threadInterval})`);
+        }
         if (over) console.log(`WARNING this seat reads ${kind} ~${rate} times a minute against a budget of ${r.budget}; raise the intervals or follow fewer threads.`);
       }
     }

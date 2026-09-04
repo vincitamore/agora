@@ -492,13 +492,20 @@ test("cli: doctor adds up the reads a minute this seat's live watches are spendi
 
     let r = await agora(["doctor", "--offline"], env);
     assert.equal(r.code, 0, "a rate over its budget is a warning, never an exit code");
-    assert.match(r.stdout, /seat poll rate {2}~6 reads\/min on local \(budget 6, 1 watch; room-history 4 \+ thread-replies 2 from 2 follows; sessions×followed×60\/threadInterval \+ sessions×60\/interval = 2×60\/60 \+ 60\/15\)/, "the counts and the arithmetic beside the number");
+    assert.match(r.stdout, /seat poll rate {2}~6 reads\/min on local \(budget 6, 1 watch; room-history 4 \+ thread-replies 2 from 2 follows; Σ_watch\(followed×60\/threadInterval \+ 60\/interval\)\)/, "the aggregate names the per-watch sum");
+    assert.match(r.stdout, /  a down pid \d+: ~6 reads\/min = room 4 \(60\/15\) \+ threads 2 \(2×60\/60\)/, "the live watch has an inspectable row");
     assert.doesNotMatch(r.stdout, /WARNING this seat reads/);
 
     await writeFile(path.join(armedDir, "down.json"), JSON.stringify({ room: "down", interval: 5, pid: process.pid, startedAt: new Date().toISOString() }));
     r = await agora(["doctor", "--offline", "--json"], env);
     const rate = r.stdout.trim().split(/\r?\n/).map((/** @type {string} */ l) => JSON.parse(l)).find((/** @type {any} */ o) => o.type === "poll-rate");
-    assert.deepEqual(rate, { type: "poll-rate", transport: "local", rate: 12, room_reads: 12, thread_reads: 0, followed: 0, budget: 6, watches: 1, over: true, formula: "sessions×followed×60/threadInterval + sessions×60/interval", terms: ["60/5"] });
+    assert.deepEqual(rate, {
+      type: "poll-rate", transport: "local", rate: 12, room_reads: 12, thread_reads: 0,
+      followed: 0, budget: 6, watches: 1, over: true,
+      formula: "Σ_watch(followed×60/threadInterval + 60/interval)",
+      terms: ["60/5"],
+      watch_rates: [{ session: "a", room: "down", pid: process.pid, followed: 0, interval: 5, thread_interval: 60, rate: 12, room_reads: 12, thread_reads: 0 }],
+    });
 
     // a registration whose process is gone is a leftover, and counts for nothing
     await writeFile(path.join(armedDir, "down.json"), JSON.stringify({ room: "down", interval: 5, pid: 2 ** 30, startedAt: new Date().toISOString() }));
