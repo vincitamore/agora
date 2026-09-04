@@ -41,9 +41,11 @@ import { jitter, readCursor, redact, writeCursor, sleep as defaultSleep } from "
  * chooses the directory (a session's own).
  *
  * `coalesceSeconds` / `maxBatch` hold fresh messages in memory and call `onBatch` once for the
- * window. The cursor is not persisted while anything is held, so a death mid-window re-delivers
- * (at-least-once unchanged). A message for which `urgent` is true flushes immediately, as does
- * reaching `maxBatch`. Remaining held messages flush when the watch is about to return.
+ * window. The cursor is not persisted while a deliverable message is held, so a death mid-window
+ * re-delivers it (at-least-once unchanged). A window containing only this session's own or filtered
+ * messages has nothing awaiting acknowledgement and persists immediately. A message for which
+ * `urgent` is true flushes immediately, as does reaching `maxBatch`. Remaining held messages flush
+ * when the watch is about to return.
  * @param {import('./core.mjs').Transport} transport
  * @param {{
  *   stateDir: string, key: string, thread?: string, cursor?: string,
@@ -103,7 +105,7 @@ export async function watch(transport, opts) {
   let windowFiltered = 0;
   const result = () => ({ fired, cursor, polls, skipped, filtered, delivered, elapsedMs: Math.max(0, now() - start), following: followed.size, threads: perThread, ...(reason ? { reason } : {}) });
 
-  /** Persist cursors seen during the window; only after the held batch is delivered. */
+  /** Persist safe cursors: immediately with no held delivery, otherwise only after delivery. */
   const persistPending = async () => {
     if (pendingRoomCursor !== undefined) {
       cursor = pendingRoomCursor;
@@ -151,7 +153,12 @@ export async function watch(transport, opts) {
   };
 
   const flush = async () => {
-    if (!held.length) return;
+    if (!held.length) {
+      await persistPending();
+      windowSkipped = 0;
+      windowFiltered = 0;
+      return;
+    }
     const msgs = held.map((e) => e.m);
     const n = held.length;
     await onBatch(msgs, batchInfo(held, { delivered: n, skipped: windowSkipped, filtered: windowFiltered }));
@@ -312,7 +319,7 @@ export async function watch(transport, opts) {
           if (urgent?.(e.m)) mustFlush = true;
         }
         if (maxBatch > 0 && held.length >= maxBatch) mustFlush = true;
-        if (mustFlush) await flush();
+        if (mustFlush || !held.length) await flush();
         if (fired && mode !== "stream") return result();
       }
     }

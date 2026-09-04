@@ -688,6 +688,57 @@ test("watch coalesce holds until the window, then one onBatch; cursor stays on d
   }
 });
 
+test("watch coalesce persists an own-only poll for both the room and followed threads", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const room = countingRoom();
+    const state = path.join(dir, "s");
+    room.say("", "my room post", 100);
+    room.say("T1", "my thread reply", 101);
+    let clock = 0;
+    /** @type {Array<string | undefined> | undefined} */
+    let duringRun;
+    const r = await watch(room.transport, {
+      stateDir: state, key: "r", mode: "stream", interval: 5, forSeconds: 8,
+      coalesceSeconds: 20,
+      own: () => new Set(["room-1", "T1-1"]),
+      threads: followed(["T1"], 60),
+      onBatch: () => { throw new Error("an own-only poll must not deliver"); },
+      now: () => clock, random: () => 0.5,
+      sleep: async (ms) => {
+        duringRun = [await readCursor(state, "r"), await readCursor(state, "r#T1")];
+        clock += ms;
+      },
+    });
+    assert.deepEqual(duringRun, ["1", "1"], "safe positions persist before the next poll or shutdown");
+    assert.deepEqual([r.delivered, r.skipped, r.filtered], [0, 2, 0]);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("watch coalesce persists a filtered-only poll for both the room and followed threads", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const room = countingRoom();
+    const state = path.join(dir, "s");
+    room.say("", "addressed elsewhere", 100);
+    room.say("T1", "thread reply addressed elsewhere", 101);
+    const r = await watch(room.transport, {
+      stateDir: state, key: "r", mode: "once",
+      coalesceSeconds: 20,
+      wake: () => false,
+      threads: followed(["T1"], 60),
+      onBatch: () => { throw new Error("a filtered-only poll must not deliver"); },
+    });
+    assert.equal(await readCursor(state, "r"), "1");
+    assert.equal(await readCursor(state, "r#T1"), "1");
+    assert.deepEqual([r.delivered, r.skipped, r.filtered], [0, 0, 2]);
+  } finally {
+    await cleanup();
+  }
+});
+
 test("watch coalesce: a message urgent for this bearer flushes immediately", async () => {
   const { dir, cleanup } = await tmp();
   try {
@@ -742,18 +793,24 @@ test("watch coalesce: maxBatch flushes at n; death before flush does not persist
   }
 });
 
-test("watch coalesce: cursor is not on disk while the window is open", async () => {
+test("watch coalesce: own and filtered suffixes cannot advance past an unacknowledged delivery", async () => {
   const { dir, cleanup } = await tmp();
   try {
     const t = localTransport({ transport: "local", path: path.join(dir, "r.ndjson") }, { actor });
     const state = path.join(dir, "s");
-    await t.post("held");
+    await t.post("held external delivery");
+    const mine = await t.post("my later post");
+    await t.post("later filtered message");
     let clock = 0;
     let sawCursorDuringHold = /** @type {string | undefined} */ (undefined);
+    /** @type {string[]} */
+    const delivered = [];
     await watch(t, {
       stateDir: state, key: "r", mode: "stream", interval: 5, forSeconds: 8,
       coalesceSeconds: 30,
-      onBatch: () => {},
+      own: () => new Set([mine.id]),
+      wake: (m) => !m.text.includes("filtered"),
+      onBatch: (messages) => { delivered.push(...messages.map((m) => m.text)); },
       now: () => clock,
       random: () => 0.5,
       sleep: async (ms) => {
@@ -761,7 +818,9 @@ test("watch coalesce: cursor is not on disk while the window is open", async () 
         clock += ms;
       },
     });
-    assert.equal(sawCursorDuringHold, undefined, "disk cursor waits for the flush so a death re-delivers");
+    assert.equal(sawCursorDuringHold, undefined, "no suffix moves past the held external delivery");
+    assert.deepEqual(delivered, ["held external delivery"]);
+    assert.equal(await readCursor(state, "r"), "3", "delivery acknowledgement releases its safe suffix too");
   } finally {
     await cleanup();
   }

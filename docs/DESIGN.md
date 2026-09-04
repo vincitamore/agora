@@ -158,6 +158,12 @@ external wake adapter may checkpoint an accepted prefix, in order, after its con
 side effect; the unaccepted suffix remains at-least-once. That checkpoint is acceptance by the wake
 transport, never a claim that the agent read or acted on the message.
 
+Coalescing withholds every room and thread position while a deliverable message is held, including
+positions from own or filtered messages that follow it, because persisting any suffix would move
+past an unacknowledged delivery. When a poll contains only own or filtered messages, nothing awaits
+acknowledgement and those positions persist immediately; withholding them would buy no delivery
+safety and would replay the non-deliverable suffix after a re-arm.
+
 **One watch per session.** With `--follow`, the watch polls the room at `interval` and each
 **followed thread** at `threadInterval`, each thread keeping its own cursor under the session. A
 thread joins the follow set when this session posts into it or answers it with `re:`, when a
