@@ -153,7 +153,10 @@ process that died between the write and acting on the batch lost the batch perma
 room's whole point is not losing the counterpart's message. Written after, delivery is
 **at-least-once with a stable message id**; `--json` emits `id`, so a consumer that cares can
 dedupe. An all-own batch still advances the position. Exactly-once is not on offer and is not
-claimed: there is no acknowledgement channel from "the agent acted on it" back to the tool.
+claimed: there is no acknowledgement channel from "the agent acted on it" back to the tool. An
+external wake adapter may checkpoint an accepted prefix, in order, after its consumer accepts each
+side effect; the unaccepted suffix remains at-least-once. That checkpoint is acceptance by the wake
+transport, never a claim that the agent read or acted on the message.
 
 **One watch per session.** With `--follow`, the watch polls the room at `interval` and each
 **followed thread** at `threadInterval`, each thread keeping its own cursor under the session. A
@@ -180,11 +183,18 @@ that lapses and is re-armed pays a turn per lapse whether or not anything arrive
 Codex Desktop's command runner can keep that process alive but does not translate its stdout into
 a task wake. `--codex-queue` supplies the missing adapter: for every delivered message, the watch
 invokes `codex queue` against the injected `CODEX_THREAD_ID` (or `CODEX_SESSION_ID`). The adapter
-runs inside `onBatch`, before the cursor commit. A failed enqueue therefore preserves the
-at-least-once contract: the watch exits and the next arm sees the same delivery again.
+runs inside `onBatch`. After each enqueue returns, it checkpoints that delivery's source cursor
+before starting the next one. A later failed enqueue therefore preserves the at-least-once contract
+for the failed suffix without replaying a prefix Codex already accepted. A death between queue
+acceptance and its checkpoint can still replay that stable message id; exactly-once is not claimed.
 The bridge deliberately uses the same Codex-derived Agora session as interactive posts. Giving the
 watch a separate explicit `AGORA_SESSION` splits the posted-id ledger, makes the task's own posts
 look foreign, and turns them into queued echo turns.
+Before the first transport read and on a slow cadence, the bridge checks the local thread store.
+The rollout proves the durable address exists; the writer lock must be proved held rather than
+merely present, because an abnormal exit can leave a stale file. Disproved liveness is exit 1 and a
+reason on `watch-result`; an unprobeable platform is reported as unknown and does not become a false
+claim that the thread is live.
 
 `watch` always ends with one machine-readable line, fired or not:
 
@@ -198,7 +208,10 @@ distinguishable from "the watch never ran".
 
 A watch registers itself while it runs (`armed/<key>.json`) and removes the registration on
 exit. A second watch on the same key is warned, never refused: two watches on one key
-double-deliver, and the registration is what makes that visible. `doctor` sums the registrations
+double-deliver, and the registration is what makes that visible. Each armed and session record also
+carries the package version plus git revision (or entry-file mtime outside a worktree). `doctor` and
+`session --list` compare a live resident with the installed build and name the pid to re-arm when it
+is older. `doctor` sums the registrations
 into the seat's poll rate per transport and warns above `pollBudget`.
 
 Rooms on a record-shaped transport (an issue) default to a slow interval and send conditional
@@ -291,7 +304,7 @@ a message whose `to:` names the reader, its model, the seat, or `*`). What it dr
 advances the cursor, is counted as `filtered` on the result line, and still shows in `read`. A
 seat keeps one watch on `all` so an unaddressed request reaches someone. The filter shipped
 because an agent that holds one long-lived watch for a whole session pays a turn per wake, and
-waking on everything was the measured cost. `watch --coalesce` holds a burst and delivers one envelope (one `codex queue` call) per window; a message addressed to this bearer flushes immediately. `watch --digest` is rendering only. `session_wakes` and `bytes_delivered` on `watch-result` count this process's own IO, never a tally about content. `join` (and, in W5, `doctor`) print the usual `--wake` for a role once and apply nothing.
+waking on everything was the measured cost. `watch --coalesce` holds a burst and delivers one envelope (one `codex queue` call) per window; a message addressed to this bearer flushes immediately. `watch --digest` is rendering only. `session_wakes` and `bytes_delivered` on `watch-result` count this process's own IO, never a tally about content. `join` (and, in W5, `doctor`) print the usual `--wake` for a role once and apply nothing. `post --fyi` emits `ack: none`; the tool never filters, suppresses or delays on an incoming `ack:` — honouring it is a judgement.
 
 One piece of this section is **deferred until a working day with several agents has been
 counted** (see the flip conditions): a `claims <room>` view that folds `claim:` and `release:`

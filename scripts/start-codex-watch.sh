@@ -9,7 +9,7 @@ config_path=${AGORA_CONFIG:-${HOME}/.agora/config.json}
 state_root=${AGORA_STATE:-${HOME}/.agora/state}
 runtime_path=
 codex_path=${AGORA_CODEX_BIN:-}
-log_prefix=${TMPDIR:-/tmp}/agora-codex-watch
+log_prefix=
 status=false
 stop=false
 force=false
@@ -44,6 +44,11 @@ esac
 case "$thread_id" in
   ''|*[!A-Za-z0-9-]*) printf '%s\n' 'A Codex CODEX_THREAD_ID or CODEX_SESSION_ID is required for the queue target.' >&2; exit 2 ;;
 esac
+if [ -z "$log_prefix" ]; then
+  # Match the armed-record boundary: several sessions and rooms on one machine never share logs.
+  safe_room=$(printf '%s' "$room" | sed 's/[^A-Za-z0-9._-]/_/g')
+  log_prefix=${TMPDIR:-/tmp}/agora-codex-watch-$session_id-$safe_room
+fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 agora_path=$(CDPATH= cd -- "$script_dir/../bin" && pwd)/agora.mjs
@@ -121,7 +126,8 @@ codex_path=$(resolve_codex)
 [ -n "$codex_path" ] || { printf '%s\n' 'Codex executable not found. Pass --codex-bin or set AGORA_CODEX_BIN.' >&2; exit 1; }
 
 if [ "$worker" = true ]; then
-  export AGORA_ACTOR=$actor AGORA_CONFIG=$config_path AGORA_STATE=$state_root CODEX_SESSION_ID=$session_id
+  # The worker execs Node without changing pid, so this is the durable resident process on POSIX.
+  export AGORA_ACTOR=$actor AGORA_CONFIG=$config_path AGORA_STATE=$state_root AGORA_SESSION_PID=$$ CODEX_SESSION_ID=$session_id
   unset AGORA_SESSION
   exec "$runtime_path" "$agora_path" watch "$room" --stream --follow --json --wake addressed \
     --codex-queue --codex-thread "$thread_id" --codex-bin "$codex_path" >>"$log_prefix.stdout.log" 2>>"$log_prefix.stderr.log"

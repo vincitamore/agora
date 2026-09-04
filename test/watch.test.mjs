@@ -234,6 +234,74 @@ test("a crash while delivering does not advance the cursor; the next watch re-de
   }
 });
 
+test("an external delivery checkpoint advances an accepted prefix and re-delivers only the failed suffix", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const t = localTransport({ transport: "local", path: path.join(dir, "r.ndjson") }, { actor });
+    const state = path.join(dir, "s");
+    await t.post("accepted");
+    await t.post("failed");
+    await assert.rejects(() => watch(t, {
+      stateDir: state, key: "r", mode: "once",
+      onBatch: async (messages, batch) => {
+        await batch.checkpoint(messages[0]);
+        throw new Error("second injection failed");
+      },
+    }), /second injection failed/);
+    assert.equal(await readCursor(state, "r"), "1", "the accepted side effect is acknowledged immediately");
+
+    /** @type {string[]} */
+    const replayed = [];
+    const result = await watch(t, {
+      stateDir: state, key: "r", mode: "once",
+      onBatch: (messages) => { replayed.push(...messages.map((m) => m.text)); },
+    });
+    assert.equal(result.fired, true);
+    assert.deepEqual(replayed, ["failed"], "the accepted prefix is not queued a second time");
+    assert.equal(await readCursor(state, "r"), "2");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("delivery checkpoints advance the right room and followed-thread cursor files", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const room = countingRoom();
+    const state = path.join(dir, "s");
+    room.say("", "room one", 100);
+    room.say("T1", "thread one", 200);
+    room.say("", "room two", 300);
+    const threads = {
+      ids: () => ["T1"],
+      key: (/** @type {string} */ id) => `r#${id}`,
+      cursor: (/** @type {string} */ id) => readCursor(state, `r#${id}`),
+      interval: 1,
+    };
+    await assert.rejects(() => watch(room.transport, {
+      stateDir: state, key: "r", mode: "once", threads,
+      onBatch: async (messages, batch) => {
+        for (const delivered of messages) {
+          if (delivered.text === "room two") throw new Error("room two failed");
+          await batch.checkpoint(delivered);
+        }
+      },
+    }), /room two failed/);
+    assert.equal(await readCursor(state, "r"), "1");
+    assert.equal(await readCursor(state, "r#T1"), "1");
+
+    /** @type {string[]} */
+    const replayed = [];
+    await watch(room.transport, {
+      stateDir: state, key: "r", mode: "once", threads,
+      onBatch: (messages) => { replayed.push(...messages.map((m) => m.text)); },
+    });
+    assert.deepEqual(replayed, ["room two"]);
+  } finally {
+    await cleanup();
+  }
+});
+
 test("a streaming watch re-reads the ledger each poll, so a post from the same session mid-stream is not echoed", async () => {
   const { dir, cleanup } = await tmp();
   try {
@@ -526,6 +594,50 @@ test("a followed thread the transport cannot read is dropped and the room watch 
   }
 });
 
+test("a rate-limited follow is kept for the next poll, not dropped", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const room = countingRoom();
+    room.say("", "in the channel", 100);
+    const follow = followSet(["T429"], 1);
+    const transport = /** @type {import('../src/core.mjs').Transport} */ ({
+      ...room.transport,
+      read: async (/** @type {import('../src/core.mjs').ReadOptions} */ o = {}) => {
+        if (o.thread === "T429") throw new Error("slack conversations.replies: rate limited");
+        return room.transport.read(o);
+      },
+    });
+    const r = await watch(transport, {
+      stateDir: path.join(dir, "s"), key: "r", mode: "once",
+      threads: follow.set,
+      onBatch: () => {},
+    });
+    assert.deepEqual(follow.dropped, [], "a 429 is transient");
+    assert.equal("T429" in r.threads, true);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("watch delivers a message carrying ack: none; the tool does not filter on it", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const t = localTransport({ transport: "local", path: path.join(dir, "r.ndjson") }, { actor });
+    await t.post("fyi, no receipt\n\nack: none");
+    /** @type {string[]} */
+    const seen = [];
+    const r = await watch(t, {
+      stateDir: path.join(dir, "s"), key: "r", mode: "once",
+      onBatch: (m) => { seen.push(...m.map((x) => x.text)); },
+    });
+    assert.equal(r.fired, true);
+    assert.equal(seen.length, 1);
+    assert.match(seen[0], /ack: none/);
+  } finally {
+    await cleanup();
+  }
+});
+
 test("a batch hands the caller the counts of THAT poll, beside the running totals", async () => {
   const { dir, cleanup } = await tmp();
   try {
@@ -650,6 +762,26 @@ test("watch coalesce: cursor is not on disk while the window is open", async () 
       },
     });
     assert.equal(sawCursorDuringHold, undefined, "disk cursor waits for the flush so a death re-delivers");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a guard stops before the next transport read and carries a machine-readable reason", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    let reads = 0;
+    const t = localTransport({ transport: "local", path: path.join(dir, "r.ndjson") }, { actor });
+    const guarded = { ...t, read: async (opts = {}) => { reads++; return t.read(opts); } };
+    const result = await watch(guarded, {
+      stateDir: path.join(dir, "s"), key: "r", mode: "stream", interval: 1,
+      guard: () => "the delivery target is no longer live",
+      onBatch: () => {},
+    });
+    assert.equal(reads, 0);
+    assert.equal(result.polls, 0);
+    assert.equal(result.reason, "the delivery target is no longer live");
+    assert.equal(result.fired, false);
   } finally {
     await cleanup();
   }

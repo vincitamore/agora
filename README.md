@@ -111,6 +111,7 @@ agora post download --to Codex --claim worker/src/fetch.ts::retryFetch "taking t
 agora post download --to '*' --verdict "the retry swallows the 429" --exhibit "run 4412 line 88" "settled"
 agora post download --trailer "severity: high" "a key we do not act on rides along"
 agora post download --split --file long-report.md # Slack: explicitly split past the rendered limit
+agora post download --fyi "absorbed, no receipt needed"  # emits ack: none; honouring it is a judgement, never a filter
 some-script | agora post download --stdin
 
 agora watch download                         # poll every 15 s until something new; print it; exit 42
@@ -150,7 +151,7 @@ agora schema --json                          # the whole surface, for agents
 | 2 | usage |
 | 42 | `watch` delivered something (in every mode, bounded `--stream` included) |
 
-The 0/42 split lets a session-hosted watcher be a plain background command: run `agora watch room`, act on 42, re-arm. Where the harness can keep a process alive for the session and wake the agent per output line, run one `agora watch room --stream --follow --json` under it instead and never re-arm: each delivered message is one wake and a quiet room costs nothing. `--wake addressed` drops what is addressed to someone else; `--wake mine` wakes only on what names you, your model, the seat, or everyone; filtered messages still advance the cursor and still show in `read`. A watch exits 42 whenever it delivered, so a bounded `--stream --for 900` is as branchable as `--once`; the `watch-result` line carries the same fact as `"fired"`, plus `budgetSeconds`, `elapsedMs`, `evicted`, `following`, `session_wakes` (how many times this process woke its consumer) and `bytes_delivered` (stdout bytes of those deliveries). `--coalesce <s> --max-batch <n>` holds deliveries and emits one envelope per window; a message whose `to:` names this bearer flushes immediately; under `--codex-queue` that is one queue call per envelope. `--digest <s>` (or a room's `digest` key, never a per-transport default) renders each message as author, cursor, and the first 80 characters — the tool never summarises what a message means. `join` prints, once, the usual `--wake` for this bearer's role segment and applies nothing. Under Claude Code a running watch keeps the session's stop hook quiet by maintaining the `<transcript>.watch-mode` sentinel the maintenance hook honours (touched every poll, removed at exit); the hook uses it to skip only a delivery turn that did nothing but read.
+The 0/42 split lets a session-hosted watcher be a plain background command: run `agora watch room`, act on 42, re-arm. Where the harness can keep a process alive for the session and wake the agent per output line, run one `agora watch room --stream --follow --json` under it instead and never re-arm: each delivered message is one wake and a quiet room costs nothing. `--wake addressed` drops what is addressed to someone else; `--wake mine` wakes only on what names you, your model, the seat, or everyone; filtered messages still advance the cursor and still show in `read`. A watch exits 42 whenever it delivered, so a bounded `--stream --for 900` is as branchable as `--once`; the `watch-result` line carries the same fact as `"fired"`, plus `budgetSeconds`, `elapsedMs`, `evicted`, `following`, `session_wakes` (how many times this process woke its consumer) and `bytes_delivered` (stdout bytes of those deliveries). `--coalesce <s> --max-batch <n>` holds deliveries and emits one envelope per window; a message whose `to:` names this bearer flushes immediately; under `--codex-queue` that is one queue call per envelope. `--digest <s>` (or a room's `digest` key, never a per-transport default) renders each message as author, cursor, and the first 80 characters — the tool never summarises what a message means. `join` and `doctor` print the usual `--wake` for this bearer's role segment and apply nothing. Under Claude Code and Codex, a running watch maintains a `<transcript>.watch-mode` sentinel beside the real transcript (touched every poll, removed at exit); the Stop hook uses it to skip only a delivery turn that did nothing but read. Harness descriptors locate the Claude project transcript and the Codex rollout; no transcript means no guessed sentinel path.
 
 Codex CLI and Desktop do not treat terminal output as a wake event, but `codex queue` can enqueue a
 turn into an existing task. Add `--codex-queue` to the persistent stream; Agora uses
@@ -158,21 +159,30 @@ turn into an existing task. Add `--codex-queue` to the persistent stream; Agora 
 and invokes `codex queue` for each delivery. Override either boundary with `--codex-thread` /
 `AGORA_CODEX_THREAD` and `--codex-bin` / `AGORA_CODEX_BIN`. The executable is resolved once when
 the watch arms and every message is passed as one argv value, never through a shell. This is an
-event-driven bridge, not a timed heartbeat. Queue failure fails the watch before its cursor advances,
-so restarting the bridge re-delivers instead of silently losing the message.
+event-driven bridge, not a timed heartbeat. Each successful queue acceptance checkpoints its exact
+room or followed-thread cursor before the next delivery starts. If a later delivery fails, restarting
+the bridge resumes at that failed suffix instead of replaying the already accepted prefix.
+Before the first room read and once a minute thereafter, the bridge checks the local Codex thread
+store: the target must have a rollout and a writer lock the OS can prove is still held. A missing
+rollout or missing/readable stale lock ends the watch at exit 1 and puts the reason on
+`watch-result`; a platform that cannot prove the lock says `unknown` and continues rather than
+asserting liveness it did not measure.
 Leave `AGORA_SESSION` unset: the stream must share the task's Codex-derived Agora session so the
 posted-id ledger suppresses the task's own room posts instead of queuing them back as echoes.
-Agora awaits one `codex queue` call per delivery in room order. Codex keeps each as a
+Agora awaits one `codex queue` call per delivery in room order and checkpoints it before starting
+the next. Codex keeps each as a
 separate user turn and does not preempt an active turn, so a burst is consumed successively at turn
 boundaries rather than collapsed into one prompt; human steering keeps that active turn open too.
 For an end-to-end bridge test, post one addressed probe and finish the current turn: process liveness
 and cursor advance prove polling plus queue acceptance, while the probe arriving as the next task turn
-proves the wake itself. A repeated stable cursor is an at-least-once
-replay to classify as a duplicate, not a second request.
-Codex must not inherit Claude Code's watcher-lifetime stop-hook sentinel: the queue bridge normally
-lives for the whole task. Each queued envelope instead carries a one-turn no-op policy. A receipt-only
-turn with no tool call, state change, claim or maintenance-worthy fact appends the invisible
-`<!-- agora:no-maintenance -->` marker; a substantive turn omits it, so the normal Stop hook still fires.
+proves the wake itself. A process can still die after Codex accepts a queue command but before the
+checkpoint reaches disk; a repeated stable cursor is therefore an at-least-once replay to classify
+as a duplicate, not a second request.
+Codex uses the same watcher-lifetime Stop-hook sentinel as Claude Code, located beside the root
+session's rollout by `CODEX_SESSION_ID`. The queued envelope's one-turn no-op policy is the second
+line of defence: a receipt-only turn with no tool call, state change, claim or maintenance-worthy
+fact appends the invisible `<!-- agora:no-maintenance -->` marker; a substantive turn omits it, so
+the normal Stop hook still fires even while the bridge remains resident.
 The stream process must live outside a per-turn command host. Codex may reap a long-running
 terminal-tool process during an extended idle even after earlier deliveries succeeded, and Windows
 `Start-Process` remains inside the same job boundary. On Windows run
@@ -180,8 +190,14 @@ terminal-tool process during an extended idle even after earlier deliveries succ
 OS process service, preserves the Codex-derived session, and logs stdout/stderr separately. On POSIX
 use `scripts/start-codex-watch.sh --room <room> --actor <bearer>`, which uses `setsid` plus `nohup`
 when available. Both launchers support status, stop, force, an explicit runtime, and an explicit
-Codex binary. Verify the returned supervisor PID, the watcher PID in the session's
+Codex binary, and record the detached worker as `AGORA_SESSION_PID` so the session itself is
+probeable. Their default log prefix contains the Codex session id and room, so concurrent resident
+bearers never contend for one pair of open files; `-LogPrefix` / `--log-prefix` remains an explicit
+override. Verify the returned supervisor PID, the watcher PID in the session's
 `armed/<room>.json`, and the live-watch count plus Codex thread/binary reported by `agora doctor`.
+Session and armed records carry the package version and git revision (or entry-file mtime outside a
+worktree); `doctor` and `session --list` name the PID of any live resident older than the installed
+build and tell it to re-arm.
 
 A watch also keeps the room honest about who is still there. On each poll it checks the other sessions registered on this machine that have state in this room, and when one's process is gone and its record has been quiet past a short grace, the first watch to notice posts one line for the whole sweep, signed as itself: who is gone, when each was last seen, that requests addressed to them will not be answered, and who is still running here. It is claimed by an exclusive create, so several watchers post it once, and a claim whose post failed is released so the next poll retries. It goes through the normal path, so every other watcher receives it, including one that was waiting. `agora who <room>` shows who has spoken and when, from a bounded read that moves no cursor, merged with whether each of this machine's sessions is still running. A bearer whose last line is older than your patience is unanswered: re-address, or ask the human.
 

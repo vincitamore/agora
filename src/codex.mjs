@@ -1,11 +1,98 @@
 // @ts-check
-import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { execFile, spawnSync } from "node:child_process";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { AgoraError, EXIT } from "./core.mjs";
 
 const execFileAsync = promisify(execFile);
+const CODEX_THREAD_RE = /^[A-Za-z0-9-]{8,128}$/;
+
+/** @param {string} root @param {(file: string) => boolean} accepts */
+function findFile(root, accepts) {
+  const stack = [root];
+  while (stack.length) {
+    const dir = /** @type {string} */ (stack.pop());
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const file = path.join(dir, entry.name);
+      if (entry.isDirectory()) stack.push(file);
+      else if (entry.isFile() && accepts(file)) return file;
+    }
+  }
+  return undefined;
+}
+
+/** @param {NodeJS.ProcessEnv | Record<string, string | undefined>} env */
+export function codexHome(env = process.env) {
+  return path.resolve(env.CODEX_HOME?.trim() || path.join(os.homedir(), ".codex"));
+}
+
+/** Find the durable rollout for one task/thread id.
+ * @param {string} thread @param {NodeJS.ProcessEnv | Record<string, string | undefined>} [env]
+ */
+export function codexRollout(thread, env = process.env) {
+  if (!CODEX_THREAD_RE.test(thread)) return undefined;
+  return findFile(path.join(codexHome(env), "sessions"), (file) => {
+    const name = path.basename(file);
+    return name.startsWith("rollout-") && name.endsWith(`-${thread}.jsonl`);
+  });
+}
+
+/**
+ * Ask the OS whether Codex still holds its writer lock. The file is empty and names no pid, so
+ * existence alone fails open after a crash. Windows exposes the held byte-range lock as EBUSY on
+ * read; Linux's `flock -n` probes the advisory lock without disturbing it. An unavailable probe is
+ * honestly unknown, never asserted live.
+ * @param {string} lock @param {{ platform?: NodeJS.Platform, read?: typeof readFileSync, run?: typeof spawnSync }} [deps]
+ * @returns {'active' | 'stale' | 'unknown'}
+ */
+export function probeCodexWriterLock(lock, deps = {}) {
+  const platform = deps.platform ?? process.platform;
+  if (platform === "win32") {
+    try {
+      (deps.read ?? readFileSync)(lock);
+      return "stale";
+    } catch (error) {
+      const code = /** @type {NodeJS.ErrnoException} */ (error).code;
+      // A held Win32 byte-range lock is EBUSY. Permission errors say only that this
+      // process cannot inspect the file; they are not evidence that Codex holds it.
+      return code === "EBUSY" ? "active" : "unknown";
+    }
+  }
+  if (platform === "linux") {
+    const result = (deps.run ?? spawnSync)("flock", ["-n", lock, "true"], { stdio: "ignore" });
+    if (result.status === 0) return "stale";
+    if (result.status === 1) return "active";
+  }
+  return "unknown";
+}
+
+/**
+ * Is a local Codex task addressable now? Codex's thread store holds one per-thread writer lock for
+ * the life of the writer, removes it on guard drop, and sweeps stale files on the next acquire.
+ * Requiring the rollout as well keeps an orphan lock from being mistaken for a task.
+ * @param {string} thread
+ * @param {NodeJS.ProcessEnv | Record<string, string | undefined>} [env]
+ * @param {{ exists?: (file: string) => boolean, rollout?: (thread: string, env: NodeJS.ProcessEnv | Record<string, string | undefined>) => string | undefined, probe?: (lock: string) => 'active' | 'stale' | 'unknown' }} [deps]
+ */
+export function codexLiveness(thread, env = process.env, deps = {}) {
+  if (!CODEX_THREAD_RE.test(thread)) return { state: "gone", reason: `Codex thread id ${JSON.stringify(thread)} is not a valid local thread id` };
+  const rollout = (deps.rollout ?? codexRollout)(thread, env);
+  if (!rollout) return { state: "gone", reason: `Codex thread ${thread} has no rollout under ${path.join(codexHome(env), "sessions")}` };
+  const lock = path.join(codexHome(env), "thread-writer-locks", `${thread}.lock`);
+  if (!(deps.exists ?? existsSync)(lock)) return { state: "gone", reason: `Codex thread ${thread} has no writer lock at ${lock}` };
+  const held = (deps.probe ?? probeCodexWriterLock)(lock);
+  if (held === "stale") return { state: "gone", reason: `Codex thread ${thread} left a stale writer lock at ${lock}` };
+  if (held === "unknown") return { state: "unknown", reason: `Codex thread ${thread} has a writer marker at ${lock}, but this platform cannot prove that it is still held`, rollout, lock };
+  return { state: "live", rollout, lock };
+}
 
 /**
  * The Codex task that owns this process. Newer CLI and Desktop builds expose both names; prefer
@@ -137,7 +224,7 @@ export function codexPrompt(room, message) {
  *   run?: typeof execFileAsync,
  *   bin?: string,
  *   thread?: string,
- *   onQueued?: (delivery: { thread: string, cursor: string, bin: string }) => void,
+ *   onQueued?: (delivery: { thread: string, cursor: string, bin: string, message: import('./core.mjs').Message }) => void | Promise<void>,
  * }} [opts]
  */
 export async function queueCodex(room, messages, opts = {}) {
@@ -153,7 +240,7 @@ export async function queueCodex(room, messages, opts = {}) {
         windowsHide: true,
         env: /** @type {NodeJS.ProcessEnv} */ (env),
       });
-      opts.onQueued?.({ thread, cursor: message.cursor, bin });
+      await opts.onQueued?.({ thread, cursor: message.cursor, bin, message });
     } catch (error) {
       const why = error instanceof Error ? error.message : String(error);
       throw new AgoraError(`could not queue delivery into Codex task ${thread}: ${why}`, EXIT.error);

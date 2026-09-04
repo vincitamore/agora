@@ -377,6 +377,26 @@ test("cli: every watch ends with one watch-result line, on stderr in human outpu
   }
 });
 
+test("cli: a Codex queue watch exits 1 with watch-result.reason when its thread is not live", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const { cfgPath, root } = await room(dir);
+    const codexHome = path.join(dir, "codex-home");
+    const thread = "dead-thread-00000001";
+    const env = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "w", CODEX_HOME: codexHome };
+    const r = await agora(["watch", "down", "--once", "--json", "--codex-queue", "--codex-thread", thread, "--codex-bin", process.execPath], env);
+    assert.equal(r.code, 1);
+    const result = typed(r.stdout).find((/** @type {any} */ o) => o.type === "watch-result");
+    assert.ok(result);
+    assert.equal(result.exit, 1);
+    assert.equal(result.polls, 0, "liveness is checked before a transport read");
+    assert.match(result.reason, /has no rollout/);
+    assert.match(r.stderr, /has no rollout/);
+  } finally {
+    await cleanup();
+  }
+});
+
 test("cli: a watch registers the cursor it holds while it runs, and a second watch on that key says so", async () => {
   const { dir, cleanup } = await tmp();
   try {
@@ -942,14 +962,19 @@ test("cli: doctor and session --list say which rooms each session is in and what
     assert.match(r.stderr, /WARNING a live session on this seat already carries the bearer Fable\/watch \(session a, pid \d+\)/);
     assert.match(r.stderr, /Give each a role segment \(Fable\/watch\/watch, Fable\/watch\/review\)/);
 
+    const oldBuild = { version: "0.0.0", source: "mtime", at: "2000-01-01T00:00:00.000Z" };
     await mkdir(path.join(root, "sessions", "a", "armed"), { recursive: true });
-    await writeFile(path.join(root, "sessions", "a", "armed", "down.json"), JSON.stringify({ room: "down", mode: "stream", interval: 15, pid: process.pid, bootEpoch: bootEpoch(), startedAt: new Date().toISOString() }));
+    await writeFile(path.join(root, "sessions", "a", "armed", "down.json"), JSON.stringify({ room: "down", mode: "stream", interval: 15, pid: process.pid, bootEpoch: bootEpoch(), build: oldBuild, startedAt: new Date().toISOString() }));
 
     r = await agora(["session", "--list"], A);
     assert.match(r.stdout, /rooms down {2}watching down \(stream, pid \d+\)/, "which rooms, and which watch: names only");
     assert.match(r.stdout, /no saved position/, "and the session that is in no room says so");
+    assert.match(r.stdout, /WARNING live watch pid \d+.*older than installed.*re-arm it/, "session --list names the stale resident and remedy");
     r = await agora(["doctor", "--offline"], A);
     assert.match(r.stdout, /rooms down {2}watching down \(stream, pid \d+\)/);
+    assert.match(r.stdout, /build {3}0\.1\.0\+/);
+    assert.match(r.stdout, /WARNING live watch pid \d+.*older than installed.*re-arm it/);
+    assert.match(r.stdout, /usual --wake for role watch is all \(not applied\)/);
     assert.match(r.stdout, /WARNING live sessions a, b all carry the bearer Fable\/watch/);
     assert.match(r.stdout, /for another shell:  AGORA_SESSION=a AGORA_ACTOR=Fable\/watch agora <verb>/);
 
@@ -962,10 +987,13 @@ test("cli: doctor and session --list say which rooms each session is in and what
     const rows = lines.filter((/** @type {any} */ o) => o.type === "session");
     assert.deepEqual(rows.map((/** @type {any} */ o) => o.slug), ["a", "b"]);
     assert.deepEqual(rows[0].rooms, ["down"]);
-    assert.deepEqual(rows[0].armed, [{ key: "down", room: "down", mode: "stream", pid: process.pid }]);
+    assert.deepEqual(rows[0].armed, [{ key: "down", room: "down", mode: "stream", pid: process.pid, build: oldBuild }]);
     assert.equal(rows[0].here, true);
     assert.equal(lines.find((/** @type {any} */ o) => o.type === "room")?.alias, "down");
     assert.equal(lines.find((/** @type {any} */ o) => o.type === "warning")?.code, "duplicate-bearer");
+    assert.equal(lines.find((/** @type {any} */ o) => o.type === "warning" && o.code === "stale-watch-build")?.message.includes(String(process.pid)), true);
+    assert.equal(lines.find((/** @type {any} */ o) => o.type === "build")?.build.version, "0.1.0");
+    assert.deepEqual(lines.find((/** @type {any} */ o) => o.type === "suggestion"), { type: "suggestion", code: "usual-wake", role: "watch", wake: "all", applied: false });
   } finally {
     await cleanup();
   }
@@ -1093,6 +1121,27 @@ test("cli: the cap does not take the thread under this session's own post while 
     r = await agora(["watch", "down", "--once", "--follow", "--json"], A);
     assert.equal(r.code, 42);
     assert.equal(JSON.parse(messages(r.stdout).at(-1) ?? "{}").text.split("\n")[0], "answering the request");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("cli: --fyi emits ack: none; a watch still delivers that message", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const { cfgPath, root } = await room(dir);
+    const env = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "w", AGORA_ACTOR: "Fable/watch" };
+    const them = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "them", AGORA_ACTOR: "Codex" };
+    let r = await agora(["post", "down", "--fyi", "heads up"], them);
+    assert.equal(r.code, 0);
+    r = await agora(["read", "down", "--json"], env);
+    const posted = JSON.parse(r.stdout.trim().split(/\r?\n/)[0]);
+    assert.ok(posted.trailers.some((/** @type {{ key: string, value: string }} */ t) => t.key === "ack" && t.value === "none"));
+    r = await agora(["watch", "down", "--once", "--json"], env);
+    assert.equal(r.code, 42, "the tool never filters on incoming ack:");
+    const msg = typed(r.stdout).find((/** @type {any} */ o) => o.type === "message");
+    assert.ok(msg);
+    assert.match(msg.text, /ack: none/);
   } finally {
     await cleanup();
   }

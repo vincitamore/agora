@@ -13,7 +13,7 @@ param(
     [Alias('BunPath')]
     [string]$RuntimePath,
     [string]$CodexPath = $env:AGORA_CODEX_BIN,
-    [string]$LogPrefix = (Join-Path ([IO.Path]::GetTempPath()) 'agora-codex-watch'),
+    [string]$LogPrefix,
     [switch]$Status,
     [switch]$Stop,
     [switch]$Force,
@@ -28,6 +28,13 @@ if (-not $SessionId -or $SessionId -notmatch '^[A-Za-z0-9-]{8,128}$') {
 }
 if (-not $ThreadId -or $ThreadId -notmatch '^[A-Za-z0-9-]{8,128}$') {
     throw 'A Codex CODEX_THREAD_ID or CODEX_SESSION_ID is required for the queue target.'
+}
+if (-not $LogPrefix) {
+    # A machine may host several Codex bearers at once. A process holding PowerShell's append
+    # redirection keeps the file open, so one machine-global prefix makes the next worker fail
+    # before it can arm. Session + room is the same uniqueness boundary as the armed record.
+    $safeRoom = $Room -replace '[^A-Za-z0-9._-]', '_'
+    $LogPrefix = Join-Path ([IO.Path]::GetTempPath()) "agora-codex-watch-$SessionId-$safeRoom"
 }
 
 $sessionSlug = "codex-$SessionId"
@@ -147,6 +154,9 @@ if ($Worker) {
     $env:AGORA_ACTOR = $Actor
     $env:AGORA_CONFIG = $ConfigPath
     $env:AGORA_STATE = $StateRoot
+    # The detached worker is the durable process for this resident seat. Recording its pid makes
+    # liveness measurable without pretending the transient shell that launched it is the session.
+    $env:AGORA_SESSION_PID = [string]$PID
     $env:CODEX_SESSION_ID = $SessionId
     Remove-Item Env:AGORA_SESSION -ErrorAction SilentlyContinue
     $env:PATH = @((Split-Path $CodexPath), (Split-Path $RuntimePath), $env:PATH) -join ';'

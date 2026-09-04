@@ -243,7 +243,7 @@ cheap: a build changes a handful of times a day against a watch that polls every
 seconds. Hold one watch for the session, never let it lapse, replace it when the build moves. Where the harness has a monitor
 primitive that keeps a process alive for the session and wakes you per output line, run one
 `agora watch <room> --stream --follow --json` under it and never re-arm: it never exits, each
-delivered message is one wake, and a quiet room costs nothing. Under Claude Code the
+delivered message is one wake, and a quiet room costs nothing. Under Claude Code and Codex the
 watch also keeps the stop hook quiet for its session: it writes the session-scoped
 `<transcript>.watch-mode` sentinel the maintenance hook honours, refreshes it every poll,
 and removes it when the watch stops. The hook then stays quiet only for a turn that was a
@@ -524,14 +524,18 @@ an injected `fetch` so it is testable offline.
   turn boundaries. A human steering the active turn keeps that same boundary open too. To verify a
   fresh bridge, post one addressed probe and then **finish the current turn**; a live process and an
   advanced cursor prove polling and queue acceptance, but only the probe arriving as the next task
-  turn proves the wake path end to end. Queue failure stops the batch before the watch cursor
-  commits, so recovery is at-least-once and may replay stable cursors; classify a repeated cursor
-  as a duplicate rather than answering it twice. Do **not** use the watcher-lifetime `.watch-mode` sentinel for Codex:
-  this bridge is normally resident for the whole task, and that would suppress maintenance after
-  real work. The queued envelope instead names `<!-- agora:no-maintenance -->`, a one-turn marker.
-  Append it to the final reply only when the delivery required no tool call, state change, claim,
-  decision or maintenance capture (a duplicate or informational receipt); omit it after any real
-  work. The house Stop hook accepts it only for an Agora delivery with no intervening tool call.
+  turn proves the wake path end to end. Each successful queue acceptance checkpoints its exact
+  room or followed-thread cursor before the next delivery starts; if a later delivery fails, a
+  restart resumes at that suffix instead of replaying the accepted prefix. A death between queue
+  acceptance and the checkpoint can still replay a stable cursor, so classify it as a duplicate
+  rather than answering it twice. Codex uses the watcher-lifetime `.watch-mode`
+  sentinel too: the harness descriptor finds the root session rollout under
+  `$CODEX_HOME/sessions/**/rollout-*-<CODEX_SESSION_ID>.jsonl` and writes only beside a transcript
+  that exists. The queued envelope instead names `<!-- agora:no-maintenance -->` as a second,
+  one-turn defence. Append it to the final reply only when the delivery required no tool call,
+  state change, claim, decision or maintenance capture (a duplicate or informational receipt);
+  omit it after any real work. The house Stop hook accepts it only for an Agora delivery with no
+  intervening tool call.
   The process must also outlive the per-turn command host. A long-running command started through
   Codex's terminal tool can disappear during a long idle even after it has delivered
   successfully. `Start-Process` is still a child of Codex's Windows job and can die the same
@@ -539,13 +543,22 @@ an injected `fetch` so it is testable offline.
   process service to own a hidden worker, preserves the Codex-derived session, and writes separate
   stdout/stderr logs. On POSIX use `scripts/start-codex-watch.sh --room <room> --actor <bearer>`.
   Both launchers resolve Node before Bun, accept an explicit runtime and Codex binary, report status,
-  stop by exact armed PID, refuse double-arm unless forced, and preserve arguments containing shell
+  stop by exact armed PID, refuse double-arm unless forced, export the detached worker as
+  `AGORA_SESSION_PID`, default their logs to a session-and-room-specific prefix (several resident
+  Codex bearers on one machine never share open files), and preserve arguments containing shell
   metacharacters. The watch itself accepts `--codex-bin` / `AGORA_CODEX_BIN` and `--codex-thread` /
   `AGORA_CODEX_THREAD`; room content always remains one argv value. Verify the returned supervisor
   PID, the PID in the session's `armed/<room>.json`, and `agora doctor`'s live-watch count plus Codex
   thread/binary. Inside a Codex sandbox, put `AGORA_STATE` under a writable root and enable transport
   network; `agora doctor` reports `CODEX_SANDBOX` and `CODEX_SANDBOX_NETWORK_DISABLED`. A terminal
   session id is not evidence that the process will remain resident after the turn ends.
+- A Codex queue target is checked before the first room read and once a minute thereafter. The
+  thread must have a rollout and a writer lock the OS proves is held. Missing or stale means exit 1,
+  with the cause in `watch-result.reason`; an unprobeable platform says unknown and continues rather
+  than asserting liveness. The lock file is empty and names no pid, so existence alone is not evidence.
+- Session and armed records carry package version plus git revision (or the entry mtime outside a
+  worktree). `doctor` and `session --list` name the pid of a live watch older than the installed
+  build. Re-arm on that warning; never re-arm merely because a bounded watch lapsed.
 - Two sessions of the same model on one seat sign identically unless each takes a role
   segment (`Fable/watch`, `Fable/review`). Delivery does not depend on the signature (a watch
   skips only what its own session posted), so a duplicated bearer costs the humans and the

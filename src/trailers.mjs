@@ -13,11 +13,14 @@ import { parseSignature } from "./core.mjs";
  *
  * Unknown keys are parsed, carried and rendered, and never acted on. That is the whole versioning
  * story: growth is additive, and narrowing a key's meaning is the only breaking change.
+ *
+ * `ack: none` (emitted by `post --fyi`) licenses the reader's silence. The tool never filters,
+ * suppresses or delays on an incoming `ack:` — honouring it is a judgement, not a code path.
  * @typedef {{ key: string, value: string }} Trailer
  */
 
 /** The keys this tool knows. Order is the order the emitter writes them in. */
-export const KNOWN_KEYS = Object.freeze(["to", "re", "claim", "release", "verdict", "exhibit", "because"]);
+export const KNOWN_KEYS = Object.freeze(["to", "re", "claim", "release", "verdict", "exhibit", "because", "ack"]);
 
 /** One cap for parse and emit: a value past this, empty, or containing a newline, is not a trailer. */
 export const TRAILER_VALUE_MAX = 400;
