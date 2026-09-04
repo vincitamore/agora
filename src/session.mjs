@@ -1,5 +1,5 @@
 // @ts-check
-import { appendFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, copyFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -387,6 +387,112 @@ export async function removeSession(dir, stateRoot) {
     throw new AgoraError(`refusing to remove ${resolved}: a session directory is one validated name under <state>/sessions`, EXIT.usage);
   if (stateRoot !== undefined) assertUnderSessions(path.join(stateRoot, "sessions"), resolved, resolved);
   await rm(resolved, { recursive: true, force: true });
+}
+
+/** The room a cursor key or a follow file belongs to: the key up to its thread separator. @param {string} key */
+function roomOfKey(key) {
+  const at = key.indexOf("#");
+  return at < 0 ? key : key.slice(0, at);
+}
+
+/** The `.cursor` keys and `follow/` keys one session directory holds. @param {string} dir */
+async function positionKeys(dir) {
+  /** @type {string[]} */
+  let cursors = [];
+  try {
+    cursors = (await readdir(dir)).filter((f) => f.endsWith(".cursor")).map((f) => f.slice(0, -".cursor".length));
+  } catch {
+    cursors = [];
+  }
+  /** @type {string[]} */
+  let follow = [];
+  try {
+    follow = (await readdir(path.join(dir, "follow"))).filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -".json".length));
+  } catch {
+    follow = [];
+  }
+  return { cursors: cursors.sort(), follow: follow.sort() };
+}
+
+/**
+ * Take over another session's place in the rooms: its saved positions, the threads it was
+ * following (aliases included) and the ids it posted.
+ *
+ * The measured failure this exists for: a successor session gets a new slug, so it has no position
+ * of its own, seeds from the shared file at the state root that nothing has written since the
+ * per-session layout landed, and starts with an EMPTY ledger -- so it replays the room from
+ * wherever that stale file sits and then delivers its predecessor's own posts back to itself as
+ * foreign messages. Copying the three files is the whole fix.
+ *
+ * The ledger is APPENDED, never replaced: this session's own ids are its own protection against
+ * a self-echo, and a copy that overwrote them would manufacture exactly the defect the inherit is
+ * being run to avoid. Ids from both sessions are then in one ring, which is correct -- the
+ * successor holds the seat, so both sets of posts are its own.
+ *
+ * The source is READ ONLY. Nothing is moved, truncated, marked or removed there: two sessions may
+ * legitimately inherit from one predecessor, and a source that a failed inherit had already
+ * emptied could not be inherited from again. `session.json` is not copied either -- the record
+ * says who a session IS, and a successor that adopted its predecessor's registration would put a
+ * bearer in `session --list` that no process answers for. The successor registers itself with
+ * `session --as`.
+ * @param {string} stateRoot
+ * @param {string} fromSlug
+ * @param {Session} session this session
+ * @param {{ force?: boolean, dryRun?: boolean }} [opts]
+ */
+export async function inheritSession(stateRoot, fromSlug, session, opts = {}) {
+  if (!SESSION_RE.test(fromSlug))
+    throw new AgoraError(`--inherit takes a session key (${SESSION_RE}); ${JSON.stringify(fromSlug)} is not one. \`agora session --list\` names them.`, EXIT.usage);
+  if (fromSlug === session.slug)
+    throw new AgoraError(`--inherit ${fromSlug} is this session; a session inherits from a different one`, EXIT.usage);
+  const base = path.join(stateRoot, "sessions");
+  const src = path.join(base, fromSlug);
+  // the same assertion `--forget` runs before a recursive delete: a key that resolves anywhere but
+  // directly under sessions/ is refused where it enters, never sanitised where it is used
+  assertUnderSessions(base, src, `--inherit ${JSON.stringify(fromSlug)}`);
+  if (!existsSync(src))
+    throw new AgoraError(`no session ${fromSlug} has state under ${base}; \`agora session --list\` names the ones that do`, EXIT.usage);
+  const dst = sessionDir(stateRoot, session);
+
+  const from = await positionKeys(src);
+  const held = await positionKeys(dst);
+  const heldRooms = new Set([...held.cursors, ...held.follow].map(roomOfKey));
+  const conflicts = [...new Set([...from.cursors, ...from.follow].map(roomOfKey))].filter((r) => heldRooms.has(r)).sort();
+  if (conflicts.length && !opts.force)
+    throw new AgoraError(
+      `this session already holds a position in ${conflicts.join(", ")}; inheriting would move it to ${fromSlug}'s. Pass --force to take ${fromSlug}'s position in those rooms, or inherit before this session reads them.`,
+      EXIT.usage,
+    );
+
+  /** @type {string[]} */
+  const ledgerFiles = [];
+  /** @type {string[]} */
+  const carried = [];
+  for (const name of ["posted.1.jsonl", "posted.jsonl"]) {
+    const lines = await ledgerLines(path.join(src, name));
+    if (!lines.length) continue;
+    ledgerFiles.push(name);
+    carried.push(...lines);
+  }
+
+  const plan = {
+    from: fromSlug,
+    to: session.slug,
+    cursors: from.cursors,
+    follow: from.follow,
+    ledger: { files: ledgerFiles, lines: carried.length },
+    conflicts,
+    forced: Boolean(conflicts.length && opts.force),
+    dryRun: Boolean(opts.dryRun),
+  };
+  if (opts.dryRun) return plan;
+
+  await mkdir(dst, { recursive: true });
+  for (const key of from.cursors) await copyFile(path.join(src, `${key}.cursor`), path.join(dst, `${key}.cursor`));
+  if (from.follow.length) await mkdir(path.join(dst, "follow"), { recursive: true });
+  for (const key of from.follow) await copyFile(path.join(src, "follow", `${key}.json`), path.join(dst, "follow", `${key}.json`));
+  if (carried.length) await appendFile(ledgerPath(dst), carried.join("\n") + "\n", "utf8");
+  return plan;
 }
 
 /**

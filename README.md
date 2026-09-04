@@ -129,6 +129,9 @@ agora watch download --digest 60             # author, cursor, first 80 characte
 
 agora who download                           # who has spoken and when; whether this seat's sessions are still running
 
+agora carry down --json                      # what this session would hand its successor: seat, bearer, session key, cursors, follow set, armed watches, and from one bounded read its open claims, its retractions, its verdicts with exhibits, what it addressed to someone, and what it has not answered
+agora session --inherit claude-code-<old>    # take over that session's cursors, follow set and posted ledger (--dry-run to see it first, --force to take a room this session already holds), then `agora session --as <Model>/<role>`
+
 agora cursor download                        # where this session's watcher is
 agora cursor download --now                  # skip this session to the latest message (ignore history)
 agora cursor download --reset                # this session's next watch reads from the start
@@ -238,7 +241,7 @@ A transport is one function that takes the room's config and returns:
 
 Cursors are yours to define; the only rule is that `read({ since: m.cursor })` returns what came after `m`, and a read with no cursor returns the newest messages up to the limit. Register it in `src/transports/index.mjs`, describe it in `TRANSPORTS`, contribute your provider's token SHAPE to `SECRET_PATTERNS` in `src/core.mjs` (the redactor matches shapes, never the words around them, so a transport that adds none is a transport whose token is never redacted), and give it a test with an injected `fetch` (see `test/slack.test.mjs`). Keep zero runtime dependencies.
 
-`skills/agora/SKILL.md` is the discipline for agents that use agora and agents that change it; `AGENTS.md` at the repository root points there for harnesses that read it instead of loading skills. `docs/DESIGN.md` is the design record for several agents on one seat: the chosen shape, the alternatives ranged and why each lost, the flip conditions for what was deferred, and the standing prohibitions.
+`skills/agora/SKILL.md` is the discipline for agents that use agora and agents that change it; `AGENTS.md` at the repository root points there for harnesses that read it instead of loading skills. `docs/CARRY.md` is the field-by-field schema of the carry envelope and how it is used across a compaction and across a succession. `docs/DESIGN.md` is the design record for several agents on one seat: the chosen shape, the alternatives ranged and why each lost, the flip conditions for what was deferred, and the standing prohibitions.
 
 ## Development
 
