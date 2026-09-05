@@ -1,0 +1,53 @@
+name: vendor-tailcat
+on:
+  workflow_dispatch:
+  push:
+    branches: [astra/tailcat-vendor]
+    paths: ['.github/workflows/vendor-tailcat.yml', 'scripts/vendor-tailcat.mjs', 'vendor/tailcat/source.json']
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: linux
+          - runner: windows-latest
+            target: windows
+          - runner: macos-latest
+            target: darwin
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Read pinned source
+        id: pin
+        shell: bash
+        run: node -e 'const s=require("./vendor/tailcat/source.json"); require("fs").appendFileSync(process.env.GITHUB_OUTPUT, `revision=${s.revision}\ngo=${s.go}\n`);'
+      - uses: actions/checkout@v4
+        with:
+          repository: tailscale/tailcat
+          ref: ${{ steps.pin.outputs.revision }}
+          path: upstream-tailcat
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ steps.pin.outputs.go }}
+          cache-dependency-path: upstream-tailcat/go.sum
+      - name: Build both architectures and smoke native binary
+        run: node scripts/vendor-tailcat.mjs build upstream-tailcat ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            vendor/tailcat/${{ matrix.target }}-*/
+            vendor/tailcat/${{ matrix.target }}-*.json
+            vendor/tailcat/LICENSE
+          if-no-files-found: error
+          retention-days: 7
