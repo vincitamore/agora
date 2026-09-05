@@ -11,7 +11,7 @@ import path from "node:path";
 import { AgoraError, EXIT } from "./core.mjs";
 import { NativeRoomService } from "./native-service.mjs";
 import { pidAlive } from "./session.mjs";
-import { serviceDescriptorPath, serviceDescriptorStatus } from "./wake/subscriber.mjs";
+import { connectSeatService, serviceDescriptorPath, serviceDescriptorStatus } from "./wake/subscriber.mjs";
 
 const STOP_MS = 5000;
 
@@ -101,4 +101,30 @@ export async function stopService(stateRoot) {
   }
   if (after.present) await rm(serviceDescriptorPath(stateRoot), { force: true });
   return serviceDescriptorStatus(stateRoot);
+}
+
+const ROOM_ID_RE = /^[a-f0-9]{32}$/;
+
+/**
+ * Mint a native room on the running service. Never writes the shared config.
+ * @param {string} stateRoot
+ * @param {string} [roomId]
+ */
+export async function createServiceRoom(stateRoot, roomId) {
+  if (roomId !== undefined && !ROOM_ID_RE.test(roomId)) {
+    throw new AgoraError("native room id must be 32 lowercase hexadecimal characters", EXIT.usage);
+  }
+  const { client } = await connectSeatService(stateRoot);
+  try {
+    const result = await client.request("create-room", roomId ? { roomId } : {});
+    const minted = typeof result.roomId === "string" ? result.roomId : "";
+    if (!ROOM_ID_RE.test(minted)) throw new AgoraError("native service did not return a minted room id", EXIT.error);
+    return minted;
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    if (/already exists|already open/i.test(message)) throw new AgoraError(message, EXIT.error);
+    throw e;
+  } finally {
+    client.close();
+  }
 }

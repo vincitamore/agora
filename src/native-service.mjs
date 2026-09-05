@@ -483,6 +483,20 @@ export class NativeRoomService {
 
   /** @param {net.Socket} socket @param {Record<string, unknown>} frame */
   async #dispatch(socket, frame) {
+    if (frame.type === "create-room") {
+      const requested = frame.roomId === undefined || frame.roomId === null || frame.roomId === ""
+        ? undefined
+        : requiredString(frame.roomId, "room id");
+      const status = await this.createRoom(requested ? { roomId: requested } : {});
+      sendFrame(socket, {
+        protocol: NATIVE_PROTOCOL,
+        type: "create-room-result",
+        requestId: frame.requestId,
+        roomId: status.roomId,
+        epoch: status.epoch,
+      });
+      return;
+    }
     const roomId = requiredString(frame.roomId, "room id");
     const store = await this.openRoom(roomId);
     if (frame.type === "status") {

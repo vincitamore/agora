@@ -3,7 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -31,7 +31,7 @@ test("schema lists service start|stop|status", async () => {
   assert.equal(code, 0);
   const schema = JSON.parse(stdout);
   assert.ok(schema.verbs.service);
-  assert.deepEqual(schema.verbs.service.args, ["start|stop|status"]);
+  assert.deepEqual(schema.verbs.service.args, ["start|stop|status|room create"]);
 });
 
 test("service start, status, stop, and a second start after stop", async (t) => {
@@ -61,4 +61,26 @@ test("service start, status, stop, and a second start after stop", async (t) => 
   const after = await agora(["service", "status", "--json"], env);
   const gone = JSON.parse(after.stdout.trim().split(/\r?\n/).at(-1) ?? "{}");
   assert.equal(gone.present, false);
+});
+
+test("service room create mints a 32-hex id, EEXIST is exit 1, and agora.json is untouched", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "agora-service-room-"));
+  t.after(async () => {
+    await agora(["service", "stop"], { AGORA_STATE: root, AGORA_CONFIG: path.join(root, "agora.json") });
+    await rm(root, { recursive: true, force: true });
+  });
+  const cfg = path.join(root, "agora.json");
+  const cfgBody = JSON.stringify({ actor: { name: "seat", kind: "agent" }, rooms: { scratch: { transport: "local", path: path.join(root, "room.ndjson") } } });
+  await writeFile(cfg, cfgBody);
+  const env = { AGORA_STATE: root, AGORA_CONFIG: cfg, AGORA_SESSION: "svc" };
+  const started = await agora(["service", "start", "--json"], env);
+  assert.equal(started.code, 0, started.stderr);
+  const created = await agora(["service", "room", "create"], env);
+  assert.equal(created.code, 0, created.stderr);
+  const id = created.stdout.trim().split(/\r?\n/).at(-1) ?? "";
+  assert.match(id, /^[a-f0-9]{32}$/);
+  const again = await agora(["service", "room", "create", "--room-id", id], env);
+  assert.equal(again.code, 1);
+  assert.match(again.stderr, /already exists|already open/i);
+  assert.equal(await readFile(cfg, "utf8"), cfgBody);
 });
