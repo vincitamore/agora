@@ -1601,6 +1601,116 @@ async function slackBacklog(count) {
   return { api: `http://127.0.0.1:${addr.port}`, stamp, close: () => new Promise((r) => server.close(() => r(undefined))) };
 }
 
+/**
+ * A Slack API on loopback that records every call it receives, so a test can assert which reads
+ * the CLI spent and, for a refused id, that it spent none.
+ * @param {{ replies?: (ts: string | null) => any[] }} [opts]
+ */
+async function slackRecorder(opts = {}) {
+  const good = "1700000000.000100";
+  /** @type {Array<{ method: string, ts: string | null }>} */
+  const hits = [];
+  const server = createServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://x");
+    req.on("data", () => {});
+    req.on("end", () => {
+      hits.push({ method: url.pathname.slice(1), ts: url.searchParams.get("ts") });
+      /** @param {any} body */
+      const send = (body) => res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(body));
+      switch (url.pathname) {
+        case "/auth.test": return send({ ok: true, user_id: "U9", user: "agora-bot" });
+        case "/users.info": return send({ ok: true, user: { real_name: "fixture" } });
+        case "/conversations.history": return send({ ok: true, has_more: false, messages: [] });
+        case "/conversations.replies":
+          return send({
+            ok: true, has_more: false,
+            messages: opts.replies?.(url.searchParams.get("ts")) ?? [
+              { ts: good, user: "U2", text: "parent", thread_ts: good, reply_count: 1 },
+              { ts: "1700000000.000200", user: "U2", text: "the reply in the good thread", thread_ts: good },
+            ],
+          });
+        case "/chat.postMessage": return send({ ok: true, ts: "1788589282.700000", channel: "C1" });
+        default: return res.writeHead(404).end("{}");
+      }
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", () => r(undefined)));
+  const addr = /** @type {import('node:net').AddressInfo} */ (server.address());
+  return { api: `http://127.0.0.1:${addr.port}`, good, hits, close: () => new Promise((r) => server.close(() => r(undefined))) };
+}
+
+test("cli: post --re and --thread refuse a malformed Slack ts with exit 2 and the reason, before any call; a well-formed one posts", async () => {
+  const { dir, cleanup } = await tmp();
+  const back = await slackRecorder();
+  try {
+    const cfgPath = path.join(dir, "agora.json");
+    await writeFile(cfgPath, JSON.stringify({
+      actor: { name: "Grace", kind: "agent" },
+      rooms: { down: { transport: "slack", channel: "C1", api: back.api, tokenEnv: "AGORA_TEST_TOKEN" } },
+    }));
+    const env = { AGORA_CONFIG: cfgPath, AGORA_STATE: path.join(dir, "state"), AGORA_SESSION: "w", AGORA_TEST_TOKEN: "xoxb-test" };
+
+    // what `agora post down --re 1788589282.659969 ...` becomes in an unquoted PowerShell line
+    let r = await agora(["post", "down", "--re", "1788589282.65997", "answering it"], env);
+    assert.equal(r.code, 2, `a malformed --re is a usage error (stderr: ${r.stderr})`);
+    assert.match(r.stderr, /--re 1788589282\.65997: a Slack thread id is the parent message's ts: 10 digits, a dot, 6 digits/);
+    assert.match(r.stderr, /5 digits after the dot, not 6 \(an unquoted ts loses its trailing digits under PowerShell; quote it\)/);
+    assert.equal(r.stdout.trim(), "");
+    assert.equal(back.hits.length, 0, "refused at the boundary: the API was not called at all");
+
+    r = await agora(["post", "down", "--thread", "1788589282.65997", "answering it"], env);
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /--thread 1788589282\.65997: .*5 digits after the dot, not 6/);
+    assert.equal(back.hits.length, 0);
+
+    r = await agora(["post", "down", "--re", "not-a-ts", "answering it"], env);
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /--re not-a-ts: .*"not-a-ts" is not a ts at all/);
+    assert.equal(back.hits.length, 0);
+
+    r = await agora(["post", "down", "--re", "1788589282.659969", "--json", "answering it"], env);
+    assert.equal(r.code, 0, `a well-formed --re proceeds (stderr: ${r.stderr})`);
+    const posted = JSON.parse(r.stdout.trim());
+    assert.equal(posted.id, "1788589282.700000");
+    assert.ok(back.hits.some((h) => h.method === "chat.postMessage"), `the post reached the API (${JSON.stringify(back.hits)})`);
+  } finally {
+    await back.close();
+    await cleanup();
+  }
+});
+
+test("cli: watch --follow on a slack room reports a malformed followed id and never reads it; the well-formed follow is read", async () => {
+  const { dir, cleanup } = await tmp();
+  const back = await slackRecorder();
+  const bad = "1788589282.65997";
+  try {
+    const cfgPath = path.join(dir, "agora.json");
+    await writeFile(cfgPath, JSON.stringify({
+      actor: { name: "Grace", kind: "agent" },
+      rooms: { down: { transport: "slack", channel: "C1", api: back.api, tokenEnv: "AGORA_TEST_TOKEN" } },
+    }));
+    const root = path.join(dir, "state");
+    const env = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "w", AGORA_TEST_TOKEN: "xoxb-test" };
+    // a sibling shell's unquoted `post --thread` wrote the mangled id into this session's follow set
+    await mkdir(path.join(root, "sessions", "w", "follow"), { recursive: true });
+    const now = new Date().toISOString();
+    await writeFile(path.join(root, "sessions", "w", "follow", "down.json"), JSON.stringify({ threads: { [bad]: now, [back.good]: now } }));
+
+    const r = await agora(["watch", "down", "--once", "--follow", "--json"], env);
+    assert.equal(r.code, 42, `the watch runs and fires on the good thread's reply (stderr: ${r.stderr})`);
+    assert.match(r.stderr, new RegExp(`agora: dropped follow ${bad.replace(".", "\\.")}: a Slack thread id is the parent message's ts.*5 digits after the dot, not 6`));
+    const asked = back.hits.filter((h) => h.method === "conversations.replies").map((h) => h.ts);
+    assert.deepEqual(asked, [back.good], "Slack was asked for the good thread only");
+    const delivered = messages(r.stdout).map((l) => JSON.parse(l).text);
+    assert.ok(delivered.includes("the reply in the good thread"), `the good thread delivered (${JSON.stringify(delivered)})`);
+    const set = JSON.parse(await readFile(path.join(root, "sessions", "w", "follow", "down.json"), "utf8"));
+    assert.deepEqual(Object.keys(set.threads), [back.good], "the malformed id left the follow set");
+  } finally {
+    await back.close();
+    await cleanup();
+  }
+});
+
 test("cli: read --pages walks deeper, and a walk that cannot reach the cursor prints nothing and names the gap", async () => {
   const { dir, cleanup } = await tmp();
   const back = await slackBacklog(2500);

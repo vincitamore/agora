@@ -318,12 +318,33 @@ test("slack post refuses past SLACK_TEXT_MAX with exit 2", async () => {
   assert.equal(calls.filter((c) => String(c.url).includes("chat.postMessage")).length, 1);
 });
 
-test("validateThread is the Slack ts predicate; read does not refuse a malformed id", async () => {
-  assert.equal(validateThread("1788459640.119699"), true);
-  assert.equal(validateThread("1788459640.1197"), false);
-  assert.equal(validateThread(1788459640.1197), false);
-  const { t } = make();
+test("the constructed slack transport carries validateThread: nothing for a ts, a reason naming the malformation otherwise", async () => {
+  const { t, calls } = make();
+  assert.equal(typeof t.validateThread, "function", "the hook is on the transport object, not only exported");
+  assert.equal(t.validateThread?.("1788459640.119699"), undefined);
+  assert.equal(t.validateThread?.("1700000000.000001"), undefined);
+  // the case this exists for: pwsh parsed an unquoted ts as a number and dropped the last digit
+  const truncated = String(t.validateThread?.("1788589282.65997"));
+  assert.match(truncated, /5 digits after the dot, not 6/);
+  assert.match(truncated, /unquoted ts loses its trailing digits under PowerShell; quote it/);
+  assert.match(String(t.validateThread?.("1788589282.6")), /1 digit after the dot, not 6/);
+  assert.match(String(t.validateThread?.("1788589282.6599690")), /7 digits after the dot, not 6/);
+  assert.doesNotMatch(String(t.validateThread?.("1788589282.6599690")), /PowerShell/, "too many digits is not the shell's doing");
+  assert.match(String(t.validateThread?.("178858928.659969")), /9 digits before the dot, not 10/);
+  assert.match(String(t.validateThread?.("")), /got an empty string/);
+  assert.match(String(t.validateThread?.("   ")), /got an empty string/);
+  assert.match(String(t.validateThread?.("p1")), /"p1" is not a ts at all/);
+  assert.match(String(t.validateThread?.("1788589282")), /is not a ts at all/);
+  assert.match(String(t.validateThread?.("1788589282.65997x")), /is not a ts at all/);
+  for (const why of [t.validateThread?.("1788589282.65997"), t.validateThread?.("p1")])
+    assert.match(String(why), /^a Slack thread id is the parent message's ts: 10 digits, a dot, 6 digits/, "every reason says what the shape is");
+  // the export is the same function, so a non-string reaches it only from code, never argv
+  assert.equal(validateThread, t.validateThread);
+  assert.match(String(validateThread(1788459640.1197)), /got a number/);
+  assert.match(String(validateThread(undefined)), /got nothing/);
+  // validation is the caller's; read() spends the call whatever the id is
   await t.read({ thread: "1788459640.1197" });
+  assert.equal(calls.filter((c) => String(c.url).includes("conversations.replies")).length, 1);
 });
 
 test("chunkAtLines prefers line boundaries and hard-splits a long line", () => {
