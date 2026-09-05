@@ -58,6 +58,7 @@ import {
 import { FOLLOW_CAP, FOLLOW_IDLE_MINUTES, aliasThreads, dropFollow, followableMessages, followThreads, readFollow, rootsOf, threadsOf } from "../src/follow.mjs";
 import { withThreads } from "../src/threads.mjs";
 import { carryState, carryWindow, foldRoom, renderCarry } from "../src/carry.mjs";
+import { decorate, human } from "../src/render.mjs";
 import { formatTrailers, matchesAddress, parseTrailers, TRAILER_VALUE_MAX, trailerValueOk } from "../src/trailers.mjs";
 import { SLACK_TEXT_MAX, chunkAtLines, encodeSlackText } from "../src/transports/slack.mjs";
 import { codexLiveness, codexSpawnWarning, codexThread, queueCodex, resolveCodexBinary } from "../src/codex.mjs";
@@ -249,49 +250,6 @@ function recordLine(rec, state) {
   const age = ageHours(rec);
   const seen = age < 1 ? `${Math.round(age * 60)}m ago` : age < 48 ? `${Math.round(age)}h ago` : `${Math.round(age / 24)}d ago`;
   return `${rec.bearer.padEnd(18)} ${rec.slug.padEnd(30)} ${state.padEnd(6)} pid ${String(rec.pid ?? "-").padEnd(7)} seen ${seen}${rec.label ? `  "${rec.label}"` : ""}`;
-}
-
-/** @param {string} s */
-const indent = (s) => s.split(/\r?\n/).map((l) => `    ${l}`).join("\n");
-
-/**
- * A message with its trailer block read off it. The text is never rewritten: the block stays in
- * the body it was posted in, and this only says what is in there.
- * @param {import('../src/core.mjs').Message} m
- */
-function decorate(m) {
-  const { trailers, to } = parseTrailers(m.text);
-  return {
-    ...m,
-    ...(decodeTransfer(m.text)?.kind === "offer" ? { offer: decodeTransfer(m.text).offer } : {}),
-    ...(to.length ? { to } : {}),
-    ...(trailers.length ? { trailers } : {}),
-  };
-}
-
-/** The one derived line above a body: what the trailers say, in the emitter's order. @param {ReturnType<typeof decorate>} m */
-function trailerLine(m) {
-  if (!m.trailers?.length) return "";
-  /** @type {string[]} */
-  const parts = [];
-  if (m.to?.length) parts.push(`to ${m.to.join(", ")}`);
-  for (const t of formatTrailers(m.trailers).split("\n")) {
-    const at = t.indexOf(": ");
-    const key = t.slice(0, at);
-    if (key === "to") continue;
-    parts.push(`${key} ${t.slice(at + 2)}`);
-  }
-  return parts.length ? `  → ${parts.join(" · ")}\n` : "";
-}
-
-/** @param {ReturnType<typeof decorate>} m */
-function human(m) {
-  const who = m.signedAs && m.signedAs !== m.author.name ? `${m.author.name} as ${m.signedAs}` : m.author.name;
-  const where = m.thread ? `  thread ${m.thread}` : "";
-  const attachments = m.attachments?.length
-    ? `\n  attachments\n${m.attachments.map((a) => `    ${a.kind} ${a.name}${a.mimetype ? ` (${a.mimetype}` : ""}${a.size !== undefined ? `${a.mimetype ? ", " : " ("}${a.size} bytes` : ""}${a.mimetype || a.size !== undefined ? ")" : ""}${a.path ? `\n      local ${a.path}` : ""}${a.url ? `\n      source ${a.url}` : ""}${a.error ? `\n      ${a.error}` : ""}`).join("\n")}`
-    : "";
-  return `[${m.ts}] ${who} (${m.author.kind})${where}  cursor ${m.cursor}\n${trailerLine(m)}${indent(m.text)}${attachments}`;
 }
 
 /**
