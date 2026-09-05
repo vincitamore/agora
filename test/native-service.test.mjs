@@ -204,6 +204,23 @@ test("filesystem aliases resolve to one physical seat endpoint", async (t) => {
   assert.equal(await nativeServiceEndpoint(root, ACCOUNT), await nativeServiceEndpoint(alias, ACCOUNT));
 });
 
+test("POSIX service endpoint stays below Darwin's socket-path bound for a long state root", {
+  skip: process.platform === "win32" ? "POSIX Unix-socket paths only" : false,
+}, async (t) => {
+  const parent = await mkdtemp(path.join(tmpdir(), "agora-native-long-root-"));
+  const root = path.join(parent, "x".repeat(140));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const service = new NativeRoomService({ root, accountId: ACCOUNT, seatLabel: "long-root" });
+  const endpoint = await service.start();
+  t.after(() => service.stop());
+  assert.equal(typeof endpoint.path, "string");
+  const endpointPath = /** @type {string} */ (endpoint.path);
+  assert.ok(Buffer.byteLength(endpointPath, "utf8") <= 103, `endpoint is ${Buffer.byteLength(endpointPath, "utf8")} bytes`);
+  assert.equal((await stat(endpointPath)).isSocket(), true);
+  const client = await NativeServiceClient.connect(/** @type {any} */ (endpoint));
+  client.close();
+});
+
 test("POSIX endpoint setup tightens a permissive pre-existing state directory", {
   skip: process.platform === "win32" ? "POSIX directory modes only" : false,
 }, async (t) => {

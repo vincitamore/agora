@@ -23,13 +23,14 @@ separate Tailcat server process, key, allowlist, loopback listener and handler c
 proxy discards client identity before forwarding to loopback; sharing a listener would collapse the
 authorization boundary even if the keys above it remained distinct.
 
-Local sessions reach the service over one path endpoint: a Unix socket below the 0700 native state
-directory or a seat-derived Windows named pipe. The endpoint bind is the live exclusion primitive;
+Local sessions reach the service over one path endpoint: a Unix socket in a short 0700 runtime
+directory keyed by the canonical state root, or a seat-derived Windows named pipe. The short POSIX
+path stays below Darwin's 104-byte `sun_path` limit even when the state root is long. The endpoint bind is the live exclusion primitive;
 the descriptor is advisory, never a lock. Abrupt death needs no manual lock recovery. A stale POSIX
 socket entry is moved to a unique quarantine name only after connection refusal and while a
 short-lived exclusive SQLite transaction serializes crash recovery, then the service binds the
 original name; it never unlinks a path a racing successor may already have rebound. The authority
-database lives below the same canonical 0700 state directory, so unlike a TCP arbiter it is not in
+database lives beside the socket in that state-root-derived 0700 runtime directory, so unlike a TCP arbiter it is not in
 an OS-allocated port range and another local principal cannot bind it. The runtime releases its
 file lock on abrupt process death. Node uses built-in `node:sqlite` (Node 22.13+); Bun uses
 `bun:sqlite`, with no package, daemon or system helper.
