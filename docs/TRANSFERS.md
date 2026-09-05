@@ -98,6 +98,22 @@ Cached receive bytes remain local after the offer expires.
 
 ## Maintainer gates
 
+The internal `spawnTailcat(args, options, owner)` API distinguishes timed offers from
+service-owned resources. Existing callers retain their deadline and 24-hour maximum.
+An explicit `lifetime: {kind: 'expiring', expiresAt}` uses a canonical ISO timestamp;
+it cannot be combined with `deadline`.
+
+A `lifetime: {kind: 'service', owner: {serviceId, serviceBootId}}` has no expiry timer.
+It requires a separate local `owner` with the same IDs and a live `AbortSignal` from
+the seat service's resource registry. Validation establishes matching context, not
+authentication or registry liveness. The signal is never serialized. Aborting it or
+losing the requesting process closes the guardian's owned runtime. Startup cancellation
+rejects only after guardian exit and discarded-output drain; a returned handle keeps
+its caller-owned output stream. Windows callers join process exit and readable stream
+completion separately, because IPC disconnect can suppress Node's child `close` event.
+Registry admission, native routes and publication fencing remain service integration
+work; this API does not grant remote callers permission to create indefinite processes.
+
 `npm test` verifies all six capsule and executable hashes, native execution, files,
 identity races, route isolation and requesting-parent death without network services.
 `node scripts/probe-tailcat-live.mjs` deliberately uses real Tailcat relay connectivity
