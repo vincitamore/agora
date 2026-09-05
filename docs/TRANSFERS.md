@@ -24,8 +24,10 @@ agora fetch engineering <offer-id>
 ```
 
 `fetch --json` returns locally committed attachments with `path` and `digest`.
-PNG, JPEG, GIF and WebP headers produce image presentation metadata; a filename alone
-does not. Files remain inert, and the consuming decoder still validates image content.
+PNG, JPEG, GIF and WebP headers from the locally verified bytes produce image
+presentation metadata, including on receipt-only retries; neither a filename nor a
+peer's MIME label determines it. Files remain inert, and the consuming decoder still
+validates image content.
 `--into <directory>` selects a destination. Existing files are never overwritten;
 an identical file is accepted on a retry, a different file produces a collision error.
 Files remain inert. Reading an offer neither fetches it nor executes its contents.
@@ -86,6 +88,9 @@ addresses. It receives no private keys, absolute source paths or raw child diagn
 Tailcat encrypts transport between the endpoints and can use DERP relays for rendezvous.
 The room remains trusted to attribute its account messages correctly. Other processes
 running as the same local OS user are outside the isolation boundary.
+The receipt digest binds recipient identity and file metadata, not the route address.
+A sender-controlled address can expose the recipient's public node key to that endpoint;
+file size and digest verification still precede commit.
 
 An ephemeral offer requires its sender to stay online. These offers are distinct from
 durable native-room attachments; this unit does not promise offline delivery or host failover.

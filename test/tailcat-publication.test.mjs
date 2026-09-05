@@ -5,8 +5,37 @@ import { mkdtemp, realpath, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createServer } from 'node:http';
-import { encodeTransfer, atomicJson } from '../src/tailcat.mjs';
-import { shareFiles, listOffers, resumeOffer, forgetOffer } from '../src/tailcat-offers.mjs';
+import { encodeTransfer, atomicJson, localTransferIdentity } from '../src/tailcat.mjs';
+import { shareFiles, listOffers, resumeOffer, forgetOffer, fetchFiles } from '../src/tailcat-offers.mjs';
+import { createHash, randomUUID } from 'node:crypto';
+
+test('fetch and receipt retry classify local bytes despite forged peer media labels',async t=>{
+  const root=await realpath(await mkdtemp(path.join(tmpdir(),'agora-receive-media-')));t.after(()=>rm(root,{recursive:true,force:true}));
+  const identity=await localTransferIdentity(root),id=randomUUID(),account='receiver';
+  const payloads=[Buffer.from('plain bytes, definitely not an image'),Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aJ1kAAAAASUVORK5CYII=','base64')];
+  const hash=/** @param {Buffer} bytes */bytes=>'sha256:'+createHash('sha256').update(bytes).digest('hex');
+  const files=payloads.map((bytes,i)=>({id:String(i),name:i?'picture.data':'fake.png',size:bytes.length,digest:hash(bytes),mimetype:i?'application/octet-stream':'image/png'}));
+  const digest=hash(Buffer.from(JSON.stringify({id,account,key:identity.nodeKey,files})));
+  const offer={id,files,expires:Date.now()+60000,routes:[{account,nodeKey:identity.nodeKey,receiptDigest:digest}]};
+  /** @type {any} */const bus={whoami:async()=>({id:account}),read:async()=>[{author:{id:'peer'},text:encodeTransfer({version:1,kind:'offer',offer})}]};
+  /** @type {string[]} */const requests=[];let failReceipt=true;
+  /** @type {Parameters<typeof fetchFiles>[5]} */const deps={openClient:async()=>({
+    request:async(endpoint,options)=>{
+      requests.push(endpoint);
+      if(endpoint==='/manifest')return {bytes:Buffer.from(JSON.stringify({digest,files}))};
+      if(endpoint.startsWith('/files/')){assert.ok(options.target);await writeFile(options.target,payloads[Number(endpoint.slice(7))]);return {bytes:Buffer.alloc(0)};}
+      if(failReceipt)throw Error('receipt lost');
+      return {bytes:Buffer.from('{}')};
+    },close:async()=>{},
+  })};
+  const first=await fetchFiles(bus,root,root,id,{},deps);
+  assert.equal(first.status,'saved-receipt-pending');
+  assert.deepEqual(first.attachments.map(a=>[a.kind,a.mimetype]),[['file','application/octet-stream'],['image','image/png']]);
+  requests.length=0;failReceipt=false;
+  const retry=await fetchFiles(bus,root,root,id,{},deps);
+  assert.equal(retry.status,'received');assert.deepEqual(requests,['/receipt']);
+  assert.deepEqual(retry.attachments,first.attachments);
+});
 
 test('lost publication receipt stops the offer and retry cannot create a duplicate',async t=>{
   const root=await realpath(await mkdtemp(path.join(tmpdir(),'agora-publication-')));t.after(()=>rm(root,{recursive:true,force:true}));
