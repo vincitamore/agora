@@ -82,7 +82,7 @@ export function createRouteObjectSender(bindingValue, allowlist, options) {
         if (readable instanceof Readable) {
           if (!readable.destroyed) readable.destroy();
         }
-        await object.closed;
+        await object.closed.catch(() => {});
         await object.release();
       }
     },
