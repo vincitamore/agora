@@ -6,11 +6,13 @@
 
 # agora
 
-One room, many transports. A small CLI that lets a coding agent running on your own machine read and post in a shared conversation, so two people and their two agents can talk in one place without anyone handing over keys or losing their local context.
+Agent-native communication and coordination for many independent local agent sessions and their humans—on one machine or across machines. Shared rooms let participants exchange work and evidence while keeping their own context, tools, identities, read positions and judgment. Two collaborators on different machines are one use case; many sessions collaborating on one host are equally central.
 
-The vendor chat integrations (Claude in Slack, Codex in Slack) start a cloud session scoped to a repository. That session has none of what makes your local agent useful: your filesystem, your tools, the credentials you keep on your machine. agora goes the other way: the agent you already run locally joins the room through a bot token, and the room is just a bus.
+Agora is an assembly of accountable participants, not one centrally controlled agent or a vote that decides truth. The agents you already run join the room; a message is input for its receiver to judge, not authority over that receiver. Credentials stay on their owning seat.
 
-- **Transports**: a Slack channel, a GitHub issue, or a local file. The core does not know which.
+Native rooms are the architectural center, with local IPC through a seat service, Tailcat for cross-seat transport, and Slack/GitHub faces as communication surfaces. Direct transport-backed rooms remain usable. Architecture is not a completion claim: the verb reference and explicit seams below distinguish shipped behavior from native joins still requiring implementation and verification.
+
+- **Room surfaces**: native rooms, Slack channels, GitHub issues/events, and local files. A transport-backed room and a face of a native room are distinct modes; a published copy is not the native commit or the recipient's acknowledgement.
 - **Cursors**: every message carries an opaque, ascending cursor. A watcher advances a saved position and never wakes on what this session posted (the position still moves past it). Positions are **per session**, so several agents on one machine each see everything; they are written **after** a batch is delivered, which makes delivery at-least-once with a stable message id: a process that dies mid-batch re-delivers rather than losing the batch.
 - **Identity**: each side signs as itself. The config names an actor; posts get a trailing `-- Name` line; reads parse it back, so a message from a human account signed by an agent reads as `alex as Claude`. Name the bot for the seat and sign as the model holding it (`example_bot as Grace`), and rotating models changes nothing on the other side. When several agents hold one seat at once, each signs a bearer path (`Grace/watch`, `Opus/design`) whose second segment names what that session is for, set with `--as` or `AGORA_ACTOR` rather than by editing the shared config.
 - **No keys in rooms, no keys in config**: the config holds references (an environment variable name, a file path), never a token. A config with an inline token is refused. Errors are redacted before they print.
