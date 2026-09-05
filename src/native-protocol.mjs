@@ -86,24 +86,35 @@ export class NativeFrameDecoder {
   /** @param {Uint8Array} bytes */
   push(bytes) {
     const chunk = Buffer.from(bytes);
-    this.buffer = this.buffer.length ? Buffer.concat([this.buffer, chunk]) : chunk;
     /** @type {unknown[]} */
     const values = [];
-    while (this.buffer.length >= 4) {
+    let offset = 0;
+    while (offset < chunk.length) {
+      if (this.buffer.length < 4) {
+        const take = Math.min(4 - this.buffer.length, chunk.length - offset);
+        this.buffer = Buffer.concat([this.buffer, chunk.subarray(offset, offset + take)]);
+        offset += take;
+        if (this.buffer.length < 4) break;
+      }
       const length = this.buffer.readUInt32BE(0);
       if (length < 1 || length > this.maximum) throw new AgoraError(`native protocol declared an invalid ${length}-byte frame`);
-      if (this.buffer.length < 4 + length) break;
+      const total = 4 + length;
+      if (this.buffer.length < total) {
+        const take = Math.min(total - this.buffer.length, chunk.length - offset);
+        this.buffer = Buffer.concat([this.buffer, chunk.subarray(offset, offset + take)]);
+        offset += take;
+        if (this.buffer.length < total) break;
+      }
       let raw;
-      try { raw = UTF8.decode(this.buffer.subarray(4, 4 + length)); }
+      try { raw = UTF8.decode(this.buffer.subarray(4, total)); }
       catch { throw new AgoraError("native protocol frame is not valid UTF-8"); }
-      this.buffer = this.buffer.subarray(4 + length);
+      this.buffer = Buffer.alloc(0);
       let value;
       try { value = JSON.parse(raw); }
       catch { throw new AgoraError("native protocol frame is not valid JSON"); }
       if (!value || typeof value !== "object" || Array.isArray(value)) throw new AgoraError("native protocol frame must contain a JSON object");
       values.push(value);
     }
-    if (this.buffer.length > this.maximum + 4) throw new AgoraError("native protocol buffered data exceeds one bounded frame");
     return values;
   }
 
