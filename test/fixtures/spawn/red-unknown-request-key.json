@@ -1,0 +1,29 @@
+{
+  "$fixture": "RED. Split out of red-forged-parent.json 2026-09-05 on the layer-1 review: an unknown key refused and a minted record's depth inspected cannot both be observed, because a refusal mints nothing.",
+  "$redCondition": "an unknown request key is accepted rather than refused",
+  "operationId": "2a77c410-8de1-4f03-9b52-c60a4b1e7d38",
+  "harness": "claude",
+  "model": "claude-opus-5",
+  "role": "verify",
+  "unit": "attack/unknown-request-key",
+  "room": "house",
+  "answersTo": "fable@opus-windows-primary",
+  "cwd": "C:/Users/AlexMoyer/Documents/agora-wt-tui",
+  "briefDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "depth": 0,
+  "parent": "operator",
+  "spawnedBy": "the human operator",
+  "bearer": "fable@opus-windows-primary",
+  "policy": { "maxDepth": 99 },
+  "env": { "AGORA_SPAWN_DEPTH": "0" },
+  "$expected": {
+    "exitCode": 1,
+    "reason": "request-field-unknown",
+    "namesEachKey": ["depth", "parent", "spawnedBy", "bearer", "policy", "env"],
+    "recordMinted": false,
+    "slotReserved": false,
+    "briefWritten": false,
+    "redIf": "any unknown key is silently ignored, or a record is minted at all"
+  },
+  "$notObservableHere": "the minted record's derived depth and spawner; that is red-forged-parent.json's job"
+}
