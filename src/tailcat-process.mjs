@@ -11,8 +11,13 @@ import { AgoraError } from './core.mjs';
  */
 export async function spawnTailcat(args,options) {
   const guardian=spawn(process.execPath,[fileURLToPath(import.meta.url),'--guardian'],{stdio:['pipe','pipe','ignore','ipc'],windowsHide:true});
-  await new Promise((resolve,reject)=>{
-    const timer=setTimeout(()=>{if(guardian.connected)guardian.disconnect();reject(new AgoraError('Tailcat startup timed out. Run agora doctor --offline, then retry the transfer.'));},20000);
+  // Keep ownership until rejected startup has actually terminated. The caller has no
+  // handle yet and cannot join cleanup if rejection races the guardian's exit.
+  const terminated=new Promise(resolve=>{
+    guardian.once('exit',()=>resolve(undefined));guardian.once('close',()=>resolve(undefined));
+  });
+  try {await new Promise((resolve,reject)=>{
+    const timer=setTimeout(()=>{reject(new AgoraError('Tailcat startup timed out. Run agora doctor --offline, then retry the transfer.'));},20000);
     guardian.once('error',()=>{clearTimeout(timer);reject(new AgoraError('Tailcat guardian could not start. Run agora doctor --offline.'));});
     guardian.once('exit',()=>{clearTimeout(timer);reject(new AgoraError('Tailcat could not start. Run agora doctor --offline.'));});
     guardian.once('message',message=>{
@@ -20,8 +25,14 @@ export async function spawnTailcat(args,options) {
       if(/** @type {any} */(message).status==='started') resolve(undefined);
       else reject(new AgoraError('Tailcat runtime verification or startup failed. Run agora doctor --offline.'));
     });
-    guardian.send({args,options});
-  });
+    guardian.send({args,options},error=>{if(error){clearTimeout(timer);reject(new AgoraError('Tailcat guardian could not receive its startup request. Run agora doctor --offline.'));}});
+  });} catch(error) {
+    if(guardian.connected)guardian.disconnect();
+    await terminated;
+    // Signal death does not establish that the guardian observed its own child's exit.
+    if(guardian.signalCode!==null)throw Object.assign(new AgoraError('Tailcat guardian exited without confirming runtime cleanup.'),{tailcatCleanupUnconfirmed:true});
+    throw error;
+  }
   return guardian;
 }
 
