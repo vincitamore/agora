@@ -1,6 +1,9 @@
 // @ts-check
 import { createHash, randomUUID } from "node:crypto";
+import { once } from "node:events";
 import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import net from "node:net";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { AgoraError } from "./core.mjs";
 import { nativeCursor, nativeDigest, parseNativeCursor, validateNativeEpoch, validateNativeId } from "./native-protocol.mjs";
@@ -10,11 +13,17 @@ const MANIFEST_VERSION = 1;
 const LOG_RECORD_MAX = 1024 * 1024;
 const MESSAGE_TEXT_MAX = 256 * 1024;
 const ATTACHMENT_MAX = 32;
+const DEFAULT_RECORD_LIMIT = 100_000;
 const ROOM_RE = /^[a-f0-9]{32}$/;
 const UTF8 = new TextDecoder("utf-8", { fatal: true });
 
 /** @param {Uint8Array} bytes */
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest();
+
+/** @param {string} roomId @param {string} accountId @param {string} operationId */
+function messageId(roomId, accountId, operationId) {
+  return createHash("sha256").update(roomId).update("\0").update(accountId).update("\0").update(operationId).digest("hex");
+}
 
 /** @param {string} root @param {string} roomId */
 function roomDirectory(root, roomId) {
@@ -34,6 +43,60 @@ async function writeDurableAtomic(file, text) {
   } finally {
     await rm(temp, { force: true });
   }
+}
+
+/** @param {string} directory */
+function writerEndpoint(directory) {
+  const name = createHash("sha256").update(directory).digest("hex").slice(0, 32);
+  return process.platform === "win32" ? `\\\\.\\pipe\\agora-native-writer-${name}`
+    : path.join(tmpdir(), `agora-native-writer-${name}.sock`);
+}
+
+/** @param {string} endpoint */
+function probeWriter(endpoint) {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection(endpoint);
+    const timer = setTimeout(() => { socket.destroy(); resolve(true); }, 1000);
+    socket.once("connect", () => { clearTimeout(timer); socket.destroy(); resolve(true); });
+    socket.once("error", (error) => {
+      clearTimeout(timer);
+      const code = /** @type {NodeJS.ErrnoException} */ (error).code;
+      if (code === "ECONNREFUSED" || code === "ENOENT") resolve(false);
+      else reject(error);
+    });
+  });
+}
+
+/** @param {string} endpoint */
+async function listenWriter(endpoint) {
+  const server = net.createServer((socket) => socket.destroy());
+  server.listen(endpoint);
+  try { await Promise.race([once(server, "listening"), once(server, "error").then(([error]) => Promise.reject(error))]); }
+  catch (error) { try { if (server.listening) server.close(); } catch {} throw error; }
+  return server;
+}
+
+/** @param {string} directory */
+async function acquireWriter(directory) {
+  const endpoint = writerEndpoint(directory);
+  try { return { server: await listenWriter(endpoint), endpoint }; }
+  catch (error) {
+    if (/** @type {NodeJS.ErrnoException} */ (error).code !== "EADDRINUSE") throw error;
+  }
+  if (await probeWriter(endpoint)) throw new AgoraError("native room already has a live writer");
+  if (process.platform === "win32") throw new AgoraError("native room writer endpoint is busy");
+  await rm(endpoint, { force: true });
+  try { return { server: await listenWriter(endpoint), endpoint }; }
+  catch (error) {
+    if (/** @type {NodeJS.ErrnoException} */ (error).code === "EADDRINUSE") throw new AgoraError("native room already has a live writer");
+    throw error;
+  }
+}
+
+/** @param {{ server: net.Server, endpoint: string }} writer */
+async function releaseWriter(writer) {
+  if (writer.server.listening) await new Promise((resolve) => writer.server.close(() => resolve(undefined)));
+  if (process.platform !== "win32") await rm(writer.endpoint, { force: true });
 }
 
 /** @param {unknown} value */
@@ -99,7 +162,9 @@ function validateRecord(record, manifest, expectedSequence, expectedPreviousDige
   validateNativeId(record.operationId, "operation id");
   if (!/^sha256:[a-f0-9]{64}$/.test(record.payloadDigest ?? "")) throw new AgoraError("native room log contains an invalid payload digest");
   if (record.previousDigest !== expectedPreviousDigest) throw new AgoraError(`native room log hash-chain mismatch at sequence ${expectedSequence}; do not advance or truncate it`);
-  if (!record.message || record.message.id !== record.operationId || record.message.room !== manifest.roomId ||
+  validateNativeId(record.accountId, "record account id");
+  if (!record.message || record.message.id !== messageId(manifest.roomId, record.accountId, record.operationId) ||
+      record.message.author?.id !== record.accountId || record.message.room !== manifest.roomId ||
       record.message.cursor !== nativeCursor(manifest.epoch, expectedSequence)) throw new AgoraError("native room log message identity does not match its committed position");
   const { recordDigest, ...unsigned } = record;
   if (!/^sha256:[a-f0-9]{64}$/.test(recordDigest ?? "") || nativeDigest(unsigned) !== recordDigest)
@@ -107,22 +172,27 @@ function validateRecord(record, manifest, expectedSequence, expectedPreviousDige
   return record;
 }
 
-/** @param {import('node:fs/promises').FileHandle} handle @param {any} manifest */
-async function scan(handle, manifest) {
+/** @param {import('node:fs/promises').FileHandle} handle @param {any} manifest @param {any} boundary */
+async function scan(handle, manifest, boundary) {
   const size = (await handle.stat()).size;
+  if (!boundary || boundary.version !== 1 || boundary.roomId !== manifest.roomId || boundary.epoch !== manifest.epoch ||
+      !Number.isSafeInteger(boundary.sequence) || boundary.sequence < 0 || boundary.sequence > manifest.recordLimit ||
+      !Number.isSafeInteger(boundary.end) || boundary.end < 0 ||
+      (boundary.sequence === 0 ? boundary.digest !== null : !/^sha256:[a-f0-9]{64}$/.test(boundary.digest ?? "")))
+    throw new AgoraError("native room committed boundary is invalid; do not advance or truncate the log");
+  if (size < boundary.end) throw new AgoraError(`native room log is truncated below its acknowledged ${boundary.end}-byte boundary; do not reuse its cursor`);
   let position = 0;
-  let recoveredTailBytes = 0;
   /** @type {any[]} */
   const records = [];
-  while (position < size) {
+  while (position < boundary.end) {
     const header = Buffer.alloc(4);
-    if (size - position < 4) { recoveredTailBytes = size - position; break; }
+    if (boundary.end - position < 4) throw new AgoraError(`native room committed boundary ends inside a header at offset ${position}`);
     const headerRead = await readExact(handle, header, position);
     if (headerRead < 4) throw new AgoraError(`native room log became unreadable at offset ${position}; do not advance or truncate it`);
     const length = header.readUInt32BE(0);
     if (length < 1 || length > LOG_RECORD_MAX) throw new AgoraError(`native room log declares an invalid ${length}-byte record at offset ${position}`);
     const body = Buffer.alloc(length + 32);
-    if (size - position - 4 < body.length) { recoveredTailBytes = size - position; break; }
+    if (boundary.end - position - 4 < body.length) throw new AgoraError(`native room committed boundary ends inside a record at offset ${position}`);
     const bodyRead = await readExact(handle, body, position + 4);
     if (bodyRead < body.length) throw new AgoraError(`native room log became unreadable at offset ${position}; do not advance or truncate it`);
     const payload = body.subarray(0, length);
@@ -133,37 +203,46 @@ async function scan(handle, manifest) {
     records.push(validateRecord(parsed, manifest, records.length + 1, records.at(-1)?.recordDigest ?? null));
     position += 4 + body.length;
   }
+  if (records.length !== boundary.sequence || (records.at(-1)?.recordDigest ?? null) !== boundary.digest)
+    throw new AgoraError("native room log does not match its acknowledged sequence/digest boundary; do not advance or truncate it");
+  const recoveredTailBytes = size - boundary.end;
   if (recoveredTailBytes) {
-    // Acceptance is sent only after sync. A partial final frame therefore has no valid receipt and
-    // is safe to remove; a complete frame with a bad checksum is refused above, never "repaired".
-    await handle.truncate(position);
+    // Only bytes beyond the separately synced committed boundary are unacknowledged. A short log
+    // is refused above: partial bytes alone never prove that an acknowledged frame was unaccepted.
+    await handle.truncate(boundary.end);
     await handle.sync();
   }
-  return { records, end: position, recoveredTailBytes };
+  return { records, end: boundary.end, recoveredTailBytes };
 }
 
 export class NativeRoomStore {
-  /** @param {string} directory @param {any} manifest @param {import('node:fs/promises').FileHandle} handle @param {any[]} records @param {number} end @param {number} recoveredTailBytes @param {() => Date} now */
-  constructor(directory, manifest, handle, records, end, recoveredTailBytes, now) {
+  /** @param {string} directory @param {any} manifest @param {any} boundary @param {import('node:fs/promises').FileHandle} handle @param {{server: net.Server, endpoint: string}} writer @param {any[]} records @param {number} end @param {number} recoveredTailBytes @param {() => Date} now */
+  constructor(directory, manifest, boundary, handle, writer, records, end, recoveredTailBytes, now) {
     this.directory = directory;
     this.logPath = path.join(directory, "room.frames");
+    this.boundaryPath = path.join(directory, "committed.json");
     this.manifest = manifest;
+    this.boundary = boundary;
     this.handle = handle;
+    this.writer = writer;
     this.records = records;
     this.end = end;
     this.recoveredTailBytes = recoveredTailBytes;
     this.now = now;
     this.queue = Promise.resolve();
     this.closed = false;
-    this.operations = new Map(records.map((r) => [`${r.message.author.id}\0${r.operationId}`, r]));
+    this.operations = new Map(records.map((r) => [`${r.accountId}\0${r.operationId}`, r]));
   }
 
-  /** @param {{ root: string, roomId?: string, epoch?: string, hostAccountId: string, now?: () => Date }} options */
+  /** @param {{ root: string, roomId?: string, epoch?: string, hostAccountId: string, recordLimit?: number, now?: () => Date }} options */
   static async create(options) {
     const roomId = options.roomId ?? randomUUID().replaceAll("-", "");
     const epoch = options.epoch ?? randomUUID().replaceAll("-", "");
     validateNativeEpoch(epoch);
     validateNativeId(options.hostAccountId, "host account id");
+    const recordLimit = options.recordLimit ?? DEFAULT_RECORD_LIMIT;
+    if (!Number.isSafeInteger(recordLimit) || recordLimit < 1 || recordLimit > 10_000_000)
+      throw new AgoraError("native room record limit must be 1-10000000");
     const directory = roomDirectory(options.root, roomId);
     await mkdir(path.dirname(directory), { recursive: true, mode: 0o700 });
     try { await mkdir(directory, { mode: 0o700 }); }
@@ -172,11 +251,13 @@ export class NativeRoomStore {
       throw e;
     }
     try {
-      const manifest = { version: MANIFEST_VERSION, roomId, epoch, hostAccountId: options.hostAccountId, createdAt: (options.now ?? (() => new Date()))().toISOString() };
+      const manifest = { version: MANIFEST_VERSION, roomId, epoch, hostAccountId: options.hostAccountId, recordLimit,
+        createdAt: (options.now ?? (() => new Date()))().toISOString() };
       await writeDurableAtomic(path.join(directory, "room.json"), JSON.stringify(manifest, null, 2) + "\n");
       const log = await open(path.join(directory, "room.frames"), "wx+", 0o600);
       await log.sync();
       await log.close();
+      await writeDurableAtomic(path.join(directory, "committed.json"), JSON.stringify({ version: 1, roomId, epoch, sequence: 0, end: 0, digest: null }, null, 2) + "\n");
       return NativeRoomStore.open({ root: options.root, roomId, now: options.now });
     } catch (e) {
       await rm(directory, { recursive: true, force: true });
@@ -191,13 +272,24 @@ export class NativeRoomStore {
     try { manifest = JSON.parse(await readFile(path.join(directory, "room.json"), "utf8")); }
     catch { throw new AgoraError(`native room ${options.roomId} has no valid manifest`); }
     if (manifest?.version !== MANIFEST_VERSION || manifest.roomId !== options.roomId || !ROOM_RE.test(manifest.roomId ?? "") ||
-        !/^[A-Za-z0-9_-]{16,128}$/.test(manifest.hostAccountId ?? "")) throw new AgoraError(`native room ${options.roomId} manifest is invalid`);
+        !/^[A-Za-z0-9_-]{16,128}$/.test(manifest.hostAccountId ?? "") || !Number.isSafeInteger(manifest.recordLimit) ||
+        manifest.recordLimit < 1 || manifest.recordLimit > 10_000_000) throw new AgoraError(`native room ${options.roomId} manifest is invalid`);
     validateNativeEpoch(manifest.epoch);
-    const handle = await open(path.join(directory, "room.frames"), "r+");
+    const writer = await acquireWriter(directory);
+    let handle;
     try {
-      const scanned = await scan(handle, manifest);
-      return new NativeRoomStore(directory, manifest, handle, scanned.records, scanned.end, scanned.recoveredTailBytes, options.now ?? (() => new Date()));
-    } catch (e) { await handle.close(); throw e; }
+      handle = await open(path.join(directory, "room.frames"), "r+");
+      let boundary;
+      try { boundary = JSON.parse(await readFile(path.join(directory, "committed.json"), "utf8")); }
+      catch { throw new AgoraError(`native room ${options.roomId} has no valid committed boundary`); }
+      const scanned = await scan(handle, manifest, boundary);
+      return new NativeRoomStore(directory, manifest, boundary, handle, writer, scanned.records, scanned.end, scanned.recoveredTailBytes,
+        options.now ?? (() => new Date()));
+    } catch (e) {
+      if (handle) await handle.close();
+      await releaseWriter(writer);
+      throw e;
+    }
   }
 
   /**
@@ -234,13 +326,17 @@ export class NativeRoomStore {
       if (existing.payloadDigest !== payloadDigest) throw new AgoraError(`native operation ${input.operationId} was already committed with different bytes`);
       return { id: existing.message.id, cursor: existing.message.cursor, duplicate: true };
     }
+    if (this.records.length >= this.manifest.recordLimit)
+      throw new AgoraError(`native room reached its ${this.manifest.recordLimit}-record resident limit; retain or archive explicitly before accepting more`);
     const sequence = this.records.length + 1;
-    const message = { id: input.operationId, room: this.manifest.roomId,
+    const id = messageId(this.manifest.roomId, authenticated.accountId, input.operationId);
+    const message = { id, room: this.manifest.roomId,
       ...(input.thread ? { thread: input.thread } : {}),
       author: { id: authenticated.accountId, name: payload.authorName, kind: payload.authorKind },
       text: input.text, ts: this.now().toISOString(), cursor: nativeCursor(this.manifest.epoch, sequence),
       ...(attachments?.length ? { attachments } : {}) };
-    const unsigned = { version: LOG_VERSION, roomId: this.manifest.roomId, epoch: this.manifest.epoch, sequence, operationId: input.operationId,
+    const unsigned = { version: LOG_VERSION, roomId: this.manifest.roomId, epoch: this.manifest.epoch, sequence,
+      accountId: authenticated.accountId, operationId: input.operationId,
       payloadDigest, previousDigest: this.records.at(-1)?.recordDigest ?? null, message };
     const record = { ...unsigned, recordDigest: nativeDigest(unsigned) };
     const frame = storedFrame(record);
@@ -248,6 +344,10 @@ export class NativeRoomStore {
     try {
       await writeAll(this.handle, frame, start);
       await this.handle.sync();
+      const boundary = { version: 1, roomId: this.manifest.roomId, epoch: this.manifest.epoch, sequence,
+        end: start + frame.length, digest: record.recordDigest };
+      await writeDurableAtomic(this.boundaryPath, JSON.stringify(boundary, null, 2) + "\n");
+      this.boundary = boundary;
     } catch (e) {
       try { await this.handle.truncate(start); await this.handle.sync(); }
       catch { this.closed = true; }
@@ -300,7 +400,7 @@ export class NativeRoomStore {
   status() {
     return { roomId: this.manifest.roomId, epoch: this.manifest.epoch, hostAccountId: this.manifest.hostAccountId,
       committed: this.records.length, latestCursor: nativeCursor(this.manifest.epoch, this.records.length), latestDigest: this.records.at(-1)?.recordDigest ?? null,
-      recoveredTailBytes: this.recoveredTailBytes };
+      recordLimit: this.manifest.recordLimit, recoveredTailBytes: this.recoveredTailBytes };
   }
 
   async close() {
@@ -308,5 +408,6 @@ export class NativeRoomStore {
     await this.queue;
     this.closed = true;
     await this.handle.close();
+    await releaseWriter(this.writer);
   }
 }
