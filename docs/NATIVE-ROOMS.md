@@ -23,6 +23,12 @@ separate Tailcat server process, key, allowlist, loopback listener and handler c
 proxy discards client identity before forwarding to loopback; sharing a listener would collapse the
 authorization boundary even if the keys above it remained distinct.
 
+Local sessions reach the service on a loopback socket using a nonce stored in the seat-private
+service descriptor. A service lock is created exclusively and is never guessed stale from a PID;
+a second service refuses and tells the operator to inspect the recorded service before explicit
+recovery. The nonce is local admission, not a remote member identity. Remote identity will enter
+only through the member-specific Tailcat route closure.
+
 The room host is the only writer for one room epoch. This is deliberately not leaderless consensus.
 It gives every participant the ordered cursor contract that existing `read`, `watch`, threads and
 carry already consume. Automatic failover is excluded until there is a fencing protocol that cannot
@@ -149,6 +155,11 @@ agora post|read|watch|carry <alias> ...       # unchanged message surface
 Creation and acceptance are explicit authority to write native room/peer state. They do not rewrite
 the shared actor/bearer identity. The exact registry/config join must remain atomic and conflict
 detecting; no implicit network message may mutate it.
+
+The seat service fans one committed event to every subscribed local connection. A subscription
+begins with an ordered replay and a prefix checkpoint, then receives later commits. It does not own
+or collapse harness checkpoints: each `watch`/session persists only its own cursor after its own
+handoff succeeds, so one sibling can stop or fail without consuming another sibling's delivery.
 
 State below the Agora root is seat-owned:
 

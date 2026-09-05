@@ -17,6 +17,14 @@ test("native protocol frames survive arbitrary chunk boundaries and several fram
   assert.equal(validateNativeEnvelope(found[0]).type, "hello");
 });
 
+test("native protocol streams a large coalesced batch without buffering it as one frame", () => {
+  const values = Array.from({ length: 2000 }, (_, i) => ({ protocol: NATIVE_PROTOCOL, type: "event", requestId: `request_${String(i).padStart(8, "0")}` }));
+  const bytes = Buffer.concat(values.map((value) => encodeNativeFrame(value)));
+  const decoder = new NativeFrameDecoder({ maximum: 128 });
+  assert.deepEqual(decoder.push(bytes), values);
+  assert.equal(decoder.buffer.length, 0);
+});
+
 test("native protocol refuses oversized, invalid and truncated frames", () => {
   assert.throws(() => encodeNativeFrame({ body: "x".repeat(100) }, 20), /must be 1-20 bytes/);
   const oversized = Buffer.alloc(4); oversized.writeUInt32BE(999, 0);
