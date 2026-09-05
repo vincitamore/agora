@@ -181,6 +181,18 @@ is authenticated in the descriptor and handshake but is not part of the endpoint
 root owns one seat service, so a second account cannot create a second Windows pipe beside the same
 shared descriptor.
 
+A room whose config names `transport: native` and a `roomId` is watched by a subscriber, not a
+poller: `agora watch <alias>` connects through the descriptor, completes the service-first hello,
+subscribes from this session's saved cursor and wakes on `event` frames. The subscriber holds what
+makes a wake this session's: the cursor, the posted ledger, the `--wake` predicate, coalescing and
+the printed lines; the service is handed a room and a cursor and nothing else, so no counterpart's
+trailer can steer the fan-out. The lines, the cursor filename, the armed record (with its build,
+plus `subscriber: true`) and the watch-mode sentinel are the poller's. A service that is absent,
+refuses the hello, or closes the socket ends the watch with exit 1 and `reason: service-dark` on
+the `watch-result` line; never 0, because 0 reads as a quiet room. `doctor` names the service by
+its descriptor's public fields and lists each live subscriber with its build, outside the poll
+arithmetic.
+
 State below the Agora root is seat-owned:
 
 ```text

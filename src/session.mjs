@@ -755,6 +755,9 @@ export function pidAlive(pid, kill) {
  * @property {number} [harnessPid]
  * @property {number} [bootEpoch] the boot this pid belongs to; a pid outlives nothing across a reboot
  * @property {import('./harness.mjs').BuildIdentity} [build] code this resident loaded when it armed
+ * @property {string} [transport] the room's transport when it armed
+ * @property {boolean} [subscriber] true when this watch rides the seat service's push instead of
+ *   polling; `doctor` lists it as a live watch and leaves it out of the poll arithmetic
  * @property {string | null} [since] the cursor it started from
  * @property {string} startedAt
  */
