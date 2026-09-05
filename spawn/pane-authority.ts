@@ -18,12 +18,14 @@ import {
   writeDeliveredLine,
   type OpenedPane,
 } from "./terminal-backend.ts";
+import { journalWrite, type JournalEntry } from "./journal.ts";
 
 export type Lease = { session: string; until: number };
 
 export type Authority = {
   panes: Map<string, OpenedPane>;
   leases: Map<string, Lease>;
+  journal: JournalEntry[];
   now: () => number;
   open: (spawnId: string) => OpenedPane;
 };
@@ -32,6 +34,7 @@ export function createAuthority(opts: { open: (spawnId: string) => OpenedPane; n
   return {
     panes: new Map(),
     leases: new Map(),
+    journal: [],
     now: opts.now ?? Date.now,
     open: opts.open,
   };
@@ -70,6 +73,7 @@ function paneOf(auth: Authority, spawnId: string): OpenedPane {
 
 function deliver(auth: Authority, frame: DeliverFrame): void {
   writeDeliveredLine(paneOf(auth, frame.spawnId), frame.line, frame.admissionId);
+  auth.journal.push(journalWrite("service", frame.spawnId, frame.line, new Date(auth.now()).toISOString()));
 }
 
 function attach(auth: Authority, frame: AttachFrame): void {
@@ -87,6 +91,7 @@ function leaseLive(auth: Authority, frame: AttachInputFrame): boolean {
 
 function attachInput(auth: Authority, frame: AttachInputFrame): void {
   writeAttachInput(paneOf(auth, frame.spawnId), frame.bytes, leaseLive(auth, frame));
+  auth.journal.push(journalWrite("human", frame.spawnId, frame.bytes, new Date(auth.now()).toISOString()));
 }
 
 function resize(auth: Authority, frame: ResizeFrame): void {
