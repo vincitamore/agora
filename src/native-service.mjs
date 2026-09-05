@@ -1,15 +1,22 @@
 // @ts-check
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { mkdir, open, readFile, realpath, rename, rm } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
 import { AgoraError } from "./core.mjs";
-import { NativeFrameDecoder, NATIVE_PROTOCOL, encodeNativeFrame, parseNativeCursor, validateNativeEnvelope, validateNativeId } from "./native-protocol.mjs";
+import { NativeFrameDecoder, NATIVE_PROTOCOL, encodeNativeFrame, nativeHandshakeProof, parseNativeCursor,
+  validateNativeEnvelope, validateNativeId, verifyNativeHandshakeProof } from "./native-protocol.mjs";
 import { NativeRoomStore } from "./native-store.mjs";
 
 const MAX_PENDING_WRITE = 2 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 10_000;
+const ENDPOINT_PROBE_TIMEOUT_MS = 500;
+
+/** @param {string} endpoint */
+function reclaimArbiterPort(endpoint) {
+  return 49152 + createHash("sha256").update(endpoint).digest().readUInt16BE(0) % 16384;
+}
 
 /** @param {string} file @param {unknown} value */
 async function writeAtomic(file, value) {
@@ -40,6 +47,143 @@ function requiredString(value, label) {
   return value;
 }
 
+/**
+ * The filesystem path is itself the exclusion primitive on POSIX. Windows
+ * named pipes do not live in the filesystem, so their stable name is derived
+ * from the physical state root plus the seat account rather than caller path
+ * spelling.
+ * @param {string} root @param {string} accountId @param {NodeJS.Platform} [platform]
+ */
+export async function nativeServiceEndpoint(root, accountId, platform = process.platform) {
+  validateNativeId(accountId, "service account id");
+  await mkdir(path.resolve(root), { recursive: true, mode: 0o700 });
+  const physicalRoot = await realpath(path.resolve(root));
+  if (platform === "win32") {
+    const seat = createHash("sha256").update(`${physicalRoot.toLowerCase()}\0${accountId}`).digest("hex").slice(0, 32);
+    return `\\\\.\\pipe\\agora-${seat}`;
+  }
+  return path.join(physicalRoot, "native", "service.sock");
+}
+
+/** @param {net.Server} server @param {string} endpoint */
+function listenOnce(server, endpoint) {
+  return new Promise((resolve, reject) => {
+    const onError = (/** @type {Error} */ error) => { cleanup(); reject(error); };
+    const onListening = () => { cleanup(); resolve(undefined); };
+    const cleanup = () => { server.off("error", onError); server.off("listening", onListening); };
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen({ path: endpoint, exclusive: true });
+  });
+}
+
+/** @param {string} endpoint */
+function endpointAcceptsConnections(endpoint) {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection({ path: endpoint });
+    const timer = setTimeout(() => finish(true), ENDPOINT_PROBE_TIMEOUT_MS);
+    timer.unref?.();
+    const finish = (/** @type {boolean} */ live, /** @type {unknown} */ error = undefined) => {
+      clearTimeout(timer);
+      socket.removeAllListeners();
+      socket.destroy();
+      if (error) reject(error); else resolve(live);
+    };
+    socket.once("connect", () => finish(true));
+    socket.once("error", (error) => {
+      const code = /** @type {NodeJS.ErrnoException} */ (error).code;
+      if (["ECONNREFUSED", "ENOENT", "ENOTSOCK", "EINVAL"].includes(code ?? "")) finish(false);
+      else finish(false, error);
+    });
+  });
+}
+
+/**
+ * Abrupt death leaves a Unix socket pathname behind. Reclaim moves the exact
+ * stale directory entry aside before binding; it never unlinks a path that a
+ * racing successor may already have rebound.
+ * @param {net.Server} server @param {string} endpoint
+ */
+async function listenOwnedEndpoint(server, endpoint) {
+  try { await listenOnce(server, endpoint); return; }
+  catch (error) {
+    if (/** @type {NodeJS.ErrnoException} */ (error).code !== "EADDRINUSE") throw error;
+  }
+  if (await endpointAcceptsConnections(endpoint)) {
+    throw new AgoraError(`native service endpoint ${endpoint} is already active or occupied`);
+  }
+  if (process.platform === "win32") {
+    throw new AgoraError(`native service endpoint ${endpoint} is occupied but not accepting connections`);
+  }
+  // Probing and moving a stale Unix socket are two operations. Serialize that
+  // tiny recovery window with a kernel-owned loopback bind so two starters
+  // cannot each move the other's newly-bound endpoint. The arbiter is released
+  // as soon as the Unix socket is bound; the socket bind is the resident lock.
+  const arbiter = net.createServer();
+  try {
+    try { await new Promise((resolve, reject) => {
+      const cleanup = () => { arbiter.off("error", onError); arbiter.off("listening", onListening); };
+      const onError = (/** @type {Error} */ error) => { cleanup(); reject(error); };
+      const onListening = () => { cleanup(); resolve(undefined); };
+      arbiter.once("error", onError); arbiter.once("listening", onListening);
+      arbiter.listen({ host: "127.0.0.1", port: reclaimArbiterPort(endpoint), exclusive: true });
+    }); }
+    catch (error) {
+      if (/** @type {NodeJS.ErrnoException} */ (error).code === "EADDRINUSE")
+        throw new AgoraError(`native service endpoint ${endpoint} reclamation is already in progress or its arbiter is occupied`);
+      throw error;
+    }
+    if (await endpointAcceptsConnections(endpoint))
+      throw new AgoraError(`native service endpoint ${endpoint} became active during reclamation`);
+    const quarantine = `${endpoint}.stale-${process.pid}-${randomUUID()}`;
+    try {
+      try { await rename(endpoint, quarantine); }
+      catch (error) {
+        if (/** @type {NodeJS.ErrnoException} */ (error).code !== "ENOENT") throw error;
+      }
+      try { await listenOnce(server, endpoint); }
+      catch (error) {
+        if (/** @type {NodeJS.ErrnoException} */ (error).code === "EADDRINUSE")
+          throw new AgoraError(`native service endpoint ${endpoint} was taken by another starter`);
+        throw error;
+      }
+    } finally { await rm(quarantine, { force: true }); }
+  } finally {
+    await new Promise((resolve) => {
+      if (!arbiter.listening) resolve(undefined);
+      else arbiter.close(() => resolve(undefined));
+    });
+  }
+}
+
+/** @param {net.Socket} socket @param {number} timeoutMs @param {string} label */
+function readHandshakeFrame(socket, timeoutMs, label) {
+  const decoder = new NativeFrameDecoder();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => finish(undefined, new AgoraError(`native service ${label} timed out`)), timeoutMs);
+    timer.unref?.();
+    const cleanup = () => {
+      clearTimeout(timer);
+      socket.off("data", onData); socket.off("error", onError); socket.off("close", onClose);
+    };
+    const finish = (/** @type {Record<string, unknown> | undefined} */ frame, /** @type {unknown} */ error = undefined) => {
+      cleanup();
+      if (error) reject(error); else resolve(frame);
+    };
+    const onData = (/** @type {Buffer} */ bytes) => {
+      try {
+        const frames = decoder.push(bytes);
+        if (!frames.length) return;
+        if (frames.length !== 1) throw new AgoraError(`native service ${label} sent extra handshake frames`);
+        finish(validateNativeEnvelope(frames[0]));
+      } catch (error) { finish(undefined, error); }
+    };
+    const onError = (/** @type {Error} */ error) => finish(undefined, error);
+    const onClose = () => finish(undefined, new AgoraError(`native service closed during ${label}`));
+    socket.on("data", onData); socket.once("error", onError); socket.once("close", onClose);
+  });
+}
+
 export class NativeRoomService {
   /** @param {{ root: string, accountId: string, seatLabel: string, now?: () => Date, nonce?: string }} options */
   constructor(options) {
@@ -54,10 +198,9 @@ export class NativeRoomService {
     this.bootEpoch = randomUUID().replaceAll("-", "");
     this.startedAt = this.now().toISOString();
     this.nativeDirectory = path.join(this.root, "native");
-    this.lockPath = path.join(this.nativeDirectory, "service.lock");
     this.descriptorPath = path.join(this.nativeDirectory, "service.json");
-    /** @type {import('node:fs/promises').FileHandle | null} */
-    this.lock = null;
+    /** @type {string | null} */
+    this.endpointPath = null;
     /** @type {net.Server | null} */
     this.server = null;
     /** @type {Map<string, NativeRoomStore>} */
@@ -73,25 +216,18 @@ export class NativeRoomService {
 
   async start() {
     if (this.running) return this.descriptor();
+    await mkdir(this.root, { recursive: true, mode: 0o700 });
+    this.root = await realpath(this.root);
+    this.nativeDirectory = path.join(this.root, "native");
+    this.descriptorPath = path.join(this.nativeDirectory, "service.json");
     await mkdir(this.nativeDirectory, { recursive: true, mode: 0o700 });
-    try { this.lock = await open(this.lockPath, "wx", 0o600); }
-    catch (e) {
-      if (/** @type {NodeJS.ErrnoException} */ (e).code === "EEXIST")
-        throw new AgoraError(`native service lock already exists at ${this.lockPath}; inspect the recorded service before explicit recovery`);
-      throw e;
-    }
+    this.endpointPath = await nativeServiceEndpoint(this.root, this.accountId);
     try {
-      await this.lock.writeFile(`${JSON.stringify({ pid: process.pid, nonce: this.nonce, bootEpoch: this.bootEpoch })}\n`, "utf8");
-      await this.lock.sync();
       this.server = net.createServer((socket) => this.#accept(socket));
       this.server.maxConnections = 128;
-      this.server.listen({ host: "127.0.0.1", port: 0, exclusive: true });
-      await Promise.race([
-        once(this.server, "listening"),
-        once(this.server, "error").then(([error]) => Promise.reject(error)),
-      ]);
-      this.running = true;
+      await listenOwnedEndpoint(this.server, this.endpointPath);
       await writeAtomic(this.descriptorPath, this.descriptor());
+      this.running = true;
       return this.descriptor();
     } catch (e) {
       await this.#releaseFiles();
@@ -100,8 +236,7 @@ export class NativeRoomService {
   }
 
   descriptor() {
-    const address = this.server?.address();
-    return { protocol: NATIVE_PROTOCOL, host: "127.0.0.1", port: typeof address === "object" && address ? address.port : null,
+    return { protocol: NATIVE_PROTOCOL, path: this.endpointPath,
       nonce: this.nonce, pid: process.pid, bootEpoch: this.bootEpoch, accountId: this.accountId, seatLabel: this.seatLabel,
       startedAt: this.startedAt };
   }
@@ -139,6 +274,12 @@ export class NativeRoomService {
     const decoder = new NativeFrameDecoder();
     let greeted = false;
     let chain = Promise.resolve();
+    const requestId = randomUUID().replaceAll("-", "");
+    const serverChallenge = randomUUID().replaceAll("-", "");
+    const serverTranscript = { bootEpoch: this.bootEpoch, requestId, serverChallenge,
+      accountId: this.accountId, seatLabel: this.seatLabel };
+    if (!sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "server-hello", ...serverTranscript,
+      proof: nativeHandshakeProof(this.nonce, "server", serverTranscript) })) return;
     const fail = (/** @type {unknown} */ error, /** @type {string | undefined} */ requestId) => {
       const message = error instanceof Error ? error.message : "native service request failed";
       sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "error", requestId: requestId ?? randomUUID().replaceAll("-", ""),
@@ -152,10 +293,16 @@ export class NativeRoomService {
         chain = chain.then(async () => {
           const frame = validateNativeEnvelope(raw);
           if (!greeted) {
-            if (frame.type !== "hello" || frame.nonce !== this.nonce) throw new AgoraError("native service hello did not prove the local service nonce");
+            if (frame.type !== "client-hello" || frame.requestId !== requestId || frame.bootEpoch !== this.bootEpoch
+              || frame.serverChallenge !== serverChallenge) throw new AgoraError("native service client hello did not match this handshake");
+            const clientChallenge = requiredString(frame.clientChallenge, "client challenge");
+            validateNativeId(clientChallenge, "client challenge");
+            const transcript = { ...serverTranscript, clientChallenge };
+            if (!verifyNativeHandshakeProof(frame.proof, this.nonce, "client", transcript))
+              throw new AgoraError("native service client did not prove the transcript");
             greeted = true;
-            sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "welcome", requestId: frame.requestId,
-              bootEpoch: this.bootEpoch, accountId: this.accountId, seatLabel: this.seatLabel });
+            sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "welcome", ...transcript,
+              proof: nativeHandshakeProof(this.nonce, "welcome", transcript) });
             return;
           }
           await this.#dispatch(socket, frame);
@@ -212,33 +359,27 @@ export class NativeRoomService {
   }
 
   async stop() {
-    if (!this.server && !this.lock) return;
+    if (!this.server) return;
     this.running = false;
     for (const socket of this.sockets) socket.destroy();
     this.sockets.clear(); this.subscriptions.clear();
-    if (this.server) {
-      const server = this.server; this.server = null;
-      await new Promise((resolve) => server.close(() => resolve(undefined)));
-    }
     for (const store of this.rooms.values()) await store.close();
     this.rooms.clear();
     await this.#releaseFiles();
   }
 
   async #releaseFiles() {
-    if (this.server) {
-      if (this.server.listening) this.server.close();
-      this.server = null;
-    }
-    if (this.lock) { await this.lock.close(); this.lock = null; }
     try {
       const descriptor = JSON.parse(await readFile(this.descriptorPath, "utf8"));
-      if (descriptor.nonce === this.nonce) await rm(this.descriptorPath, { force: true });
+      if (descriptor.nonce === this.nonce && descriptor.bootEpoch === this.bootEpoch) await rm(this.descriptorPath, { force: true });
     } catch {}
-    try {
-      const lock = JSON.parse(await readFile(this.lockPath, "utf8"));
-      if (lock.nonce === this.nonce) await rm(this.lockPath, { force: true });
-    } catch {}
+    const server = this.server;
+    this.server = null;
+    if (!server) return;
+    await new Promise((resolve) => {
+      if (!server.listening) resolve(undefined);
+      else server.close(() => resolve(undefined));
+    });
   }
 }
 
@@ -257,17 +398,48 @@ export class NativeServiceClient {
     socket.on("close", () => this.#close(new AgoraError("native service connection closed")));
   }
 
-  /** @param {{ host: string, port: number, nonce: string, timeoutMs?: number }} endpoint */
+  /** @param {{ path: string, nonce: string, bootEpoch: string, accountId: string, seatLabel: string, timeoutMs?: number }} endpoint */
   static async connect(endpoint) {
-    if (!Number.isSafeInteger(endpoint.port) || endpoint.port < 1 || endpoint.port > 65535) throw new AgoraError("native service endpoint has an invalid port");
-    const socket = net.createConnection({ host: endpoint.host, port: endpoint.port });
-    await Promise.race([
-      once(socket, "connect"),
-      once(socket, "error").then(([error]) => Promise.reject(error)),
-    ]);
-    const client = new NativeServiceClient(socket, endpoint.timeoutMs ?? REQUEST_TIMEOUT_MS);
-    await client.request("hello", { nonce: endpoint.nonce });
-    return client;
+    if (typeof endpoint.path !== "string" || !endpoint.path) throw new AgoraError("native service descriptor has no endpoint path");
+    validateNativeId(endpoint.nonce, "service secret");
+    validateNativeId(endpoint.bootEpoch, "service boot epoch");
+    validateNativeId(endpoint.accountId, "service account id");
+    if (typeof endpoint.seatLabel !== "string" || !endpoint.seatLabel.trim() || endpoint.seatLabel.length > 120)
+      throw new AgoraError("native service descriptor has no bounded seat label");
+    const timeoutMs = endpoint.timeoutMs ?? REQUEST_TIMEOUT_MS;
+    const socket = net.createConnection({ path: endpoint.path });
+    try {
+      await Promise.race([
+        once(socket, "connect"),
+        once(socket, "error").then(([error]) => Promise.reject(error)),
+      ]);
+      const hello = /** @type {Record<string, any>} */ (await readHandshakeFrame(socket, timeoutMs, "server proof"));
+      if (hello.type !== "server-hello" || hello.bootEpoch !== endpoint.bootEpoch
+        || hello.accountId !== endpoint.accountId || hello.seatLabel !== endpoint.seatLabel)
+        throw new AgoraError("native service server proof did not match the descriptor");
+      const requestId = requiredString(hello.requestId, "handshake request id");
+      const serverChallenge = requiredString(hello.serverChallenge, "server challenge");
+      validateNativeId(serverChallenge, "server challenge");
+      const serverTranscript = { bootEpoch: endpoint.bootEpoch, requestId, serverChallenge,
+        accountId: endpoint.accountId, seatLabel: endpoint.seatLabel };
+      if (!verifyNativeHandshakeProof(hello.proof, endpoint.nonce, "server", serverTranscript))
+        throw new AgoraError("native service server proof was invalid");
+      const clientChallenge = randomUUID().replaceAll("-", "");
+      const transcript = { ...serverTranscript, clientChallenge };
+      if (!sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "client-hello", ...transcript,
+        proof: nativeHandshakeProof(endpoint.nonce, "client", transcript) }))
+        throw new AgoraError("native service closed before client authentication");
+      const welcome = /** @type {Record<string, any>} */ (await readHandshakeFrame(socket, timeoutMs, "welcome proof"));
+      if (welcome.type !== "welcome" || welcome.requestId !== requestId || welcome.bootEpoch !== endpoint.bootEpoch
+        || welcome.serverChallenge !== serverChallenge || welcome.clientChallenge !== clientChallenge
+        || welcome.accountId !== endpoint.accountId || welcome.seatLabel !== endpoint.seatLabel
+        || !verifyNativeHandshakeProof(welcome.proof, endpoint.nonce, "welcome", transcript))
+        throw new AgoraError("native service welcome did not prove the fresh transcript");
+      return new NativeServiceClient(socket, timeoutMs);
+    } catch (error) {
+      socket.destroy();
+      throw error;
+    }
   }
 
   /** @param {string} type @param {Record<string, unknown>} [fields] */

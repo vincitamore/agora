@@ -1,5 +1,5 @@
 // @ts-check
-import { createHash } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { AgoraError } from "./core.mjs";
 
 export const NATIVE_PROTOCOL = "agora-native/1";
@@ -31,6 +31,34 @@ export function canonicalJson(value) {
 /** @param {unknown} value */
 export function nativeDigest(value) {
   return `sha256:${createHash("sha256").update(canonicalJson(value)).digest("hex")}`;
+}
+
+const HANDSHAKE_PHASES = new Set(["server", "client", "welcome"]);
+
+/**
+ * Proves possession of the seat-local service secret without putting that
+ * reusable secret on the socket. Every phase covers the complete transcript
+ * accumulated so far, including the service boot epoch.
+ * @param {string} secret
+ * @param {"server" | "client" | "welcome"} phase
+ * @param {Record<string, unknown>} transcript
+ */
+export function nativeHandshakeProof(secret, phase, transcript) {
+  validateNativeId(secret, "service secret");
+  if (!HANDSHAKE_PHASES.has(phase)) throw new AgoraError(`native handshake has an invalid ${JSON.stringify(phase)} phase`);
+  return createHmac("sha256", secret).update(canonicalJson({ ...transcript, phase, protocol: NATIVE_PROTOCOL })).digest("hex");
+}
+
+/**
+ * @param {unknown} proof
+ * @param {string} secret
+ * @param {"server" | "client" | "welcome"} phase
+ * @param {Record<string, unknown>} transcript
+ */
+export function verifyNativeHandshakeProof(proof, secret, phase, transcript) {
+  if (typeof proof !== "string" || !/^[a-f0-9]{64}$/.test(proof)) return false;
+  const expected = nativeHandshakeProof(secret, phase, transcript);
+  return timingSafeEqual(Buffer.from(proof, "hex"), Buffer.from(expected, "hex"));
 }
 
 /** @param {string} value @param {string} label */
