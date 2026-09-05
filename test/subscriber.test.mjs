@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { NativeRoomService } from "../src/native-service.mjs";
+import { NativeRoomService, NativeServiceClient } from "../src/native-service.mjs";
 import { SERVICE_DARK, ServiceDarkError, openNativeSubscription, serviceDescriptorPath, serviceDescriptorStatus } from "../src/wake/subscriber.mjs";
 import { nativeTransport } from "../src/transports/native.mjs";
 import { isWatchStop, watch, watchStopReason } from "../src/watch.mjs";
@@ -224,4 +224,60 @@ test("a first arm on a room longer than the window names the committed positions
   const explicit = await openNativeSubscription({ stateRoot: root, roomId: ROOM, since: `${EPOCH}:0`, window: 3 });
   t.after(() => explicit.close());
   assert.equal(explicit.neverOffered, null, "a saved or set cursor is the session's own position, not a window");
+});
+
+/**
+ * The property the head is named for, exercised rather than read: a CONNECTED subscriber whose
+ * channel has gone dark in each of the three ways `classify` recognises reports the next failure
+ * as the service being dark, carrying the declared stop protocol, never as the underlying error.
+ * `connect` is injected so the condition is set on the real client after its hello and before the
+ * first request. Replacing the discriminator with `false` turns every case here red.
+ */
+test("a connected subscriber whose channel went dark reports the next failure as service-dark under each dark condition, never as the underlying error", async (t) => {
+  const { root } = await fixture(t);
+  const unknown = "e".repeat(32);
+  /** @param {(client: import('../src/native-service.mjs').NativeServiceClient) => void} arm */
+  const connectThen = (arm) => /** @type {typeof NativeServiceClient.connect} */ (async (endpoint) => {
+    const client = await NativeServiceClient.connect(endpoint);
+    arm(client);
+    return client;
+  });
+  /** @param {unknown} e @param {string} condition @param {RegExp} cause the underlying failure the dark verdict wraps: pins the case to the post-connection line, not to a failed connect */
+  const isDark = (e, condition, cause) => {
+    assert.ok(e instanceof ServiceDarkError, `${condition}: expected ServiceDarkError, got ${e instanceof Error ? `${e.name}: ${e.message}` : String(e)}`);
+    assert.match(e.message, cause, `${condition}: wraps the underlying failure, not a connect failure`);
+    assert.equal(watchStopReason(e), SERVICE_DARK, `${condition}: the stop protocol is carried`);
+    assert.equal(e.exitCode, 1, `${condition}: exit 1, never a new code`);
+    return true;
+  };
+
+  // 1. darkReason already set by the subscriber's own error listener on a still-open socket: the
+  //    link fails after the hello, before the service answers the first request
+  await assert.rejects(
+    openNativeSubscription({ stateRoot: root, roomId: ROOM, connect: connectThen((client) => {
+      setImmediate(() => client.socket.emit("error", new Error("simulated link failure after hello")));
+    }) }),
+    (e) => isDark(e, "darkReason set by a listener (status)", /simulated link failure after hello/));
+
+  // 2. socket.destroyed before the first request is written: the request is refused locally and
+  //    the close event has not yet run any listener, so only the socket's state says dark
+  await assert.rejects(
+    openNativeSubscription({ stateRoot: root, roomId: ROOM, connect: connectThen((client) => client.socket.destroy()) }),
+    (e) => isDark(e, "socket.destroyed (status)", /request was not sent/));
+  await assert.rejects(
+    openNativeSubscription({ stateRoot: root, roomId: ROOM, since: `${EPOCH}:0`, connect: connectThen((client) => client.socket.destroy()) }),
+    (e) => isDark(e, "socket.destroyed (subscribe)", /request was not sent/));
+
+  // 3. the socket is no longer writable while not reported destroyed: the write side is gone
+  await assert.rejects(
+    openNativeSubscription({ stateRoot: root, roomId: unknown, since: `${EPOCH}:0`, connect: connectThen((client) => {
+      Object.defineProperty(client.socket, "writable", { value: false, configurable: true });
+      Object.defineProperty(client.socket, "destroyed", { value: false, configurable: true });
+    }) }),
+    (e) => isDark(e, "!socket.writable (subscribe)", /request was not sent/));
+
+  // the control: the same refusal on a healthy channel is not dark (the discriminator, not the
+  // error, decides)
+  await assert.rejects(openNativeSubscription({ stateRoot: root, roomId: unknown, since: `${EPOCH}:0` }),
+    (e) => !(e instanceof ServiceDarkError) && !isWatchStop(e));
 });
