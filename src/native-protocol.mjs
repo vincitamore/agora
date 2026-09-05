@@ -1,0 +1,124 @@
+// @ts-check
+import { createHash } from "node:crypto";
+import { AgoraError } from "./core.mjs";
+
+export const NATIVE_PROTOCOL = "agora-native/1";
+export const NATIVE_FRAME_MAX = 1024 * 1024;
+const ID_RE = /^[A-Za-z0-9_-]{16,128}$/;
+const EPOCH_RE = /^[a-f0-9]{32}$/;
+const UTF8 = new TextDecoder("utf-8", { fatal: true });
+
+/** @param {unknown} value @returns {string} */
+function canonical(value) {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new AgoraError("native protocol values must contain finite JSON numbers");
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (typeof value === "object") {
+    const record = /** @type {Record<string, unknown>} */ (value);
+    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonical(record[key])}`).join(",")}}`;
+  }
+  throw new AgoraError("native protocol values must be JSON data");
+}
+
+/** Stable across object key order; arrays retain their declared order. @param {unknown} value */
+export function canonicalJson(value) {
+  return canonical(value);
+}
+
+/** @param {unknown} value */
+export function nativeDigest(value) {
+  return `sha256:${createHash("sha256").update(canonicalJson(value)).digest("hex")}`;
+}
+
+/** @param {string} value @param {string} label */
+export function validateNativeId(value, label = "id") {
+  if (!ID_RE.test(value)) throw new AgoraError(`native ${label} must be 16-128 URL-safe characters`);
+  return value;
+}
+
+/** @param {string} value */
+export function validateNativeEpoch(value) {
+  if (!EPOCH_RE.test(value)) throw new AgoraError("native room epoch must be 32 lowercase hexadecimal characters");
+  return value;
+}
+
+/** @param {string} epoch @param {number} sequence */
+export function nativeCursor(epoch, sequence) {
+  validateNativeEpoch(epoch);
+  if (!Number.isSafeInteger(sequence) || sequence < 0) throw new AgoraError("native room sequence must be a non-negative safe integer");
+  return `${epoch}:${sequence}`;
+}
+
+/** @param {string} cursor */
+export function parseNativeCursor(cursor) {
+  const match = cursor.match(/^([a-f0-9]{32}):(0|[1-9][0-9]*)$/);
+  if (!match) throw new AgoraError(`bad native room cursor ${JSON.stringify(cursor)} (expected <epoch>:<sequence>)`);
+  const sequence = Number(match[2]);
+  if (!Number.isSafeInteger(sequence)) throw new AgoraError(`native room cursor sequence is too large: ${JSON.stringify(cursor)}`);
+  return { epoch: match[1], sequence };
+}
+
+/**
+ * The stream is length-prefixed so a message body may contain any text without line parsing.
+ * A declared length is checked before the payload is buffered further.
+ * @param {unknown} value
+ * @param {number} [maximum]
+ */
+export function encodeNativeFrame(value, maximum = NATIVE_FRAME_MAX) {
+  const payload = Buffer.from(JSON.stringify(value), "utf8");
+  if (!payload.length || payload.length > maximum) throw new AgoraError(`native protocol frame must be 1-${maximum} bytes`);
+  const frame = Buffer.allocUnsafe(4 + payload.length);
+  frame.writeUInt32BE(payload.length, 0);
+  payload.copy(frame, 4);
+  return frame;
+}
+
+export class NativeFrameDecoder {
+  /** @param {{ maximum?: number }} [options] */
+  constructor(options = {}) {
+    this.maximum = options.maximum ?? NATIVE_FRAME_MAX;
+    this.buffer = Buffer.alloc(0);
+  }
+
+  /** @param {Uint8Array} bytes */
+  push(bytes) {
+    const chunk = Buffer.from(bytes);
+    this.buffer = this.buffer.length ? Buffer.concat([this.buffer, chunk]) : chunk;
+    /** @type {unknown[]} */
+    const values = [];
+    while (this.buffer.length >= 4) {
+      const length = this.buffer.readUInt32BE(0);
+      if (length < 1 || length > this.maximum) throw new AgoraError(`native protocol declared an invalid ${length}-byte frame`);
+      if (this.buffer.length < 4 + length) break;
+      let raw;
+      try { raw = UTF8.decode(this.buffer.subarray(4, 4 + length)); }
+      catch { throw new AgoraError("native protocol frame is not valid UTF-8"); }
+      this.buffer = this.buffer.subarray(4 + length);
+      let value;
+      try { value = JSON.parse(raw); }
+      catch { throw new AgoraError("native protocol frame is not valid JSON"); }
+      if (!value || typeof value !== "object" || Array.isArray(value)) throw new AgoraError("native protocol frame must contain a JSON object");
+      values.push(value);
+    }
+    if (this.buffer.length > this.maximum + 4) throw new AgoraError("native protocol buffered data exceeds one bounded frame");
+    return values;
+  }
+
+  finish() {
+    if (this.buffer.length) throw new AgoraError("native protocol stream ended inside a frame");
+  }
+}
+
+/** @param {unknown} value */
+export function validateNativeEnvelope(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new AgoraError("native protocol envelope must be an object");
+  const envelope = /** @type {Record<string, unknown>} */ (value);
+  if (envelope.protocol !== NATIVE_PROTOCOL) throw new AgoraError(`unsupported native protocol ${JSON.stringify(envelope.protocol)}`);
+  if (typeof envelope.type !== "string" || !/^[a-z][a-z0-9-]{1,40}$/.test(envelope.type)) throw new AgoraError("native protocol envelope needs a bounded type");
+  if (typeof envelope.requestId !== "string") throw new AgoraError("native protocol envelope needs requestId");
+  validateNativeId(envelope.requestId, "requestId");
+  return envelope;
+}
