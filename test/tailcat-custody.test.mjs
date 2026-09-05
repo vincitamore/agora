@@ -93,3 +93,20 @@ test('custody: owner disposal join supports ended non-auto-destroy and emitClose
     assert.equal(released,false);finishDestroy();await refused;assert.equal(released,true);
   }
 });
+
+/** Custody owner whose disposal join rejects: a disposal can fail after the bytes landed.
+ * @param {Readable} readable @param {typeof info} metadata @param {()=>void} release */
+function rejectingPinned(readable,metadata,release) {
+  const closed=Promise.reject(Object.assign(Error('owner disposal failed'),{code:'P1_DISPOSE'}));
+  return {info:metadata,readable,closed,release};
+}
+
+test('custody: a rejecting owner disposal join still releases the pin and keeps the verified receipt', async () => {
+  let releases=0;
+  const sender=createRouteObjectSender(binding,[info],{signal:new AbortController().signal,maxBytes:100,async openObject(){return rejectingPinned(Readable.from([bytes]),info,()=>{releases++;});}});
+  const out=sink(); assert.deepEqual(await sender.send(ref,out.writable),{id:info.id,digest,size:bytes.length});
+  assert.deepEqual(Buffer.concat(out.chunks),bytes); assert.equal(releases,1);
+  releases=0;
+  const refused=createRouteObjectSender(binding,[info],{signal:new AbortController().signal,maxBytes:100,async openObject(){return rejectingPinned(Readable.from([bytes]),{...info,id:'attachment000002'},()=>{releases++;});}});
+  await assert.rejects(refused.send(ref,sink().writable),{code:'AGORA_CUSTODY_OBJECT_CONTEXT'}); assert.equal(releases,1);
+});
