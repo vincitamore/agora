@@ -21,3 +21,12 @@ test("attack-matrix package-api: frame union has no write/send/type/keys", () =>
     expect(FRAME_TYPES.includes(forbidden as never)).toBe(false);
   }
 });
+
+test("attack-matrix agora-verb: the root CLI has no verb that carries bytes to a pane", () => {
+  const src = readFileSync(new URL("../../bin/agora.mjs", import.meta.url), "utf8");
+  const verbs = [...src.matchAll(/^\s{4}([a-z][a-z0-9-]*): \{ args:/gm)].map((m) => m[1]);
+  expect(verbs.length).toBeGreaterThan(5);
+  for (const forbidden of ["write", "send", "type", "keys", "inject"]) {
+    expect(verbs.includes(forbidden)).toBe(false);
+  }
+});
