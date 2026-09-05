@@ -6,11 +6,17 @@ on:
 jobs:
   suite:
     name: ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            runner: [self-hosted, linux, house]
+          - os: macos-latest
+            runner: macos-latest
+          - os: windows-latest
+            runner: [self-hosted, windows, house]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -56,11 +62,17 @@ jobs:
             node -e 'let s=""; process.stdin.on("data", d => s += d).on("end", () => { const r = JSON.parse(s); if (r.alive !== false || r.watcherPid !== null || r.supervisorPid !== null) process.exit(1); })'
   tui:
     name: tui ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            runner: [self-hosted, linux, house]
+          - os: macos-latest
+            runner: macos-latest
+          - os: windows-latest
+            runner: [self-hosted, windows, house]
     defaults:
       run:
         working-directory: tui
@@ -74,11 +86,17 @@ jobs:
       - run: bunx tsc --noEmit -p .
   spawn:
     name: spawn ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            runner: [self-hosted, linux, house]
+          - os: macos-latest
+            runner: macos-latest
+          - os: windows-latest
+            runner: [self-hosted, windows, house]
     defaults:
       run:
         working-directory: spawn
