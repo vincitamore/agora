@@ -57,15 +57,22 @@ export function nativeTransport(room, { actor, stateRoot, connect }) {
       const messages = Array.isArray(result?.messages) ? result.messages.map(nativeMessage) : [];
       return /** @type {import('../core.mjs').ReadResult} */ (messages);
     },
-    async post(text, { thread } = {}) {
+    /**
+     * `face` is the poster's post-time face choice (`--face` names transports, `--no-face` is
+     * `"none"`; absent is the room's policy). It rides the append frame beside the operation, so
+     * the service that runs the faces reads it from the same request that committed the message;
+     * the ack's `faces[]`, when the service supplies one, is returned as the receipt's face rows.
+     * This transport never publishes a face itself.
+     */
+    async post(text, { thread, face } = {}) {
       if (thread !== undefined) throw new AgoraError("native rooms have no threads");
       /** @type {import('../native-service.mjs').NativeServiceClient} */
       let c;
       try { c = await client(); }
       catch (e) { throw new AgoraError(`room-dark: ${e instanceof Error ? e.message : String(e)}; nothing was posted and no cursor was issued`); }
       const operationId = randomUUID().replaceAll("-", "");
-      const receipt = await c.request("append", { roomId, operation: { operationId, authorName: actor.name, authorKind: actor.kind, text } });
-      return { id: String(receipt.id), cursor: String(receipt.cursor) };
+      const receipt = await c.request("append", { roomId, operation: { operationId, authorName: actor.name, authorKind: actor.kind, text }, ...(face === undefined ? {} : { face }) });
+      return { id: String(receipt.id), cursor: String(receipt.cursor), ...(Array.isArray(receipt.faces) ? { faces: receipt.faces } : {}) };
     },
   };
 }

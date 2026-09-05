@@ -47,7 +47,9 @@ const execFileAsync = promisify(execFile);
  * `ids` is present when the transport had to send one post as several messages: every id it
  * produced, in order, `id` being the first. The caller records them all in the ledger (they are all
  * this session's own) and follows the first, the rest as other names for it.
- * @typedef {{ id: string, cursor: string, url?: string, ids?: string[] }} PostResult
+ * `faces` is present only on a native room whose service returned the per-face rows of the
+ * receipt (`pending`, `refused` before any call); a transport never invents one.
+ * @typedef {{ id: string, cursor: string, url?: string, ids?: string[], faces?: { transport: string, status: string, reason?: string, id?: string, attachmentId?: string }[] }} PostResult
  */
 /**
  * Why a read after a cursor could not reach it: the page cap, or a walk that stopped early. A read
@@ -65,7 +67,11 @@ const execFileAsync = promisify(execFile);
  * @typedef {Message[] & GapCarrier} ReadResult
  */
 /** @typedef {{ thread?: string, since?: string, limit?: number, pages?: number }} ReadOptions */
-/** @typedef {{ thread?: string }} PostOptions */
+/**
+ * `face` is a native room's post-time face choice: transports named by `--face`, `"none"` for
+ * `--no-face`, absent for the room's own policy. Only the native transport reads it.
+ * @typedef {{ thread?: string, face?: 'none' | string[] }} PostOptions
+ */
 /**
  * What a transport implements. `read` returns messages ascending, each carrying a cursor.
  * @typedef {object} Transport
