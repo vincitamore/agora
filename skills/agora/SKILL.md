@@ -466,6 +466,25 @@ obvious, ask whether the counterpart would have acted differently having seen it
 crosses whenever who-holds-what changes, naming who holds what, and a `note` on each room
 in the config says which lane it is.
 
+**A native room's faces are its policy, and a post can override it for itself.** A face is
+a copy of a native message on a transport where a reader lives (the Slack channel the
+humans read from a phone). `agora room faces <room>` prints the policy; with `--add slack
+--channel <id>`, `--remove`, `--enable`, `--disable`, `--human`, `--agent`, `--system`
+(a `+`-joined list from `always`, `never`, `addressed`, `landing`), `--attachments` or
+`--pictures` it writes the record under the seat's state, never the shared config, and
+refuses an unknown transport, selector or mode by name with exit 1 and nothing written.
+Every selector reads the poster's own outbound trailers and never the body: `addressed` is
+your own `to:` or `re:` reaching a human, `landing` is your own `verdict:` with a sha
+`exhibit:`. `post <room> --face slack` publishes this one post to that face whatever the
+policy says; `--no-face` keeps it native only. The receipt carries one row per face
+(`pending`, `published`, `refused` with a named reason, `unknown`), and a face that
+refuses (`no-such-face`, `capability`, `disabled`, `dark`, `too-long`, `redacted`, `route`)
+is a row and a stderr line, never an exit code: the native post is the outcome, so read
+the face's fate with `agora faces <room> --for <cursor>` rather than branching on the
+code, and `agora faces <room> --unknown` for what a human should look at. A row the seat's
+service has not written is absent, not `pending`: the tool never reports a publish it did
+not read. `--split` is a Slack post's; on a native room it is a usage error.
+
 ## §3 TRANSPORTS
 
 | transport | room is | threads | cursor | identity |
@@ -474,7 +493,7 @@ in the config says which lane it is.
 | `github` | one issue, `owner/name#N` | no | `created_at\|id`; an edited old comment is not re-delivered; reads are conditional and a watch defaults to five minutes | the token's user; falls back to `gh auth token` |
 | `github-events` | a read-only feed: one repo (`repo`), an org (`org`), or a user (`user`); narrowed by `events` (types) and `refs` (branches or tags) in the room's config | no | the event id; reads are conditional; a watch defaults to one minute | the token's user; `post` is a usage error, the issue or the pull request is the room for that |
 | `local` | one NDJSON file | yes | lines consumed | the configured actor |
-| `native` | a room hosted by this seat's service, by `roomId` (32 hex); `watch` subscribes to the service and wakes on its events instead of polling, with the same lines, cursor file and exit codes; a service that is absent, refuses the hello, or closes the socket ends the watch with exit 1 and `reason: service-dark` on the `watch-result` line, never 0 | no | `<epoch>:<sequence>`; a foreign epoch or a future sequence is refused without advancing | the seat's service account, stamped by the host; the bearer is the signature |
+| `native` | a room hosted by this seat's service, by `roomId` (32 hex); `watch` subscribes to the service and wakes on its events instead of polling, with the same lines, cursor file and exit codes; a service that is absent, refuses the hello, or closes the socket ends the watch with exit 1 and `reason: service-dark` on the `watch-result` line, never 0; its faces (`room faces`, `post --face`, `faces`) are the seat's own records under `native/rooms/<roomId>/` | no | `<epoch>:<sequence>`; a foreign epoch or a future sequence is refused without advancing | the seat's service account, stamped by the host; the bearer is the signature |
 
 One Slack app per participant per machine: an app is one bot user, one identity, one token,
 and the token lives on the machine that uses it, so each side creates its own from
