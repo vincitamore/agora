@@ -50,8 +50,9 @@ function requiredString(value, label) {
 /**
  * The filesystem path is itself the exclusion primitive on POSIX. Windows
  * named pipes do not live in the filesystem, so their stable name is derived
- * from the physical state root plus the seat account rather than caller path
- * spelling.
+ * from the physical state root rather than caller path spelling. The service
+ * is seat-global: account identity belongs in its authenticated descriptor,
+ * not in the exclusion endpoint, or two accounts can own one root at once.
  * @param {string} root @param {string} accountId @param {NodeJS.Platform} [platform]
  */
 export async function nativeServiceEndpoint(root, accountId, platform = process.platform) {
@@ -59,7 +60,7 @@ export async function nativeServiceEndpoint(root, accountId, platform = process.
   await mkdir(path.resolve(root), { recursive: true, mode: 0o700 });
   const physicalRoot = await realpath(path.resolve(root));
   if (platform === "win32") {
-    const seat = createHash("sha256").update(`${physicalRoot.toLowerCase()}\0${accountId}`).digest("hex").slice(0, 32);
+    const seat = createHash("sha256").update(physicalRoot.toLowerCase()).digest("hex").slice(0, 32);
     return `\\\\.\\pipe\\agora-${seat}`;
   }
   const nativeDirectory = path.join(physicalRoot, "native");
@@ -209,6 +210,8 @@ export class NativeRoomService {
     this.rooms = new Map();
     /** @type {Map<string, Promise<NativeRoomStore>>} */
     this.roomOpenings = new Map();
+    /** @type {Set<Promise<unknown>>} */
+    this.roomActivities = new Set();
     /** @type {Set<net.Socket>} */
     this.sockets = new Set();
     /** @type {Map<net.Socket, Map<string, number>>} */
@@ -248,10 +251,17 @@ export class NativeRoomService {
     if (!this.running) throw new AgoraError("native service is dark; start it explicitly before creating a room");
     if (options.roomId && (this.rooms.has(options.roomId) || this.roomOpenings.has(options.roomId)))
       throw new AgoraError(`native room ${options.roomId} is already open on this service`);
-    const store = await NativeRoomStore.create({ root: this.root, roomId: options.roomId, epoch: options.epoch,
-      hostAccountId: this.accountId, now: this.now });
-    this.rooms.set(store.manifest.roomId, store);
-    return store.status();
+    const activity = (async () => {
+      const store = await NativeRoomStore.create({ root: this.root, roomId: options.roomId, epoch: options.epoch,
+        hostAccountId: this.accountId, now: this.now });
+      if (!this.running) {
+        await store.close();
+        throw new AgoraError("native service stopped while creating the room; the room was not opened by this service");
+      }
+      this.rooms.set(store.manifest.roomId, store);
+      return store.status();
+    })();
+    return await this.#trackRoomActivity(activity);
   }
 
   /** @param {string} roomId */
@@ -259,13 +269,31 @@ export class NativeRoomService {
     if (!this.running) throw new AgoraError("native service is dark; start it explicitly before opening a room");
     const existing = this.rooms.get(roomId);
     if (existing) return existing;
-    const opening = this.roomOpenings.get(roomId) ?? NativeRoomStore.open({ root: this.root, roomId, now: this.now });
-    this.roomOpenings.set(roomId, opening);
+    let opening = this.roomOpenings.get(roomId);
+    if (!opening) {
+      opening = this.#trackRoomActivity((async () => {
+        const store = await NativeRoomStore.open({ root: this.root, roomId, now: this.now });
+        if (!this.running) {
+          await store.close();
+          throw new AgoraError("native service stopped while opening the room; the room was not retained");
+        }
+        this.rooms.set(roomId, store);
+        return store;
+      })());
+      this.roomOpenings.set(roomId, opening);
+    }
     try {
-      const store = await opening;
-      this.rooms.set(roomId, store);
-      return store;
-    } finally { this.roomOpenings.delete(roomId); }
+      return await opening;
+    } finally {
+      if (this.roomOpenings.get(roomId) === opening) this.roomOpenings.delete(roomId);
+    }
+  }
+
+  /** @template T @param {Promise<T>} activity @returns {Promise<T>} */
+  #trackRoomActivity(activity) {
+    this.roomActivities.add(activity);
+    activity.then(() => this.roomActivities.delete(activity), () => this.roomActivities.delete(activity));
+    return activity;
   }
 
   /** @param {net.Socket} socket */
@@ -330,12 +358,34 @@ export class NativeRoomService {
     if (frame.type === "read" || frame.type === "subscribe") {
       const since = frame.since === undefined ? undefined : requiredString(frame.since, "cursor");
       const limit = frame.limit === undefined ? undefined : Number(frame.limit);
-      const messages = store.read({ ...(since ? { since } : {}), ...(limit !== undefined ? { limit } : {}) });
-      const sequence = messages.length ? parseNativeCursor(messages.at(-1).cursor).sequence
-        : since ? parseNativeCursor(since).sequence : store.status().committed;
-      sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: frame.type === "subscribe" ? "subscribe-result" : "read-result",
-        requestId: frame.requestId, roomId, messages, checkpoint: store.checkpoint(sequence) });
-      if (frame.type === "subscribe") this.subscriptions.get(socket)?.set(roomId, sequence);
+      if (frame.type === "read") {
+        const messages = store.read({ ...(since ? { since } : {}), ...(limit !== undefined ? { limit } : {}) });
+        const sequence = messages.length ? parseNativeCursor(messages.at(-1).cursor).sequence
+          : since ? parseNativeCursor(since).sequence : store.status().committed;
+        sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "read-result", requestId: frame.requestId,
+          roomId, messages, checkpoint: store.checkpoint(sequence) });
+        return;
+      }
+
+      if (!since) throw new AgoraError("native subscription needs an explicit cursor");
+      const start = parseNativeCursor(since);
+      // read() validates the epoch and that the cursor is not beyond the log.
+      store.read({ since, limit: 1 });
+      const committed = store.status().committed;
+      const backlogCount = committed - start.sequence;
+      if (backlogCount > 10_000)
+        throw new AgoraError(`native subscription backlog has ${backlogCount} records; read forward before subscribing (no cursor advanced)`);
+      const backlog = backlogCount ? store.read({ since, limit: backlogCount }) : [];
+      const replayFrames = backlog.map((message) => encodeNativeFrame({ protocol: NATIVE_PROTOCOL, type: "event",
+        requestId: message.id, roomId, message }));
+      const resultFrame = encodeNativeFrame({ protocol: NATIVE_PROTOCOL, type: "subscribe-result",
+        requestId: frame.requestId, roomId, messages: [], checkpoint: store.checkpoint(committed) });
+      const replayBytes = replayFrames.reduce((sum, encoded) => sum + encoded.length, resultFrame.length);
+      if (socket.writableLength + replayBytes > MAX_PENDING_WRITE)
+        throw new AgoraError(`native subscription backlog needs ${replayBytes} buffered bytes; read forward before subscribing (no cursor advanced)`);
+      for (const encoded of replayFrames) socket.write(encoded);
+      this.subscriptions.get(socket)?.set(roomId, committed);
+      socket.write(resultFrame);
       return;
     }
     if (frame.type === "append") {
@@ -365,6 +415,7 @@ export class NativeRoomService {
     this.running = false;
     for (const socket of this.sockets) socket.destroy();
     this.sockets.clear(); this.subscriptions.clear();
+    await Promise.allSettled([...this.roomActivities]);
     for (const store of this.rooms.values()) await store.close();
     this.rooms.clear();
     await this.#releaseFiles();

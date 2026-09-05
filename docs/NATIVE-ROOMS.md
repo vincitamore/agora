@@ -170,6 +170,16 @@ The seat service fans one committed event to every subscribed local connection. 
 begins with an ordered replay and a prefix checkpoint, then receives later commits. It does not own
 or collapse harness checkpoints: each `watch`/session persists only its own cursor after its own
 handoff succeeds, so one sibling can stop or fail without consuming another sibling's delivery.
+Replay is contiguous through the host's committed frontier before the subscription is acknowledged.
+If that replay exceeds the bounded frame or pending-output budget, subscription refuses before
+delivering any prefix and tells the reader to advance with bounded reads; it never registers at the
+frontier after returning only the first page. Service shutdown joins every in-flight room create or
+open before releasing the endpoint, and a late acquisition is closed rather than retained.
+
+The endpoint is derived from the canonical physical state root on every platform. Account identity
+is authenticated in the descriptor and handshake but is not part of the endpoint name: one state
+root owns one seat service, so a second account cannot create a second Windows pipe beside the same
+shared descriptor.
 
 State below the Agora root is seat-owned:
 

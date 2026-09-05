@@ -9,6 +9,7 @@ import net from "node:net";
 import path from "node:path";
 import { NativeRoomService, NativeServiceClient, nativeServiceEndpoint } from "../src/native-service.mjs";
 import { NativeFrameDecoder, NATIVE_PROTOCOL, encodeNativeFrame, nativeHandshakeProof } from "../src/native-protocol.mjs";
+import { NativeRoomStore } from "../src/native-store.mjs";
 
 const ROOM = "4".repeat(32);
 const EPOCH = "5".repeat(32);
@@ -133,6 +134,16 @@ test("concurrent seat-service starters produce exactly one live owner", async (t
   client.close();
 });
 
+test("one physical state root refuses a second service under another account", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "agora-native-account-owner-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const first = new NativeRoomService({ root, accountId: ACCOUNT, seatLabel: "first" });
+  const second = new NativeRoomService({ root, accountId: "seat_account_0002", seatLabel: "second" });
+  await first.start();
+  t.after(() => first.stop());
+  await assert.rejects(second.start(), /endpoint .* already active or occupied/);
+});
+
 test("an endpoint squatter receives no client bytes before proving the service", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "agora-native-squatter-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -210,4 +221,82 @@ test("abrupt service death leaves no manual lock recovery step", async (t) => {
   const client = await NativeServiceClient.connect(/** @type {any} */ (endpoint));
   client.close();
   assert.notEqual(endpoint.bootEpoch, deadEndpoint.bootEpoch);
+});
+
+test("stop joins an in-flight room opening without retaining a late store", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "agora-native-stop-opening-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const seed = new NativeRoomService({ root, accountId: ACCOUNT, seatLabel: "seed" });
+  await seed.start();
+  await seed.createRoom({ roomId: ROOM, epoch: EPOCH });
+  await seed.stop();
+
+  const service = new NativeRoomService({ root, accountId: ACCOUNT, seatLabel: "replacement" });
+  await service.start();
+  t.after(() => service.stop());
+  const original = NativeRoomStore.open;
+  /** @type {() => void} */ let resume = () => {};
+  /** @type {() => void} */ let entered = () => {};
+  const barrier = new Promise((resolve) => { resume = () => resolve(undefined); });
+  const observed = new Promise((resolve) => { entered = () => resolve(undefined); });
+  try {
+    NativeRoomStore.open = async function(options) {
+      entered();
+      await barrier;
+      return await original.call(this, options);
+    };
+    const opening = service.openRoom(ROOM);
+    await observed;
+    const stopping = service.stop();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    resume();
+    await assert.rejects(opening, /stopped while opening/);
+    await stopping;
+    assert.equal(service.rooms.size, 0);
+    const replacement = await original.call(NativeRoomStore, { root, roomId: ROOM });
+    await replacement.close();
+  } finally {
+    resume?.();
+    NativeRoomStore.open = original;
+  }
+});
+
+test("subscription catch-up is contiguous beyond the default read page", async (t) => {
+  const { service, endpoint } = await fixture(t);
+  const store = await service.openRoom(ROOM);
+  for (let i = 1; i <= 1005; i++) await store.append({
+    operationId: `operation_backlog_${String(i).padStart(4, "0")}`,
+    authorName: "Sol/codex",
+    text: String(i),
+  }, { accountId: ACCOUNT });
+  const client = await NativeServiceClient.connect(/** @type {any} */ (endpoint));
+  t.after(() => client.close());
+  /** @type {any[]} */ const events = [];
+  /** @type {() => void} */ let resolveEnd = () => {};
+  const end = new Promise((resolve) => { resolveEnd = () => resolve(undefined); });
+  const result = await client.subscribe(ROOM, `${EPOCH}:0`, (message) => {
+    events.push(message);
+    if (message.cursor === `${EPOCH}:1006`) resolveEnd();
+  });
+  await client.request("append", { roomId: ROOM, operation: {
+    operationId: "operation_backlog_1006", authorName: "Sol/codex", text: "1006",
+  } });
+  await end;
+  const sequences = [...result.messages, ...events].map((message) => parseInt(message.cursor.split(":")[1], 10));
+  assert.deepEqual(sequences, Array.from({ length: 1006 }, (_, index) => index + 1));
+});
+
+test("subscription refuses an oversized replay before delivering a partial prefix", async (t) => {
+  const { service, endpoint } = await fixture(t);
+  const store = await service.openRoom(ROOM);
+  for (let i = 1; i <= 11; i++) await store.append({
+    operationId: `operation_large_backlog_${String(i).padStart(2, "0")}`,
+    authorName: "Sol/codex",
+    text: `${i}:${"x".repeat(200_000)}`,
+  }, { accountId: ACCOUNT });
+  const client = await NativeServiceClient.connect(/** @type {any} */ (endpoint));
+  t.after(() => client.close());
+  /** @type {any[]} */ const events = [];
+  await assert.rejects(client.subscribe(ROOM, `${EPOCH}:0`, (message) => events.push(message)), /read forward before subscribing/);
+  assert.equal(events.length, 0);
 });
