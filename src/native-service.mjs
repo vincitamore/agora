@@ -62,7 +62,9 @@ export async function nativeServiceEndpoint(root, accountId, platform = process.
     const seat = createHash("sha256").update(`${physicalRoot.toLowerCase()}\0${accountId}`).digest("hex").slice(0, 32);
     return `\\\\.\\pipe\\agora-${seat}`;
   }
-  return path.join(physicalRoot, "native", "service.sock");
+  const nativeDirectory = path.join(physicalRoot, "native");
+  await mkdir(nativeDirectory, { recursive: true, mode: 0o700 });
+  return path.join(nativeDirectory, "service.sock");
 }
 
 /** @param {net.Server} server @param {string} endpoint */
