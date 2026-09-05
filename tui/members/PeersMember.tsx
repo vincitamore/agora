@@ -9,6 +9,7 @@ import { useStableDimensions } from "../lib/use-stable-dimensions";
 import { fmtDay, trunc, truncPad } from "../lib/format";
 import { icons, neutral, presence, primary, semantic } from "../theme";
 import { CHROME_ROWS } from "./RoomMember";
+import { shown } from "../lib/safe-text";
 
 const POLL_MS = 5000;
 
@@ -47,7 +48,7 @@ export const PeersMember = memo(function PeersMember({ active }: { active: boole
         {Array.from({ length: listRows }).map((_, i) => {
           const p = rows[i];
           if (!p) {
-            const hint = i === 0 ? (store.peersError ? `peers unreadable: ${store.peersError}` : rows.length ? "" : "no sessions registered on this seat") : "";
+            const hint = i === 0 ? (store.peersError ? shown(`peers unreadable: ${store.peersError}`) : rows.length ? "" : "no sessions registered on this seat") : "";
             return (
               <box key={i} height={1} flexShrink={0}>
                 <text>
