@@ -24,13 +24,13 @@ proxy discards client identity before forwarding to loopback; sharing a listener
 authorization boundary even if the keys above it remained distinct.
 
 Local sessions reach the service over one path endpoint: a Unix socket in a short, non-symlink 0700 runtime
-directory keyed by the state root's filesystem device and inode, or a seat-derived Windows named pipe. The short POSIX
+directory keyed by an Agora-minted identity inside the protected state root, or a seat-derived Windows named pipe. The short POSIX
 path stays below Darwin's 104-byte `sun_path` limit even when the state root is long. The endpoint bind is the live exclusion primitive;
 the descriptor is advisory, never a lock. Abrupt death needs no manual lock recovery. A stale POSIX
 socket entry is moved to a unique quarantine name only after connection refusal and while a
 short-lived exclusive SQLite transaction serializes crash recovery, then the service binds the
 original name; it never unlinks a path a racing successor may already have rebound. The authority
-database lives beside the socket in that physical-root-derived 0700 runtime directory, so unlike a TCP arbiter it is not in
+database lives beside the socket in that seat-identity-derived 0700 runtime directory, so unlike a TCP arbiter it is not in
 an OS-allocated port range and another local principal cannot bind it. The runtime releases its
 file lock on abrupt process death. Node uses built-in `node:sqlite` (Node 22.13+); Bun uses
 `bun:sqlite`, with no package, daemon or system helper.
