@@ -4,15 +4,18 @@
  *
  * Reads the shared config for its rooms and state root only, resolves the seat's human from
  * `<state>/native/human.json` (asking once in the TUI when absent, or taking `--name` on this
- * run only if no record exists), mounts <App> over a LocalRoomClient, and blocks until quit.
- * The client never holds a token and never writes the shared config.
+ * run only if no record exists), mounts <App> over a SeatRoomClient, and blocks until quit.
+ * Which client serves a room is the room's config: `transport: native` rooms go to the seat
+ * service client over the service socket, `local` rooms to the local file client. The client
+ * never holds a token and never writes the shared config; quitting disconnects and stops nothing.
  */
 
 import { parseArgs } from "node:util";
 import { createCliRenderer } from "@opentui/core";
 import { createRoot } from "@opentui/react";
 import { App } from "./App";
-import { LocalRoomClient, roomsFromConfig } from "./lib/local-client";
+import { roomsFromConfig } from "./lib/local-client";
+import { SeatRoomClient } from "./lib/seat-client";
 import { readHuman, writeHuman } from "./lib/human";
 import type { HumanActor } from "./lib/room-client";
 import { shownError } from "./lib/safe-text";
@@ -37,14 +40,15 @@ const view = await roomsFromConfig(values.config);
 let human: HumanActor | undefined = await readHuman(view.stateRoot);
 if (!human && values.name) human = await writeHuman(view.stateRoot, values.name);
 
-const alias = positionals[0] ?? view.rooms[0]?.alias;
-if (alias && !view.rooms.some((r) => r.alias === alias)) {
+const servable = [...view.native, ...view.rooms];
+const alias = positionals[0] ?? servable[0]?.alias;
+if (alias && !servable.some((r) => r.alias === alias)) {
   const other = view.elsewhere.find((r) => r.alias === alias);
-  console.error(other ? `agora tui: room ${alias} is on ${other.transport}; this slice reads local rooms only` : `agora tui: no room named ${alias} in the config`);
+  console.error(other ? `agora tui: room ${alias} is on ${other.transport}; this surface serves native and local rooms` : `agora tui: no room named ${alias} in the config`);
   process.exit(2);
 }
 
-const client = new LocalRoomClient(human ?? { name: "", kind: "human" }, view);
+const client = new SeatRoomClient(human ?? { name: "", kind: "human" }, view);
 
 const renderer = await createCliRenderer({
   enableMouseMovement: false,
@@ -68,6 +72,7 @@ const poll = setInterval(resize, 1000);
 
 const quit = () => {
   clearInterval(poll);
+  client.close();
   renderer.destroy();
   process.exit(0);
 };
