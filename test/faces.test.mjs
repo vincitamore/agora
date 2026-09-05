@@ -1,7 +1,7 @@
 // @ts-check
-// The picture face (P5): tests named for the fixtures under
-// forge/output/agora-native-surface/fixtures/faces/ they satisfy. Every Slack call goes to the
-// injected fake of test/helpers.mjs; no test reads a token, the network, or the shared config.
+// The picture face and the github face (P5): tests named for the fixtures under
+// forge/output/agora-native-surface/fixtures/faces/ they satisfy. Every Slack and GitHub call goes
+// to the injected fake of test/helpers.mjs; no test reads a token, the network, or the shared config.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -12,6 +12,7 @@ import { encodeTransfer } from "../src/tailcat.mjs";
 import { validateFacePublication } from "../src/protocol/outcomes.mjs";
 import { validateOriginReference } from "../src/protocol/origin.mjs";
 import { SLACK_IMAGE_MAX_BYTES, SlackApiError, encodeSlackText, slackTransport } from "../src/transports/slack.mjs";
+import { GitHubApiError, githubTransport } from "../src/transports/github.mjs";
 import {
   FACE_MAX_ATTEMPTS, FaceRunner, appendFaceRecord, classifyFaceFailure, faceKey, faceRecordsPath, faceText, isAddressed, isLanding,
   normalizeSelectors, readFacePolicy, readFaceRecords, selectFaces, toFacePublication, writeFacePolicy,
@@ -838,5 +839,327 @@ test("fixture 13: a landing line faces Slack under the landing selector; a verdi
     const policy = await readFacePolicy(r.dir, ROOM);
     const { selected } = selectFaces({ ...policy, faces: [{ ...policy.faces[0], post: { ...policy.faces[0].post, agent: ["addressed"] } }] }, msg({ text: `faces landed\n\nverdict: landed\nexhibit: 9f2c1a0b4d6e9f7a2b5c8d1e3f4a6b90c7d3e1f5${sig}` }), { memberKind: () => undefined, lookupCursor: () => undefined });
     assert.deepEqual(selected, []);
+  } finally { await r.cleanup(); }
+});
+
+// ---------------------------------------------------------------------------------------------
+// The GitHub face half (P5): the same receipt, dedupe and origin discipline as the Slack face,
+// against a fake GitHub API. GitHub has no per-comment metadata, so there is no rider: a lost
+// response reconciles by the seat's own account and the payload digest. Issue comments take no
+// upload, so `pictures` is the honest text form. No test reads a token or the network.
+// ---------------------------------------------------------------------------------------------
+
+const GH_ROOM = { transport: "github", repo: "bonejohnson8/slopcannon", issue: 3 };
+const GH_TOKEN = "ghp_fakefakefakefakefake0001";
+/** @type {[string, () => { body: unknown }]} */
+const GH_USER = ["/user", () => ({ body: { id: 7, login: "vincitamore" } })];
+const GH_FACE = { transport: "github", alias: "issue", target: { repo: "bonejohnson8/slopcannon", issue: "3" }, post: { agent: ["addressed"] } };
+/** @param {number} id @param {string} body @param {{ login?: string, uid?: number, type?: string, at?: string }} [o] */
+const comment = (id, body, o = {}) => ({ id, body, created_at: o.at ?? "2026-09-05T12:00:01Z", updated_at: o.at ?? "2026-09-05T12:00:01Z", user: { login: o.login ?? "vincitamore", id: o.uid ?? 7, type: o.type ?? "User" }, html_url: `https://github.com/bonejohnson8/slopcannon/issues/3#issuecomment-${id}` });
+
+/**
+ * A github rig: the real transport on the fake API. `comments` is what a GET lists; `onPost`
+ * answers a POST (default: a 201 with a fresh id). Every call is recorded.
+ * @param {{ comments?: any[] | (() => any[]), onPost?: (body: any) => any, clock?: ReturnType<typeof clock>, face?: Record<string, unknown>, faces?: any[], records?: any[], membership?: any[], lookupCursor?: (c: string) => any, transportFor?: (f: any) => Promise<any>, readBlob?: (a: any) => Promise<Buffer>, getStatus?: () => number | undefined }} [o]
+ */
+async function ghRig(o = {}) {
+  const { dir, cleanup } = await tmp();
+  const c = o.clock ?? clock("2026-09-05T12:00:00.000Z");
+  const faces = o.faces ?? [{ ...GH_FACE, ...(o.face ?? {}) }];
+  await writeFacePolicy(dir, ROOM, { faces }, { now: c.now });
+  for (const r of o.records ?? []) await appendFaceRecord(dir, ROOM, r);
+  let nextId = 900;
+  const { fetch, calls } = fakeFetch([GH_USER, ["/issues/3/comments", (_url, init) => {
+    if (init?.method === "POST") {
+      const body = JSON.parse(String(init.body));
+      return o.onPost ? o.onPost(body) : { status: 201, body: comment(nextId++, body.body) };
+    }
+    const status = o.getStatus?.();
+    if (status) return { status, body: { message: "Server Error" } };
+    return { body: typeof o.comments === "function" ? o.comments() : o.comments ?? [] };
+  }]]);
+  /** @type {string[]} */
+  const warned = [];
+  const transport = githubTransport(GH_ROOM, { token: GH_TOKEN, fetch });
+  const runner = new FaceRunner({
+    stateRoot: dir, roomId: ROOM, attestor: ATTESTOR, now: c.now, membership: o.membership ?? [ALEX], lookupCursor: o.lookupCursor, readBlob: o.readBlob,
+    warn: (l) => warned.push(l), transportFor: o.transportFor ?? (async () => transport),
+  });
+  const face = (await readFacePolicy(dir, ROOM)).faces[0];
+  const posts = () => calls.filter((x) => x.url.href.includes("/issues/3/comments") && x.init?.method === "POST");
+  const lists = () => calls.filter((x) => x.url.href.includes("/issues/3/comments") && x.init?.method !== "POST");
+  /** @param {{ url: URL, init: RequestInit | undefined }} call */
+  const bodyOf = (call) => JSON.parse(String(call.init?.body));
+  const reader = () => transport.read({ since: "2026-09-05T00:00:00Z|0" });
+  return { dir, cleanup, clock: c, runner, face, transport, calls, posts, lists, bodyOf, warned, reader, records: () => readFaceRecords(dir, ROOM), file: faceRecordsPath(dir, ROOM) };
+}
+
+test("github / fixture 02 and 09 row 1: a native answer to a human faces the issue as ONE comment, the receipt before the call, the pending line before the request, the body verbatim with no rider", async () => {
+  /** @type {string[]} */
+  const recordsAtCall = [];
+  let file = "";
+  const r = await ghRig({ onPost: (body) => { recordsAtCall.push(readFileSync(file, "utf8")); return { status: 201, body: comment(4242, body.body) }; } });
+  file = r.file;
+  try {
+    const text = "the derper is up on 443 and 3478\n\nto: Alex\n\n-- Fable/agora-orchestrator";
+    const { faces, settled } = await r.runner.face(msg({ text }));
+    assert.deepEqual(faces, [{ transport: "github", status: "pending" }]);
+    assert.equal(r.posts().length, 0, "the receipt returns before any comment is posted");
+    const after = await settled;
+    assert.deepEqual(after, [{ transport: "github", status: "published", id: "4242" }]);
+    assert.equal(r.posts().length, 1, "exactly one comment");
+    assert.deepEqual(r.bodyOf(r.posts()[0]), { body: text }, "the body verbatim: no encoding, no rider, no marker");
+    assert.equal(recordsAtCall.length, 1);
+    const pendingLine = JSON.parse(recordsAtCall[0].trim().split("\n").at(-1) ?? "{}");
+    assert.equal(pendingLine.status, "pending");
+    assert.equal(pendingLine.transport, "github");
+    assert.equal(pendingLine.payloadDigest, sha(text), "the digest is of the verbatim text, which is what the wire carries");
+    assert.equal(pendingLine.thread, undefined);
+    const rec = (await r.records()).get(faceKey(ORIGIN_A, "github"));
+    assert.equal(rec?.status, "published");
+    assert.equal(rec?.id, "4242");
+    assert.equal(rec?.via, "response");
+    assert.equal(rec?.selector, "addressed");
+    // the token went only into the authorization header; never into the record or stderr
+    assert.equal(/** @type {any} */ (r.posts()[0].init?.headers).authorization, `Bearer ${GH_TOKEN}`);
+    assert.doesNotMatch(await readFile(r.file, "utf8"), /ghp_/);
+    assert.doesNotMatch(r.warned.join("\n"), /ghp_/);
+    const dto = toFacePublication(/** @type {any} */ (rec), ROOM, r.transport.room);
+    validateFacePublication(dto);
+    assert.deepEqual(/** @type {any} */ (dto).source, { transport: "github", room: "bonejohnson8/slopcannon#3", id: "4242" });
+    // fixture 07 rule 2 on the next poll: the echo is own by id, never ingested
+    const appended = [];
+    const polled = await r.runner.poll(r.face, { read: async () => r.transport.read({ since: "2026-09-05T00:00:00Z|0" }), appendForeign: async (m) => { appended.push(m); } });
+    assert.equal(appended.length, 0);
+    assert.equal(polled.held, false);
+  } finally { await r.cleanup(); }
+});
+
+test("github / fixture 03: a lost response is unknown, reconciled through the issue's listing with a since bound by account and digest, reposted only when the read succeeded and found nothing, and a failed read never licenses a repost", async () => {
+  const text = "ack\n\nto: Alex\n\n-- Fable";
+  // arm 1: the link dies during the POST
+  let die = true;
+  const r = await ghRig({ onPost: () => { if (die) throw new Error("socket hang up"); return { status: 201, body: comment(4300, text) }; }, comments: () => listed });
+  /** @type {any[]} */
+  let listed = [];
+  try {
+    const { settled } = await r.runner.face(msg({ text }));
+    const [after] = await settled;
+    assert.equal(after.status, "unknown");
+    assert.match(String(after.reason), /^unknown: github POST .*the link died during the request; the request may have landed$/);
+    assert.equal(r.posts().length, 1, "never retried blind");
+    let rec = (await r.records()).get(faceKey(ORIGIN_A, "github"));
+    assert.equal(rec?.status, "unknown");
+    assert.equal(rec?.code, "lost-response");
+    assert.equal(rec?.pendingAt, "2026-09-05T12:00:00.000Z");
+    // arm 4 first: the read fails, the face stays exactly as it was, zero posts
+    r.clock.advance(31_000);
+    let fail = true;
+    const r2 = await ghRig({ clock: r.clock, records: [/** @type {any} */ (rec)], getStatus: () => (fail ? 503 : undefined), comments: () => listed, onPost: (b) => ({ status: 201, body: comment(4301, b.body) }),
+      lookupCursor: (cur) => (cur === `${EPOCH}:41` ? msg({ text }) : undefined) });
+    try {
+      let out = await r2.runner.reconcile(r2.face, /** @type {any} */ (rec));
+      assert.equal(out.outcome, "read-failed");
+      assert.equal(r2.posts().length, 0, "a retry blind to the issue IS the duplicate");
+      assert.equal((await r2.records()).get(faceKey(ORIGIN_A, "github"))?.status, "unknown");
+      assert.equal((await r2.records()).get(faceKey(ORIGIN_A, "github"))?.attempt, 1);
+      // arm 2: the read finds one comment from OUR account whose body digests to the payload digest
+      fail = false;
+      listed = [comment(4299, text, { at: "2026-09-05T12:00:00Z" }), comment(4298, text, { login: "someone-else", uid: 99, at: "2026-09-05T12:00:00Z" })];
+      out = await r2.runner.reconcile(r2.face, /** @type {any} */ (rec));
+      assert.equal(out.outcome, "published");
+      assert.equal(out.record?.id, "4299", "another account's identical body is not ours");
+      assert.equal(out.record?.via, "payload");
+      assert.equal(r2.posts().length, 0);
+      const q = r2.lists().at(-1)?.url.searchParams;
+      assert.equal(q?.get("since"), "2026-09-05T11:59:55.000Z", "the window starts at pendingAt minus the lookback");
+      assert.equal(q?.get("per_page"), "100");
+      // arm 3: the read succeeds and finds nothing, so a repost is not a duplicate: attempt 2, same origin id
+      listed = [];
+      const rec3 = { ...rec, status: "unknown" };
+      out = await r2.runner.reconcile(r2.face, /** @type {any} */ (rec3));
+      assert.equal(out.outcome, "reposted");
+      assert.equal(r2.posts().length, 1);
+      const rep = (await r2.records()).get(faceKey(ORIGIN_A, "github"));
+      assert.equal(rep?.status, "published");
+      assert.equal(rep?.attempt, 2);
+      assert.equal(rep?.id, "4301");
+      // arm 5: two byte-identical bodies from this account inside the window: unknown, quarantined, listed for a human
+      listed = [comment(4310, text, { at: "2026-09-05T12:00:00Z" }), comment(4311, text, { at: "2026-09-05T12:00:00Z" })];
+      out = await r2.runner.reconcile(r2.face, /** @type {any} */ (rec3));
+      assert.equal(out.outcome, "ambiguous");
+      assert.deepEqual(out.record?.quarantine, ["4310", "4311"]);
+      assert.equal(r2.posts().length, 1, "ambiguity never posts");
+      const unknown = await r2.runner.unknown();
+      assert.deepEqual(unknown.map((x) => [x.originId, x.code, x.quarantine]), [[ORIGIN_A, "ambiguous", ["4310", "4311"]]]);
+    } finally { await r2.cleanup(); }
+  } finally { die = false; await r.cleanup(); }
+});
+
+test("github / fixture 07 and 05: a comment from a human is ingested with a validated OriginReference and an unverified key, an own echo by id is not, our own login with no record IS, and our own login while a face is pending is held", async () => {
+  const c = clock("2026-09-05T12:00:20.000Z");
+  const publishedGh = { originId: ORIGIN_A, cursor: `${EPOCH}:41`, transport: "github", status: "published", id: "4242", attempt: 1, at: "2026-09-05T12:00:00.300Z" };
+  const r = await ghRig({ clock: c, records: [publishedGh], comments: [
+    comment(4242, "the derper is up\n\nto: Alex\n\n-- Fable", { at: "2026-09-05T12:00:01Z" }),
+    comment(4243, "good. name it in doctor", { login: "bone", uid: 2, at: "2026-09-05T12:00:05Z" }),
+    comment(4244, "posted by the other seat through the same token", { at: "2026-09-05T12:00:06Z" }),
+    comment(4245, "bot says\n\n-- Codex/ops", { login: "app[bot]", uid: 5, type: "Bot", at: "2026-09-05T12:00:07Z" }),
+  ] });
+  try {
+    /** @type {any[]} */
+    const appended = [];
+    const polled = await r.runner.poll(r.face, { read: r.reader, appendForeign: async (m) => { appended.push(m); } });
+    assert.equal(polled.held, false);
+    assert.deepEqual(polled.notIngested.map((x) => x.id), ["4242"], "the own echo, by id");
+    assert.deepEqual(appended.map((m) => [m.origin.source.id, m.author.id, m.author.kind, m.key, m.signedAs]), [["4243", "bone", "human", "unverified", undefined], ["4244", "vincitamore", "human", "unverified", undefined], ["4245", "app[bot]", "agent", "unverified", "Codex/ops"]]);
+    assert.ok(!("bearer" in appended[0]), "bearer is seat-attested and never stamped on a foreign line");
+    for (const m of appended) validateOriginReference(m.origin);
+    assert.deepEqual(appended[0].origin, { source: { transport: "github", room: "bonejohnson8/slopcannon#3", id: "4243" }, ts: "2026-09-05T12:00:05.000Z", author: { id: "bone", name: "bone", kind: "human" }, attestor: ATTESTOR });
+    assert.deepEqual(appended[0].account, { transport: "github", id: "bone" });
+    assert.equal(appended[0].thread, undefined, "github has no threads; nothing is invented");
+    assert.equal(polled.cursor, "2026-09-05T12:00:07Z|4245");
+    assert.equal(r.posts().length, 0);
+  } finally { await r.cleanup(); }
+  // rule 3: our own login while a github face is pending inside the settle window is held, the cursor withheld
+  const pendingB = { originId: ORIGIN_B, cursor: `${EPOCH}:42`, transport: "github", status: "pending", attempt: 1, at: "2026-09-05T12:00:14.000Z", pendingAt: "2026-09-05T12:00:14.000Z", payloadDigest: sha("ack") };
+  const h = await ghRig({ clock: clock("2026-09-05T12:00:20.000Z"), records: [pendingB], comments: [
+    comment(4250, "before", { login: "bone", uid: 2, at: "2026-09-05T12:00:13Z" }),
+    comment(4251, "ack", { at: "2026-09-05T12:00:14Z" }),
+  ] });
+  try {
+    /** @type {any[]} */
+    const appended = [];
+    const polled = await h.runner.poll(h.face, { read: h.reader, appendForeign: async (m) => { appended.push(m); } });
+    assert.equal(polled.held, true);
+    assert.equal(polled.reason, "own-account-while-pending");
+    assert.equal(appended.length, 1, "the human line before it was ingested");
+    assert.equal(polled.cursor, "2026-09-05T12:00:13Z|4250", "the cursor stops before the held comment");
+    assert.equal((await h.records()).get(faceKey(ORIGIN_B, "github"))?.status, "pending");
+  } finally { await h.cleanup(); }
+});
+
+test("github / fixture 09 row 9: a threaded native message on the github face refuses with thread: in the transport's own words, under --face and under the policy, and no call is made", async () => {
+  const r = await ghRig();
+  try {
+    const flagged = await r.runner.face(msg({ id: ORIGIN_A, seq: 41, text: "x\n\n-- Fable", thread: ORIGIN_D }), { face: ["github"] });
+    assert.deepEqual(flagged.faces, [{ transport: "github", status: "refused", reason: "thread: github rooms have no threads; the issue is the thread" }]);
+    await flagged.settled;
+    const auto = await r.runner.face(msg({ id: ORIGIN_B, seq: 42, text: "x\n\nto: Alex\n\n-- Fable", thread: ORIGIN_D }));
+    assert.deepEqual(auto.faces, [{ transport: "github", status: "refused", reason: "thread: github rooms have no threads; the issue is the thread" }]);
+    await auto.settled;
+    assert.equal(r.calls.length, 0, "a thread refusal is decided before any call");
+    const rec = (await r.records()).get(faceKey(ORIGIN_A, "github"));
+    assert.equal(rec?.code, "thread");
+    // the same message without a thread faces
+    const flat = await r.runner.face(msg({ id: ORIGIN_D, seq: 43, text: "x\n\n-- Fable" }), { face: ["github"] });
+    assert.deepEqual(flat.faces, [{ transport: "github", status: "pending" }]);
+    assert.equal((await flat.settled)[0].status, "published");
+  } finally { await r.cleanup(); }
+});
+
+test("github / fixture 09: too-long at the comment limit, redacted for a github token shape, no-such-face naming --via, and the dark and answered classifications", async () => {
+  const r = await ghRig();
+  try {
+    const long = `${"y".repeat(65537 - "\n\nto: Alex\n\n-- Fable".length)}\n\nto: Alex\n\n-- Fable`;
+    const row7 = await r.runner.face(msg({ text: long }));
+    assert.deepEqual(row7.faces, [{ transport: "github", status: "refused", reason: "too-long: the github face is 65537 characters and the limit is 65536" }]);
+    const fits = await r.runner.face(msg({ id: ORIGIN_B, seq: 42, text: long.slice(1) }));
+    assert.deepEqual(fits.faces, [{ transport: "github", status: "pending" }], "65536 fits; the limit is GitHub's, not Slack's");
+    await fits.settled;
+    const row10 = await r.runner.face(msg({ id: ORIGIN_D, seq: 43, text: `the token is ${GH_TOKEN}\n\nto: Alex\n\n-- Fable` }));
+    assert.deepEqual(row10.faces, [{ transport: "github", status: "refused", reason: "redacted: the body carries a credential shape and a face is byte-identical or it is not sent" }]);
+    assert.doesNotMatch(await readFile(r.file, "utf8"), /ghp_/, "the record never carries the token");
+    assert.equal(r.posts().length, 1);
+  } finally { await r.cleanup(); }
+  const none = await ghRig({ faces: [] });
+  try {
+    const { faces } = await none.runner.face(msg({ text: "x\n\n-- Fable" }), { face: ["github"], alias: "issue-room" });
+    assert.deepEqual(faces, [{ transport: "github", status: "refused", reason: "no-such-face: room issue-room has no github face; set one with agora room faces issue-room --add github --via <github room>" }]);
+  } finally { await none.cleanup(); }
+  // dark by configuration, in createTransport's own words; and a transport error carrying a token shape is redacted
+  const dark = await ghRig({ transportFor: async () => { throw new AgoraError(`room "issue": no token (tokenEnv/tokenFile, GITHUB_TOKEN, or gh auth login)`); } });
+  try {
+    const { faces, settled } = await dark.runner.face(msg({ text: "x\n\nto: Alex\n\n-- Fable" }));
+    assert.deepEqual(faces, [{ transport: "github", status: "pending" }], "the receipt in full before any attempt");
+    assert.deepEqual(await settled, [{ transport: "github", status: "refused", reason: `dark: room "issue": no token (tokenEnv/tokenFile, GITHUB_TOKEN, or gh auth login)` }]);
+  } finally { await dark.cleanup(); }
+  // GitHub answers a 401 whose message echoes a token shape: an answered refusal, redacted on every surface
+  const leaky = await ghRig({ onPost: () => ({ status: 401, body: { message: `Bad credentials for ${GH_TOKEN}` } }) });
+  try {
+    const { settled } = await leaky.runner.face(msg({ text: "x\n\nto: Alex\n\n-- Fable" }));
+    const [after] = await settled;
+    assert.equal(after.status, "refused");
+    assert.doesNotMatch(String(after.reason), /ghp_/);
+    assert.doesNotMatch(await readFile(leaky.file, "utf8"), /ghp_/);
+    assert.doesNotMatch(leaky.warned.join("\n"), /ghp_/);
+    assert.match(leaky.warned.join("\n"), /\[redacted\]/);
+  } finally { await leaky.cleanup(); }
+  // classification by the facts on the error, never by its class
+  assert.deepEqual(classifyFaceFailure(new GitHubApiError("github POST /x: 422 Validation Failed", { answered: true, status: 422, error: "Validation Failed" }), "github"), { status: "refused", code: "answered", reason: "answered: github POST /x: 422 Validation Failed" });
+  assert.deepEqual(classifyFaceFailure(new GitHubApiError("github POST /x: 502 Bad Gateway", { answered: false, status: 502 }), "github"), { status: "unknown", code: "lost-response", reason: "unknown: github POST /x: 502 Bad Gateway; the request may have landed" });
+  assert.equal(classifyFaceFailure(new GitHubApiError("github POST /x: 429 rate limited", { answered: false, status: 429 }), "github").status, "unknown", "throttled before or after it landed: not proof of nothing");
+  assert.deepEqual(classifyFaceFailure(new GitHubApiError("github POST /x: unreachable", { answered: false, sent: false }), "github"), { status: "refused", code: "dark", reason: "dark: the github face could not be reached" });
+});
+
+test("github / fixture 10: under pictures the face makes no upload and pretends none: each image is its metadata line plus its link or its digest, a refused picture row per image says why, no byte moves, the pcap is metadata only", async () => {
+  let blobReads = 0;
+  const linked = { ...image, id: "blob-8a4b0123456789ab", name: "public.png", url: "https://blobs.example.test/8a4b/public.png" };
+  const r = await ghRig({ face: { attachments: "pictures" }, readBlob: async () => { blobReads++; return PNG; } });
+  try {
+    const text = "two files\n\nto: Alex\n\n-- Fable";
+    const { faces, settled } = await r.runner.face(msg({ text, attachments: [image, pcap, linked] }));
+    assert.deepEqual(faces, [{ transport: "github", status: "pending" }], "the receipt precedes every call");
+    const after = await settled;
+    assert.deepEqual(after, [
+      { transport: "github", status: "published", id: "900" },
+      { transport: "github", status: "refused", reason: "picture not uploaded: github issue comments take no file upload through the API; the face carries the attachment's link or its digest as text", attachmentId: image.id },
+      { transport: "github", status: "refused", reason: "picture not uploaded: github issue comments take no file upload through the API; the face carries the attachment's link or its digest as text", attachmentId: linked.id },
+    ]);
+    assert.equal(r.posts().length, 1, "one comment, and no upload endpoint was called");
+    assert.equal(r.calls.length, 1);
+    assert.equal(blobReads, 0, "no byte moves: custody is never read for a face that cannot carry it");
+    const body = r.bodyOf(r.posts()[0]).body;
+    assert.equal(body, [
+      "two files",
+      `image screen shot.png (image/png, ${PNG.length} bytes) ${image.digest}`,
+      "file collector.pcap (application/vnd.tcpdump.pcap, 41220000 bytes)",
+      `image public.png (image/png, ${PNG.length} bytes) <https://blobs.example.test/8a4b/public.png>`,
+      "", "to: Alex", "", "-- Fable",
+    ].join("\n"), "the digest when there is no public link, the link when there is one; never a path, never bytes");
+    const rows = await r.runner.statusFor(ORIGIN_A);
+    assert.deepEqual(rows.map((x) => [x.part, x.attachmentId, x.status, x.code]), [[undefined, undefined, "published", undefined], ["attachment", image.id, "refused", "capability"], ["attachment", linked.id, "refused", "capability"]]);
+    // under metadata (the default) the same message renders plain lines and no digest
+    const plain = await ghRig();
+    try {
+      const { settled: s2 } = await plain.runner.face(msg({ text, attachments: [image, linked] }));
+      await s2;
+      assert.equal(plain.bodyOf(plain.posts()[0]).body, `two files\nimage screen shot.png (image/png, ${PNG.length} bytes)\nimage public.png (image/png, ${PNG.length} bytes)\n\nto: Alex\n\n-- Fable`);
+    } finally { await plain.cleanup(); }
+  } finally { await r.cleanup(); }
+});
+
+test("github / fixture 12: a pending github face whose process died is swept and reconciled by account and digest BEFORE any ingestion; the human comment ingests and the echo does not", async () => {
+  const c = clock("2026-09-05T12:00:45.000Z");
+  const text = "ack\n\nto: Alex\n\n-- Fable";
+  const stale = { originId: ORIGIN_A, cursor: `${EPOCH}:41`, transport: "github", status: "pending", selector: "addressed", attempt: 1, at: "2026-09-05T12:00:00.000Z", pendingAt: "2026-09-05T12:00:00.000Z", payloadDigest: sha(text) };
+  /** @type {any[]} */
+  const appended = [];
+  /** @type {number[]} */
+  const appendedAtList = [];
+  const r = await ghRig({ clock: c, records: [stale], comments: () => { appendedAtList.push(appended.length); return [
+    comment(4260, text, { at: "2026-09-05T12:00:01Z" }),
+    comment(4261, "good", { login: "bone", uid: 2, at: "2026-09-05T12:00:30Z" }),
+  ]; } });
+  try {
+    const polled = await r.runner.poll(r.face, { read: r.reader, appendForeign: async (m) => { appended.push(m); } });
+    assert.equal(polled.held, false);
+    assert.deepEqual(appendedAtList, [0, 0], "the reconciliation read and then the room read, and nothing was appended before either");
+    const rec = (await r.records()).get(faceKey(ORIGIN_A, "github"));
+    assert.equal(rec?.status, "published");
+    assert.equal(rec?.id, "4260");
+    assert.equal(rec?.via, "payload");
+    assert.deepEqual(appended.map((m) => m.origin.source.id), ["4261"]);
+    assert.deepEqual(polled.notIngested.map((x) => x.id), ["4260"]);
+    assert.equal(r.posts().length, 0);
   } finally { await r.cleanup(); }
 });
