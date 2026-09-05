@@ -103,11 +103,16 @@ physical seats. Do not change shared production firewall/DNS or tokens for this 
 | Public-map independence | With `tailcat.dev` and public relay hosts unavailable to the fixtures, create a new route and transfer verified text and PNG through the configured relay. A warmed cache alone is insufficient evidence. |
 | Relay-only success | Prevent direct UDP between the test peers while preserving relay TCP reachability. Transfer and reconcile the receipt. Record observed path throughout the relevant interval. |
 | Direct success | Allow direct reachability, observe its establishment and transfer the same fixture class. A relay-only result remains a valid transfer; report the actual path. |
-| Outage | Interrupt the selected relay while direct transport is unavailable. Show bounded failure/unknown acceptance, no claimed send without receipt and no silent public fallback. |
-| Recovery/failover | Restore or replace the relay through the implemented recovery protocol; reject old descriptors and reconcile to one original operation/receipt. Separately name whether the connection survived or a new route was established. |
+| Cold-start outage | Make the selected relay unavailable before route readiness. Show bounded failure, no offer publication, confirmed owned-resource cleanup and an actionable retry. |
+| Mid-stream outage | Interrupt the selected relay while direct transport is unavailable. Show bounded failure/unknown acceptance, no claimed send without receipt and no silent public fallback. |
+| Original-relay restoration | Restore the same relay and reconcile to one original operation/receipt. This establishes restoration, not second-endpoint failover. |
+| Different-relay recovery/failover | With the primary still unavailable, use the implemented protocol and a second nominated endpoint; authenticate replacement descriptors, reject stale generations and reconcile to one original operation/receipt. Keep this required row unfulfilled until that mechanism and endpoint exist. Record whether the connection survived or a new route was established. |
 | Authorization | An unapproved key remains unable to fetch on the operator-managed relay; the intended recipient succeeds. |
 
-`tailcat ping <address>` can report a DERP or direct path. `ping --until-direct`
+Upstream `tailcat ping` can report a DERP or direct path. A diagnostic for an
+Agora-restricted route must use the verified bundled executable and that recipient's
+explicit enrolled client key; a bare invocation may use the wrong ambient identity.
+Agora integration of this diagnostic is pending. `ping --until-direct`
 measures whether an upgrade occurs within its timeout; it is not a prerequisite for
 share/fetch. A ping is not proof of the entire file stream's path. An existing direct
 connection that survives relay shutdown is not proof that a new connection can
