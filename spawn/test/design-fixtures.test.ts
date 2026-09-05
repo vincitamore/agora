@@ -3,8 +3,10 @@ import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { attributeRead, journalWrite } from "../journal.ts";
-import { FRAME_TYPES } from "../protocol.ts";
+import { FRAME_TYPES, paneHelloProof } from "../protocol.ts";
 import { createAuthority, handleJson, registerPane } from "../pane-authority.ts";
+
+const NONCE = "c".repeat(32);
 import { bearerFromProvenance, renderDeliveredLine } from "../delivered-line.ts";
 import { outcomeWithoutAdmission, verdictAdmitsWrite } from "../readiness.ts";
 import { writeDeliveredLine } from "../terminal-backend.ts";
@@ -31,6 +33,7 @@ test("attack-matrix package-api: frame union has no write/send/type/keys", () =>
 test("attack-matrix pane-sock: deliver before hello is refused", () => {
   const auth = createAuthority({
     bootEpoch: 1,
+    nonce: NONCE,
     open: (spawnId) => ({ spawnId, term: { write() {}, close() {} } }),
   });
   expect(() =>
@@ -180,6 +183,7 @@ test("three-arrivals races: no write occurs without an admission", () => {
   const writes: string[] = [];
   const auth = createAuthority({
     bootEpoch: 1,
+    nonce: NONCE,
     open: (spawnId) => ({
       spawnId,
       term: {
@@ -190,7 +194,11 @@ test("three-arrivals races: no write occurs without an admission", () => {
       },
     }),
   });
-  handleJson(auth, { type: "hello", bootEpoch: 1 });
+  handleJson(auth, {
+    type: "hello",
+    bootEpoch: 1,
+    proof: paneHelloProof(NONCE, 1, auth.challenge),
+  });
   registerPane(auth, fixture.peer);
   expect(() =>
     handleJson(auth, {

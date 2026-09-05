@@ -5,7 +5,10 @@ import os from "node:os";
 import path from "node:path";
 import { issueAdmission } from "../pane-authority.ts";
 import { startAuthority } from "../listen.ts";
+import { paneHelloProof } from "../protocol.ts";
 import { renderDeliveredLine } from "../delivered-line.ts";
+
+const NONCE = "b".repeat(32);
 
 const envelope = {
   deliveryId: "dl-1",
@@ -39,6 +42,7 @@ test("pane.sock: server writes hello first; deliver before client hello is refus
   const started = await startAuthority({
     sock,
     bootEpoch: 7,
+    nonce: NONCE,
     open: (spawnId) => ({
       spawnId,
       term: {
@@ -55,7 +59,10 @@ test("pane.sock: server writes hello first; deliver before client hello is refus
     socket.once("error", reject);
   });
   const first = JSON.parse(await readLine(socket));
-  expect(first).toEqual({ type: "hello", bootEpoch: 7 });
+  expect(first.type).toBe("hello");
+  expect(first.bootEpoch).toBe(7);
+  expect(typeof first.challenge).toBe("string");
+  expect(first.nonce).toBeUndefined();
 
   socket.write(
     `${JSON.stringify({
@@ -70,7 +77,13 @@ test("pane.sock: server writes hello first; deliver before client hello is refus
   expect(refused.error).toMatch(/hello/);
   expect(writes).toEqual([]);
 
-  socket.write(`${JSON.stringify({ type: "hello", bootEpoch: 7 })}\n`);
+  socket.write(
+    `${JSON.stringify({
+      type: "hello",
+      bootEpoch: 7,
+      proof: paneHelloProof(NONCE, 7, first.challenge),
+    })}\n`,
+  );
   socket.write(`${JSON.stringify({ type: "open", spawnId: "s1" })}\n`);
   issueAdmission(started.auth, "ad-1");
   socket.write(
