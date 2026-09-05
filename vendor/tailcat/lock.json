@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "source": {
+    "repository": "https://github.com/tailscale/tailcat",
+    "tag": "v0.4.0",
+    "revision": "ce6fedcabc220bab3b94d470ab330219111eeae8",
+    "go": "1.27.0"
+  },
+  "build": {
+    "go": "go1.27.0",
+    "tags": "netgo,omitidna,omitpemdecrypt,osusergo,ts_omit_ace,ts_omit_acme,ts_omit_advertiseexitnode,ts_omit_advertiseroutes,ts_omit_appconnectors,ts_omit_aws,ts_omit_bird,ts_omit_cachenetmap,ts_omit_captiveportal,ts_omit_capture,ts_omit_cliconndiag,ts_omit_clientmetrics,ts_omit_clientupdate,ts_omit_cloud,ts_omit_colorable,ts_omit_completion,ts_omit_completion_scripts,ts_omit_conn25,ts_omit_debug,ts_omit_debugeventbus,ts_omit_debugportmapper,ts_omit_desktop_sessions,ts_omit_dns,ts_omit_doctor,ts_omit_drive,ts_omit_favorites,ts_omit_flashappliance,ts_omit_health,ts_omit_hujsonconf,ts_omit_identityfederation,ts_omit_ipnbus,ts_omit_iptables,ts_omit_kube,ts_omit_linkspeed,ts_omit_linuxdnsfight,ts_omit_listenrawdisco,ts_omit_logtail,ts_omit_netlog,ts_omit_networkmanager,ts_omit_oauthkey,ts_omit_osrouter,ts_omit_outboundproxy,ts_omit_peerapiclient,ts_omit_peerapiserver,ts_omit_portlist,ts_omit_portmapper,ts_omit_posture,ts_omit_qrcodes,ts_omit_relayserver,ts_omit_remoteconfig,ts_omit_resolved,ts_omit_routecheck,ts_omit_runtimemetrics,ts_omit_sdnotify,ts_omit_serve,ts_omit_serviceclientprefs,ts_omit_synology,ts_omit_syslog,ts_omit_syspolicy,ts_omit_systray,ts_omit_taildrop,ts_omit_tailnetlock,ts_omit_tap,ts_omit_tpm,ts_omit_tundevstats,ts_omit_unixsocketidentity,ts_omit_useexitnode,ts_omit_useproxy,ts_omit_usermetrics,ts_omit_useroutes,ts_omit_wakeonlan,ts_omit_webbrowser,ts_omit_webclient",
+    "flags": [
+      "-trimpath",
+      "-buildvcs=false"
+    ],
+    "ldflags": [
+      "-s",
+      "-w",
+      "-X main.version=v0.4.0"
+    ],
+    "cgo": false
+  },
+  "license": {
+    "path": "LICENSE",
+    "sha256": "a7ca6186a7963a0a60740f6047760eecd7a0234e8c38bd7e1e0bbcb324bda45b"
+  },
+  "targets": {
+    "windows-amd64": {
+      "path": "windows-amd64/tailcat.gz",
+      "capsuleSha256": "2055035a89e9bebceafb46337c907e39ed93ab77acd4861f2077393ba1f9a3f6",
+      "capsuleSize": 7108448,
+      "sha256": "90447d52dad00babae1bb2fb7f39bcca44d4549ef5ae27311a5b39bd7e95f922",
+      "size": 18098688
+    },
+    "windows-arm64": {
+      "path": "windows-arm64/tailcat.gz",
+      "capsuleSha256": "7e5da9400cb78d2e6e7e57d864a3e80df6a085474979d99236ce6caff2f1398f",
+      "capsuleSize": 6398434,
+      "sha256": "4eba744d9e13b0ca6aa43363d5414f6bdfc5ced151f5804d9e9d58ea6d427f32",
+      "size": 16615936
+    },
+    "linux-amd64": {
+      "path": "linux-amd64/tailcat.gz",
+      "capsuleSha256": "9d38563c03d39f3f1be1ad4283047d1cd63393829ed8a7ce02680d13c1ef6a15",
+      "capsuleSize": 7114020,
+      "sha256": "ee34ad967bee15a4c8e84c821b07c87ed16d27b5c40b8ceb5e6891005a096bc6",
+      "size": 18034848
+    },
+    "linux-arm64": {
+      "path": "linux-arm64/tailcat.gz",
+      "capsuleSha256": "4acfe12775d6980cb737b02c61bb1ea4cd5b8abb413a4baa7c8eb2872b99cd38",
+      "capsuleSize": 6489815,
+      "sha256": "117f00f44d11fb1ecd39007e503e569e0c4cf97371722b100db59f1db3b1bbac",
+      "size": 16842912
+    },
+    "darwin-amd64": {
+      "path": "darwin-amd64/tailcat.gz",
+      "capsuleSha256": "dfd8d5620523c10c40844e01f7de083b3f94237d13117395bac46be9cb62e31e",
+      "capsuleSize": 7025757,
+      "sha256": "798d79bccc7333559d924dc6fd0c7d54df338e7a23e89b7c615742f3cce3efa6",
+      "size": 17925728
+    },
+    "darwin-arm64": {
+      "path": "darwin-arm64/tailcat.gz",
+      "capsuleSha256": "e43d4f4911ac82b0c40eca869325408d4a8ccacfc574ff20b775909e793be60c",
+      "capsuleSize": 6550742,
+      "sha256": "7e9ca0999a0c65eb5f84ca1ac15a767a498280a3fad39f30d6665ab269f5dddc",
+      "size": 16798818
+    }
+  }
+}
