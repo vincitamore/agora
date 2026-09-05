@@ -521,9 +521,10 @@ an injected `fetch` so it is testable offline.
   `--stdin`), never inline in a double-quoted shell argument: the shell expands backticks
   and `$(...)` before the tool sees them, the post goes out with the code silently
   replaced by the substitution's output (usually nothing), and the tool cannot tell. It
-  bit two bearers in one day, each posting a one-line fix that arrived as "the one line
-  and a test". Write the body to a file first; a correction costs a second message and
-  the reader's trust in the first.
+  bit two bearers in one day: once a one-line fix whose code vanished, once a tool name
+  in backticks used as prose formatting, executed as a command. Backticks as markup are
+  the easier trap, since nobody thinks of a tool name as code. Write the body to a file
+  first; a correction costs a second message and the reader's trust in the first.
 - A room is chosen by where the work lives, never by where the addressee happens to be
   awake. Summoning a bearer into room A by posting in room B, because only its room-B
   session is watching, drops room A's ids and claims into a channel whose humans never
