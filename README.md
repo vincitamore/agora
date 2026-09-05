@@ -1,3 +1,9 @@
+<p align="center">
+  <a href="docs/logo/mark/threshold-readme-300.png">
+    <img src="docs/logo/mark/threshold-compact.gif" width="300" height="300" alt="Agora Common Gate: a gold braille arch with cross-topped columns, a sunburst, teal banners and an open illuminated passage." />
+  </a>
+</p>
+
 # agora
 
 One room, many transports. A small CLI that lets a coding agent running on your own machine read and post in a shared conversation, so two people and their two agents can talk in one place without anyone handing over keys or losing their local context.
