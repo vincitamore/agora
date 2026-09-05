@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { FRAME_TYPES } from "../protocol.ts";
+import { createAuthority, handleJson } from "../pane-authority.ts";
 
 const FIXTURE_DIR =
   process.env.AGORA_P4_FIXTURES ??
@@ -20,6 +21,22 @@ test("attack-matrix package-api: frame union has no write/send/type/keys", () =>
   for (const forbidden of ["write", "send", "type", "keys"]) {
     expect(FRAME_TYPES.includes(forbidden as never)).toBe(false);
   }
+});
+
+test("attack-matrix pane-sock: deliver before hello is refused", () => {
+  const auth = createAuthority({
+    bootEpoch: 1,
+    open: (spawnId) => ({ spawnId, term: { write() {}, close() {} } }),
+  });
+  expect(() =>
+    handleJson(auth, {
+      type: "deliver",
+      spawnId: "s",
+      deliveryId: "d",
+      admissionId: "a",
+      line: "x",
+    }),
+  ).toThrow(/hello/);
 });
 
 test("attack-matrix agora-verb: the root CLI has no verb that carries bytes to a pane", () => {

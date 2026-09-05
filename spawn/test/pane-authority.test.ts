@@ -4,6 +4,7 @@ import { createAuthority, handleJson } from "../pane-authority.ts";
 function harness() {
   const writes: string[] = [];
   const auth = createAuthority({
+    bootEpoch: 7,
     now: () => 1_000,
     open: (spawnId) => ({
       spawnId,
@@ -15,6 +16,7 @@ function harness() {
       },
     }),
   });
+  handleJson(auth, { type: "hello", bootEpoch: 7 });
   return { auth, writes };
 }
 
