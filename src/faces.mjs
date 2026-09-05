@@ -5,7 +5,8 @@ import path from "node:path";
 import { AgoraError, redact } from "./core.mjs";
 import { parseTrailers } from "./trailers.mjs";
 import { decodeTransfer } from "./tailcat.mjs";
-import { SLACK_IMAGE_MAX_BYTES, SLACK_IMAGE_MAX_PER_MESSAGE, SLACK_TEXT_MAX, SlackApiError, encodeSlackText } from "./transports/slack.mjs";
+import { SLACK_IMAGE_MAX_BYTES, SLACK_IMAGE_MAX_PER_MESSAGE, SLACK_TEXT_MAX, encodeSlackText } from "./transports/slack.mjs";
+import { githubFaceHalf } from "./transports/github.mjs";
 
 /**
  * A native room is the canonical log; a face is a copy of one message on a transport where an
@@ -44,8 +45,75 @@ const SHA40 = /^[0-9a-f]{40}$/;
 const POLICY_VERSION = 1;
 /** Transports with an audience a face can reach. `local` is a file; `native` is the log itself. */
 export const FACE_CAPABLE = new Set(["slack", "github"]);
+
+/**
+ * What the faces layer needs of a transport beyond the shared contract, keyed by transport name:
+ * the wire rendering and its limit, whether the face takes a thread or an upload, the rider it
+ * stamps (if any), and how to read a raw history item (its id, its author, its text) so a lost
+ * response reconciles against the far side. Everything transport-specific lives in a half; the
+ * runner reads the half and never the transport's name.
+ * @typedef {object} FaceHalf
+ * @property {string} transport
+ * @property {number} textMax the far side's limit on one message, in the units `encode` produces
+ * @property {(text: string) => string} encode what goes on the wire for a body (Slack escapes `&<>`; GitHub verbatim)
+ * @property {(rendered: number) => string} tooLong the `too-long` reason
+ * @property {boolean} threads whether a face can carry a thread; when not, a threaded native message refuses `thread:`
+ * @property {string} noThread the `thread:` reason, in the transport's own words
+ * @property {boolean} uploads whether an upload ladder exists; when not, `pictures` is the honest text form
+ * @property {string} noUpload the reason on each image's refused picture row when there is no ladder
+ * @property {(alias: string) => string} addHint the command that gives a room this face (the `no-such-face` reason)
+ * @property {(originId: string) => Record<string, unknown>} postOptions the rider, as post options (Slack's `metadata`; nothing for GitHub)
+ * @property {(oldestMs: number, latestMs: number) => Record<string, string>} window a history window in the transport's own terms
+ * @property {(raw: any) => string} idOf the transport's message id of a raw history item
+ * @property {(raw: any) => string | undefined} rider the origin id a raw item's rider carries, when the transport has one
+ * @property {(raw: any, who: { id: string, name: string, botId?: string }) => boolean} ownAccount is this raw item from the seat's own account
+ * @property {(raw: any) => string | undefined} textOf the wire text of a raw item, to digest against `payloadDigest`
+ * @property {(raw: any) => string[]} fileIds the file ids a raw item shares, for a picture's echo
+ * @property {(attachment: any, line: string) => string} pictureLine the `pictures` text form of one attachment when there is no ladder
+ */
+
+/** Is this raw Slack message from the seat's own bot account? @param {any} m @param {{ id: string, name: string, botId?: string }} who */
+function slackOwnAccount(m, who) {
+  if (!m) return false;
+  if (m.user && m.user === who.id) return true;
+  if (who.botId && m.bot_id === who.botId) return true;
+  return (m.subtype === "bot_message" || Boolean(m.bot_id)) && typeof m.username === "string" && m.username === who.name;
+}
+
+/** @param {number} ms */
+export function slackTs(ms) {
+  const secs = Math.floor(ms / 1000);
+  const frac = String(ms - secs * 1000).padStart(3, "0");
+  return `${secs}.${frac}000`;
+}
+
+/** The Slack half, from the face code #32 put in `src/transports/slack.mjs`. @type {FaceHalf} */
+const slackFaceHalf = Object.freeze({
+  transport: "slack",
+  textMax: SLACK_TEXT_MAX,
+  encode: encodeSlackText,
+  tooLong: (n) => `too-long: the slack face is ${n} rendered characters and the limit is ${SLACK_TEXT_MAX}; pass --split to chunk at line boundaries`,
+  threads: true,
+  noThread: "thread: this face takes no thread",
+  uploads: true,
+  noUpload: "picture not uploaded",
+  addHint: (alias) => `agora room faces ${alias} --add slack --channel <id>`,
+  postOptions: (originId) => ({ metadata: { event_type: FACE_RIDER_EVENT, event_payload: { origin: originId } } }),
+  window: (oldestMs, latestMs) => ({ oldest: slackTs(oldestMs), latest: slackTs(latestMs) }),
+  idOf: (raw) => String(raw?.ts),
+  rider: (raw) => (raw?.metadata?.event_type === FACE_RIDER_EVENT && typeof raw.metadata?.event_payload?.origin === "string" ? raw.metadata.event_payload.origin : undefined),
+  ownAccount: slackOwnAccount,
+  textOf: (raw) => (typeof raw?.text === "string" ? raw.text : undefined),
+  fileIds: (raw) => (Array.isArray(raw?.files) ? raw.files.map((/** @type {any} */ f) => String(f?.id)) : []),
+  pictureLine: (_a, line) => line,
+});
+
+/** The face halves this build carries, by transport name. A transport with no half is `capability`-refused. */
+export const FACE_HALVES = Object.freeze({ slack: slackFaceHalf, github: githubFaceHalf });
 /** Transports whose face half is built: `agora room faces --add` admits these and the runner publishes to them. */
-export const FACE_BUILT = Object.freeze(["slack"]);
+export const FACE_BUILT = Object.freeze(Object.keys(FACE_HALVES));
+/** @param {string} transport @returns {FaceHalf | undefined} */
+export function faceHalf(transport) { return Object.prototype.hasOwnProperty.call(FACE_HALVES, transport) ? FACE_HALVES[/** @type {'slack'|'github'} */ (transport)] : undefined; }
 
 /** @typedef {'always'|'never'|'addressed'|'landing'} FaceSelector */
 /** @typedef {'none'|'metadata'|'pictures'} FaceAttachmentMode */
@@ -301,7 +369,7 @@ export function selectFaces(policy, message, ctx, opts = {}) {
       if (!FACE_CAPABLE.has(transport)) refusals.push({ transport, code: "capability", reason: transport === "local"
         ? "capability: the local transport is an append-only NDJSON file with no audience to face to"
         : `capability: the ${transport} transport has no audience to face to` });
-      else if (!face) refusals.push({ transport, code: "no-such-face", reason: `no-such-face: room ${alias} has no ${transport} face; set one with agora room faces ${alias} --add ${transport} --channel <id>` });
+      else if (!face) refusals.push({ transport, code: "no-such-face", reason: `no-such-face: room ${alias} has no ${transport} face; set one with ${faceHalf(transport)?.addHint(alias) ?? `agora room faces ${alias} --add ${transport}`}` });
       else if (!face.enabled) refusals.push({ transport, code: "disabled", reason: `disabled: the ${transport} face of ${opts.alias ?? face.alias} is off; turn it on with agora room faces ${opts.alias ?? face.alias} --enable ${transport}` });
       else selected.push({ face, selector: "flag" });
     }
@@ -326,13 +394,15 @@ export function attachmentLine(a) {
 
 /**
  * Attachment lines go after the body and before the trailer block, so the trailers and the
- * signature still parse on the far side. Attachment bytes are never inlined.
- * @param {{ text: string, attachments?: { kind: string, name: string, mimetype?: string, size?: number }[] }} message @param {FaceAttachmentMode} mode
+ * signature still parse on the far side. Attachment bytes are never inlined. Under `pictures` on
+ * a half with no upload ladder, each image's line carries the half's honest text form (a link
+ * when the attachment has a public one, else its digest) instead of a copy the face cannot make.
+ * @param {{ text: string, attachments?: { kind: string, name: string, mimetype?: string, size?: number }[] }} message @param {FaceAttachmentMode} mode @param {FaceHalf} [half]
  */
-export function faceText(message, mode) {
+export function faceText(message, mode, half) {
   const text = message.text;
   if (mode === "none" || !message.attachments?.length) return text;
-  const lines = message.attachments.map(attachmentLine).join("\n");
+  const lines = message.attachments.map((a) => (mode === "pictures" && half && !half.uploads && a.kind === "image" ? half.pictureLine(a, attachmentLine(a)) : attachmentLine(a))).join("\n");
   const { body } = parseTrailers(text);
   if (body !== text && text.startsWith(body)) return `${body}\n${lines}${text.slice(body.length)}`;
   return `${text.replace(/\s+$/, "")}\n${lines}`;
@@ -348,16 +418,22 @@ function bounded(s, max = 300) {
   return r.length > max ? `${r.slice(0, max - 1)}…` : r;
 }
 
+/** The facts a transport's call error carries for a face (`SlackApiError`, `GitHubApiError`): read by shape, never by class. @param {unknown} e @returns {e is AgoraError & { answered: boolean, sent: boolean, status?: number, error?: string }} */
+function carriesCallFacts(e) {
+  return e instanceof AgoraError && typeof (/** @type {any} */ (e)).answered === "boolean" && typeof (/** @type {any} */ (e)).sent === "boolean";
+}
+
 /**
- * `{ok:false}` and a non-429 4xx are `refused`: Slack answered, nothing landed. A failure before
- * any request left is `refused` too, under `dark`. A link death after send, a 5xx or the 429
- * ladder exhausting is `unknown`: the request may have landed, and a retry blind to the channel
- * is the duplicate.
+ * An answered refusal (`{ok:false}`, a non-429 4xx) is `refused`: the far side answered, nothing
+ * landed. A failure before any request left is `refused` too, under `dark`. A link death after
+ * send, a 5xx or a throttle is `unknown`: the request may have landed, and a retry blind to the
+ * far side is the duplicate. The facts are read off the error by shape, so every transport half
+ * that throws them is classified the same way.
  * @param {unknown} e @param {string} transport
  * @returns {{ status: 'refused' | 'unknown', code: string, reason: string }}
  */
 export function classifyFaceFailure(e, transport) {
-  if (e instanceof SlackApiError) {
+  if (carriesCallFacts(e)) {
     if (!e.sent) return { status: "refused", code: "dark", reason: `dark: the ${transport} face could not be reached` };
     if (e.answered) {
       const error = e.error ?? (e.status ? `http-${e.status}` : "answered");
@@ -367,13 +443,6 @@ export function classifyFaceFailure(e, transport) {
   }
   if (e instanceof AgoraError) return { status: "refused", code: "refused", reason: bounded(e.message) };
   return { status: "unknown", code: "lost-response", reason: bounded(`unknown: ${e instanceof Error ? e.message : String(e)}`) };
-}
-
-/** @param {number} ms */
-export function slackTs(ms) {
-  const secs = Math.floor(ms / 1000);
-  const frac = String(ms - secs * 1000).padStart(3, "0");
-  return `${secs}.${frac}000`;
 }
 
 /** @param {string} originId @param {string} transport @param {string} [attachmentId] */
@@ -500,7 +569,7 @@ export class FaceRunner {
    * list for that receipt before any transport call is issued (every line is `pending`, `refused`
    * by a pre-call check, or absent), and `settled`, the promise of the calls themselves.
    * @param {any} message the committed native message (id, cursor, text, author, thread?, attachments?)
-   * @param {{ face?: 'auto' | 'none' | string[] }} [opts]
+   * @param {{ face?: 'auto' | 'none' | string[], alias?: string }} [opts] `alias` is the name the caller typed for the native room, for the refusal reasons
    * @returns {Promise<{ faces: FaceStatus[], settled: Promise<FaceStatus[]> }>}
    */
   async face(message, opts = {}) {
@@ -523,10 +592,11 @@ export class FaceRunner {
         faces.push({ transport: face.transport, status: "refused", reason: refusal.reason });
         continue;
       }
-      const thread = this.#faceThread(records, face, message);
-      const text = faceText(message, face.attachments);
+      const half = /** @type {FaceHalf} */ (faceHalf(face.transport));
+      const thread = half.threads ? this.#faceThread(records, face, message) : undefined;
+      const text = faceText(message, face.attachments, half);
       const record = await this.#append({ originId: message.id, cursor: message.cursor, transport: face.transport, status: "pending", selector, attempt: 1, at, pendingAt: at,
-        ...(thread ? { thread } : {}), payloadDigest: `sha256:${createHash("sha256").update(encodeSlackText(text)).digest("hex")}` });
+        ...(thread ? { thread } : {}), payloadDigest: `sha256:${createHash("sha256").update(half.encode(text)).digest("hex")}` });
       pending.push({ face, record });
       faces.push({ transport: face.transport, status: "pending" });
     }
@@ -539,15 +609,18 @@ export class FaceRunner {
     return { faces, settled };
   }
 
-  /** The refusals decided before any call: capability, redacted, route, too-long. @param {Face} face @param {any} message */
+  /** The refusals decided before any call: capability, thread, redacted, route, too-long. @param {Face} face @param {any} message */
   #precheck(face, message) {
     if (face.transport === "local") return { code: "capability", reason: "capability: the local transport is an append-only NDJSON file with no audience to face to" };
-    if (!FACE_BUILT.includes(face.transport)) return { code: "capability", reason: `capability: the ${face.transport} face is not built in this unit` };
-    const text = faceText(message, face.attachments);
+    const half = faceHalf(face.transport);
+    if (!half) return { code: "capability", reason: `capability: the ${face.transport} face is not built in this unit` };
+    // a threaded native message on a face with no threads: refused in the transport's own words, never flattened
+    if (!half.threads && message.thread) return { code: "thread", reason: half.noThread };
+    const text = faceText(message, face.attachments, half);
     if (redact(text) !== text) return { code: "redacted", reason: "redacted: the body carries a credential shape and a face is byte-identical or it is not sent" };
     if (decodeTransfer(message.text)?.kind === "offer") return { code: "route", reason: "route: the body carries a transfer route, which is an ACL-restricted address and a face is a broadcast surface" };
-    const rendered = encodeSlackText(text).length;
-    if (rendered > SLACK_TEXT_MAX) return { code: "too-long", reason: `too-long: the ${face.transport} face is ${rendered} rendered characters and the limit is ${SLACK_TEXT_MAX}; pass --split to chunk at line boundaries` };
+    const rendered = half.encode(text).length;
+    if (rendered > half.textMax) return { code: "too-long", reason: half.tooLong(rendered) };
     return undefined;
   }
 
@@ -565,10 +638,11 @@ export class FaceRunner {
       await this.#append({ originId: record.originId, transport: face.transport, status: "refused", code: "dark", reason, attempt: record.attempt, at: at() });
       return [{ transport: face.transport, status: "refused", reason }];
     }
-    const text = faceText(message, face.attachments);
+    const half = /** @type {FaceHalf} */ (faceHalf(face.transport));
+    const text = faceText(message, face.attachments, half);
     let result;
     try {
-      result = await transport.post(text, { thread: record.thread, metadata: { event_type: FACE_RIDER_EVENT, event_payload: { origin: record.originId } } });
+      result = await transport.post(text, /** @type {any} */ ({ ...(record.thread ? { thread: record.thread } : {}), ...half.postOptions(record.originId) }));
     } catch (e) {
       const c = classifyFaceFailure(e, face.transport);
       await this.#append({ originId: record.originId, transport: face.transport, status: c.status, code: c.code, reason: c.reason, attempt: record.attempt, at: at(), ...(c.status === "unknown" ? { pendingAt: record.pendingAt } : {}) });
@@ -577,7 +651,26 @@ export class FaceRunner {
     await this.#append({ originId: record.originId, transport: face.transport, status: "published", id: result.id, ...(result.ids ? { ids: result.ids } : {}), attempt: record.attempt, at: at(), via: "response" });
     /** @type {FaceStatus[]} */
     const out = [{ transport: face.transport, status: "published", id: result.id }];
-    if (face.attachments === "pictures") out.push(...(await this.#pictures(face, message, transport, record.thread)));
+    if (face.attachments === "pictures") out.push(...(half.uploads ? await this.#pictures(face, message, transport, record.thread) : await this.#noUploads(face, message, half)));
+    return out;
+  }
+
+  /**
+   * `pictures` on a half with no upload ladder: the text already carries each image's honest form
+   * (its link or its digest), and each image gets a refused picture row saying why no copy was
+   * made, so `faces --for` never reads a picture as published that nobody uploaded.
+   * @param {Face} face @param {any} message @param {FaceHalf} half
+   * @returns {Promise<FaceStatus[]>}
+   */
+  async #noUploads(face, message, half) {
+    /** @type {FaceStatus[]} */
+    const out = [];
+    for (const a of Array.isArray(message.attachments) ? message.attachments : []) {
+      if (a.kind !== "image") continue;
+      const reason = half.noUpload;
+      await this.#append({ originId: message.id, transport: face.transport, part: "attachment", attachmentId: String(a.id), name: String(a.name), status: "refused", code: "capability", reason, attempt: 0, at: this.now().toISOString() });
+      out.push({ transport: face.transport, status: "refused", reason, attachmentId: String(a.id) });
+    }
     return out;
   }
 
@@ -644,13 +737,8 @@ export class FaceRunner {
     return { transport: face.transport, status: "published", attachmentId: record.attachmentId };
   }
 
-  /** Is this raw Slack message from the seat's own bot account? @param {any} m @param {{ id: string, name: string, botId?: string }} who */
-  static ownAccount(m, who) {
-    if (!m) return false;
-    if (m.user && m.user === who.id) return true;
-    if (who.botId && m.bot_id === who.botId) return true;
-    return (m.subtype === "bot_message" || Boolean(m.bot_id)) && typeof m.username === "string" && m.username === who.name;
-  }
+  /** Is this raw Slack message from the seat's own bot account? (The Slack half's rule, kept here by name.) @param {any} m @param {{ id: string, name: string, botId?: string }} who */
+  static ownAccount(m, who) { return slackOwnAccount(m, who); }
 
   /**
    * Reconcile one `unknown` (or swept `pending`) face against the channel before any retry: a
@@ -664,13 +752,14 @@ export class FaceRunner {
     const at = () => this.now().toISOString();
     const pendingAtMs = Date.parse(record.pendingAt ?? record.at);
     const nowMs = this.now().getTime();
+    const half = /** @type {FaceHalf} */ (faceHalf(face.transport));
     let transport;
     let who;
     let hist;
     try {
       transport = await this.#transport(face);
       who = await this.#identity(face, transport);
-      hist = await transport.history({ oldest: slackTs(Math.max(0, pendingAtMs - this.lookbackMs)), latest: slackTs(nowMs) });
+      hist = await transport.history(/** @type {any} */ (half.window(Math.max(0, pendingAtMs - this.lookbackMs), nowMs)));
     } catch (e) {
       // a retry blind to the channel IS the duplicate; the face stays exactly as it was
       this.warn(`face ${face.transport} reconciliation read failed for ${record.originId.slice(0, 12)}: ${bounded(e instanceof Error ? e.message : String(e))}`);
@@ -680,25 +769,24 @@ export class FaceRunner {
     let candidates;
     let via;
     if (record.part === "attachment") {
-      candidates = hist.messages.filter((m) => Array.isArray(m.files) && m.files.some((/** @type {any} */ f) => f?.id === record.fileId));
+      candidates = hist.messages.filter((m) => half.fileIds(m).includes(String(record.fileId)));
       via = "file-id";
       if (candidates.length > 1) candidates = [candidates[0]]; // one file id shares once; the first sighting is it
     } else {
-      candidates = hist.messages.filter((m) => m.metadata?.event_type === FACE_RIDER_EVENT && m.metadata?.event_payload?.origin === record.originId);
+      candidates = hist.messages.filter((m) => half.rider(m) === record.originId);
       via = "rider";
       if (!candidates.length && record.payloadDigest) {
-        candidates = hist.messages.filter((m) => FaceRunner.ownAccount(m, who) && typeof m.text === "string"
-          && `sha256:${createHash("sha256").update(m.text).digest("hex")}` === record.payloadDigest);
+        candidates = hist.messages.filter((m) => { const t = half.textOf(m); return half.ownAccount(m, who) && typeof t === "string" && `sha256:${createHash("sha256").update(t).digest("hex")}` === record.payloadDigest; });
         via = "payload";
       }
     }
     if (candidates.length === 1) {
       const line = await this.#append({ originId: record.originId, transport: face.transport, ...(record.part ? { part: record.part, attachmentId: record.attachmentId } : {}),
-        status: "published", id: String(candidates[0].ts), attempt: record.attempt, at: at(), via });
+        status: "published", id: half.idOf(candidates[0]), attempt: record.attempt, at: at(), via });
       return { outcome: "published", record: line };
     }
     if (candidates.length > 1) {
-      const quarantine = candidates.map((m) => String(m.ts));
+      const quarantine = candidates.map((m) => half.idOf(m));
       const line = await this.#append({ originId: record.originId, transport: face.transport, status: "unknown", code: "ambiguous", attempt: record.attempt, at: at(), pendingAt: record.pendingAt,
         reason: `unknown: ${quarantine.length} byte-identical candidates from this seat inside the window and no rider; a human decides (agora faces --unknown)`, quarantine });
       return { outcome: "ambiguous", record: line };
@@ -767,7 +855,8 @@ export class FaceRunner {
    */
   classify(m, records, who, transport) {
     const raw = /** @type {any} */ (m.raw ?? {});
-    const rider = raw.metadata?.event_type === FACE_RIDER_EVENT ? raw.metadata?.event_payload?.origin : undefined;
+    const half = faceHalf(transport);
+    const rider = half?.rider(raw);
     const list = [...records.values()].filter((r) => r.transport === transport);
     if (typeof rider === "string") {
       const r = list.find((x) => x.originId === rider && !x.part);
@@ -775,7 +864,7 @@ export class FaceRunner {
     }
     const byTs = list.find((r) => r.status === "published" && (r.id === m.id || r.ids?.includes(m.id)));
     if (byTs) return { verdict: "own", record: byTs };
-    const fileIds = new Set(Array.isArray(raw.files) ? raw.files.map((/** @type {any} */ f) => String(f?.id)) : []);
+    const fileIds = new Set(half?.fileIds(raw) ?? []);
     if (fileIds.size) {
       const r = list.find((x) => x.part === "attachment" && x.fileId && fileIds.has(x.fileId));
       if (r) return { verdict: "own", record: r };
@@ -783,7 +872,7 @@ export class FaceRunner {
     if (list.some((r) => r.quarantine?.includes(m.id))) return { verdict: "quarantined" };
     const nowMs = this.now().getTime();
     const pendingInside = list.some((r) => r.status === "pending" && nowMs - Date.parse(r.pendingAt ?? r.at) <= this.settleMs);
-    if (pendingInside && FaceRunner.ownAccount(raw, who)) return { verdict: "held" };
+    if (pendingInside && half?.ownAccount(raw, who)) return { verdict: "held" };
     if (pendingInside && (m.author.id === who.id || (who.botId && m.author.id === who.botId))) return { verdict: "held" };
     return { verdict: "foreign" };
   }
@@ -794,7 +883,10 @@ export class FaceRunner {
    * @param {import('./core.mjs').Message} m @param {string} transport @param {string} room
    */
   origin(m, transport, room) {
-    return { source: { transport, room, id: m.id }, ts: m.ts, author: { id: m.author.id, name: m.author.name, kind: m.author.kind }, attestor: this.attestor };
+    // the transport's own timestamp, in the one spelling `OriginReference` accepts (GitHub says `Z` with no millis)
+    const parsed = Date.parse(m.ts);
+    const ts = Number.isFinite(parsed) ? new Date(parsed).toISOString() : m.ts;
+    return { source: { transport, room, id: m.id }, ts, author: { id: m.author.id, name: m.author.name, kind: m.author.kind }, attestor: this.attestor };
   }
 
   /**
