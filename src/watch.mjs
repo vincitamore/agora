@@ -200,7 +200,21 @@ export async function watch(transport, opts) {
     if (sweep) await sweep();
     /** @type {Array<{ m: import('./core.mjs').Message, thread?: string, checkpoint?: CursorCheckpoint }>} */
     const batch = [];
-    const roomMsgs = await transport.read({ thread, since: cursor, ...(pages ? { pages } : {}) });
+    /** @type {import('./core.mjs').ReadResult} */
+    let roomMsgs;
+    try {
+      roomMsgs = await transport.read({ thread, since: cursor, ...(pages ? { pages } : {}) });
+    } catch (e) {
+      // A source that can name why this watch must stop (a subscription whose seat service went
+      // dark) says so with a machine-readable `watchReason`, and the watch ends the way a guard
+      // ends it: held deliveries flushed, the reason on the result, never read as a quiet room.
+      // Any other failure is what it always was: thrown, so nothing here is checkpointed over it.
+      const why = e && typeof e === "object" && "watchReason" in e ? /** @type {{ watchReason: unknown }} */ (e).watchReason : undefined;
+      if (typeof why !== "string" || !why) throw e;
+      reason = why;
+      await flush();
+      return result();
+    }
     if (roomMsgs.gap) {
       gap = roomMsgs.gap;
       // said every poll it happens: the cursor is not moving, and the reader is the only one who
