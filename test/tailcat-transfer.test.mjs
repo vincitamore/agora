@@ -9,6 +9,19 @@ import { localTransferIdentity, encodeTransfer, decodeTransfer, resolveTransferR
 import { createTransferListener, requestTransfer, openTransferClient } from '../src/tailcat-http.mjs';
 import { connect } from 'node:net';
 const key=/** @param {number} n */n=>'nodekey:'+String(n).repeat(64);
+
+test('a screenshot remains an image attachment after verified materialization, without trusting its extension',async t=>{
+  const root=await fixture(t),input=path.join(root,'screenshot.data');
+  const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aJ1kAAAAASUVORK5CYII=','base64');
+  await writeFile(input,png);
+  const staging=path.join(root,'snapshot'),destination=path.join(root,'received');
+  const files=await snapshotTransferFiles(staging,[input]);
+  assert.equal(files[0].mimetype,'image/png');
+  const received=await commitReceivedFiles(staging,destination,files);
+  assert.equal(received[0].kind,'image');assert.deepEqual(await readFile(received[0].path),png);
+  const fake=path.join(root,'not-an-image.png');await writeFile(fake,'plain bytes');
+  assert.equal((await snapshotTransferFiles(path.join(root,'fake-snapshot'),[fake]))[0].mimetype,'application/octet-stream');
+});
 /** @param {import("node:test").TestContext} t */
 async function fixture(t){const root=await realpath(await mkdtemp(path.join(os.tmpdir(),'agora-transfer-')));t.after(()=>rm(root,{recursive:true,force:true}));return root;}
 /** @param {string} account @param {string} nodeKey @param {string} [signedAs] @returns {any} */

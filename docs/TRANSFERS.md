@@ -24,6 +24,8 @@ agora fetch engineering <offer-id>
 ```
 
 `fetch --json` returns locally committed attachments with `path` and `digest`.
+PNG, JPEG, GIF and WebP headers produce image presentation metadata; a filename alone
+does not. Files remain inert, and the consuming decoder still validates image content.
 `--into <directory>` selects a destination. Existing files are never overwritten;
 an identical file is accepted on a retry, a different file produces a collision error.
 Files remain inert. Reading an offer neither fetches it nor executes its contents.

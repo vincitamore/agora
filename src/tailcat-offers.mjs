@@ -5,7 +5,7 @@ import { randomUUID, randomBytes } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { AgoraError } from './core.mjs';
 import { atomicJson, privateDirectory, snapshotTransferFiles, resolveTransferRecipients,
-  encodeTransfer, decodeTransfer, localTransferIdentity, validateTransferManifest, commitReceivedFiles, digestFile } from './tailcat.mjs';
+  encodeTransfer, decodeTransfer, localTransferIdentity, validateTransferManifest, commitReceivedFiles, digestFile, transferAttachment } from './tailcat.mjs';
 import { controlOffer, launchOffer, unloadOfferRegistration } from './tailcat-launcher.mjs';
 import { requestTransfer, openTransferClient } from './tailcat-http.mjs';
 import { sha256 } from './tailcat-runtime.mjs';
@@ -149,7 +149,7 @@ export async function fetchFiles(transport,stateRoot,root,id,options={}){
       await atomicJson(receiptPath,{digest});
     }finally{await rm(staging,{recursive:true,force:true});}
   }
-  const attachments=files.map(file=>({...file,kind:'file',path:path.join(destination,file.name)}));
+  const attachments=files.map(file=>({...transferAttachment(file),path:path.join(destination,file.name)}));
   try{await client.request('/receipt',{body:JSON.stringify({digest}),maximum:256});}
   catch{ return {offerId:id,status:'saved-receipt-pending',attachments,next:{command:'agora',args:['fetch',options.room??'<room>',id,'--into',destination]}}; }
   return {offerId:id,status:'received',attachments};

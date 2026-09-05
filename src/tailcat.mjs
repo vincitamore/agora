@@ -13,6 +13,17 @@ export const TRANSFER_PREFIX = 'AGORA_TRANSFER_V1 ';
 export const MAX_FILE_BYTES = 128 * 1024 * 1024;
 export const MAX_OFFER_BYTES = 512 * 1024 * 1024;
 export const MAX_FILES = 8;
+/** Presentation metadata only; decoders still validate the format and files remain inert.
+ * @param {Buffer} prefix */
+export function transferMediaType(prefix) {
+  if(prefix.subarray(0,8).equals(Buffer.from('89504e470d0a1a0a','hex')))return 'image/png';
+  if(prefix.length>=3&&prefix[0]===255&&prefix[1]===216&&prefix[2]===255)return 'image/jpeg';
+  if(['GIF87a','GIF89a'].includes(prefix.subarray(0,6).toString('ascii')))return 'image/gif';
+  if(prefix.subarray(0,4).toString('ascii')==='RIFF'&&prefix.subarray(8,12).toString('ascii')==='WEBP')return 'image/webp';
+  return 'application/octet-stream';
+}
+/** @param {any} file */
+export const transferAttachment = file => ({...file,kind:['image/png','image/jpeg','image/gif','image/webp'].includes(file.mimetype)?'image':'file'});
 export const nodeKeyValid = /** @param {unknown} key */ key => typeof key === 'string' && /^nodekey:[a-f0-9]{64}$/.test(key);
 export const fingerprint = /** @param {string} key */ key => sha256(Buffer.from(key)).slice(0,16);
 /** @param {unknown} data */
@@ -209,20 +220,21 @@ export async function snapshotTransferFiles(directory,inputs) {
       const source=await open(full,constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
       const id=String(files.length);
       const dest=await open(path.join(directory,id),'wx',0o600);
-      const hash=createHash('sha256');let count=0;
+      const hash=createHash('sha256');let count=0;let prefix=Buffer.alloc(0);
       try {
         const before=await source.stat();
         if(!before.isFile() || before.ino!==st.ino || before.dev!==st.dev) throw new AgoraError('Transfer source changed while opening. Retry agora share.');
         for await(const chunk of source.createReadStream({autoClose:false})) {
           count+=chunk.length;
           if(count>st.size || count>MAX_FILE_BYTES) throw new AgoraError('Transfer source grew while reading. Retry agora share after the file is stable.');
+          if(prefix.length<12)prefix=Buffer.concat([prefix,chunk.subarray(0,12-prefix.length)]);
           hash.update(chunk);await dest.writeFile(chunk);
         }
         const after=await source.stat();
         if(count!==st.size || after.mtimeMs!==st.mtimeMs || after.size!==st.size) throw new AgoraError('Transfer source changed during snapshot. Retry agora share after the file is stable.');
         await dest.sync();
       } finally {await source.close();await dest.close();}
-      files.push({id,name,size:count,mimetype:'application/octet-stream',digest:`sha256:${hash.digest('hex')}`});total+=count;
+      files.push({id,name,size:count,mimetype:transferMediaType(prefix),digest:`sha256:${hash.digest('hex')}`});total+=count;
     }
     return files;
   } catch(e) {await rm(directory,{recursive:true,force:true});throw e;}
@@ -267,6 +279,6 @@ export async function commitReceivedFiles(staging,destination,files) {
     }
     // Files were fsynced before linking. Persist directory entries where supported before ACK.
     if(process.platform!=='win32') {const dir=await open(destination,'r');try {await dir.sync();} finally {await dir.close();}}
-    return files.map(file=>({id:file.id,name:file.name,kind:'file',size:file.size,mimetype:file.mimetype,digest:file.digest,path:path.join(destination,file.name)}));
+    return files.map(file=>({...transferAttachment(file),path:path.join(destination,file.name)}));
   } catch(e) {for(const file of created) await rm(file,{force:true});throw e;}
 }
