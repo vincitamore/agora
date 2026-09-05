@@ -27,8 +27,18 @@ Local sessions reach the service over one path endpoint: a Unix socket below the
 directory or a seat-derived Windows named pipe. The endpoint bind is the live exclusion primitive;
 the descriptor is advisory, never a lock. Abrupt death needs no manual lock recovery. A stale POSIX
 socket entry is moved to a unique quarantine name only after connection refusal and while a
-short-lived, endpoint-derived loopback bind serializes crash recovery, then the service
-binds the original name; it never unlinks a path a racing successor may already have rebound.
+short-lived exclusive SQLite transaction serializes crash recovery, then the service binds the
+original name; it never unlinks a path a racing successor may already have rebound. The authority
+database lives below the same canonical 0700 state directory, so unlike a TCP arbiter it is not in
+an OS-allocated port range and another local principal cannot bind it. The runtime releases its
+file lock on abrupt process death. Node uses built-in `node:sqlite` (Node 22.13+); Bun uses
+`bun:sqlite`, with no package, daemon or system helper.
+
+On POSIX, startup verifies that the canonical state root and native directory belong to the current
+OS user and tightens group/other access before trusting this authority. A busy authority refuses
+without touching the stale endpoint. A corrupt or unopenable authority also refuses, names the
+file, and tells the operator to stop every Agora process on that state root before removing it;
+automatic deletion could erase a live contender's authority.
 
 The descriptor carries a seat-private service secret and boot epoch. That reusable secret is never
 sent on the socket. The service first proves an HMAC over its fresh challenge, account, seat label

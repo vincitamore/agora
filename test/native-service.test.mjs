@@ -3,7 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, rm, symlink } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import net from "node:net";
 import path from "node:path";
@@ -36,6 +36,14 @@ async function readFrame(socket) {
     const frames = decoder.push(/** @type {Buffer} */ (bytes));
     if (frames.length) return /** @type {Record<string, any>} */ (frames[0]);
   }
+}
+
+/** @param {string} file */
+async function openTestDatabase(file) {
+  const moduleName = typeof process.versions.bun === "string" ? "bun:sqlite" : "node:sqlite";
+  const sqlite = await import(moduleName);
+  const Database = sqlite.DatabaseSync ?? sqlite.Database;
+  return new Database(file);
 }
 
 /** @param {import('node:test').TestContext} t */
@@ -174,6 +182,20 @@ test("filesystem aliases resolve to one physical seat endpoint", async (t) => {
   assert.equal(await nativeServiceEndpoint(root, ACCOUNT), await nativeServiceEndpoint(alias, ACCOUNT));
 });
 
+test("POSIX endpoint setup tightens a permissive pre-existing state directory", {
+  skip: process.platform === "win32" ? "POSIX directory modes only" : false,
+}, async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "agora-native-permissive-root-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const nativeDirectory = path.join(root, "native");
+  await mkdir(nativeDirectory);
+  await chmod(root, 0o777);
+  await chmod(nativeDirectory, 0o777);
+  const endpoint = await nativeServiceEndpoint(root, ACCOUNT);
+  assert.equal((await stat(root)).mode & 0o077, 0);
+  assert.equal((await stat(path.dirname(endpoint))).mode & 0o077, 0);
+});
+
 test("a recorded dead-service transcript cannot authenticate a fresh client challenge", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "agora-native-replay-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -221,6 +243,93 @@ test("abrupt service death leaves no manual lock recovery step", async (t) => {
   const client = await NativeServiceClient.connect(/** @type {any} */ (endpoint));
   client.close();
   assert.notEqual(endpoint.bootEpoch, deadEndpoint.bootEpoch);
+});
+
+test("POSIX stale-endpoint recovery refuses a held state-scoped authority without moving the socket", {
+  skip: process.platform === "win32" ? "POSIX Unix-socket recovery only" : false,
+}, async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "agora-native-reclaim-held-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const moduleUrl = new URL("../src/native-service.mjs", import.meta.url).href;
+  const child = spawn(process.execPath, ["--input-type=module", "--eval",
+    `import { NativeRoomService } from ${JSON.stringify(moduleUrl)}; const s = new NativeRoomService({ root: process.env.AGORA_TEST_ROOT, accountId: ${JSON.stringify(ACCOUNT)}, seatLabel: "child" }); process.stdout.write(JSON.stringify(await s.start()) + "\\n"); setInterval(() => {}, 1000);`],
+  { env: { ...process.env, AGORA_TEST_ROOT: root }, stdio: ["ignore", "pipe", "inherit"] });
+  t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
+  const [line] = await once(child.stdout, "data");
+  const deadEndpoint = JSON.parse(String(line));
+  child.kill("SIGKILL");
+  await once(child, "exit");
+
+  const authorityPath = path.join(path.dirname(deadEndpoint.path), "reclaim-authority.sqlite");
+  const blocker = await openTestDatabase(authorityPath);
+  blocker.exec("PRAGMA busy_timeout=0; BEGIN EXCLUSIVE");
+  try {
+    const refused = new NativeRoomService({ root, accountId: ACCOUNT, seatLabel: "refused" });
+    await assert.rejects(refused.start(), /reclamation authority is already held/);
+    assert.equal((await stat(deadEndpoint.path)).isSocket(), true, "a losing recovery never moves the endpoint");
+  } finally {
+    blocker.exec("ROLLBACK");
+    blocker.close();
+  }
+
+  const restarted = new NativeRoomService({ root, accountId: ACCOUNT, seatLabel: "replacement" });
+  const endpoint = await restarted.start();
+  t.after(() => restarted.stop());
+  assert.equal((await stat(authorityPath)).mode & 0o777, 0o600);
+  const client = await NativeServiceClient.connect(/** @type {any} */ (endpoint));
+  client.close();
+});
+
+test("POSIX corrupt reclaim authority fails visibly without moving the stale endpoint", {
+  skip: process.platform === "win32" ? "POSIX Unix-socket recovery only" : false,
+}, async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "agora-native-reclaim-corrupt-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const moduleUrl = new URL("../src/native-service.mjs", import.meta.url).href;
+  const child = spawn(process.execPath, ["--input-type=module", "--eval",
+    `import { NativeRoomService } from ${JSON.stringify(moduleUrl)}; const s = new NativeRoomService({ root: process.env.AGORA_TEST_ROOT, accountId: ${JSON.stringify(ACCOUNT)}, seatLabel: "child" }); process.stdout.write(JSON.stringify(await s.start()) + "\\n"); setInterval(() => {}, 1000);`],
+  { env: { ...process.env, AGORA_TEST_ROOT: root }, stdio: ["ignore", "pipe", "inherit"] });
+  t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
+  const [line] = await once(child.stdout, "data");
+  const deadEndpoint = JSON.parse(String(line));
+  child.kill("SIGKILL");
+  await once(child, "exit");
+
+  const authorityPath = path.join(path.dirname(deadEndpoint.path), "reclaim-authority.sqlite");
+  await writeFile(authorityPath, "not a sqlite database", { mode: 0o600 });
+  const refused = new NativeRoomService({ root, accountId: ACCOUNT, seatLabel: "refused" });
+  await assert.rejects(refused.start(), /reclamation authority .* is unusable; stop every Agora process .* remove that file/);
+  assert.equal((await stat(deadEndpoint.path)).isSocket(), true, "corrupt authority does not authorize moving the endpoint");
+});
+
+test("POSIX canonical aliases racing to reclaim one stale endpoint produce exactly one successor", {
+  skip: process.platform === "win32" ? "POSIX Unix-socket recovery only" : false,
+}, async (t) => {
+  const parent = await mkdtemp(path.join(tmpdir(), "agora-native-reclaim-alias-"));
+  const root = path.join(parent, "root");
+  const alias = path.join(parent, "alias");
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  await nativeServiceEndpoint(root, ACCOUNT);
+  await symlink(root, alias, "dir");
+  const moduleUrl = new URL("../src/native-service.mjs", import.meta.url).href;
+  const child = spawn(process.execPath, ["--input-type=module", "--eval",
+    `import { NativeRoomService } from ${JSON.stringify(moduleUrl)}; const s = new NativeRoomService({ root: process.env.AGORA_TEST_ROOT, accountId: ${JSON.stringify(ACCOUNT)}, seatLabel: "child" }); process.stdout.write(JSON.stringify(await s.start()) + "\\n"); setInterval(() => {}, 1000);`],
+  { env: { ...process.env, AGORA_TEST_ROOT: root }, stdio: ["ignore", "pipe", "inherit"] });
+  t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
+  await once(child.stdout, "data");
+  child.kill("SIGKILL");
+  await once(child, "exit");
+
+  const first = new NativeRoomService({ root, accountId: ACCOUNT, seatLabel: "first" });
+  const second = new NativeRoomService({ root: alias, accountId: ACCOUNT, seatLabel: "second" });
+  const results = await Promise.allSettled([first.start(), second.start()]);
+  assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+  assert.equal(results.filter((result) => result.status === "rejected").length, 1);
+  const winner = results[0].status === "fulfilled" ? first : second;
+  t.after(() => winner.stop());
+  const descriptor = /** @type {PromiseFulfilledResult<any>} */ (results.find((result) => result.status === "fulfilled")).value;
+  const client = await NativeServiceClient.connect(descriptor);
+  client.close();
 });
 
 test("stop joins an in-flight room opening without retaining a late store", async (t) => {

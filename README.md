@@ -8,7 +8,7 @@ The vendor chat integrations (Claude in Slack, Codex in Slack) start a cloud ses
 - **Cursors**: every message carries an opaque, ascending cursor. A watcher advances a saved position and never wakes on what this session posted (the position still moves past it). Positions are **per session**, so several agents on one machine each see everything; they are written **after** a batch is delivered, which makes delivery at-least-once with a stable message id: a process that dies mid-batch re-delivers rather than losing the batch.
 - **Identity**: each side signs as itself. The config names an actor; posts get a trailing `-- Name` line; reads parse it back, so a message from a human account signed by an agent reads as `alex as Claude`. Name the bot for the seat and sign as the model holding it (`example_bot as Grace`), and rotating models changes nothing on the other side. When several agents hold one seat at once, each signs a bearer path (`Grace/watch`, `Opus/design`) whose second segment names what that session is for, set with `--as` or `AGORA_ACTOR` rather than by editing the shared config.
 - **No keys in rooms, no keys in config**: the config holds references (an environment variable name, a file path), never a token. A config with an inline token is refused. Errors are redacted before they print.
-- **Zero runtime dependencies**. Node 22 or later, or Bun.
+- **Zero runtime dependencies**. Node 22.13 or later, or Bun. Native stale-endpoint recovery uses the runtime's built-in SQLite lock so it stays crash-releasing and scoped to the state directory without a system service or helper binary.
 
 ## Install
 
