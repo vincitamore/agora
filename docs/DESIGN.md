@@ -2,6 +2,10 @@
 
 ## Native scope
 
+The native paragraphs prescribe target acceptance contracts, not proof that this build implements
+them. The transport-backed direct-watch behavior below remains the legacy mode unless an explicit
+native rider applies; its body-delivery checkpoint is distinct from a native pointer wake.
+
 The failure exhibits below explain the original transport-backed CLI. Its Slack face has one
 app and bot account per seat; native rooms authenticate explicitly enrolled principals. Bearers
 remain addressing labels, not authorization. The CLI is a short-lived client; an explicitly
@@ -16,7 +20,9 @@ no operator authority. Same-user writable keys and policy provide cooperative ac
 not isolation against arbitrary local processes.
 
 Canonical accepted content and rendered views are distinct. Preserve accepted body values exactly;
-views may redact or sanitize under explicit policy without overwriting canonical content. Text
+every derived index and rendered view must apply the configured protection policy without
+overwriting canonical content. A changed projection identifies the alteration; ordinary views do
+not provide a raw-content bypass. Canonical content changes only through an authorized purge. Text
 fidelity means valid UTF-8 body bytes, not identical JSON escaping or envelope key order. Binary
 data travels as an attachment; invalid text is not silently decoded with replacement characters.
 Outgoing guards reject recognized owned credentials, not every possible secret in arbitrary text.
@@ -357,9 +363,11 @@ not because textual is nicer.
 `--release`, `--verdict`, `--exhibit`, `--because` are sugar on top of it, emitted in a fixed
 order through one emitter, so the parser and the emitter round-trip by construction.
 
-`agora read` renders one derived line above the body and prints the body **verbatim**; the
-trailers are never stripped and what was said is never rewritten. `--json` gains `to` and
-`trailers`, omitted when absent.
+In the historical transport-backed mode, `agora read` renders one derived line above the body
+and preserves the body and trailers verbatim. Native fidelity preserves those accepted bytes in
+canonical custody; every derived index and rendered view, including JSON, applies the configured
+protection policy and identifies any alteration. Applying that policy does not guarantee detection
+of every possible secret. `--json` gains `to` and `trailers`, omitted when absent.
 
 **Claims are advisory by physics, not by policy.** No transport offers an atomic take: there is
 no compare-and-swap over channel history, and deleting a message would destroy the wire's own
@@ -784,9 +792,11 @@ feature that looks helpful in isolation.
 - **No transport-specific verb.** A feature that only makes sense on one transport is that
   transport's option.
 - **The exit codes are a contract**: 0 ok or nothing new, 1 error, 2 usage, 42 a watch delivered, in every mode. No new code, and no new meaning for an old one.
-- **Zero runtime package dependencies**; pinned Tailcat capsules are bundled for native transfers,
+- **The root CLI has zero runtime package dependencies**; pinned Tailcat capsules are bundled for native transfers,
   never installed dynamically. Tokens by reference only, every transport testable offline with
-  an injected fetch.
+  an injected fetch. Separately packaged TUI and pane runtimes declare their own dependencies;
+  neither becomes an implicit root CLI installation or startup dependency. A service-owned PTY
+  alone does not establish isolation against another process under the same OS principal.
 - **No subagent marker.** A `child` field once flagged a post from a subagent of the seat's session. Measured: Claude Code sets `CLAUDE_CODE_CHILD_SESSION` in every tool subprocess, the seat's own included, so the flag was true for the normal case; Amore Build sets no marker at all, and on both a real subagent inherits its parent's session id and pid. Nothing in the environment discriminates, so the field was dropped rather than renamed; the evidence a reader has is the ledger's posting pid and the identity line.
 - **The state layout is a contract.** A cursor's filename inside a session directory is the same
   string the cursor key has always been, and no bearer or session string is ever a component of it.
