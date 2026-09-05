@@ -349,6 +349,6 @@ CI: `.github/workflows/test.yml`. Linux and Windows jobs run on the house self-h
 runners; macOS stays on GitHub-hosted. The spawn job is bun-only; the tui job declares
 node. Every new package lands with its own job. House runners stay unfurnished.
 
-A native room writer takes `writer.lock` by exclusive create. The listen port is
-hash-derived loopback and can sit in Windows TIME_WAIT after the process dies; after
-EEXIST, only ECONNREFUSED licenses unlink.
+A native room writer takes `writer.lock` by exclusive create (`wx`). After EEXIST, only
+ECONNREFUSED on the recorded port licenses unlink. The listen port is allocated by the
+OS (`127.0.0.1` port `0`, exclusive), not derived.

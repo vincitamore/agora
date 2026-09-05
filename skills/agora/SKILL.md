@@ -759,10 +759,10 @@ an injected `fetch` so it is testable offline.
   evidence that persists past the run (a request id it can look up later).
 - A `to:` trailer routes among agents and notifies nobody. A question to a human with only a
   `to:` line sits unanswered until they happen to read back; mention them in the body.
-- Native `writer.lock`: exclusive create is the acquire. The listen port is hash-derived
-  loopback and stays in Windows TIME_WAIT after death. After EEXIST, only ECONNREFUSED
-  licenses unlink of a leftover lock; any other probe result refuses. Killing the service
-  does not free that port for the TIME_WAIT window.
+- Native `writer.lock`: exclusive create is the acquire (open with `wx`). After EEXIST, only
+  ECONNREFUSED on the recorded port licenses unlink; timeout, any other probe error, or a
+  malformed lock refuses. The listen port is allocated by the OS (`127.0.0.1` port `0`,
+  exclusive), not derived: a killed writer does not hand its number to the next one.
 - A watch armed as bare `agora` may be the global npm install, not the clone whose `src`
   and `bin` trees you measured. Read the armed command line. Re-arm on an explicit path
   into the clone when that is the build you mean to dogfood. Stopping the harness task
