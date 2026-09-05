@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { issueAdmission } from "../pane-authority.ts";
 import { startAuthority } from "../listen.ts";
 import { renderDeliveredLine } from "../delivered-line.ts";
 
@@ -71,6 +72,7 @@ test("pane.sock: server writes hello first; deliver before client hello is refus
 
   socket.write(`${JSON.stringify({ type: "hello", bootEpoch: 7 })}\n`);
   socket.write(`${JSON.stringify({ type: "open", spawnId: "s1" })}\n`);
+  issueAdmission(started.auth, "ad-1");
   socket.write(
     `${JSON.stringify({
       type: "deliver",

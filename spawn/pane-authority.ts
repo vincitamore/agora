@@ -33,6 +33,7 @@ export type Authority = {
   now: () => number;
   open: (spawnId: string, cmd?: string[]) => OpenedPane;
   opens: string[];
+  issued: Set<string>;
 };
 
 export function createAuthority(opts: {
@@ -49,7 +50,14 @@ export function createAuthority(opts: {
     now: opts.now ?? Date.now,
     open: opts.open,
     opens: [],
+    issued: new Set(),
   };
+}
+
+/** Until the receiver-atomic-accept seam issues grants, the package holds the set. */
+export function issueAdmission(auth: Authority, id: string): void {
+  if (!id) throw new Error("admission.id required");
+  auth.issued.add(id);
 }
 
 /** Spawn admission calls this. Sock frames never open a pane as a side effect. */
@@ -106,6 +114,7 @@ function openSpawn(auth: Authority, frame: OpenFrame): void {
 }
 
 function deliver(auth: Authority, frame: DeliverFrame): void {
+  if (!auth.issued.has(frame.admission.id)) throw new Error("admission unissued");
   const line = renderDeliveredLine(frame.envelope);
   writeDeliveredLine(existingPane(auth, frame.spawnId), line, frame.admission);
   auth.journal.push(journalWrite("service", frame.spawnId, line, new Date(auth.now()).toISOString()));

@@ -42,8 +42,7 @@ export function closePane(pane: OpenedPane): void {
 /** Production opener: the authority owns the Bun.Terminal. */
 export function openBunPane(spawnId: string, cmd?: string[]): OpenedPane {
   const argv = cmd && cmd.length > 0 ? cmd : ["node", "-e", "setInterval(()=>{}, 1e9)"];
-  const Terminal = (Bun as unknown as { Terminal: new (opts: object) => TerminalHandle & { closed?: boolean } }).Terminal;
-  const term = new Terminal({
+  const term = new Bun.Terminal({
     cols: 80,
     rows: 24,
     data() {},
@@ -56,7 +55,7 @@ export function openBunPane(spawnId: string, cmd?: string[]): OpenedPane {
         return term.write(bytes);
       },
       resize(cols, rows) {
-        term.resize?.(cols, rows);
+        term.resize(cols, rows);
       },
       close() {
         try {
@@ -67,7 +66,7 @@ export function openBunPane(spawnId: string, cmd?: string[]): OpenedPane {
         term.close();
       },
       get closed() {
-        return Boolean(term.closed);
+        return term.closed;
       },
     },
   };

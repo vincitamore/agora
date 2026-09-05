@@ -135,14 +135,24 @@ function parseEnvelope(value: unknown): DeliveredEnvelope {
   if (!cursorRange || typeof cursorRange !== "object") throw new Error("envelope needs cursorRange");
   const range = cursorRange as Record<string, unknown>;
   return {
-    deliveryId: str(rec.deliveryId, "envelope.deliveryId"),
-    seat: str(rec.seat, "envelope.seat"),
-    bearer: str(rec.bearer, "envelope.bearer"),
-    room: str(rec.room, "envelope.room"),
+    deliveryId: field(rec.deliveryId, "envelope.deliveryId"),
+    seat: field(rec.seat, "envelope.seat"),
+    bearer: field(rec.bearer, "envelope.bearer"),
+    room: field(rec.room, "envelope.room"),
     cursorRange: {
-      from: str(range.from, "envelope.cursorRange.from"),
-      to: str(range.to, "envelope.cursorRange.to"),
+      from: field(range.from, "envelope.cursorRange.from"),
+      to: field(range.to, "envelope.cursorRange.to"),
     },
-    since: str(rec.since, "envelope.since"),
+    since: field(rec.since, "envelope.since"),
   };
+}
+
+/** Envelope fields are interpolated into a PTY write; C0 and DEL cannot ride. */
+function field(value: unknown, name: string): string {
+  const s = str(value, name);
+  for (let i = 0; i < s.length; i++) {
+    const code = s.charCodeAt(i);
+    if (code < 32 || code === 127) throw new Error(`${name} refuses control bytes`);
+  }
+  return s;
 }
