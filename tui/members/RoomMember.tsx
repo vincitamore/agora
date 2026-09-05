@@ -22,6 +22,7 @@ import { composeRefusal, preparePost } from "../lib/compose-guard";
 import { clamp, trunc, truncPad } from "../lib/format";
 import { authorColor, icons, neutral, presence, primary, semantic } from "../theme";
 import type { PeerRow } from "../lib/room-client";
+import { shown, shownError } from "../lib/safe-text";
 
 /** Rows the shell keeps above and below a member (brand box 3, member bar 1, hint bar 1). */
 export const CHROME_ROWS = 5;
@@ -37,7 +38,7 @@ const SEND_BINDINGS = [
 ];
 
 function peersLine(peers: PeerRow[], error: string | undefined, width: number): { text: string; color: string } {
-  if (error) return { text: `peers unreadable: ${error}`, color: semantic.warning };
+  if (error) return { text: shown(`peers unreadable: ${error}`), color: semantic.warning };
   if (!peers.length) return { text: "no sessions registered on this seat", color: neutral.textMuted };
   const parts = peers.map((p) => `${presence[p.state].glyph} ${p.bearer}`);
   return { text: trunc(parts.join("  "), width), color: neutral.textDim };
@@ -146,7 +147,7 @@ export const RoomMember = memo(function RoomMember({ active }: { active: boolean
       toast(`posted ${r.id} at cursor ${r.cursor}`, "success");
       await store.refresh();
     } catch (e) {
-      toast(`not sent: ${e instanceof Error ? e.message : String(e)}`, "error");
+      toast(`not sent: ${shownError(e)}`, "error");
     }
   }, [store, toast]);
 
@@ -206,7 +207,7 @@ export const RoomMember = memo(function RoomMember({ active }: { active: boolean
   const headTail = " · this seat only";
   const peers = peersLine(store.peers, store.peersError, Math.max(8, width - 2 - headLead.length - headTail.length));
   const status = store.error
-    ? { text: `room unreadable: ${store.error}`, color: semantic.error }
+    ? { text: shown(`room unreadable: ${store.error}`), color: semantic.error }
     : !store.alias
       ? { text: "no local room in the config", color: semantic.warning }
       : !entries.length

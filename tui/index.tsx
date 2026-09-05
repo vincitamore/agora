@@ -15,6 +15,7 @@ import { App } from "./App";
 import { LocalRoomClient, roomsFromConfig } from "./lib/local-client";
 import { readHuman, writeHuman } from "./lib/human";
 import type { HumanActor } from "./lib/room-client";
+import { shownError } from "./lib/safe-text";
 
 const { values, positionals } = parseArgs({
   args: process.argv.slice(2),
@@ -82,7 +83,7 @@ createRoot(renderer).render(
         await writeHuman(view.stateRoot, name);
         return undefined;
       } catch (e) {
-        return e instanceof Error ? e.message : String(e);
+        return shownError(e);
       }
     }}
     onQuit={quit}

@@ -10,6 +10,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { HumanActor, Horizon, Message, PeerRow, RoomClient, RoomInfo } from "./room-client";
+import { shownError } from "./safe-text";
 
 export interface RoomStore {
   client: RoomClient;
@@ -59,7 +60,7 @@ export function RoomStoreProvider({ client, initialAlias, children }: { client: 
         setRooms(list);
         setAlias((cur) => cur ?? list[0]?.alias);
       })
-      .catch((e: unknown) => alive && setError(e instanceof Error ? e.message : String(e)));
+      .catch((e: unknown) => alive && setError(shownError(e)));
     return () => {
       alive = false;
     };
@@ -74,7 +75,7 @@ export function RoomStoreProvider({ client, initialAlias, children }: { client: 
       setHorizon(r.horizon);
       setError(undefined);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(shownError(e));
     } finally {
       inflight.current = false;
     }
@@ -85,7 +86,7 @@ export function RoomStoreProvider({ client, initialAlias, children }: { client: 
       setPeers(await client.peers());
       setPeersError(undefined);
     } catch (e) {
-      setPeersError(e instanceof Error ? e.message : String(e));
+      setPeersError(shownError(e));
     }
   }, [client]);
 
