@@ -1,8 +1,11 @@
 /**
- * SEARCH: a substring search over the messages the room store has loaded, in memory only (no
- * store, no index yet). Rows render like ROOM rows; one horizon line says what the search could
- * see and when. It prints no count of any kind: not of rows, not of authors, not of anything.
- * Enter jumps ROOM to the row under the cursor.
+ * SEARCH: the room searched through its source when the client has one (the seat service's
+ * `search`, a named seam while the service refuses it), and otherwise a substring search over
+ * the messages the room store has loaded, in memory. Rows render like ROOM rows; one horizon
+ * line says what the search could see, when, and through what; when the source refused the
+ * request the line says so and names the in-memory window that was searched instead. It prints
+ * no count of any kind: not of rows, not of authors, not of anything. Enter jumps ROOM to the row
+ * under the cursor.
  */
 
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
@@ -14,6 +17,8 @@ import { searchMessages } from "../lib/room-model";
 import { clamp, fmtClock, fmtDay, trunc, truncPad } from "../lib/format";
 import { redact } from "../../src/core.mjs";
 import { authorColor, icons, neutral, primary, semantic } from "../theme";
+import { SeamUnservedError, type SearchResult } from "../lib/room-client";
+import { shownError } from "../lib/safe-text";
 import { CHROME_ROWS } from "./RoomMember";
 
 const DEBOUNCE_MS = 120;
@@ -25,6 +30,10 @@ export const SearchMember = memo(function SearchMember({ active, onJump }: { act
   const [applied, setApplied] = useState("");
   const [cursor, setCursor] = useState(0);
   const [top, setTop] = useState(0);
+  /** Rows the source answered with, when it did. */
+  const [served, setServed] = useState<SearchResult | undefined>(undefined);
+  /** Why the source did not answer: the seam, or a failure; nothing when it answered or has none. */
+  const [unserved, setUnserved] = useState<string | undefined>(undefined);
 
   useTypingFlag(active);
 
@@ -37,7 +46,35 @@ export const SearchMember = memo(function SearchMember({ active, onJump }: { act
     return () => clearTimeout(t);
   }, [query]);
 
-  const rows = useMemo(() => searchMessages(store.messages, applied), [store.messages, applied]);
+  // through the source, when the client has one for this room; a refusal falls back to memory
+  useEffect(() => {
+    const alias = store.alias;
+    const search = store.client.search;
+    if (!alias || !search || !applied.trim()) {
+      setServed(undefined);
+      setUnserved(undefined);
+      return;
+    }
+    let alive = true;
+    search
+      .call(store.client, alias, applied)
+      .then((r) => {
+        if (!alive) return;
+        setServed(r);
+        setUnserved(undefined);
+      })
+      .catch((e: unknown) => {
+        if (!alive) return;
+        setServed(undefined);
+        setUnserved(e instanceof SeamUnservedError ? `seat service ${e.request} is not served yet (a seam) · searched the loaded window in memory` : `source failed: ${shownError(e)} · searched the loaded window in memory`);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [store.client, store.alias, applied]);
+
+  const loaded = useMemo(() => searchMessages(store.messages, applied), [store.messages, applied]);
+  const rows = served ? served.rows : loaded;
   const memberHeight = Math.max(6, height - CHROME_ROWS);
   const listRows = Math.max(3, memberHeight - 4);
   const rowWidth = Math.max(20, width - 2);
@@ -66,9 +103,9 @@ export const SearchMember = memo(function SearchMember({ active, onJump }: { act
     }
   });
 
-  const h = store.horizon;
+  const h = served ? served.horizon : store.horizon;
   const horizonText = h
-    ? `horizon: ${h.alias} · oldest loaded ${h.oldestTs ? fmtDay(h.oldestTs) : "nothing"}${h.oldestCursor ? ` (cursor ${h.oldestCursor})` : ""} · read ${fmtClock(h.readAt)} · ${h.source} · older messages are not searched here`
+    ? `horizon: ${h.alias}${unserved ? ` · ${unserved}` : ""} · oldest loaded ${h.oldestTs ? fmtDay(h.oldestTs) : "nothing"}${h.oldestCursor ? ` (cursor ${h.oldestCursor})` : ""}${h.readTo ? ` · read to ${h.readTo}` : ""} · read ${fmtClock(h.readAt)} · ${h.source} · older messages are not searched here`
     : "horizon: no room loaded yet";
 
   const tsCol = 8;
