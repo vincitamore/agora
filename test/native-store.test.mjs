@@ -156,7 +156,14 @@ test("boundary publication failure preserves the synced frame for explicit recon
   await rename(store.boundaryPath, savedBoundary);
   await mkdir(store.boundaryPath);
   const before = (await stat(store.logPath)).size;
-  await assert.rejects(store.append({ operationId: "operation_boundary_fail", authorName: "Peer", text: "unknown" }, { accountId: PEER }), /acceptance is unknown/);
+  const failed = await store.append({ operationId: "operation_boundary_fail", authorName: "Peer", text: "unknown" }, { accountId: PEER }).then(
+    () => { throw new Error("expected publication to fail"); },
+    (error) => error,
+  );
+  assert.match(String(failed.message), /acceptance is unknown/);
+  assert.equal(failed.message.includes("("), false, "the caller-facing message is unchanged");
+  assert.ok(failed.cause instanceof Error, "the OS error is carried as cause, not discarded");
+  assert.equal(typeof /** @type {NodeJS.ErrnoException} */ (failed.cause).code, "string");
   assert.ok((await stat(store.logPath)).size > before, "a possibly committed frame is not rolled back");
   await store.close();
   await rm(store.boundaryPath, { recursive: true, force: true });
