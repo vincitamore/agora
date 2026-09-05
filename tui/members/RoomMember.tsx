@@ -21,7 +21,7 @@ import { buildLines, foldThreads, type Line } from "../lib/room-model";
 import { composeRefusal, preparePost } from "../lib/compose-guard";
 import { clamp, trunc, truncPad } from "../lib/format";
 import { authorColor, icons, neutral, presence, primary, semantic } from "../theme";
-import type { PeerRow } from "../lib/room-client";
+import { PostFaultError, type PeerRow } from "../lib/room-client";
 import { shown, shownError } from "../lib/safe-text";
 
 /** Rows the shell keeps above and below a member (brand box 3, member bar 1, hint bar 1). */
@@ -76,11 +76,14 @@ export const RoomMember = memo(function RoomMember({ active }: { active: boolean
   const topRef = useRef(0);
 
   useTypingFlag(active && composing);
-  usePollWhileActive(active, store.refresh, POLL_MS);
+  usePollWhileActive(active, store.poll, POLL_MS);
   usePollWhileActive(active, store.refreshPeers, PEERS_POLL_MS);
 
   const memberHeight = Math.max(6, height - CHROME_ROWS);
-  const listRows = Math.max(3, memberHeight - 1 - COMPOSE_ROWS);
+  // a fault or a read failure takes a row of its own above compose, so it is visible however
+  // full the list is; the list gives that row up while the room is not answering
+  const faultRows = store.fault || store.error ? 1 : 0;
+  const listRows = Math.max(3, memberHeight - 1 - COMPOSE_ROWS - faultRows);
   const listWidth = Math.max(20, width - 2);
 
   const entries = useMemo(() => foldThreads(store.messages), [store.messages]);
@@ -134,7 +137,7 @@ export const RoomMember = memo(function RoomMember({ active }: { active: boolean
     const ed = editor.current;
     if (!ed || !store.alias) return;
     const text = ed.plainText;
-    const refusal = composeRefusal(text, store.actor);
+    const refusal = composeRefusal(text, store.actor) ?? store.client.draftRefusal?.(text);
     if (refusal) {
       toast(refusal, "error");
       return;
@@ -144,10 +147,15 @@ export const RoomMember = memo(function RoomMember({ active }: { active: boolean
       ed.clear();
       setComposing(false);
       setCursor(-1);
-      toast(`posted ${r.id} at cursor ${r.cursor}`, "success");
+      toast(`posted ${r.id} at cursor ${r.cursor}${r.duplicate ? " (the host had accepted it already)" : ""}`, "success");
       await store.refresh();
     } catch (e) {
-      toast(`not sent: ${shownError(e)}`, "error");
+      // three outcomes besides sent, each rendered as itself; the draft stays in every case
+      if (e instanceof PostFaultError) {
+        if (e.outcome === "dark") toast(`not sent · room dark: ${shown(e.reason)}`, "error");
+        else if (e.outcome === "refused") toast(`not sent · refused: ${shown(e.reason)}`, "error");
+        else toast(`acceptance unknown: ${shown(e.reason)}`, "error");
+      } else toast(`not sent: ${shownError(e)}`, "error");
     }
   }, [store, toast]);
 
@@ -203,16 +211,23 @@ export const RoomMember = memo(function RoomMember({ active }: { active: boolean
 
   const roomInfo = store.rooms.find((r) => r.alias === store.alias);
   const oldest = store.horizon?.oldestCursor;
-  const headLead = `${icons.room} ROOM ${store.alias ?? "(none)"}${roomInfo ? ` · ${roomInfo.transport}` : ""}${oldest ? ` · from cursor ${oldest}` : ""}   PEERS `;
+  // "read to" is the source's coverage, a cursor the read is complete through; it stands in for
+  // "from cursor" when the source says it, because a native cursor carries the whole epoch
+  const readTo = store.horizon?.readTo;
+  const position = readTo ? ` · read to ${readTo}` : oldest ? ` · from cursor ${oldest}` : "";
+  const headLead = `${icons.room} ROOM ${store.alias ?? "(none)"}${roomInfo ? ` · ${roomInfo.transport}` : ""}${position}   PEERS `;
   const headTail = " · this seat only";
   const peers = peersLine(store.peers, store.peersError, Math.max(8, width - 2 - headLead.length - headTail.length));
-  const status = store.error
-    ? { text: shown(`room unreadable: ${store.error}`), color: semantic.error }
-    : !store.alias
-      ? { text: "no local room in the config", color: semantic.warning }
-      : !entries.length
-        ? { text: "nothing in this room yet", color: neutral.textMuted }
-        : { text: "", color: neutral.textMuted };
+  const fault = store.fault
+    ? { text: shown(`room ${store.fault.kind} · ${store.fault.reason}`), color: store.fault.kind === "dark" ? semantic.error : semantic.warning }
+    : store.error
+      ? { text: shown(`room unreadable: ${store.error}`), color: semantic.error }
+      : undefined;
+  const status = !store.alias
+    ? { text: "no room in the config", color: semantic.warning }
+    : !entries.length && !fault
+      ? { text: "nothing in this room yet", color: neutral.textMuted }
+      : { text: "", color: neutral.textMuted };
 
   return (
     <box flexGrow={1} flexDirection="column" paddingLeft={1} paddingRight={1}>
@@ -221,7 +236,7 @@ export const RoomMember = memo(function RoomMember({ active }: { active: boolean
           <span fg={primary.bright}>{icons.room} ROOM </span>
           <span fg={neutral.text}>{store.alias ?? "(none)"}</span>
           <span fg={neutral.textMuted}>{roomInfo ? ` · ${roomInfo.transport}` : ""}</span>
-          <span fg={neutral.textMuted}>{oldest ? ` · from cursor ${oldest}` : ""}</span>
+          <span fg={neutral.textMuted}>{position}</span>
           <span fg={neutral.textMuted}>{"   PEERS "}</span>
           <span fg={peers.color}>{peers.text}</span>
           <span fg={neutral.textMuted}>{headTail}</span>
@@ -261,6 +276,14 @@ export const RoomMember = memo(function RoomMember({ active }: { active: boolean
           );
         })}
       </box>
+
+      {fault ? (
+        <box height={1} flexShrink={0}>
+          <text>
+            <span fg={fault.color}>{truncPad(fault.text, listWidth)}</span>
+          </text>
+        </box>
+      ) : null}
 
       <box
         height={COMPOSE_ROWS}

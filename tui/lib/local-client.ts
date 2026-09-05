@@ -23,25 +23,40 @@ interface LocalRoom extends RoomInfo {
   path: string;
 }
 
+export interface NativeRoom extends RoomInfo {
+  transport: "native";
+  roomId: string;
+}
+
+const NATIVE_ROOM_ID = /^[a-f0-9]{32}$/;
+
 /** The pieces of the shared config this surface is allowed to hold. */
 export interface RoomsView {
   stateRoot: string;
   rooms: LocalRoom[];
-  /** Aliases the config names on transports this slice cannot read yet, so they are shown, not hidden. */
+  /** Rooms the config names `transport: native` with a roomId; the seat service client serves them. */
+  native: NativeRoom[];
+  /** Aliases the config names on transports this surface cannot read, so they are shown, not hidden. */
   elsewhere: RoomInfo[];
 }
 
-/** Read the shared config for its rooms and state root only; the actor never leaves this function. */
+/**
+ * Read the shared config for its rooms and state root only; the actor never leaves this function,
+ * and no token field is looked at: a room's `tokenEnv` / `tokenFile` are not read, resolved or
+ * copied, so this surface never holds one.
+ */
 export async function roomsFromConfig(explicit?: string): Promise<RoomsView> {
   const cfg = await loadConfig(explicit);
   const rooms: LocalRoom[] = [];
+  const native: NativeRoom[] = [];
   const elsewhere: RoomInfo[] = [];
   for (const [alias, r] of Object.entries(cfg.rooms)) {
     const note = typeof r.note === "string" ? r.note : undefined;
     if (r.transport === "local" && typeof r.path === "string") rooms.push({ alias, transport: "local", room: r.path, path: r.path, note });
-    else elsewhere.push({ alias, transport: r.transport, room: String(r.channel ?? r.repo ?? r.path ?? ""), note });
+    else if (r.transport === "native" && typeof r.roomId === "string" && NATIVE_ROOM_ID.test(r.roomId)) native.push({ alias, transport: "native", room: r.roomId, roomId: r.roomId, note });
+    else elsewhere.push({ alias, transport: r.transport, room: String(r.channel ?? r.repo ?? r.path ?? r.roomId ?? ""), note });
   }
-  return { stateRoot: stateDir(cfg), rooms, elsewhere };
+  return { stateRoot: stateDir(cfg), rooms, native, elsewhere };
 }
 
 export class LocalRoomClient implements RoomClient {

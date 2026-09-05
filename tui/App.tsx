@@ -105,6 +105,9 @@ function Shell({ needsName = false, onName, onQuit }: AppProps) {
 
   const activeDef = MEMBERS.find((m) => m.id === active);
   const who = store.actor.name || "(unnamed)";
+  const loadedRoom = store.rooms.find((r) => r.alias === store.alias);
+  // the hint names the loaded room's transport (the config's choice), and whether it is followed
+  const sourceLabel = `${loadedRoom ? `${loadedRoom.transport} room` : store.client.kind}${store.live ? " · live" : ""}`;
 
   return (
     <box flexDirection="column" width="100%" height="100%" backgroundColor={neutral.background}>
@@ -137,7 +140,7 @@ function Shell({ needsName = false, onName, onQuit }: AppProps) {
 
       <box paddingLeft={1} paddingRight={1} flexShrink={0} height={1}>
         <text>
-          <span fg={semantic.info}>{store.client.kind === "local" ? "local room" : store.client.kind}</span>
+          <span fg={semantic.info}>{sourceLabel}</span>
           <span fg={neutral.textMuted}>
             {active === ROOM_ID
               ? " · j/k or arrows move · enter folds · i compose · alt+enter send · esc leave · r re-read"
