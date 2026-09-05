@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync, mkdirSync, copyFileSync, chmodSync } from 
 import { resolve, dirname } from 'node:path';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { gzipSync, gunzipSync } from 'node:zlib';
 const root = resolve(import.meta.dirname, '..');
 const vendor = resolve(root, 'vendor/tailcat');
 const source = JSON.parse(readFileSync(resolve(vendor, 'source.json'), 'utf8'));
@@ -32,7 +33,10 @@ if (mode === 'build') {
       { ...process.env, GOOS: os, GOARCH: arch, CGO_ENABLED: '0' });
     chmodSync(out, 0o755);
     const bytes = readFileSync(out);
-    writeFileSync(resolve(vendor, `${target}.json`), JSON.stringify({ target, path: relative, sha256: hash(bytes), size: bytes.length,
+    const capsule = gzipSync(bytes, { level: 9 });
+    const capsulePath = `${target}/tailcat.gz`;
+    writeFileSync(resolve(vendor, capsulePath), capsule);
+    writeFileSync(resolve(vendor, `${target}.json`), JSON.stringify({ target, path: capsulePath, capsuleSha256: hash(capsule), capsuleSize: capsule.length, sha256: hash(bytes), size: bytes.length,
       source, build: { go: goVersion, tags, flags: ['-trimpath', '-buildvcs=false'], ldflags: flags, cgo: false }, licenseSha256: hash(license) }, null, 2) + '\n');
     if ((process.platform === os || process.platform === 'win32' && os === 'windows') &&
         (process.arch === arch || process.arch === 'x64' && arch === 'amd64')) {
@@ -50,23 +54,24 @@ if (mode === 'build') {
   for (const target of targets) {
     const dir = resolve(artifacts, target.split('-')[0]);
     const entry = JSON.parse(readFileSync(resolve(dir, `${target}.json`), 'utf8'));
-    const expected = `${target}/tailcat${target.startsWith('windows-') ? '.exe' : ''}`;
+    const expected = `${target}/tailcat.gz`;
     if (entry.target !== target || entry.path !== expected || JSON.stringify(entry.source) !== JSON.stringify(source)) throw Error(`Bad manifest: ${target}`);
     if (build && JSON.stringify(build) !== JSON.stringify(entry.build)) throw Error('Different build flags across targets');
     if (licenseSha256 && licenseSha256 !== entry.licenseSha256) throw Error('Different licenses across targets');
     build = entry.build;
     licenseSha256 = entry.licenseSha256;
-    const bytes = readFileSync(resolve(dir, expected));
+    const capsule = readFileSync(resolve(dir, expected));
+    if (capsule.length !== entry.capsuleSize || hash(capsule) !== entry.capsuleSha256) throw Error(`Capsule mismatch: ${target}`);
+    const bytes = gunzipSync(capsule, { maxOutputLength: 100 * 1024 * 1024 });
     if (hash(bytes) !== entry.sha256 || bytes.length !== entry.size) throw Error(`Artifact integrity mismatch: ${target}`);
     const license = readFileSync(resolve(dir, 'LICENSE'));
     if (hash(license) !== licenseSha256) throw Error('License mismatch');
     const out = resolve(vendor, expected);
     mkdirSync(dirname(out), { recursive: true });
-    writeFileSync(out, bytes, { mode: 0o755 });
-    chmodSync(out, 0o755);
+    writeFileSync(out, capsule);
     writeFileSync(resolve(vendor, 'LICENSE'), license);
-    entries[target] = { path: expected, sha256: entry.sha256, size: entry.size };
+    entries[target] = { path: expected, capsuleSha256: entry.capsuleSha256, capsuleSize: entry.capsuleSize, sha256: entry.sha256, size: entry.size };
   }
   writeFileSync(resolve(vendor, 'lock.json'), JSON.stringify({ version: 1, source, build, license: { path: 'LICENSE', sha256: licenseSha256 }, targets: entries }, null, 2) + '\n');
-  console.log('Collected all six verified targets. Stage POSIX binaries with git update-index --chmod=+x before committing.');
+  console.log('Collected all six verified capsules; no executable bits needed until local expansion.');
 } else throw Error('Usage: node scripts/vendor-tailcat.mjs build <upstream-checkout> <windows|linux|darwin> | collect <artifact-directory>');
