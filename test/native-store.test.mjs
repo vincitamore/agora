@@ -117,7 +117,7 @@ test("a closed writer can be reopened immediately without waiting out TIME_WAIT 
   t.after(() => new Promise((resolve) => occupant.close(() => resolve(undefined))));
   await new Promise((resolve, reject) => {
     occupant.once("error", reject);
-    occupant.listen({ host: "127.0.0.1", port: lastPort, exclusive: true }, resolve);
+    occupant.listen({ host: "127.0.0.1", port: lastPort, exclusive: true }, () => resolve(undefined));
   });
   const reopened = await NativeRoomStore.open({ root, roomId: ROOM });
   t.after(() => reopened.close());
