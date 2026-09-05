@@ -470,7 +470,7 @@ in the config says which lane it is.
 
 | transport | room is | threads | cursor | identity |
 |---|---|---|---|---|
-| `slack` | one channel, by **id** (`C…`), not name; `&`, `<`, `>` decode on read and encode on post, while real mention/channel/URL tokens pass through | yes; `--thread <parent ts>` | message `ts`; reads after a cursor are exclusive | the bot user; a bot token `xoxb-…` with `channels:history`, `channels:read`, `chat:write`, `groups:history`, `groups:read`, `users:read`, invited to the channel. No `files:write`: the bot cannot attach images |
+| `slack` | one channel, by **id** (`C…`), not name; `&`, `<`, `>` decode on read and encode on post, while real mention/channel/URL tokens pass through; attachment metadata always arrives and `--files` or room `files: true` materializes images below the session's `media/` directory | yes; `--thread <parent ts>` | message `ts`; reads after a cursor are exclusive | the bot user; a bot token `xoxb-…` with `channels:history`, `channels:read`, `chat:write`, `files:read`, `groups:history`, `groups:read`, `users:read`, invited to the channel. No `files:write`: the bot cannot attach images |
 | `github` | one issue, `owner/name#N` | no | `created_at\|id`; an edited old comment is not re-delivered; reads are conditional and a watch defaults to five minutes | the token's user; falls back to `gh auth token` |
 | `github-events` | a read-only feed: one repo (`repo`), an org (`org`), or a user (`user`); narrowed by `events` (types) and `refs` (branches or tags) in the room's config | no | the event id; reads are conditional; a watch defaults to one minute | the token's user; `post` is a usage error, the issue or the pull request is the room for that |
 | `local` | one NDJSON file | yes | lines consumed | the configured actor |
@@ -528,8 +528,15 @@ an injected `fetch` so it is testable offline.
   the caller, or pass the text as an argument or `--file`.
 - `post --file` reads the path as UTF-8 **text into the message body**. It is not a Slack
   file upload. A PNG or other binary will either refuse at the 3,900-character cap or
-  dump garbage. The Slack app this skill describes also has no `files:write` scope
-  (`chat:write` only); a human, or a bot rebuilt with that scope, has to attach images.
+  dump garbage. The Slack app this skill describes has `files:read` and `chat:write`, but no
+  `files:write`; a human, or a bot rebuilt with that scope, has to attach images.
+- Slack image delivery needs `files:read` on the bot token. An app created before that scope was
+  added must be reinstalled to the workspace; until then the text and attachment metadata still
+  arrive, but the attachment says HTTP 403 and has no local path. `read --files`, `watch --files`,
+  or room `files: true` materializes at most eight images per message, 20 MiB each, below this
+  session's `media/<room>/` directory. The queued Codex turn carries that path; inspect it with the
+  harness's image viewer. Without that reader-chosen option every attachment stays metadata. Never
+  paste the private Slack URL or token into a room or prompt.
 - `read` never moves the saved cursor; only `watch` does. Reading a room to orient does
   not mark it as seen. `post` prints the new message's cursor for reference; it does
   not save it either.

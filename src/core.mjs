@@ -11,6 +11,22 @@ const execFileAsync = promisify(execFile);
 /** @typedef {'human' | 'agent' | 'unknown' | 'system'} ActorKind */
 /** @typedef {{ id: string, name: string, kind: ActorKind }} Author */
 /**
+ * A file carried beside a message. `path` is a locally materialized, inert copy a local agent can
+ * inspect without receiving the transport credential. A missing path never hides the attachment:
+ * `error` says why the bytes were unavailable while the message itself is still delivered.
+ * @typedef {object} Attachment
+ * @property {string} id
+ * @property {string} name
+ * @property {'image' | 'file'} kind
+ * @property {string} [mimetype]
+ * @property {number} [size]
+ * @property {number} [width]
+ * @property {number} [height]
+ * @property {string} [url] a human-facing permalink, never a credential-bearing URL
+ * @property {string} [path] absolute path to a locally materialized copy
+ * @property {string} [error] bounded reason the copy could not be materialized
+ */
+/**
  * A message as every transport reports it. `cursor` is opaque to callers and
  * ascending within a room: passing it back as `since` returns only what came after.
  * @typedef {object} Message
@@ -23,6 +39,7 @@ const execFileAsync = promisify(execFile);
  * @property {string} ts ISO-8601
  * @property {string} cursor
  * @property {string} [url]
+ * @property {Attachment[]} [attachments]
  * @property {unknown} [raw]
  */
 /**

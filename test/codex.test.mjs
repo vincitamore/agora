@@ -80,6 +80,20 @@ test("Codex prompt preserves the original delivery with a compact origin envelop
   assert.ok(prompt.endsWith(message.text));
 });
 
+test("Codex prompt carries locally materialized image paths without private transport URLs", () => {
+  const prompt = codexPrompt("agora", {
+    ...message,
+    attachments: [{
+      id: "F1", name: "screen shot.jpg", kind: "image", mimetype: "image/jpeg", size: 121548,
+      path: "C:\\state\\media\\agora\\F1.jpg",
+      url: "https://files.slack.com/private/source",
+    }],
+  });
+  assert.match(prompt, /\[Agora attachments\]/);
+  assert.match(prompt, /local path "C:\\\\state\\\\media\\\\agora\\\\F1\.jpg"/);
+  assert.doesNotMatch(prompt, /files\.slack\.com/);
+});
+
 test("Codex binary honors the explicit environment override", async () => {
   const expected = path.resolve("fixture", "codex.exe");
   assert.equal(await resolveCodexBinary({

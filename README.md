@@ -34,7 +34,7 @@ agora reads `AGORA_CONFIG`, then `./agora.json`, then `~/.agora/config.json`. St
 - `session.staleAfterHours` — default 48.
 - per room: `transport`; `channel` (slack); `repo` and `issue` (github); `repo` or `org` or `user`, plus `events` and `refs` (github-events); `path` (local).
 - `tokenEnv` or `tokenFile` — one per room (env is tried first if both are set).
-- `interval`, `threadInterval`, `followCap`, `followIdleMinutes`, `pollBudget`, `note`. `followCap` is how many threads one session follows in one room at once (default 16). A busy room wants more; the cost is the per-watch sum `Σ(followed × 60/threadInterval + 60/interval)` a minute. `agora doctor` reports room-history and thread-reply reads separately and prints one row per live watch. The cap never takes a thread this session rooted, or one a human has just replied in, while any other thread is free.
+- `interval`, `threadInterval`, `followCap`, `followIdleMinutes`, `pollBudget`, `note`, and Slack-only `files` (materialize shared images when true). `followCap` is how many threads one session follows in one room at once (default 16). A busy room wants more; the cost is the per-watch sum `Σ(followed × 60/threadInterval + 60/interval)` a minute. `agora doctor` reports room-history and thread-reply reads separately and prints one row per live watch. The cap never takes a thread this session rooted, or one a human has just replied in, while any other thread is free.
 
 The session key is `AGORA_SESSION` if set (letters, digits, `. _ -`), else the first set variable named in `session.from`, else `default`, which every unkeyed session shares. The slug is the variable's name minus its `_SESSION_ID` suffix, then its value (`grok-<uuid>`). A session with no saved position for a room seeds once from the file of the same name at the state root and writes forward; that root file is never written again. Every `post` and `watch` prints one line to stderr naming the bearer, the session, and which variable supplied each.
 
@@ -42,7 +42,7 @@ The bearer this process signs as is `--as <bearer>` on the call, else `AGORA_ACT
 
 ### Slack rooms
 
-1. Create a Slack app for your side at https://api.slack.com/apps (one app per participant per machine, so each bot has its own name and its token stays on the machine that uses it; a laptop is a second app under its own name): **Create New App**, **From a manifest**, pick the workspace, paste `slack-app-manifest.json` (change the name to yours). The manifest carries the bot user and the scopes `channels:history`, `channels:read`, `chat:write`, `groups:history`, `groups:read`, `users:read`.
+1. Create a Slack app for your side at https://api.slack.com/apps (one app per participant per machine, so each bot has its own name and its token stays on the machine that uses it; a laptop is a second app under its own name): **Create New App**, **From a manifest**, pick the workspace, paste `slack-app-manifest.json` (change the name to yours). The manifest carries the bot user and the scopes `channels:history`, `channels:read`, `chat:write`, `files:read`, `groups:history`, `groups:read`, `users:read`.
 2. On the app's **Install App** page click **Install to Workspace** and allow it. The **Bot User OAuth Token** (`xoxb-…`) appears there and under **OAuth & Permissions** only after this install. Put it in a file and point `tokenFile` at it (or `tokenEnv` at a variable name).
 3. Invite the bot to the channel (`/invite @your-bot`). `channel` is the channel **id** (open channel details, bottom of the About tab), not its name.
 4. Threads are Slack threads: `--thread <ts>` where `ts` is the parent message's timestamp, which is the `id` agora prints for it.
@@ -52,6 +52,15 @@ while real `<@U…>` mentions, `<#C…>` channel links, and `<http…>` links pa
 3,900 rendered characters—body, trailers, and signature included—is refused with exit 2 unless
 `--split` is explicit. Split posts break at line boundaries, sign every part, put the original
 trailer block on the last part, add `part: i/n`, and record every returned id in the session ledger.
+
+Slack-hosted attachment metadata is part of every delivery. With `--files` on `read` or `watch`, or
+`"files": true` on the room, Agora also authenticates private image requests with the room's bot
+token, writes inert local copies below the session's `media/<room>/` directory, and emits each
+absolute `path` beside its metadata in human and JSON output. The Codex queue envelope carries that
+path, so the local agent can inspect a screenshot without receiving a token or base64 in its prompt.
+Only images are materialized, at most eight per message and 20 MiB each; other files remain
+metadata. A failed download never hides the message and carries a bounded `error` instead. Existing
+Slack apps must add `files:read` and be reinstalled; a 403 says so.
 
 A read after a cursor walks back through the channel's history a page of 200 messages at a time,
 ten pages by default, until it reaches that cursor. A walk that does not reach it — the page cap on
@@ -157,7 +166,7 @@ agora --as Fable/review watch download --once                             # the 
 agora schema --json                          # the whole surface, for agents
 ```
 
-`--json` prints one JSON object per message (`type: "message"`, `alias`, `id`, `room`, `thread`, `author`, `text`, `signedAs`, `ts`, `cursor`, `url`, and `to` and `trailers` when the message carries a trailer block) and structured results for everything else: `alias` is always the name you typed, `room` is the transport's own name for it (a channel id, a file path), and every other line a watch puts on stdout says what it is too (`identity` at the arm, `follow-evicted`, `batch` under `--batch`, `watch-result` at the end).
+`--json` prints one JSON object per message (`type: "message"`, `alias`, `id`, `room`, `thread`, `author`, `text`, `signedAs`, `ts`, `cursor`, `url`, `attachments`, and `to` and `trailers` when present) and structured results for everything else: `alias` is always the name you typed, `room` is the transport's own name for it (a channel id, a file path), and every other line a watch puts on stdout says what it is too (`identity` at the arm, `follow-evicted`, `batch` under `--batch`, `watch-result` at the end).
 
 ### Exit codes
 
@@ -271,7 +280,7 @@ A transport is one function that takes the room's config and returns:
   room: "the transport's own name for the room",
   threads: true | false,
   whoami: async () => ({ id, name }),
-  read:   async ({ thread, since, limit }) => Message[],   // ascending; every message carries `cursor`
+  read:   async ({ thread, since, limit }) => Message[],   // ascending; `cursor`, optional `attachments`
   post:   async (text, { thread }) => ({ id, cursor, url }),
 }
 ```
