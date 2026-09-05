@@ -114,7 +114,6 @@ const session = process.env.CODEX_SESSION_ID;
 const root = process.env.AGORA_STATE;
 const armed = path.join(root, "sessions", \`codex-\${session}\`, "armed", \`\${room}.json\`);
 mkdirSync(path.dirname(armed), { recursive: true });
-writeFileSync(armed, JSON.stringify({ room, pid: process.pid }, null, 2) + "\\n");
 writeFileSync(path.join(root, "capture.json"), JSON.stringify({
   actor: process.env.AGORA_ACTOR,
   config: process.env.AGORA_CONFIG,
@@ -124,6 +123,8 @@ writeFileSync(path.join(root, "capture.json"), JSON.stringify({
   pid: process.pid,
   ppid: process.ppid,
 }) + "\\n");
+// Publish readiness only after the observations consumed by the parent exist.
+writeFileSync(armed, JSON.stringify({ room, pid: process.pid }, null, 2) + "\\n");
 const stop = () => { rmSync(armed, { force: true }); process.exit(0); };
 process.on("SIGTERM", stop);
 process.on("SIGINT", stop);
