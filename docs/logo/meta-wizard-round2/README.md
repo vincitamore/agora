@@ -27,11 +27,11 @@ of the choice, not a claim about a historical building.
 
 ## 03 — The Common Gate
 
-**Selected direction, refined for review.** The cross finials now have filled
+**Selected and approved mark.** The cross finials now have filled
 stems and arms, all eight sun rays are formed symmetrically, and continuous
 stepped plinths support the projecting outer column bases in both sampling tiers.
-The still and shimmer below share that geometry. Root README integration awaits
-approval of this refinement.
+The still and shimmer below share that geometry. The root README uses its native
+300px shimmer linked to the still.
 
 ![Refined Common Gate](threshold.png)
 
