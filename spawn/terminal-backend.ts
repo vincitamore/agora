@@ -39,9 +39,14 @@ export function closePane(pane: OpenedPane): void {
   pane.term.close();
 }
 
+/** Default pane child is this process runtime, never PATH `node`. */
+export function defaultPaneCmd(): string[] {
+  return [process.execPath, "-e", "setInterval(()=>{}, 1e9)"];
+}
+
 /** Production opener: the authority owns the Bun.Terminal. */
 export function openBunPane(spawnId: string, cmd?: string[]): OpenedPane {
-  const argv = cmd && cmd.length > 0 ? cmd : ["node", "-e", "setInterval(()=>{}, 1e9)"];
+  const argv = cmd && cmd.length > 0 ? cmd : defaultPaneCmd();
   const term = new Bun.Terminal({
     cols: 80,
     rows: 24,

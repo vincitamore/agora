@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
-import { closePane, openBunPane, writeAttachInput, writeDeliveredLine } from "../terminal-backend.ts";
+import { closePane, defaultPaneCmd, openBunPane, writeAttachInput, writeDeliveredLine } from "../terminal-backend.ts";
 
 function fakeTerm() {
   const writes: string[] = [];
@@ -37,10 +37,21 @@ test("deliver throws on a closed Terminal and writes nothing", () => {
   expect(writes).toEqual([]);
 });
 
+test("default pane child is this runtime, never PATH node", () => {
+  const cmd = defaultPaneCmd();
+  expect(cmd[0]).toBe(process.execPath);
+  expect(cmd[0]).not.toBe("node");
+});
+
 test("openBunPane constructs a Bun.Terminal the authority owns", () => {
-  const pane = openBunPane("s1", ["node", "-e", "setTimeout(()=>{}, 50)"]);
+  const pane = openBunPane("s1", [process.execPath, "-e", "setTimeout(()=>{}, 50)"]);
   expect(typeof pane.term.write).toBe("function");
   pane.term.close();
+});
+
+test("production opener does not name PATH node", () => {
+  const text = readFileSync(path.join(import.meta.dir, "..", "terminal-backend.ts"), "utf8");
+  expect(text).not.toMatch(/\["node"/);
 });
 
 test("terminal.write is only reached from terminal-backend.ts", () => {
