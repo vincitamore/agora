@@ -154,3 +154,126 @@ must not touch a ledger; valid advertised metadata must not make an unverified
 file ready; a lost response must reconcile the original operation; a redacted
 search/read response must contain no nested original body. Syntax-only tests do
 not replace those consumer or physical cross-seat acceptance tests.
+
+## Wave 1: native consumer boundaries
+
+The new modules export named JSDoc DTO types as well as validators. Consumer
+imports stay within `src/protocol/`, never back through a service implementation.
+
+| Module | Primary consumer exports |
+|---|---|
+| `identity.mjs` | `AcceptedHostContext`, `validateAcceptedHostContext`, `assertAcceptedHostContext`, `scopedNativeIdentityKey`, `assertScopedNativeCursorContext` |
+| `capabilities.mjs` | `validateCapabilityOffer`, `negotiateNativeCapabilities`, `assertNegotiatedCapabilitiesContext` |
+| `origin.mjs` | `OriginReference`, `validateOriginReference`, `assertOriginContext` |
+| `operation.mjs` | `NativeOperationRequest`, `NativeOperationEvent`, their validators, `nativeOperationPayloadDigest`, `assertNativeOperationEventContext` |
+| `message.mjs` | `NativeMessage`, `validateNativeMessage`, `assertMessageContext`, `validateLegacyUnattestedMessage` |
+| `read.mjs` | `NativeReadResult`, `NativeReadCoverage`, `NativeReadMessage`, `NativeCheckpoint`, `validateNativeReadResult`, `assertNativeReadContext` |
+| `route.mjs` | `RouteBinding`, `RouteDescriptor`, `RouteStatus`, their validators, `assertRouteContext`, `publicNodeKeyDigest` |
+| `resource-lifetime.mjs` | `ResourceLifetime`, `validateResourceLifetime`, `assertResourceOwnerContext` |
+
+This release adds pure contracts, not automatic protocol activation. Existing
+`agora-native/1` framing, stored v1 records and receipt derivation remain intact.
+`test/protocol-v1-fidelity.test.mjs` pins the complete frame hash, payload/record
+digests, message ID and retry receipt to a vector captured before this change.
+A legacy attachment remains without a synthesized lifetime.
+
+### Required consumer order
+
+1. Verify service proof against independently enrolled expected host authority.
+   Authority is not boot generation, a secret, seat label, body or trailer.
+2. Negotiate explicit capabilities on that authenticated connection. Both
+   parties' requirements must be supported; `board-v1` depends on `contracts-v2`.
+   A persisted negotiation DTO cannot replace the live exchange. Legacy v1
+   remains a distinct path, never silently upgraded.
+3. Validate request kind and scope before room open: open can itself scan,
+   recover or acquire ownership. Checking only before append is too late.
+4. P1 rechecks current route/grant authority at serialized effect commit, after
+   buffering. P2 supplies live owned resources, not authority minted by a DTO.
+5. Validate response and expected host/room/epoch before ledger, archive,
+   subscription or cursor mutation.
+
+Pure-validator and injected-counter tests do not establish this production
+ordering. Consumer integration owes unsupported-capability-before-open and
+wrong-host-before-ledger controls against its actual dispatch path.
+
+### Identity and provenance
+
+Consumer deduplication keys the entire structured tuple `(transport, enrolled
+host authority, roomId, messageId)`. Host includes scheme, authority and ID.
+Scope must reach watch's initial duplicate filter, not only its own-post check.
+The historical message hash is unchanged but not globally unique across hosts.
+Never suppress scoped native traffic by falling back to an old naked ledger
+row. Non-native compatibility remains the adapter's separate responsibility.
+
+Persisted native progress binds host and room to cursor. Retargeting an alias
+cannot reuse the first host's cursor even when the second reports the same
+epoch. Imported origin is source metadata stamped by an authorized reader, not
+destination identity or permission to suppress an own post. An
+`AcceptedHostContext` is a syntax/context record; trust comes from the
+consumer-owned authenticated connection, not parsing that record.
+
+### Native scan results
+
+Native read returns exactly `{messages, checkpoint, coverage}`. The checkpoint
+retains `{roomId, epoch, sequence, digest}` with null digest only at zero. It is
+not a scalar cursor, nor independent evidence when returned by the same host
+whose prefix it describes; independently held prefix custody is still required.
+
+Native scan coverage carries scoped room, `fromExclusive`, `toInclusive`, and
+`committedThrough`, in one epoch and ordered `from <= to <= committed`. The
+checkpoint equals `toInclusive`, not the last visible message. Messages are
+strictly ordered within `(from,to]`. Empty messages may advance over board-only
+events. Claimed frontier is not a claim that its entire prefix was scanned.
+Context validation requires `fromExclusive` equal the requested `since`;
+first-arm window selection must therefore be explicit.
+
+The producer must return **every** committed message event in that scanned
+interval, without wake/own-post/author filtering. `limit` bounds scanned event
+records, not returned messages. An empty advancing page is valid only when the
+scanned interval contains no message event. These completeness obligations are
+tested against P1's typed store truth, not proved by adding another count from
+the same host. A bounded tail read reports the actual predecessor of its tail,
+never coverage of the omitted prefix.
+
+`NativeReadCoverage` is narrower than archive/index coverage, whose retention,
+gaps, index lag and authorized continuations retain separate contracts. A scan
+also is not recipient-delivered coverage. Wake supersession requires the latter
+with recipient/generation checks; neither scan nor wake implies agent ACK.
+
+### Route and child ownership
+
+Service boot, room epoch, specific grant revision and route generation are
+distinct. Captured validity does not authorize a later revoked operation.
+Endpoint bounds remain 20–1800 ASCII bytes. Key digest covers UTF-8 canonical
+public `nodekey:` text plus 64 lowercase hex digits, not private material,
+decoded bytes or a short display fingerprint.
+
+`ResourceLifetime` is expiring or owned by a particular live service generation.
+It is not attachment custody lifetime. Service-owned resources require a live
+owner and joined cleanup; far-future expiry substitutes for neither. Parsing
+an owner reference, endpoint or digest starts no child and grants no stream.
+
+### Typed operations and legacy read composition
+
+`NativeOperationRequest` has only `{kind, operationId, payload}`. Message payload
+contains text and optional thread/attachment references, not author identity.
+Board claim carries action/subject; renew/release additionally carry lease ID
+and acquisition fence; contest carries a reason. Holder identity comes from
+the authenticated route, never from a sender-selected holder field.
+
+`NativeOperationEvent` contains `{kind, receipt, payload, payloadDigest}`. Its
+receipt uses the unchanged v1 derivation. The new digest hashes UTF-8 canonical
+JSON of `{domain:'agora-native-operation/2',kind,payload}`; canonical objects
+sort keys recursively, arrays preserve order and scalars use JSON spelling.
+This digest binds request kind and payload for retry checking; it must never
+replace a stored v1 payload digest. A board event receipt is not a chat message
+and must not enter a chat-only identity or rendering path.
+
+A strict `NativeMessage` and an explicit
+`{provenance:'legacy-unattested',message:...}` projection are different types.
+Native read's messages array supports both after closed validation, then checks
+ordering and scope using their respective message fields. Legacy projection
+does not invent account attestations, registrations, attachment lifetime or
+custody. It is not a replacement decoder for historical frames: stored v1
+verification happens first, against unchanged bytes. New ingress remains
+strict rather than weakening its rules to match historical inputs.
