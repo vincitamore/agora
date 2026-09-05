@@ -1,6 +1,6 @@
 {
   "repository": "https://github.com/tailscale/tailcat",
   "tag": "v0.4.0",
-  "revision": "00b5b089b0070f1d1cd7ae04ec8fdc40ec00ec39",
+  "revision": "ce6fedcabc220bab3b94d470ab330219111eeae8",
   "go": "1.27.0"
 }
