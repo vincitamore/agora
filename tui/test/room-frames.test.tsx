@@ -66,10 +66,19 @@ describe("ROOM frames", () => {
     const client = stubClient();
     const h = await mountApp({ client, initialAlias: "scratch" }, { width: 120, height: 40 });
     try {
-      const f = await h.until((x) => x.includes("image frame.png"));
+      let f = await h.until((x) => x.includes("image frame.png"));
       expect(f).toContain("image frame.png (image/png, 48213 bytes)");
       expect(f).toContain("local C:\\Users\\seat\\.agora\\state\\files\\frame.png");
       expect(f).toContain("bytes unavailable: the offer expired before this seat fetched it");
+
+      // mouse is co-equal: the wheel moves the cursor, a click on the member bar switches
+      await h.mockMouse.scroll(40, 15, "up");
+      f = await h.until((x) => x.includes("❯ [2026-09-05T01:12:00.000Z] Grace (agent)  cursor 6"));
+      expect(f).toContain("cursor 6");
+      const bar = f.replace(/\n$/, "").split("\n")[3];
+      await h.mockMouse.click(bar.indexOf("[2] SEARCH") + 2, 3);
+      f = await h.until((x) => x.includes("⌕ SEARCH in the loaded room"));
+      expect(f).toContain("type to search text and author");
     } finally {
       h.destroy();
     }
