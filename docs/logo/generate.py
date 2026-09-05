@@ -26,27 +26,31 @@ def shape(name, x, y):
             return int(a // 120)
         return -1
     if name == "stoa":
-        # A single tall open arch, two shorter piers, and an unbroken common floor.
-        # No pediment or classical ornament: this is a doorway, not a temple seal.
-        arch = y <= 0 and 24 <= math.hypot(x, y) <= 44
-        jambs = 24 <= abs(x) <= 44 and 0 <= y <= 38
-        outer = 50 <= abs(x) <= 59 and 7 <= y <= 38
-        floor = abs(x) <= 59 and 44 <= y <= 51
+        # Three open bays over a shared ground. The higher middle bay gives
+        # the silhouette an architectural cadence instead of a headset shape.
+        arch = y <= -4 and 23 <= math.hypot(x, y + 4) <= 35
+        jambs = 23 <= abs(x) <= 35 and -4 <= y <= 39
+        floor = abs(x) <= 61 and 44 <= y <= 51
         if arch or jambs:
             return 0
-        if outer:
-            return 1
+        for sign in (-1, 1):
+            u, v = x - sign * 43, y - 10
+            outer = v <= 0 and 10 <= math.hypot(u, v) <= 18
+            piers = 10 <= abs(u) <= 18 and 0 <= v <= 29
+            if outer or piers:
+                return 1
         return 2 if floor else -1
     if name == "voices":
         # Two facing, hooked voice forms. Neither overlaps or owns the center.
         for material, sign in ((1, 1), (2, -1)):
             u, v = x * sign, y * sign
-            # Broad rounded quote / doorway half, with a square-cut inner opening.
-            shell = (u + 10) ** 2 + (v + 12) ** 2 <= 40 ** 2
-            shell = shell and u <= 14 and v <= 17
-            hollow = (u + 3) ** 2 + (v + 10) ** 2 < 21 ** 2
-            tail = -43 <= u <= -25 and 4 <= v <= 39 and v <= -u
-            if (shell and not hollow) or tail:
+            # Rounded outer rectangle, square-cut aperture open to the other
+            # speaker, and a broad tail. The centerline gap is unconditional.
+            qx, qy = abs(u + 30) - 8, abs(v + 12) - 16
+            shell = math.hypot(max(qx, 0), max(qy, 0)) <= 16
+            hollow = u >= -35 and -27 <= v <= 2
+            tail = -54 <= u <= -35 and 4 <= v <= 39 and v <= -u - 13
+            if ((shell and not hollow) or tail) and u <= -6:
                 return material
         return -1
     raise ValueError(name)
@@ -88,7 +92,7 @@ def text_form(grid):
     return "\n".join("".join(row) for row in rows) + "\n"
 
 
-def raster(grid, mono=False):
+def raster(grid, mono=False, shimmer=None):
     # Mean x pitch = 6 + 3/2; mean y pitch = 6 + 6/4. Exactly square.
     pitch, gap_x, gap_y, edge, ss = 6, 3, 6, 16, 3
     width = len(grid[0]) * pitch + (len(grid[0]) // 2 - 1) * gap_x + 2 * edge
@@ -101,6 +105,9 @@ def raster(grid, mono=False):
         # A terminal can colour a cell, never its individual dots.
         base = PALETTE[0] if mono else PALETTE[material]
         light = 1.07 - .25 * (cy * 4 / len(grid))
+        if shimmer is not None:
+            position = cx * 2 / len(grid[0]) + cy * 4 / len(grid) * .4
+            light += .32 * math.exp(-((position - shimmer) / .11) ** 2)
         color = tuple(min(255, round(c * light)) for c in base) + (255,)
         for dy in range(4):
             for dx in range(2):
@@ -110,6 +117,43 @@ def raster(grid, mono=False):
                     r = 2.25
                     draw.ellipse(tuple(round(v * ss) for v in (x-r, y-r, x+r, y+r)), fill=color)
     return img.resize((width, height), Image.Resampling.LANCZOS)
+
+
+def animation(name, grid):
+    """A 4.8-second quiet loop; fixed geometry, cell-wise diagonal light."""
+    frames = []
+    for i in range(60):
+        sweep = -.55 + 2.6 * i / 40 if i < 40 else None
+        mark = raster(grid, shimmer=sweep)
+        mark.thumbnail((440, 440), Image.Resampling.LANCZOS)
+        frame = Image.new("RGB", (480, 480), BG)
+        frame.paste(mark, ((480-mark.width)//2, (480-mark.height)//2), mark)
+        frames.append(frame)
+    # One palette for the whole loop; no frame-wise colour reclassification.
+    samples = Image.new("RGB", (128, 128 * len(frames)))
+    for i, frame in enumerate(frames):
+        # Nearest preserves actual bright dot colours. Averaging thumbnails
+        # here teaches the GIF palette only dark dot/background mixtures.
+        samples.paste(frame.resize((128, 128), Image.Resampling.NEAREST), (0, 128*i))
+    palette = samples.quantize(colors=255, method=Image.Quantize.MEDIANCUT)
+    quantized = [f.quantize(palette=palette, dither=Image.Dither.NONE) for f in frames]
+    quantized[0].save(OUT / f"{name}.gif", save_all=True,
+                      append_images=quantized[1:], duration=80, loop=0,
+                      optimize=False, disposal=1)
+    # Contact strip is decoded from the actual GIF, not its source frames.
+    decoded = Image.open(OUT / f"{name}.gif")
+    decoded.convert("RGB").save(OUT / f"{name}-gif-poster.png")
+    strip = Image.new("RGB", (4 * 240, 240), BG)
+    elapsed = 0
+    for i in range(decoded.n_frames):
+        decoded.seek(i)
+        elapsed += decoded.info["duration"]
+    assert elapsed == 4800
+    assert decoded.info["loop"] == 0
+    for j, frame_id in enumerate((0, 10, 20, 30)):
+        decoded.seek(min(frame_id, decoded.n_frames - 1))
+        strip.paste(decoded.convert("RGB").resize((240, 240)), (240*j, 0))
+    strip.save(OUT / f"{name}-shimmer-frames.png")
 
 
 def font(size, serif=False):
@@ -166,6 +210,7 @@ def generate():
                          "fullLitDots": sum(v >= 0 for row in grid for v in row),
                          "compactLitDots": sum(v >= 0 for row in compact for v in row),
                          "edgeLitDots": 0}
+        animation(name, grid)
     d.line((70, 966, 1490, 966), fill=(46, 58, 61), width=1)
     d.text((72, 984), "Original geometry · true Unicode braille · proposals, not adopted branding", font=font(14), fill=(128, 143, 145))
     sheet.save(OUT / "astra-studies.png")
