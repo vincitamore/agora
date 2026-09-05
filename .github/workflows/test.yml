@@ -23,7 +23,7 @@ jobs:
         if: runner.os == 'macOS'
         env:
           AGORA_TEST_LAUNCHD: '1'
-        run: node --test test/codex-watch-launcher.test.mjs
+        run: node --test test/codex-watch-launcher.test.mjs test/tailcat-launcher.test.mjs
       - name: launcher syntax
         if: runner.os != 'Windows'
         run: sh -n scripts/start-codex-watch.sh

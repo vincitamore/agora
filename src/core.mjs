@@ -24,6 +24,7 @@ const execFileAsync = promisify(execFile);
  * @property {number} [height]
  * @property {string} [url] a human-facing permalink, never a credential-bearing URL
  * @property {string} [path] absolute path to a locally materialized copy
+ * @property {string} [digest] verified content digest, e.g. sha256:<hex>; populated only after local materialization
  * @property {string} [error] bounded reason the copy could not be materialized
  */
 /**

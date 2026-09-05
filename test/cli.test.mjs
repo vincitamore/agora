@@ -110,7 +110,7 @@ test("cli end to end on a local room", async () => {
 
     r = await agora(["doctor", "--json"], env);
     assert.equal(r.code, 0);
-    assert.equal(JSON.parse(r.stdout.trim().split("\n")[0]).token, "none");
+    assert.equal(r.stdout.trim().split("\n").map(/** @param {string} line */line=>JSON.parse(line)).find(/** @param {any} row */row=>row.type==='room').token, "none");
 
     r = await agora(["watch", "down", "--once"], env);
     assert.equal(r.code, 0, "nothing new yet");
@@ -1230,7 +1230,7 @@ test("cli: the verb is named before the room, an unknown option is a usage error
 
     let r = await agora(["frobnicate"], env);
     assert.equal(r.code, 2);
-    assert.match(r.stderr, /unknown verb "frobnicate" \(have: rooms, whoami, read, post, watch, cursor, who, carry, session, join, doctor, schema\)/);
+    assert.match(r.stderr, /unknown verb "frobnicate" \(have: rooms, whoami, read, post, watch, cursor, who, carry, session, join, enroll, share, fetch, doctor, schema\)/);
     assert.doesNotMatch(r.stderr, /needs a room/, "a misspelled verb typed without a room used to read as a missing room");
 
     r = await agora(["read", "down", "--bogus"], env);

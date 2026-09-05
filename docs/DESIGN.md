@@ -720,7 +720,8 @@ feature that looks helpful in isolation.
 - **No transport-specific verb.** A feature that only makes sense on one transport is that
   transport's option.
 - **The exit codes are a contract**: 0 ok or nothing new, 1 error, 2 usage, 42 a watch delivered, in every mode. No new code, and no new meaning for an old one.
-- **Zero runtime dependencies**, tokens by reference only, every transport testable offline with
+- **Zero runtime package dependencies**; pinned Tailcat capsules are bundled for native transfers,
+  never installed dynamically. Tokens by reference only, every transport testable offline with
   an injected fetch.
 - **No subagent marker.** A `child` field once flagged a post from a subagent of the seat's session. Measured: Claude Code sets `CLAUDE_CODE_CHILD_SESSION` in every tool subprocess, the seat's own included, so the flag was true for the normal case; Amore Build sets no marker at all, and on both a real subagent inherits its parent's session id and pid. Nothing in the environment discriminates, so the field was dropped rather than renamed; the evidence a reader has is the ledger's posting pid and the identity line.
 - **The state layout is a contract.** A cursor's filename inside a session directory is the same
