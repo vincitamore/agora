@@ -1,7 +1,9 @@
 // @ts-check
 import test from "node:test";
 import assert from "node:assert/strict";
-import { appendFile, mkdtemp, open, readFile, rm, stat, truncate } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { appendFile, mkdir, mkdtemp, open, readFile, realpath, rename, rm, stat, symlink, truncate } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { NativeRoomStore } from "../src/native-store.mjs";
@@ -92,6 +94,58 @@ test("truncating an acknowledged frame is damage, never an unaccepted tail whose
 test("one room has one OS-owned writer even when opened through separate store objects", async (t) => {
   const { root } = await room(t);
   await assert.rejects(NativeRoomStore.open({ root, roomId: ROOM }), /already has a live writer|writer endpoint is busy/);
+});
+
+test("filesystem aliases cannot mint a second writer authority for one physical room", async (t) => {
+  const { root, store } = await room(t);
+  const alias = `${root}-alias`;
+  t.after(() => rm(alias, { force: true }));
+  await symlink(root, alias, process.platform === "win32" ? "junction" : "dir");
+  assert.equal(await realpath(alias), await realpath(root));
+  await assert.rejects(NativeRoomStore.open({ root: alias, roomId: ROOM }), /already has a live writer|OS-owned endpoint/);
+  assert.equal(store.status().committed, 0);
+});
+
+test("abrupt writer process death releases OS-owned room authority without stale reclaim", async (t) => {
+  const { root, store } = await room(t);
+  await store.close();
+  const moduleUrl = new URL("../src/native-store.mjs", import.meta.url).href;
+  const child = spawn(process.execPath, ["--input-type=module", "-e",
+    "const {NativeRoomStore}=await import(process.argv[1]);await NativeRoomStore.open({root:process.argv[2],roomId:process.argv[3]});console.log('READY');setInterval(()=>{},1000)",
+    moduleUrl, root, ROOM], { stdio: ["ignore", "pipe", "pipe"] });
+  t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
+  await new Promise((resolve, reject) => {
+    let output = "";
+    const timer = setTimeout(() => reject(new Error("child writer did not become ready")), 5000);
+    child.stdout.on("data", (chunk) => {
+      output += chunk;
+      if (output.includes("READY")) { clearTimeout(timer); resolve(undefined); }
+    });
+    child.once("exit", (code) => { if (!output.includes("READY")) { clearTimeout(timer); reject(new Error(`child writer exited ${code}`)); } });
+  });
+  await assert.rejects(NativeRoomStore.open({ root, roomId: ROOM }), /already has a live writer|OS-owned endpoint/);
+  child.kill("SIGKILL");
+  await once(child, "exit");
+  const reopened = await NativeRoomStore.open({ root, roomId: ROOM });
+  await reopened.close();
+});
+
+test("boundary publication failure preserves the synced frame for explicit reconciliation", async (t) => {
+  const { root, store } = await room(t);
+  const savedBoundary = `${store.boundaryPath}.saved`;
+  await rename(store.boundaryPath, savedBoundary);
+  await mkdir(store.boundaryPath);
+  const before = (await stat(store.logPath)).size;
+  await assert.rejects(store.append({ operationId: "operation_boundary_fail", authorName: "Peer", text: "unknown" }, { accountId: PEER }), /acceptance is unknown/);
+  assert.ok((await stat(store.logPath)).size > before, "a possibly committed frame is not rolled back");
+  await store.close();
+  await rm(store.boundaryPath, { recursive: true, force: true });
+  await rename(savedBoundary, store.boundaryPath);
+  const tailBytes = (await stat(store.logPath)).size - before;
+  const reopened = await NativeRoomStore.open({ root, roomId: ROOM });
+  t.after(() => reopened.close());
+  assert.equal(reopened.status().recoveredTailBytes, tailBytes);
+  assert.equal(reopened.status().committed, 0);
 });
 
 test("the persisted resident-record ceiling refuses before memory grows without bound", async (t) => {

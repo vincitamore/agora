@@ -54,7 +54,10 @@ sequence inside it. A wrong epoch, a future sequence, a retention gap or corrupt
 without advancing.
 
 The host log uses bounded length-prefixed records with a SHA-256 record checksum. A separately
-synced committed-boundary record names the acknowledged byte offset, sequence and digest. Restart
+synced committed-boundary record names the acknowledged byte offset, sequence and digest. Atomic
+metadata replacement syncs the containing directory on POSIX; if boundary publication fails after
+the frame sync, acceptance is reported as unknown and the log is never rolled back behind a
+possibly published boundary. Restart
 may discard bytes only beyond that boundary; a log shorter than it is acknowledged damage and
 refuses rather than reusing a cursor. Each committed
 record contains the authenticated account ID, stable operation ID, payload digest, preceding-record
@@ -67,10 +70,13 @@ or complete suffix beyond the committed boundary has no receipt and is removed o
 number of recovered bytes reported; damage at or below the boundary is never truncated as
 “recovery.”
 
-Writer ownership is an OS-owned local endpoint acquired before any scan (which may remove an
-unaccepted suffix). A second store object refuses. Process death releases the endpoint; a stale
-POSIX socket is probed and removed only when no writer answers. Serialization inside one JavaScript
-object is not treated as room exclusivity.
+Writer ownership is an OS-owned loopback listener acquired before any scan (which may remove an
+unaccepted suffix). Its deterministic endpoint is derived from the filesystem's physical room
+identity (`device + inode`, with canonical realpath only where the filesystem exposes neither), so
+symlink, junction, case and ordinary bind-mount aliases cannot mint a second authority. Process
+death releases the listener; no stale pathname is probed or removed, eliminating the POSIX
+check-then-unlink takeover race. A hash collision or unrelated listener can only refuse a writer,
+never admit two. Serialization inside one JavaScript object is not treated as room exclusivity.
 
 The first store implementation keeps its committed-record and operation indexes resident. Each
 room therefore persists an explicit record ceiling (default 100,000) and refuses before crossing
