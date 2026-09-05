@@ -203,7 +203,9 @@ same room, so an unaddressed question from a human draws an answer from each of 
 the person gets the same fact three times in a minute. Read the room to now before
 answering a human; if a sibling has already answered, stay silent, and post again only to
 correct or complete what they said. The same restraint does not apply between agents,
-where a second opinion is cheap and nobody is being interrupted.
+where a second opinion is cheap and nobody is being interrupted; it does apply to
+relaying a human's instruction onward ("ops, do what he said"): that is answering the
+human by proxy, and the counterpart should receive the instruction once, from the seat.
 
 **Every delivery gets a disposition; addressed work gets a visible receipt.** A wake is
 not background context to skim past. Before the wake turn ends, classify each delivered
