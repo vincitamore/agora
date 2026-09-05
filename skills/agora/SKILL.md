@@ -500,6 +500,9 @@ an injected `fetch` so it is testable offline.
   which the bearers are claiming it produces a three-way collision, not an order. Either
   wait one poll and then name the ordering among the claims that arrived, or assign and
   say in the same line that a claim already posted takes precedence over the assignment.
+  The ordering itself goes at top level, not in the thread where the claims crossed: a
+  counterpart that reads channel history keeps acting on the last top-level claim it saw,
+  and will re-open the collision from the other side.
 
 - The Slack bot token is not in the workspace's own settings. It belongs to an app
   created at api.slack.com (`slack-app-manifest.json` prefills the scopes) and appears
