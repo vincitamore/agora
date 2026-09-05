@@ -1,7 +1,7 @@
 // @ts-check
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, open, readFile, realpath, rename, rm } from "node:fs/promises";
+import { chmod, mkdir, open, readFile, realpath, rename, rm, stat } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
 import { AgoraError } from "./core.mjs";
@@ -13,9 +13,72 @@ const MAX_PENDING_WRITE = 2 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 10_000;
 const ENDPOINT_PROBE_TIMEOUT_MS = 500;
 
-/** @param {string} endpoint */
-function reclaimArbiterPort(endpoint) {
-  return 49152 + createHash("sha256").update(endpoint).digest().readUInt16BE(0) % 16384;
+const RECLAIM_AUTHORITY_FILE = "reclaim-authority.sqlite";
+
+/** @param {string} directory @param {string} label */
+async function ensurePrivateStateDirectory(directory, label) {
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  if (process.platform === "win32") return;
+  const before = await stat(directory);
+  if (!before.isDirectory()) throw new AgoraError(`native ${label} is not a directory: ${directory}`);
+  const uid = process.getuid?.();
+  if (uid !== undefined && before.uid !== uid)
+    throw new AgoraError(`native ${label} is not owned by this OS user: ${directory}`);
+  if ((before.mode & 0o077) !== 0) await chmod(directory, 0o700);
+  const after = await stat(directory);
+  if ((after.mode & 0o077) !== 0)
+    throw new AgoraError(`native ${label} must deny group and other access: chmod 700 ${JSON.stringify(directory)}`);
+}
+
+/** @param {string} endpoint @param {string} file */
+function unusableReclaimAuthority(endpoint, file) {
+  return new AgoraError(`native service endpoint ${endpoint} reclamation authority ${file} is unusable; stop every Agora process using this state root, remove that file, then start again`);
+}
+
+/**
+ * SQLite is the one zero-dependency cross-process authority available in both
+ * supported runtimes. Its OS lock is released on process death; placing the
+ * database below the canonical 0700 state directory keeps the authority at
+ * the same principal boundary as the Unix socket it protects.
+ * @param {string} endpoint
+ */
+async function acquireReclaimAuthority(endpoint) {
+  const moduleName = typeof process.versions.bun === "string" ? "bun:sqlite" : "node:sqlite";
+  let sqlite;
+  try { sqlite = await import(moduleName); }
+  catch {
+    throw new AgoraError("native service stale-endpoint recovery needs Node 22.13 or later, or Bun with SQLite support");
+  }
+  const Database = sqlite.DatabaseSync ?? sqlite.Database;
+  if (typeof Database !== "function") throw new AgoraError("native service runtime has no supported SQLite API");
+  const file = path.join(path.dirname(endpoint), RECLAIM_AUTHORITY_FILE);
+  /** @type {{ exec: (sql: string) => unknown, close: () => void }} */
+  let database;
+  try { database = new Database(file); }
+  catch { throw unusableReclaimAuthority(endpoint, file); }
+  let held = false;
+  try {
+    database.exec("PRAGMA busy_timeout=0; BEGIN EXCLUSIVE");
+    held = true;
+    await chmod(file, 0o600);
+  } catch (error) {
+    try { database.close(); } catch {}
+    const sqliteError = /** @type {Error & { code?: string, errno?: number, errcode?: number }} */ (error);
+    if (sqliteError.code === "SQLITE_BUSY" || sqliteError.errno === 5 || sqliteError.errcode === 5
+      || /database is locked/i.test(sqliteError.message)) {
+      throw new AgoraError(`native service endpoint ${endpoint} reclamation authority is already held`);
+    }
+    throw unusableReclaimAuthority(endpoint, file);
+  }
+  return {
+    file,
+    release() {
+      if (!held) return;
+      held = false;
+      try { database.exec("ROLLBACK"); }
+      finally { database.close(); }
+    },
+  };
 }
 
 /** @param {string} file @param {unknown} value */
@@ -57,14 +120,15 @@ function requiredString(value, label) {
  */
 export async function nativeServiceEndpoint(root, accountId, platform = process.platform) {
   validateNativeId(accountId, "service account id");
-  await mkdir(path.resolve(root), { recursive: true, mode: 0o700 });
+  await ensurePrivateStateDirectory(path.resolve(root), "state root");
   const physicalRoot = await realpath(path.resolve(root));
+  await ensurePrivateStateDirectory(physicalRoot, "state root");
   if (platform === "win32") {
     const seat = createHash("sha256").update(physicalRoot.toLowerCase()).digest("hex").slice(0, 32);
     return `\\\\.\\pipe\\agora-${seat}`;
   }
   const nativeDirectory = path.join(physicalRoot, "native");
-  await mkdir(nativeDirectory, { recursive: true, mode: 0o700 });
+  await ensurePrivateStateDirectory(nativeDirectory, "state directory");
   return path.join(nativeDirectory, "service.sock");
 }
 
@@ -118,24 +182,13 @@ async function listenOwnedEndpoint(server, endpoint) {
   if (process.platform === "win32") {
     throw new AgoraError(`native service endpoint ${endpoint} is occupied but not accepting connections`);
   }
-  // Probing and moving a stale Unix socket are two operations. Serialize that
-  // tiny recovery window with a kernel-owned loopback bind so two starters
-  // cannot each move the other's newly-bound endpoint. The arbiter is released
-  // as soon as the Unix socket is bound; the socket bind is the resident lock.
-  const arbiter = net.createServer();
+  // Probing and moving a stale Unix socket are two operations. Serialize the
+  // whole second-probe -> quarantine -> bind window with a crash-releasing
+  // SQLite transaction under the same 0700 directory as the endpoint. A TCP
+  // port is not equivalent: any local principal can bind it and the OS may
+  // allocate it for an unrelated outbound connection.
+  const authority = await acquireReclaimAuthority(endpoint);
   try {
-    try { await new Promise((resolve, reject) => {
-      const cleanup = () => { arbiter.off("error", onError); arbiter.off("listening", onListening); };
-      const onError = (/** @type {Error} */ error) => { cleanup(); reject(error); };
-      const onListening = () => { cleanup(); resolve(undefined); };
-      arbiter.once("error", onError); arbiter.once("listening", onListening);
-      arbiter.listen({ host: "127.0.0.1", port: reclaimArbiterPort(endpoint), exclusive: true });
-    }); }
-    catch (error) {
-      if (/** @type {NodeJS.ErrnoException} */ (error).code === "EADDRINUSE")
-        throw new AgoraError(`native service endpoint ${endpoint} reclamation is already in progress or its arbiter is occupied`);
-      throw error;
-    }
     if (await endpointAcceptsConnections(endpoint))
       throw new AgoraError(`native service endpoint ${endpoint} became active during reclamation`);
     const quarantine = `${endpoint}.stale-${process.pid}-${randomUUID()}`;
@@ -151,12 +204,7 @@ async function listenOwnedEndpoint(server, endpoint) {
         throw error;
       }
     } finally { await rm(quarantine, { force: true }); }
-  } finally {
-    await new Promise((resolve) => {
-      if (!arbiter.listening) resolve(undefined);
-      else arbiter.close(() => resolve(undefined));
-    });
-  }
+  } finally { authority.release(); }
 }
 
 /** @param {net.Socket} socket @param {number} timeoutMs @param {string} label */
@@ -221,11 +269,12 @@ export class NativeRoomService {
 
   async start() {
     if (this.running) return this.descriptor();
-    await mkdir(this.root, { recursive: true, mode: 0o700 });
+    await ensurePrivateStateDirectory(this.root, "state root");
     this.root = await realpath(this.root);
+    await ensurePrivateStateDirectory(this.root, "state root");
     this.nativeDirectory = path.join(this.root, "native");
     this.descriptorPath = path.join(this.nativeDirectory, "service.json");
-    await mkdir(this.nativeDirectory, { recursive: true, mode: 0o700 });
+    await ensurePrivateStateDirectory(this.nativeDirectory, "state directory");
     this.endpointPath = await nativeServiceEndpoint(this.root, this.accountId);
     try {
       this.server = net.createServer((socket) => this.#accept(socket));
