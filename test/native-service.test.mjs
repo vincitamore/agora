@@ -3,7 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { chmod, mkdir, mkdtemp, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import net from "node:net";
 import path from "node:path";
@@ -26,6 +26,28 @@ function listen(server, endpoint) {
 /** @param {net.Server} server */
 function close(server) {
   return new Promise((resolve) => server.close(() => resolve(undefined)));
+}
+
+/**
+ * Leave a real Unix-socket node behind without depending on what a platform
+ * does to a listening process's pathname after SIGKILL. Node removes the path
+ * it listened on when the server closes, so move that node to the endpoint
+ * first; close then cleans the now-absent staging name and the moved node stays.
+ * @param {string} endpoint
+ */
+async function seedStaleUnixSocket(endpoint) {
+  const staging = path.join(path.dirname(endpoint), "stale-seed.sock");
+  const server = net.createServer();
+  await rm(staging, { force: true });
+  await rm(endpoint, { force: true });
+  try {
+    await listen(server, staging);
+    assert.equal((await stat(staging)).isSocket(), true, "fixture staging path is a Unix socket");
+    await rename(staging, endpoint);
+  } finally {
+    await close(server);
+  }
+  assert.equal((await stat(endpoint)).isSocket(), true, "fixture established a stale Unix socket before recovery");
 }
 
 /** @param {net.Socket} socket */
@@ -250,23 +272,16 @@ test("POSIX stale-endpoint recovery refuses a held state-scoped authority withou
 }, async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "agora-native-reclaim-held-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const moduleUrl = new URL("../src/native-service.mjs", import.meta.url).href;
-  const child = spawn(process.execPath, ["--input-type=module", "--eval",
-    `import { NativeRoomService } from ${JSON.stringify(moduleUrl)}; const s = new NativeRoomService({ root: process.env.AGORA_TEST_ROOT, accountId: ${JSON.stringify(ACCOUNT)}, seatLabel: "child" }); process.stdout.write(JSON.stringify(await s.start()) + "\\n"); setInterval(() => {}, 1000);`],
-  { env: { ...process.env, AGORA_TEST_ROOT: root }, stdio: ["ignore", "pipe", "inherit"] });
-  t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
-  const [line] = await once(child.stdout, "data");
-  const deadEndpoint = JSON.parse(String(line));
-  child.kill("SIGKILL");
-  await once(child, "exit");
+  const endpointPath = await nativeServiceEndpoint(root, ACCOUNT);
+  await seedStaleUnixSocket(endpointPath);
 
-  const authorityPath = path.join(path.dirname(deadEndpoint.path), "reclaim-authority.sqlite");
+  const authorityPath = path.join(path.dirname(endpointPath), "reclaim-authority.sqlite");
   const blocker = await openTestDatabase(authorityPath);
   blocker.exec("PRAGMA busy_timeout=0; BEGIN EXCLUSIVE");
   try {
     const refused = new NativeRoomService({ root, accountId: ACCOUNT, seatLabel: "refused" });
     await assert.rejects(refused.start(), /reclamation authority is already held/);
-    assert.equal((await stat(deadEndpoint.path)).isSocket(), true, "a losing recovery never moves the endpoint");
+    assert.equal((await stat(endpointPath)).isSocket(), true, "a losing recovery never moves the endpoint");
   } finally {
     blocker.exec("ROLLBACK");
     blocker.close();
@@ -285,21 +300,14 @@ test("POSIX corrupt reclaim authority fails visibly without moving the stale end
 }, async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "agora-native-reclaim-corrupt-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const moduleUrl = new URL("../src/native-service.mjs", import.meta.url).href;
-  const child = spawn(process.execPath, ["--input-type=module", "--eval",
-    `import { NativeRoomService } from ${JSON.stringify(moduleUrl)}; const s = new NativeRoomService({ root: process.env.AGORA_TEST_ROOT, accountId: ${JSON.stringify(ACCOUNT)}, seatLabel: "child" }); process.stdout.write(JSON.stringify(await s.start()) + "\\n"); setInterval(() => {}, 1000);`],
-  { env: { ...process.env, AGORA_TEST_ROOT: root }, stdio: ["ignore", "pipe", "inherit"] });
-  t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
-  const [line] = await once(child.stdout, "data");
-  const deadEndpoint = JSON.parse(String(line));
-  child.kill("SIGKILL");
-  await once(child, "exit");
+  const endpointPath = await nativeServiceEndpoint(root, ACCOUNT);
+  await seedStaleUnixSocket(endpointPath);
 
-  const authorityPath = path.join(path.dirname(deadEndpoint.path), "reclaim-authority.sqlite");
+  const authorityPath = path.join(path.dirname(endpointPath), "reclaim-authority.sqlite");
   await writeFile(authorityPath, "not a sqlite database", { mode: 0o600 });
   const refused = new NativeRoomService({ root, accountId: ACCOUNT, seatLabel: "refused" });
   await assert.rejects(refused.start(), /reclamation authority .* is unusable; stop every Agora process .* remove that file/);
-  assert.equal((await stat(deadEndpoint.path)).isSocket(), true, "corrupt authority does not authorize moving the endpoint");
+  assert.equal((await stat(endpointPath)).isSocket(), true, "corrupt authority does not authorize moving the endpoint");
 });
 
 test("POSIX canonical aliases racing to reclaim one stale endpoint produce exactly one successor", {
@@ -311,14 +319,8 @@ test("POSIX canonical aliases racing to reclaim one stale endpoint produce exact
   t.after(() => rm(parent, { recursive: true, force: true }));
   await nativeServiceEndpoint(root, ACCOUNT);
   await symlink(root, alias, "dir");
-  const moduleUrl = new URL("../src/native-service.mjs", import.meta.url).href;
-  const child = spawn(process.execPath, ["--input-type=module", "--eval",
-    `import { NativeRoomService } from ${JSON.stringify(moduleUrl)}; const s = new NativeRoomService({ root: process.env.AGORA_TEST_ROOT, accountId: ${JSON.stringify(ACCOUNT)}, seatLabel: "child" }); process.stdout.write(JSON.stringify(await s.start()) + "\\n"); setInterval(() => {}, 1000);`],
-  { env: { ...process.env, AGORA_TEST_ROOT: root }, stdio: ["ignore", "pipe", "inherit"] });
-  t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
-  await once(child.stdout, "data");
-  child.kill("SIGKILL");
-  await once(child, "exit");
+  const endpointPath = await nativeServiceEndpoint(root, ACCOUNT);
+  await seedStaleUnixSocket(endpointPath);
 
   const first = new NativeRoomService({ root, accountId: ACCOUNT, seatLabel: "first" });
   const second = new NativeRoomService({ root: alias, accountId: ACCOUNT, seatLabel: "second" });
