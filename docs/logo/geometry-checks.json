@@ -1,0 +1,41 @@
+{
+  "forum": {
+    "fullCells": [
+      64,
+      32
+    ],
+    "compactCells": [
+      32,
+      16
+    ],
+    "fullLitDots": 4708,
+    "compactLitDots": 1174,
+    "edgeLitDots": 0
+  },
+  "stoa": {
+    "fullCells": [
+      64,
+      32
+    ],
+    "compactCells": [
+      32,
+      16
+    ],
+    "fullLitDots": 5048,
+    "compactLitDots": 1316,
+    "edgeLitDots": 0
+  },
+  "voices": {
+    "fullCells": [
+      64,
+      32
+    ],
+    "compactCells": [
+      32,
+      16
+    ],
+    "fullLitDots": 5786,
+    "compactLitDots": 1500,
+    "edgeLitDots": 0
+  }
+}

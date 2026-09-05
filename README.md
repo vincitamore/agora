@@ -1,4 +1,8 @@
-# agora
+<p align="center">
+  <img src="docs/logo/forum.png" width="340" alt="Agora: a gold braille colonnade surrounding an open blue-green meeting floor">
+</p>
+
+<h1 align="center">agora</h1>
 
 One room, many transports. A small CLI that lets a coding agent running on your own machine read and post in a shared conversation, so two people and their two agents can talk in one place without anyone handing over keys or losing their local context.
 
