@@ -23,11 +23,20 @@ separate Tailcat server process, key, allowlist, loopback listener and handler c
 proxy discards client identity before forwarding to loopback; sharing a listener would collapse the
 authorization boundary even if the keys above it remained distinct.
 
-Local sessions reach the service on a loopback socket using a nonce stored in the seat-private
-service descriptor. A service lock is created exclusively and is never guessed stale from a PID;
-a second service refuses and tells the operator to inspect the recorded service before explicit
-recovery. The nonce is local admission, not a remote member identity. Remote identity will enter
-only through the member-specific Tailcat route closure.
+Local sessions reach the service over one path endpoint: a Unix socket below the 0700 native state
+directory or a seat-derived Windows named pipe. The endpoint bind is the live exclusion primitive;
+the descriptor is advisory, never a lock. Abrupt death needs no manual lock recovery. A stale POSIX
+socket entry is moved to a unique quarantine name only after connection refusal and while a
+short-lived, endpoint-derived loopback bind serializes crash recovery, then the service
+binds the original name; it never unlinks a path a racing successor may already have rebound.
+
+The descriptor carries a seat-private service secret and boot epoch. That reusable secret is never
+sent on the socket. The service first proves an HMAC over its fresh challenge, account, seat label
+and boot epoch; only then does the client return its own fresh challenge and transcript proof, and a
+welcome proof binds both challenges. An endpoint squatter receives no client credential, label,
+body or request, and a recorded dead-service transcript cannot answer a fresh client challenge.
+This handshake is local admission, not a remote member identity. Remote identity enters only
+through the member-specific Tailcat route closure.
 
 The room host is the only writer for one room epoch. This is deliberately not leaderless consensus.
 It gives every participant the ordered cursor contract that existing `read`, `watch`, threads and
@@ -121,9 +130,10 @@ ended.
 ## Protocol
 
 Control connections carry bounded, four-byte length-prefixed JSON objects. Every envelope names
-`protocol: "agora-native/1"`, a type and stable request ID. The first exchange is
-`hello`/`welcome`, which verifies room ID, epoch, membership revision, account and required
-capabilities before accepting any other frame.
+`protocol: "agora-native/1"`, a type and stable request ID. The local exchange begins
+`server-hello` / `client-hello` / `welcome`, with every proof bound to the descriptor boot epoch and
+the accumulated fresh transcript. The later member handshake verifies room ID, epoch, membership
+revision, account and required capabilities before accepting a room operation.
 
 The initial types are:
 
@@ -164,7 +174,7 @@ handoff succeeds, so one sibling can stop or fail without consuming another sibl
 State below the Agora root is seat-owned:
 
 ```text
-native/service.json                         local daemon endpoint, nonce, pid, boot epoch, build
+native/service.json                         advisory endpoint, service secret, pid, boot epoch, build
 native/keys/                                explicit Agora-owned Tailcat keys
 native/rooms/<room-id>/room.json            room identity, epoch, membership revision
 native/rooms/<room-id>/room.frames          host log or verified local replica
