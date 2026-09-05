@@ -27,11 +27,22 @@ of the choice, not a claim about a historical building.
 
 ## 03 — The Common Gate
 
+**Selected direction, refined for review.** The cross finials now have filled
+stems and arms, all eight sun rays are formed symmetrically, and continuous
+stepped plinths support the projecting outer column bases in both sampling tiers.
+The still and shimmer below share that geometry. Root README integration awaits
+approval of this refinement.
+
+![Refined Common Gate](threshold.png)
+
 A substantial masonry arch with layered capitals, fluted columns, teal standards
 and a lit path through two smaller arches beyond. The strongest frontal emblem.
 The depth belongs inside the doorway; the exterior stays compact and readable.
 
 [Shimmer animation](threshold.gif) · [PNG](threshold.png) · [Braille](threshold.txt)
+
+[Native 300px shimmer](threshold-compact.gif) · [300px still](threshold-readme-300.png)
+— the compact animation is rendered at its own dot pitch, not shrunk from 512px.
 
 ## Small display checks
 
@@ -54,7 +65,7 @@ python docs/logo/meta-wizard-round2/generate.py --stills-only
 
 Python/Pillow are build-time tools, not Agora runtime dependencies. The script
 owns only this directory. All other passes and the root README remain unchanged.
-No mark is selected or proposed for automatic integration by this gallery.
+The operator selected Common Gate; this gallery does not authorize automatic integration.
 
 The geometry is constructed in a 192-square coordinate space and sampled at
 160 × 160 dots (80 × 40 braille cells) and 96 × 96 dots (48 × 24 cells), with
@@ -68,6 +79,12 @@ The PNG and GIF use that same cell colour rather than claiming that a terminal
 can colour individual dots inside a character. The generator checks every decoded
 bit against its sampled occupancy and rejects lit outer edges; bounds and lit-dot
 counts are recorded in `geometry-checks.json`.
+
+The small Common Gate ornaments use continuous filled predicates sampled directly
+in dot-space, avoiding an intermediate integer-pixel line raster. Run
+`python docs/logo/meta-wizard-round2/check-refinement.py` after generation to check
+mirrored finials/rays, crossbar-to-stem proportions, continuous pedestal support,
+all eight rays at both tiers, the 300px size and the decoded GIF loop duration.
 
 All three 512px GIFs run for 4.8 seconds per loop. A subtle highlight crosses stationary
 geometry, followed by a rest. A shared palette is learned from nearest-neighbour
