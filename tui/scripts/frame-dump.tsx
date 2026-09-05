@@ -132,8 +132,11 @@ export async function walkNativeFrames(): Promise<Frame[]> {
       h.mockInput.pressKey("1");
       await h.until((f) => f.includes("▣ ROOM house"));
       await service.stop();
-      await h.until((f) => f.includes("room dark ·"));
-      take("native-room-dark");
+      // the dark row lands when the subscription sees the close or the next poll finds no
+      // descriptor; on a slow runner that is seconds, not the default two, so the wait is long and
+      // the frame taken is the one that carried the row
+      const darkFrame = await h.until((f) => f.includes("room dark ·"), { tries: 200, ms: 50 });
+      out.push({ name: `${tag}-native-room-dark`, width: size.width, height: size.height, text: darkFrame, secrets: [service.nonce] });
     } finally {
       h.destroy();
       client.close();

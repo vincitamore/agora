@@ -28,13 +28,19 @@ export async function mountApp(props: AppProps, size: { width?: number; height?:
     ...setup,
     settle,
     frame: () => setup.captureCharFrame(),
+    // Resolves with the first frame the predicate accepts. It never resolves with a frame the
+    // predicate refused: a wait that ran out returns nothing a caller can mistake for the settled
+    // screen, so a slow runner fails the test on the wait, naming the last frame, instead of on
+    // whatever the next capture happened to hold.
     until: async (pred, { tries = 40, ms = 50 } = {}) => {
+      let last = "";
       for (let i = 0; i < tries; i++) {
-        const f = setup.captureCharFrame();
-        if (pred(f)) return f;
+        last = setup.captureCharFrame();
+        if (pred(last)) return last;
         await settle(ms);
       }
-      return setup.captureCharFrame();
+      throw new Error(`until: no frame matched after ${tries} tries (${tries * ms} ms); last frame:
+${last}`);
     },
     destroy: () => setup.renderer.destroy(),
   };
