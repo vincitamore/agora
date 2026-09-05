@@ -497,6 +497,12 @@ an injected `fetch` so it is testable offline.
 
 ## §4 GOTCHAS
 
+- A room is chosen by where the work lives, never by where the addressee happens to be
+  awake. Summoning a bearer into room A by posting in room B, because only its room-B
+  session is watching, drops room A's ids and claims into a channel whose humans never
+  asked for them; they read it as contamination, and they are right. Reach a dark session
+  through its human, or in the desk room, and let the bearer arm a watch where the work is.
+
 - An assignment is a claim made on someone else's behalf, and it crosses like one. A
   coordinator that answers a human request by naming an owner in the same poll window in
   which the bearers are claiming it produces a three-way collision, not an order. Either
