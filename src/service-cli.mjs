@@ -50,14 +50,36 @@ export async function runService(options) {
 }
 
 /**
+ * Handshake the published endpoint. Success means this descriptor names OUR service.
+ * Failure means the file is stale: a recycled pid is not identity.
+ * @param {string} stateRoot
+ * @returns {Promise<{ live: true, pid?: number } | { live: false }>}
+ */
+async function probeOwnService(stateRoot) {
+  try {
+    const { client, descriptor } = await connectSeatService(stateRoot);
+    client.close();
+    return { live: true, pid: typeof descriptor.pid === "number" ? descriptor.pid : undefined };
+  } catch {
+    return { live: false };
+  }
+}
+
+/** @param {string} stateRoot */
+async function unlinkDescriptor(stateRoot) {
+  await rm(serviceDescriptorPath(stateRoot), { force: true });
+}
+
+/**
  * @param {{ root: string, entry: string, execPath: string, accountId: string, seatLabel: string }} options
  */
 export async function startService(options) {
   await mkdir(options.root, { recursive: true, mode: 0o700 });
-  const status = await serviceDescriptorStatus(options.root);
-  if (status.present && status.pidAlive) {
-    throw new AgoraError(`native service already running (pid ${status.pid})`, EXIT.error);
+  const probe = await probeOwnService(options.root);
+  if (probe.live) {
+    throw new AgoraError(`native service already running (pid ${probe.pid ?? "unknown"})`, EXIT.error);
   }
+  await unlinkDescriptor(options.root);
   const child = spawn(options.execPath, [options.entry, "service", "--daemon"], {
     env: {
       ...process.env,
@@ -72,8 +94,8 @@ export async function startService(options) {
   child.unref();
   const deadline = Date.now() + STOP_MS;
   while (Date.now() < deadline) {
-    const next = await serviceDescriptorStatus(options.root);
-    if (next.present && next.pidAlive) return next;
+    const next = await probeOwnService(options.root);
+    if (next.live) return serviceDescriptorStatus(options.root);
     await new Promise((r) => setTimeout(r, 50));
   }
   throw new AgoraError("native service did not publish a live descriptor", EXIT.error);
@@ -81,25 +103,26 @@ export async function startService(options) {
 
 /** @param {string} stateRoot */
 export async function stopService(stateRoot) {
-  const status = await serviceDescriptorStatus(stateRoot);
-  if (!status.present) throw new AgoraError(`native service absent (${status.error ?? "no descriptor"})`, EXIT.error);
-  const pid = status.pid;
-  if (pid && pidAlive(pid)) {
-    const sig = process.platform === "win32" ? "SIGKILL" : "SIGTERM";
-    try { process.kill(pid, sig); } catch { /* already gone */ }
-    const deadline = Date.now() + STOP_MS;
-    while (Date.now() < deadline && pidAlive(pid)) {
-      await new Promise((r) => setTimeout(r, 50));
-    }
-    if (pidAlive(pid)) {
-      try { process.kill(pid, "SIGKILL"); } catch { /* gone */ }
-    }
+  const probe = await probeOwnService(stateRoot);
+  if (!probe.live) {
+    await unlinkDescriptor(stateRoot);
+    return serviceDescriptorStatus(stateRoot);
   }
-  const after = await serviceDescriptorStatus(stateRoot);
-  if (after.present && after.pidAlive) {
-    throw new AgoraError(`native service still running (pid ${after.pid})`, EXIT.error);
+  const pid = probe.pid ?? 0;
+  if (!Number.isInteger(pid) || pid <= 0) {
+    throw new AgoraError("native service is live at the endpoint but the descriptor has no pid; not killing by guess", EXIT.error);
   }
-  if (after.present) await rm(serviceDescriptorPath(stateRoot), { force: true });
+  try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
+  const deadline = Date.now() + STOP_MS;
+  while (Date.now() < deadline && pidAlive(pid)) {
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  if (pidAlive(pid)) {
+    try { process.kill(pid, "SIGKILL"); } catch { /* gone */ }
+  }
+  const still = await probeOwnService(stateRoot);
+  if (still.live) throw new AgoraError(`native service still running (pid ${still.pid})`, EXIT.error);
+  await unlinkDescriptor(stateRoot);
   return serviceDescriptorStatus(stateRoot);
 }
 

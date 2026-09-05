@@ -1,9 +1,9 @@
 // @ts-check
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -83,4 +83,37 @@ test("service room create mints a 32-hex id, EEXIST is exit 1, and agora.json is
   assert.equal(again.code, 1);
   assert.match(again.stderr, /already exists|already open/i);
   assert.equal(await readFile(cfg, "utf8"), cfgBody);
+});
+
+test("service stop does not kill a pid it has not verified is the service", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "agora-service-stale-"));
+  const cfg = path.join(root, "agora.json");
+  await writeFile(cfg, JSON.stringify({ actor: { name: "seat", kind: "agent" }, rooms: { scratch: { transport: "local", path: path.join(root, "room.ndjson") } } }));
+  await mkdir(path.join(root, "native"), { recursive: true });
+  const innocent = spawn(process.execPath, ["-e", "setInterval(()=>{}, 1e9)"], { stdio: "ignore", windowsHide: true });
+  t.after(async () => {
+    try { innocent.kill("SIGKILL"); } catch { /* gone */ }
+    await agora(["service", "stop"], { AGORA_STATE: root, AGORA_CONFIG: cfg });
+    await rm(root, { recursive: true, force: true });
+  });
+  await writeFile(path.join(root, "native", "service.json"), JSON.stringify({
+    protocol: 1,
+    path: path.join(root, "native", "no-such-endpoint"),
+    nonce: "n".repeat(32),
+    pid: innocent.pid,
+    bootEpoch: "b".repeat(32),
+    accountId: "a".repeat(32),
+    seatLabel: "stale",
+    startedAt: new Date().toISOString(),
+  }));
+  const env = { AGORA_STATE: root, AGORA_CONFIG: cfg, AGORA_SESSION: "svc" };
+  const stopped = await agora(["service", "stop", "--json"], env);
+  assert.equal(stopped.code, 0, stopped.stderr);
+  assert.equal(innocent.exitCode, null, "stop killed a pid it never handshook");
+  assert.notEqual(innocent.killed, true);
+  try {
+    process.kill(/** @type {number} */ (innocent.pid), 0);
+  } catch (e) {
+    assert.fail(`innocent pid ${innocent.pid} is gone: ${e instanceof Error ? e.message : e}`);
+  }
 });
