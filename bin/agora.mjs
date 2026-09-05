@@ -63,7 +63,8 @@ import { formatTrailers, matchesAddress, parseTrailers, TRAILER_VALUE_MAX, trail
 import { SLACK_TEXT_MAX, chunkAtLines, encodeSlackText } from "../src/transports/slack.mjs";
 import { codexLiveness, codexSpawnWarning, codexThread, queueCodex, resolveCodexBinary } from "../src/codex.mjs";
 import { buildLabel, buildPredates, cacheTtls, clearWatchMode, installedBuild, touchWatchMode, watchModeSentinel } from "../src/harness.mjs";
-import { SERVICE_DARK, ServiceDarkError, openNativeSubscription, serviceDescriptorStatus } from "../src/wake/subscriber.mjs";
+import { SERVICE_DARK, ServiceDarkError, openNativeSubscription, serviceDescriptorStatus, validateNativeRoomId } from "../src/wake/subscriber.mjs";
+import { FACE_ATTACHMENT_MODES, FACE_BUILT, FACE_SELECTORS, appendFaceRecord, facePolicyPath, listFaceRecords, normalizeSelectors, readFacePolicy, selectFaces, writeFacePolicy } from "../src/faces.mjs";
 
 /**
  * The arithmetic `doctor`'s poll rate is: the threads every watching session follows, each read at
@@ -122,8 +123,37 @@ const SCHEMA = {
         "--exhibit <locator>": `what settles it, repeatable (same ${TRAILER_VALUE_MAX}-character cap as --trailer)`,
         "--because <text>": `the reasoning behind it (same ${TRAILER_VALUE_MAX}-character cap as --trailer)`,
         "--fyi": "emit ack: none, licensing the reader's silence. Honouring it is a judgement; the tool never filters, suppresses or delays on an incoming ack:",
+        "--face <name>": "native rooms: also publish this post to the named face of the room (slack, ...), whatever the room's policy would have chosen; repeatable or comma-separated. A name that is not a face of the room, a transport with no audience, or a face that is off is a refused row on the receipt, never an exit code: the native post is the outcome",
+        "--no-face": "native rooms: this post stays native only, whatever the room's policy says",
       },
-      does: "post one message signed as this session's bearer, with any trailers in a block above the signature; prints id and cursor",
+      does: "post one message signed as this session's bearer, with any trailers in a block above the signature; prints id and cursor. On a native room the receipt also carries one row per face of the room (pending | published | refused | unknown), read from the seat's face records; agora faces <room> --for <cursor> reads them again later",
+    },
+    room: {
+      args: ["faces", "<room>"],
+      options: {
+        "--add <transport>": "give the native room a face on this transport (one of the built faces); the token is borrowed from a configured room of that transport",
+        "--via <room>": "with --add: the configured room whose token and target the face borrows (default: the one configured room of that transport)",
+        "--channel <id>": "with --add slack: the channel to face to (default: the --via room's channel)",
+        "--remove <transport>": "drop that face from the record",
+        "--enable <transport>": "turn that face on",
+        "--disable <transport>": "turn that face off; its rows refuse with disabled until it is on again",
+        "--human <selectors>": `which of this room's human posts cross to the face: a list from ${FACE_SELECTORS.join(", ")} joined by + (default always)`,
+        "--agent <selectors>": "the same for agent posts (default addressed+landing: a post whose own to: or re: reaches a human, or that carries a verdict with a sha exhibit)",
+        "--system <selectors>": "the same for system posts (default never)",
+        "--attachments <mode>": `what the face carries of an attachment: ${FACE_ATTACHMENT_MODES.join(", ")} (default metadata: one line per attachment, never a path)`,
+        "--pictures": "shorthand for --attachments pictures: image attachments are uploaded to the face from the seat's verified copy",
+        "--face <transport>": "which face an edit applies to, when the room has more than one",
+        "--show": "print the record and change nothing (the default with no edit option)",
+      },
+      does: "the face policy of a native room: which transports carry a copy of which of its posts, per author kind, read from and written to the seat's own state (never the shared config), with where the record lives and when it was last written. An unknown transport, selector or mode is refused by name and nothing is written",
+    },
+    faces: {
+      args: ["<room>"],
+      options: {
+        "--for <cursor|id>": "the face rows of one message of the native room, by cursor or message id: one row per face (and per uploaded picture) with its status, and for a refused or unknown row the reason",
+        "--unknown": "every face row of the room a human should look at: a publication the seat could not confirm and will not repeat blind, with the candidates it quarantined",
+      },
+      does: "read the seat's face records for a native room; rows, never a count, and never a publish",
     },
     watch: {
       args: ["<room>"],
@@ -243,8 +273,56 @@ const OPTIONS = /** @type {const} */ ({
   forget: { type: "boolean", default: false },
   inherit: { type: "string" },
   force: { type: "boolean", default: false },
+  face: { type: "string", multiple: true },
+  "no-face": { type: "boolean", default: false },
+  unknown: { type: "boolean", default: false },
+  add: { type: "string" },
+  via: { type: "string" },
+  channel: { type: "string" },
+  remove: { type: "string" },
+  enable: { type: "string" },
+  disable: { type: "string" },
+  human: { type: "string" },
+  agent: { type: "string" },
+  system: { type: "string" },
+  attachments: { type: "string" },
+  pictures: { type: "boolean", default: false },
+  show: { type: "boolean", default: false },
   help: { type: "boolean", short: "h", default: false },
 });
+
+/**
+ * One face row of a receipt or a record, rendered. A record line carries the seat's own fields
+ * (`code`, `attempt`, `at`, `quarantine`); an ack row from the service carries only the status.
+ * Every reason passes through `redact()` on the way out.
+ * @param {Record<string, any>} r
+ */
+function faceRowText(r) {
+  const who = `${r.transport}${r.part === "attachment" ? ` picture ${r.name ?? r.attachmentId}` : ""}`;
+  const tail = r.reason ? `: ${redact(String(r.reason))}` : r.id ? ` ${r.id}${Array.isArray(r.ids) && r.ids.length > 1 ? ` (+${r.ids.length - 1})` : ""}` : "";
+  const quarantine = Array.isArray(r.quarantine) && r.quarantine.length ? `  quarantined ${r.quarantine.join(" ")}` : "";
+  return `face ${who} ${r.status}${tail}${quarantine}`;
+}
+
+/** @param {Record<string, any>} r @param {{ alias: string, roomId: string }} ctx */
+function faceRowJson(r, ctx) {
+  const { reason, ...rest } = r;
+  return { type: "face", alias: ctx.alias, room: ctx.roomId, ...rest, ...(reason === undefined ? {} : { reason: redact(String(reason)) }) };
+}
+
+/**
+ * The poster's `--face` / `--no-face` as the native transport carries it: `"none"`, or the named
+ * transports, deduplicated, comma lists split. Absent is the room's own policy.
+ * @param {Record<string, unknown>} values
+ * @returns {'none' | string[] | undefined}
+ */
+function faceChoice(values) {
+  const named = /** @type {string[]} */ (values.face ?? []).flatMap((v) => String(v).split(",")).map((s) => s.trim()).filter(Boolean);
+  if (values["no-face"] && named.length) throw new AgoraError(`--no-face and --face contradict each other; pass one`, EXIT.usage);
+  if (values["no-face"]) return "none";
+  if (named.length) return [...new Set(named)];
+  return undefined;
+}
 
 /** @param {import('../src/session.mjs').SessionRecord} rec @param {'live' | 'gone' | 'unknown' | 'unregistered'} state */
 function recordLine(rec, state) {
@@ -875,6 +953,84 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
     return bad ? EXIT.error : EXIT.ok;
   }
 
+  if (verb === "room") {
+    // `agora room faces <room>`: the one admin verb of the face policy. The record is the seat's
+    // own state under native/rooms/<roomId>/faces.json; the shared config is read and never written.
+    if (roomAlias !== "faces") throw new AgoraError(`room takes "faces" (agora room faces <room> ...)${roomAlias ? `, not "${roomAlias}"` : ""}`, EXIT.usage);
+    const alias = rest[0];
+    if (!alias) throw new AgoraError(`room faces needs a native room (one of: ${Object.entries(cfg.rooms).filter(([, r]) => r.transport === "native").map(([a]) => a).join(", ") || "none configured"})`, EXIT.usage);
+    const native = cfg.rooms[alias];
+    if (!native) throw new AgoraError(`no room "${alias}" (have: ${Object.keys(cfg.rooms).join(", ")})`, EXIT.usage);
+    if (native.transport !== "native") throw new AgoraError(`faces belong to a native room; "${alias}" is a ${native.transport} room, and a post there is already where its readers are`, EXIT.usage);
+    const roomId = validateNativeRoomId(native.roomId, `room "${alias}": roomId`);
+    const policy = await readFacePolicy(stateRoot, roomId);
+    const file = facePolicyPath(stateRoot, roomId);
+    const given = /** @type {Record<string, unknown>} */ (values);
+    const edits = ["add", "remove", "enable", "disable", "human", "agent", "system", "attachments"].filter((k) => given[k] !== undefined).concat(values.pictures ? ["pictures"] : []);
+    if (values.add === undefined && (values.channel !== undefined || values.via !== undefined)) throw new AgoraError(`--via and --channel go with --add`, EXIT.usage);
+    if (edits.length) {
+      /** @param {string} transport @param {string} flag */
+      const faceOf = (transport, flag) => {
+        const f = policy.faces.find((x) => x.transport === transport);
+        if (!f) throw new AgoraError(`${flag}: room ${alias} has no ${transport} face (have: ${policy.faces.map((x) => x.transport).join(", ") || "none"})`);
+        return f;
+      };
+      if (values.add !== undefined) {
+        const transport = String(values.add).trim();
+        if (!FACE_BUILT.includes(transport)) throw new AgoraError(`--add ${transport}: not a face this build publishes (have: ${FACE_BUILT.join(", ")})`);
+        if (policy.faces.some((f) => f.transport === transport)) throw new AgoraError(`room ${alias} already has a ${transport} face; edit it, or --remove ${transport} first`);
+        const candidates = Object.entries(cfg.rooms).filter(([, r]) => r.transport === transport).map(([a]) => a);
+        const via = values.via !== undefined ? String(values.via).trim() : candidates.length === 1 ? candidates[0] : undefined;
+        if (!via) throw new AgoraError(candidates.length ? `--add ${transport} needs --via <room>: the configured ${transport} room whose token the face borrows (have: ${candidates.join(", ")})` : `--add ${transport} needs a configured ${transport} room to borrow a token from, and none is configured`);
+        const source = cfg.rooms[via];
+        if (!source || source.transport !== transport) throw new AgoraError(`--via ${via}: not a configured ${transport} room (have: ${candidates.join(", ") || "none"})`);
+        /** @type {Record<string, string>} */
+        const target = {};
+        if (transport === "slack") {
+          const channel = values.channel !== undefined ? String(values.channel).trim() : typeof source.channel === "string" ? source.channel : "";
+          if (!channel) throw new AgoraError(`--add slack needs --channel <id>, or a --via room that names one`);
+          target.channel = channel;
+        } else if (values.channel !== undefined) throw new AgoraError(`--channel names a Slack channel; the ${transport} face takes its target from the --via room`);
+        policy.faces.push({ transport, alias: via, target, enabled: true, post: { human: ["always"], agent: ["addressed", "landing"], system: ["never"] }, attachments: "metadata", backfill: null });
+      }
+      if (values.remove !== undefined) {
+        const f = faceOf(String(values.remove).trim(), "--remove");
+        policy.faces = policy.faces.filter((x) => x !== f);
+      }
+      if (values.enable !== undefined) faceOf(String(values.enable).trim(), "--enable").enabled = true;
+      if (values.disable !== undefined) faceOf(String(values.disable).trim(), "--disable").enabled = false;
+      const perFace = ["human", "agent", "system", "attachments"].filter((k) => given[k] !== undefined).concat(values.pictures ? ["pictures"] : []);
+      if (perFace.length) {
+        const named = /** @type {string[]} */ (values.face ?? []);
+        if (named.length > 1) throw new AgoraError(`--face names one face here (the one the edit applies to)`, EXIT.usage);
+        const which = named[0] ?? (values.add !== undefined ? String(values.add).trim() : undefined);
+        const target = which ? faceOf(which, "--face") : policy.faces.length === 1 ? policy.faces[0] : undefined;
+        if (!target) throw new AgoraError(policy.faces.length ? `room ${alias} has ${policy.faces.length} faces; say which with --face <transport> (have: ${policy.faces.map((x) => x.transport).join(", ")})` : `room ${alias} has no face to edit; add one with --add <transport>`);
+        for (const kind of /** @type {const} */ (["human", "agent", "system"])) if (values[kind] !== undefined) target.post[kind] = normalizeSelectors(String(values[kind]), `--${kind}`);
+        if (values.pictures && values.attachments !== undefined && String(values.attachments) !== "pictures") throw new AgoraError(`--pictures is --attachments pictures; pass one`, EXIT.usage);
+        const mode = values.pictures ? "pictures" : values.attachments !== undefined ? String(values.attachments).trim() : undefined;
+        if (mode !== undefined) {
+          if (!FACE_ATTACHMENT_MODES.includes(/** @type {any} */ (mode))) throw new AgoraError(`--attachments ${JSON.stringify(mode)} is not a mode (have: ${FACE_ATTACHMENT_MODES.join(", ")})`);
+          target.attachments = /** @type {any} */ (mode);
+        }
+      }
+      await writeFacePolicy(stateRoot, roomId, policy);
+    }
+    const written = await readFacePolicy(stateRoot, roomId);
+    if (json) console.log(JSON.stringify({ type: "face-policy", alias, room: roomId, path: file, updatedAt: written.updatedAt, written: edits.length > 0, faces: written.faces }));
+    else {
+      console.log(`faces of ${alias} (native room ${roomId})`);
+      console.log(`  record ${file}${written.updatedAt ? `  written ${written.updatedAt}` : "  (absent: every post is native only and nothing refuses)"}${edits.length ? "  (written now)" : ""}`);
+      for (const f of written.faces) {
+        const where = Object.entries(f.target).map(([k, v]) => `${k} ${v}`).join(" ") || "no target";
+        console.log(`  ${f.transport.padEnd(8)} via ${f.alias}  ${where}  ${f.enabled ? "enabled" : "DISABLED"}`);
+        console.log(`  ${"".padEnd(8)} human: ${f.post.human.join("+")}  agent: ${f.post.agent.join("+")}  system: ${f.post.system.join("+")}  attachments: ${f.attachments}`);
+      }
+      if (!written.faces.length) console.log(`  no faces; add one: agora room faces ${alias} --add slack --via <slack room> [--channel <id>]`);
+    }
+    return EXIT.ok;
+  }
+
   if (!roomAlias) throw new AgoraError(`${verb} needs a room (one of: ${Object.keys(cfg.rooms).join(", ")})`, EXIT.usage);
   const room = cfg.rooms[roomAlias];
   if (!room) throw new AgoraError(`no room "${roomAlias}" (have: ${Object.keys(cfg.rooms).join(", ")})`, EXIT.usage);
@@ -1012,6 +1168,39 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       console.log(json ? JSON.stringify(carry) : renderCarry(carry));
       return EXIT.ok;
     }
+    case "faces": {
+      // A read of the seat's face records. Nothing here calls a face transport: a publication is
+      // the service's, and a row the service never wrote is reported as absent, not guessed.
+      if (room.transport !== "native") throw new AgoraError(`faces belong to a native room; "${roomAlias}" is a ${room.transport} room`, EXIT.usage);
+      const roomId = transport.room;
+      const ctx = { alias: roomAlias, roomId };
+      if (values.for !== undefined && values.unknown) throw new AgoraError(`faces takes --for <cursor|id> or --unknown, not both`, EXIT.usage);
+      if (values.for === undefined && !values.unknown) throw new AgoraError(`faces needs --for <cursor|id> (one message's rows) or --unknown (what a human should look at)`, EXIT.usage);
+      /** @type {Record<string, any>[]} */
+      let rows;
+      if (values.unknown) rows = await listFaceRecords(stateRoot, roomId, { status: "unknown" });
+      else {
+        const key = String(values.for).trim();
+        let originId = key;
+        /** @type {string | undefined} */
+        let cursor;
+        if (!/^[a-f0-9]{64}$/.test(key)) {
+          const why = transport.validateCursor?.(key);
+          if (why) throw new AgoraError(`--for ${JSON.stringify(key)}: ${why}; pass a native cursor (<epoch>:<sequence>) or a 64-hex message id`, EXIT.usage);
+          // the message at a cursor is the first one after the cursor before it; the service's own read
+          const [epoch, seq] = key.split(":");
+          const [m] = await transport.read({ since: `${epoch}:${Number(seq) - 1}`, limit: 1 });
+          if (!m || m.cursor !== key) throw new AgoraError(`no message at ${key} in ${roomAlias}`);
+          originId = m.id;
+          cursor = key;
+        }
+        rows = (await listFaceRecords(stateRoot, roomId, { originId })).map((r) => ({ ...(cursor ? { cursor } : {}), ...r }));
+        if (!rows.length) console.error(`agora: no face rows for ${key} in ${roomAlias}: the seat service wrote none (the room has no face that selected it, or the service that publishes faces has not run over it)`);
+      }
+      for (const r of rows) console.log(json ? JSON.stringify(faceRowJson(r, ctx)) : faceRowText(r));
+      if (values.unknown && !rows.length && !json) console.log(`no unknown faces in ${roomAlias}`);
+      return EXIT.ok;
+    }
     case "whoami": {
       const me = await transport.whoami();
       console.log(json ? JSON.stringify({ ...me, transport: transport.kind, room: transport.room }) : `${me.name} (${me.id}) on ${transport.kind} ${transport.room}`);
@@ -1065,6 +1254,23 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         text = await readStdin();
       }
       if (!text.trim()) throw new AgoraError(`nothing to post (give text, --file, or --stdin)`, EXIT.usage);
+      // The face choice is a native room's: elsewhere the post is already where its readers are.
+      // The names are checked against the room's policy record before the post so that a name the
+      // seat can decide on without any call (no such face, no audience, off) is a refused row the
+      // CLI records itself; the rest ride the append frame for the service that publishes faces.
+      const choice = faceChoice(values);
+      if (choice !== undefined && room.transport !== "native") throw new AgoraError(`--face and --no-face belong to a native room; "${roomAlias}" is a ${room.transport} room, and a post there is already where its readers are`, EXIT.usage);
+      if (values.split && room.transport === "native") throw new AgoraError(`--split chunks a Slack post; "${roomAlias}" is a native room, whose message is one message, and a face carries no split`, EXIT.usage);
+      /** @type {{ transport: string, code: string, reason: string }[]} */
+      let faceRefusals = [];
+      /** @type {'none' | string[] | undefined} */
+      let wireChoice = choice;
+      if (Array.isArray(choice)) {
+        const policy = await readFacePolicy(stateRoot, transport.room);
+        const { selected, refusals } = selectFaces(policy, { text, author: cfg.actor }, { memberKind: () => undefined, lookupCursor: () => undefined }, { face: choice, alias: roomAlias });
+        faceRefusals = refusals;
+        wireChoice = selected.map((s) => s.face.transport);
+      }
       const unsigned = text.replace(/\s+$/, "");
       const trailerBlock = entries.length ? formatTrailers(entries) : "";
       const signIt = cfg.sign !== false && !values["no-sign"];
@@ -1092,13 +1298,13 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
           return `${c}\n\n${block}`;
         });
       }
-      /** @type {{ id: string, cursor: string, url?: string } | undefined} */
+      /** @type {import('../src/core.mjs').PostResult | undefined} */
       let last;
       /** @type {string[]} */
       const ids = [];
       try {
         for (const piece of pieces) {
-          last = await transport.post(payload(piece), { thread });
+          last = await transport.post(payload(piece), { thread, ...(wireChoice === undefined ? {} : { face: wireChoice }) });
           await appendPosted(sdir, last.id);
           ids.push(last.id);
         }
@@ -1118,6 +1324,28 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       else if (transport.threads) {
         await follow(sdir, roomAlias, room, [ids[0]]);
         if (ids.length > 1) await aliasThreads(sdir, cursorKey(roomAlias), ids[0], ids.slice(1));
+      }
+      /**
+       * The receipt's face rows, on a native room: what the CLI refused before the post (recorded
+       * now, under the committed message's id), then the rows the service put on the ack, or, when
+       * the ack carried none, the rows the service's own record log holds for this message. Never a
+       * row the CLI did not read: a face the service has not published is absent, not `pending`.
+       * @type {Record<string, any>[]}
+       */
+      const faceRows = [];
+      if (room.transport === "native") {
+        const at = new Date().toISOString();
+        for (const f of faceRefusals) faceRows.push(await appendFaceRecord(stateRoot, transport.room, { originId: r.id, cursor: r.cursor, transport: f.transport, status: "refused", code: f.code, reason: f.reason, attempt: 0, at }));
+        const { faces: ackRows, ...receipt } = r;
+        if (Array.isArray(ackRows)) faceRows.push(...ackRows.filter((row) => !faceRefusals.some((f) => f.transport === row.transport)));
+        else faceRows.push(...(await listFaceRecords(stateRoot, transport.room, { originId: r.id })).filter((row) => !faceRefusals.some((f) => f.transport === row.transport && !row.part)));
+        if (json) console.log(JSON.stringify({ ...receipt, alias: roomAlias, room: transport.room, thread, ...(ids.length > 1 ? { ids } : {}), faces: faceRows.map((row) => faceRowJson(row, { alias: roomAlias, roomId: transport.room })) }));
+        else {
+          console.log(`posted ${ids.join(" ")}  cursor ${r.cursor}`);
+          for (const row of faceRows) console.log(faceRowText(row));
+        }
+        if (!faceRows.length) console.error(`agora: no face rows for ${r.cursor}${wireChoice === "none" ? " (--no-face)" : ""}: ${wireChoice === "none" ? "the post is native only" : "the seat service wrote none (no face of the room selected it, or the service that publishes faces has not run over it); agora faces " + roomAlias + " --for " + r.cursor + " reads them later"}`);
+        return EXIT.ok;
       }
       console.log(json ? JSON.stringify({ ...r, alias: roomAlias, room: transport.room, thread, ...(ids.length > 1 ? { ids } : {}) }) : `posted ${ids.join(" ")}${r.url ? `  ${r.url}` : ""}  cursor ${r.cursor}`);
       return EXIT.ok;

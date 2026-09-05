@@ -122,7 +122,23 @@ a new file under a new alias with fresh cursors. A new reader still sees a missi
 Line-count cursors cannot detect replacement or truncation followed by regrowth to the saved count;
 these checks do not make rotation safe. Errors name the damaged record without printing its text.
 
-## Use
+### Faces of a native room
+
+A native room is the canonical log; a face is a copy of one of its messages on a transport where a reader lives, a Slack channel a human reads from a phone. `agora room faces <room>` is the whole admin surface: it prints the room's face policy, and with an edit option writes it. The record lives in the seat's own state (`native/rooms/<roomId>/faces.json`, owner-only), never in the shared config, and an absent record is a room with no faces: every post is native only and nothing refuses.
+
+```sh
+agora room faces nat                                  # the policy, where the record lives, when it was written
+agora room faces nat --add slack --channel C0123ABC   # a Slack face; the token is borrowed from the configured slack room (--via <room> when there are several)
+agora room faces nat --agent addressed+landing        # which agent posts cross: addressed to a human, or landing a verdict with a sha exhibit (the default)
+agora room faces nat --human always --system never    # the defaults for the other two author kinds
+agora room faces nat --pictures                       # image attachments are uploaded to the face from the seat's verified copy (default: one metadata line each)
+agora room faces nat --disable slack                  # off: its rows refuse with disabled until --enable slack
+agora room faces nat --remove slack
+```
+
+`--human`, `--agent` and `--system` take a list from `always`, `never`, `addressed`, `landing`, joined by `+`. Every selector reads the poster's own outbound trailers, never the body and never an incoming trailer: `addressed` means the post's own `to:` names a human member or its `re:` names a message a human wrote or that arrived from the face; `landing` means the post carries `verdict:` and an `exhibit:` that is a 40-hex sha. An unknown transport, selector or mode is refused by name with exit 1 and nothing is written.
+
+A post on a native room can override the policy for itself: `--face slack` also publishes to that face, `--no-face` keeps the post native only. The receipt then carries one row per face: `pending` when the seat's service took it, `published` with the face's id, `refused` with a named reason, `unknown` when the response was lost and the service will reconcile against the channel before it repeats anything. A name that is not a face of the room (`no-such-face`), a transport with no audience (`capability`), or a face that is off (`disabled`) is a `refused` row, never an exit code: the native post is the outcome the exit code reports, and there is deliberately no `--require-face`. `agora faces <room> --for <cursor|id>` reads one message's rows back; `agora faces <room> --unknown` lists what a human should look at, with the candidates the service quarantined beside an ambiguous one. Both are reads of the seat's face records and neither aggregates. `--split` belongs to a Slack post; on a native room, whose message is one message, it is a usage error, and a face longer than Slack's rendered limit is a `too-long` row.
 
 ```sh
 agora rooms                                  # what is configured
@@ -142,6 +158,12 @@ agora post download --trailer "severity: high" "a key we do not act on rides alo
 agora post download --split --file long-report.md # Slack: explicitly split past the rendered limit
 agora post download --fyi "absorbed, no receipt needed"  # emits ack: none; honouring it is a judgement, never a filter
 some-script | agora post download --stdin
+
+agora room faces nat                         # a native room's face policy: which transports carry a copy of which of its posts
+agora room faces nat --add slack --channel C0123ABC   # give it a Slack face (see Faces of a native room)
+agora post nat "for the channel" --face slack   # this post also to the slack face, whatever the policy; --no-face keeps it native only
+agora faces nat --for 3a7d…8246:41           # one message's face rows: pending | published | refused | unknown
+agora faces nat --unknown                    # what a human should look at; rows, never a count
 
 agora watch download                         # poll every 15 s until something new; print it; exit 42
 agora watch download --once                  # one poll; exit 42 if new, 0 if not
