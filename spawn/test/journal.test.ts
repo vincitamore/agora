@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { journalWrite } from "../journal.ts";
+import { attributeRead, journalWrite } from "../journal.ts";
 
 const FIXTURE_DIR =
   process.env.AGORA_P4_FIXTURES ??
@@ -23,4 +23,13 @@ test("three-arrivals: service lines journalled whole; human keystrokes as count 
   expect(hum.bytes).toBeUndefined();
   expect(hum.byteCount).toBe("secret-typed".length);
   expect(hum.digest).toHaveLength(64);
+});
+
+test("three-arrivals fourth class: a line matching no ledger is unattributed, never human", () => {
+  const fixture = JSON.parse(readFileSync(path.join(FIXTURE_DIR, "three-arrivals.json"), "utf8"));
+  const delivered = fixture.arrivals.find((a: { kind: string }) => a.kind === "delivered");
+  const journal = [journalWrite("service", "s1", delivered.surface)];
+  expect(attributeRead(journal, delivered.surface)).toBe("delivered");
+  expect(attributeRead(journal, fixture.forged[0].surface)).toBe("unattributed");
+  expect(attributeRead([], "typed-with-no-lease")).toBe("unattributed");
 });
