@@ -1,0 +1,93 @@
+{
+  "$fixture": "per-harness idle-at-turn-boundary probes and what deliver() does with each verdict",
+  "$rule": "no verdict admits a write. A write is admitted only by a receiver-owned primitive: a native enqueue, or the receiver's atomic accept at its own turn boundary. Absent one the pointer stays in the durable inbox however idle the transcript looks. The probes below are roster surface and enqueue suppression.",
+  "harnesses": {
+    "claude": {
+      "probe": "claude-transcript-tail",
+      "tier": "measured",
+      "idle": "last 'assistant' record has stop_reason 'end_turn' and no later 'user', 'tool_result' or 'queue-operation' record, and mtime stable for 750 ms",
+      "busy": "last 'assistant' record has stop_reason 'tool_use', or a 'user' record with tool_result content is the tail",
+      "observedShapes": [
+        "assistant|end_turn|text",
+        "assistant|tool_use|thinking",
+        "assistant|tool_use|tool_use",
+        "user|tool_result",
+        "queue-operation",
+        "attachment"
+      ]
+    },
+    "codex": {
+      "probe": "codex-writer-lock",
+      "tier": "source: src/codex.mjs:95-105",
+      "idle": "rollout present and no thread writer lock",
+      "busy": "thread writer lock held",
+      "unknown": "writer marker present but the platform cannot prove it is held",
+      "preferredPath": "codex queue --thread <id> --message <pointer>; the harness's own inbox needs no readiness, so the pane is the fallback"
+    },
+    "grok": {
+      "probe": null,
+      "tier": "measured absence",
+      "verdict": "unknown",
+      "effect": "never typed; pointer stays pending in the durable inbox"
+    },
+    "bravo": {
+      "probe": null,
+      "tier": "measured absence",
+      "verdict": "unknown",
+      "effect": "never typed; pointer stays pending in the durable inbox"
+    },
+    "omp": {
+      "probe": null,
+      "tier": "measured absence",
+      "verdict": "unknown",
+      "note": "--mode json reports usage, not turn state"
+    },
+    "hermes": {
+      "probe": null,
+      "verdict": "not-admitted",
+      "reason": "one-shot is not a peer; spawn refuses"
+    }
+  },
+  "exitRace": {
+    "case": "the child exits between the verdict and the write",
+    "expected": "terminal.write throws on a closed Bun.Terminal; the delivery reverts to pending; no bytes reach any shell because the ConPTY has no shell once the child is gone",
+    "tier": "measured: 'closed' is true after close() on Bun 1.3.14"
+  },
+  "$revised": "2026-09-05: a sampled idle hint is not a cross-process input transaction. The child can enter an approval dialog, or the human can start editing, after the observation and before the write, with nothing updating the transcript in between. Turn-safe delivery is earned by a native enqueue primitive or a receiver-side admission handshake, never by a sampled hint.",
+  "acknowledgement": {
+    "required": true,
+    "proves": "receipt only",
+    "doesNotProve": "the turn state at write time",
+    "verb": "agora inbox ack <deliveryId>"
+  },
+  "$openSchedule": {
+    "id": "turn-state-race",
+    "statement": "no sampled observation and no after-write acknowledgement closes the window between observation and write",
+    "closedBy": [
+      "native enqueue",
+      "receiver-owned atomic accept"
+    ],
+    "measuredBy": "test 3's turn-state cases, whose green is that no write occurred"
+  },
+  "$revised2": "2026-09-05 re-review: same-tick idle removed as an admission. A receipt ACK proves receipt only and does not close the pre-write turn-state race.",
+  "admission": {
+    "kinds": [
+      "native-enqueue",
+      "receiver-atomic-accept"
+    ],
+    "availableToday": {
+      "codex": "codex queue --thread --message"
+    },
+    "unbuilt": "receiver-atomic-accept, the general form, P4 work not shipped here",
+    "notAnAdmission": [
+      "idle transcript tail",
+      "mtime debounce",
+      "an after-write receipt acknowledgement"
+    ]
+  },
+  "$outcomes": {
+    "inbox": "no admission; nothing written",
+    "ack-pending": "written under an admission, receipt outstanding",
+    "woken": "admitted and receipt confirmed"
+  }
+}

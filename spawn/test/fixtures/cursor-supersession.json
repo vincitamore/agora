@@ -1,0 +1,25 @@
+{
+  "$fixture": "revision 4, P3's ruling (room 1788593227.833329; layer1-contract-synthesis 4.3/4.4): the positive supersession case and its inverse, side by side.",
+  "$rule": "superseded-by-cursor is accepted ONLY against recipient-bound, authenticated, gap-free delivered coverage over the entire wake range in the same host, room, epoch and registration generation, rechecked at admission.",
+  "positive": {
+    "$case": "mint at sequence 10, an armed subscriber later delivers through 20, the wake range 11-20 becomes a redundant poke",
+    "delivery": { "deliveryId": "dl-01JZ8QA1", "recipient": { "spawnId": "spawn-01JZ8Q4K7N2X", "registration": "reg-7c1a", "generation": 3 }, "room": "house", "range": { "after": "7:10", "through": "7:20" } },
+    "coverageProof": { "recipient": { "registration": "reg-7c1a", "generation": 3 }, "room": { "host": "seat-a", "roomId": "house", "epoch": 7 }, "range": { "after": "7:10", "through": "7:20" }, "progressId": "prog-4471", "admissionId": "adm-9920", "source": "P1/P4 authenticated progress owner", "gapFree": true },
+    "expected": { "answer": "superseded-by-cursor", "exit": 1, "answerIsAField": true, "writes": "nothing: no ACK, no reader position", "claims": "a redundant poke was saved", "doesNotClaim": ["agent acknowledgement", "business completion", "deletion of any canonical event"] }
+  },
+  "inverse": {
+    "$case": "RED. A saved cursor sitting past the range with no delivered coverage must NOT supersede",
+    "$why": "watch.mjs:270-321 filters through wake() and persists the last room cursor even when fresh.length === 0, so a filtered-only range advances the cursor with nothing delivered; cursor --set is the second counterexample",
+    "delivery": { "deliveryId": "dl-01JZ8QA2", "recipient": { "spawnId": "spawn-01JZ8Q4K7N2X", "registration": "reg-7c1a", "generation": 3 }, "room": "house", "range": { "after": "7:10", "through": "7:20" } },
+    "savedCursor": "7:24",
+    "coverageProof": null,
+    "expected": { "answer": "fresh", "exit": 0, "redIf": "the answer is superseded-by-cursor on the strength of the saved cursor alone" }
+  },
+  "otherRequiredCases": [
+    { "case": "partial coverage, proof covers 11-15 of an 11-20 range", "expected": "the 16-20 suffix stays pending; no supersession of the whole" },
+    { "case": "coverage from another host, room, epoch or registration generation", "expected": "not accepted; the delivery stays fresh" },
+    { "case": "an artifact-only delivery with a room cursor past everything", "expected": "never superseded by a room cursor" },
+    { "case": "any lookup at all", "expected": "no ACK written, no cursor moved; exit contract 0/1/2/42 unchanged" },
+    { "case": "proof valid at lookup, invalid at admission", "expected": "rechecked at admission; the delivery is not suppressed" }
+  ]
+}

@@ -1,0 +1,159 @@
+{
+  "$fixture": "test 4; expected verdict per attack vector, run from a spawned peer against another peer's pane",
+  "$revised": "2026-09-05, on an executed exhibit",
+  "$withdrawn": {
+    "claim": "detector.reliable = 'cooked-mode children': unexplained read bytes are a bypassed input event",
+    "falsifiedBy": "alpha scripts/agora-pty-observation-review.py, isolated Linux PTY, ICANON+ECHO",
+    "exhibit": "untracked master input and ordinary slave-side application output produce the identical master observation under the same empty authority-write ledger; only the first delivers input at the slave",
+    "defect": "this matrix had no ordinary-output control, so the claim was never run against the case that breaks it",
+    "investigation": "inbox/investigations/agora-pane-echo-is-not-input-attribution.md"
+  },
+  "$rules": [
+    "every vector declares a direction: input or output",
+    "an input claim is credited ONLY by a child-side acknowledgement that the child received the marker as input; a marker rendered at the master is not a received command",
+    "the probe payload is a harmless nonce marker, never a destructive command",
+    "the channel is proven first: a known-permissive positive control must land before any candidate outcome is reported",
+    "same-user and enforced profiles are run and reported separately",
+    "handle ownership is reported as implementation structure, never as proof the OS blocks other access"
+  ],
+  "marker": "AGORA_PROBE_<nonce>",
+  "childSideAcknowledgement": {
+    "mechanism": "the probe child prints ACK:<nonce> to a file descriptor the prober owns, only from its stdin read path",
+    "creditsInput": true,
+    "absent": "the vector is scored 'no input observed', never 'unknown but probably landed'"
+  },
+  "vectors": [
+    {
+      "id": "agora-verb",
+      "direction": "input",
+      "attempt": "any agora subcommand carrying bytes to a pane",
+      "expected": "no such verb exists; the CLI surface test enumerates every verb",
+      "childAck": false,
+      "tier": "structural"
+    },
+    {
+      "id": "package-api",
+      "direction": "input",
+      "attempt": "import agora-pane and call a write function",
+      "expected": "the exported API has no write/send/type/keys; the frame union in protocol.ts is pinned by a test",
+      "childAck": false,
+      "tier": "structural"
+    },
+    {
+      "id": "pane-sock",
+      "direction": "input",
+      "attempt": "dial <state>/native/pane.sock and send a deliver or attach frame",
+      "expected": "server-auth-first hello refuses a caller that is neither the seat service nor the human channel",
+      "childAck": false,
+      "tier": "structural"
+    },
+    {
+      "id": "tmux-send-keys",
+      "direction": "input",
+      "attempt": "tmux send-keys -t <pane> 'echo AGORA_PROBE_<nonce>' Enter",
+      "expected": "Agora's shipped scaffold exposes no keystroke verb; a peer invoking tmux directly is the below-the-API case, scored here and not against the scaffold",
+      "childAck": "measure",
+      "tier": "to be measured on the NixOS seat"
+    },
+    {
+      "id": "wt-any",
+      "direction": "input",
+      "attempt": "every wt verb against the target window",
+      "expected": "wt has no send-keys, kill or enumerate, so Agora's scaffold offers none either; no input reaches the child",
+      "childAck": false,
+      "tier": "documentation plus measured absence"
+    },
+    {
+      "id": "pty-slave-write",
+      "direction": "OUTPUT",
+      "attempt": "POSIX: write the pty slave",
+      "expected": "this is output at the master and NOT input at the slave (executed exhibit). Scored as output injection: it can forge what a human sees on the pane, and it forges nothing the child receives",
+      "childAck": false,
+      "tier": "measured, isolated PTY",
+      "$corrected": "the first version mislabelled this as input injection"
+    },
+    {
+      "id": "pty-master-write",
+      "direction": "input",
+      "attempt": "POSIX: acquire the master and write it",
+      "expected": "delivers input at the slave when the master can be acquired; whether a peer can acquire another process's master under this seat's policy is unexecuted",
+      "childAck": "measure",
+      "tier": "inferred"
+    },
+    {
+      "id": "attach-console",
+      "direction": "input",
+      "attempt": "Windows: AttachConsole(childPid) then WriteConsoleInput",
+      "expected": "unmeasured; test 4 settles it",
+      "childAck": "measure",
+      "tier": "inferred"
+    },
+    {
+      "id": "debugger",
+      "direction": "input",
+      "attempt": "attach a debugger to the pane authority and call write",
+      "expected": "lands under the cooperative profile; no package design prevents it; named in doctor output",
+      "childAck": "measure",
+      "tier": "inferred"
+    }
+  ],
+  "controls": {
+    "$classes": {
+      "untracked-input": {
+        "role": "positive class",
+        "stimulus": "an input vector driven from outside the authority",
+        "groundTruth": "the probe child acknowledges the marker on its stdin read path",
+        "measures": "false negatives, being untracked-input events the counter missed"
+      },
+      "authorized-input": {
+        "role": "excluded by construction",
+        "stimulus": "the authority's own deliver() and attach writes",
+        "groundTruth": "the write ledger",
+        "$rule": "ledger-matched writes are never counted as detections; counting them makes the control vacuous",
+        "redIf": "a run reports them in either rate"
+      },
+      "ordinary-output": {
+        "role": "negative class",
+        "stimulus": "the child prints the marker as ordinary application output, including output repeating an earlier authorized input",
+        "groundTruth": "no input occurred at the slave",
+        "measures": "false positives, being ordinary-output events the counter flagged"
+      }
+    },
+    "$reporting": "both rates are controlled-fixture results reported with the fixture that produced them, never live attribution statistics and never a reliability claim"
+  },
+  "detector": {
+    "name": "output-anomaly",
+    "wasCalled": "unattributed-input (withdrawn)",
+    "mechanism": "read bytes matching no authority write and no attach lease",
+    "status": "heuristic output anomaly, never authenticated input attribution",
+    "reports": [
+      "falseNegativeRateOverUntrackedInput",
+      "falsePositiveRateOverOrdinaryOutput",
+      "fixtureId",
+      "profile"
+    ],
+    "reliableAttributionNeeds": [
+      "a child-side acknowledgement path",
+      "the enforced profile's separate OS user, which prevents rather than observes"
+    ],
+    "neverReports": [
+      "a live attribution verdict",
+      "authorized ledger-matched writes as detections"
+    ]
+  },
+  "$notSurfaced": [
+    "Windows AttachConsole reachability",
+    "Linux master-handle acquisition policy",
+    "real harness editor and approval behaviour",
+    "separate-user enforcement"
+  ],
+  "$revised2": "2026-09-05 re-review: the anomaly control is stated over three declared classes with child-side ground truth as controlled-fixture results, never as live attribution statistics.",
+  "$revised5": "2026-09-05, P3 review: the run proves its own attack channel with a known-permissive positive control before any candidate outcome is reported; zero without the control is a broken test, not a result.",
+  "channelControl": {
+    "id": "known-permissive-target",
+    "setup": "a pane the prober is explicitly authorized to write, on the same backend and OS profile as the candidate",
+    "mustLand": true,
+    "creditedBy": "the same child-side acknowledgement the candidates use",
+    "$rule": "zero candidate successes WITH this control landing is a result; zero WITHOUT it is a broken test and is reported as such, never as green"
+  }
+}

@@ -9,8 +9,10 @@ import {
   type CloseFrame,
   type DeliverFrame,
   type Frame,
+  type OpenFrame,
   type ResizeFrame,
 } from "./protocol.ts";
+import { renderDeliveredLine } from "./delivered-line.ts";
 import {
   closePane,
   resizePane,
@@ -29,11 +31,12 @@ export type Authority = {
   greeted: boolean;
   bootEpoch: number;
   now: () => number;
-  open: (spawnId: string) => OpenedPane;
+  open: (spawnId: string, cmd?: string[]) => OpenedPane;
+  opens: string[];
 };
 
 export function createAuthority(opts: {
-  open: (spawnId: string) => OpenedPane;
+  open: (spawnId: string, cmd?: string[]) => OpenedPane;
   now?: () => number;
   bootEpoch: number;
 }): Authority {
@@ -45,19 +48,42 @@ export function createAuthority(opts: {
     bootEpoch: opts.bootEpoch,
     now: opts.now ?? Date.now,
     open: opts.open,
+    opens: [],
   };
+}
+
+/** Spawn admission calls this. Sock frames never open a pane as a side effect. */
+export function registerPane(auth: Authority, spawnId: string, cmd?: string[]): OpenedPane {
+  const existing = auth.panes.get(spawnId);
+  if (existing) return existing;
+  auth.opens.push(spawnId);
+  const opened = auth.open(spawnId, cmd);
+  auth.panes.set(spawnId, opened);
+  return opened;
+}
+
+function existingPane(auth: Authority, spawnId: string): OpenedPane {
+  const existing = auth.panes.get(spawnId);
+  if (!existing) throw new Error("pane-unknown");
+  return existing;
 }
 
 const LEASE_MS = 30_000;
 
-export function handleFrame(auth: Authority, frame: Frame): void {
+export type Conn = { greeted: boolean };
+
+export function handleFrame(auth: Authority, frame: Frame, conn?: Conn): void {
   if (frame.type === "hello") {
     if (frame.bootEpoch !== auth.bootEpoch) throw new Error("hello bootEpoch does not match this authority");
-    auth.greeted = true;
+    if (conn) conn.greeted = true;
+    else auth.greeted = true;
     return;
   }
-  if (!auth.greeted) throw new Error("pane.sock requires hello from the seat service or the human channel first");
+  const greeted = conn ? conn.greeted : auth.greeted;
+  if (!greeted) throw new Error("pane.sock requires hello from the seat service or the human channel first");
   switch (frame.type) {
+    case "open":
+      return openSpawn(auth, frame);
     case "deliver":
       return deliver(auth, frame);
     case "attach":
@@ -71,25 +97,26 @@ export function handleFrame(auth: Authority, frame: Frame): void {
   }
 }
 
-export function handleJson(auth: Authority, value: unknown): void {
-  handleFrame(auth, parseFrame(value));
+export function handleJson(auth: Authority, value: unknown, conn?: Conn): void {
+  handleFrame(auth, parseFrame(value), conn);
 }
 
-function paneOf(auth: Authority, spawnId: string): OpenedPane {
-  const existing = auth.panes.get(spawnId);
-  if (existing) return existing;
-  const opened = auth.open(spawnId);
-  auth.panes.set(spawnId, opened);
-  return opened;
+function openSpawn(auth: Authority, frame: OpenFrame): void {
+  registerPane(auth, frame.spawnId, frame.cmd);
 }
 
 function deliver(auth: Authority, frame: DeliverFrame): void {
-  writeDeliveredLine(paneOf(auth, frame.spawnId), frame.line, frame.admissionId);
-  auth.journal.push(journalWrite("service", frame.spawnId, frame.line, new Date(auth.now()).toISOString()));
+  const line = renderDeliveredLine(frame.envelope);
+  writeDeliveredLine(existingPane(auth, frame.spawnId), line, frame.admission);
+  auth.journal.push(journalWrite("service", frame.spawnId, line, new Date(auth.now()).toISOString()));
 }
 
 function attach(auth: Authority, frame: AttachFrame): void {
-  paneOf(auth, frame.spawnId);
+  existingPane(auth, frame.spawnId);
+  const held = auth.leases.get(frame.spawnId);
+  if (held && held.session !== frame.session && auth.now() < held.until) {
+    throw new Error("lease exclusive");
+  }
   auth.leases.set(frame.spawnId, { session: frame.session, until: auth.now() + LEASE_MS });
 }
 
@@ -102,12 +129,13 @@ function leaseLive(auth: Authority, frame: AttachInputFrame): boolean {
 }
 
 function attachInput(auth: Authority, frame: AttachInputFrame): void {
-  writeAttachInput(paneOf(auth, frame.spawnId), frame.bytes, leaseLive(auth, frame));
+  const pane = existingPane(auth, frame.spawnId);
+  writeAttachInput(pane, frame.bytes, leaseLive(auth, frame));
   auth.journal.push(journalWrite("human", frame.spawnId, frame.bytes, new Date(auth.now()).toISOString()));
 }
 
 function resize(auth: Authority, frame: ResizeFrame): void {
-  resizePane(paneOf(auth, frame.spawnId), frame.cols, frame.rows);
+  resizePane(existingPane(auth, frame.spawnId), frame.cols, frame.rows);
 }
 
 function close(auth: Authority, frame: CloseFrame): void {

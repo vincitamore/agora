@@ -1,0 +1,22 @@
+{
+  "$fixture": "revision 5, from Bruno's executed arithmetic (inbox/investigations/agora-spawn-depth-and-daily-budget-contracts.md): the alternating-two-seat bound-plus-one refusal control.",
+  "$whyThisExists": "min(parent.depth + 1, maxDepthFromForeignSeat) SATURATES. With cap 1 and maxDepth 2, six honest cross-seat hops record [1,1,1,1,1,1] and all pass, so the sequence is unbounded with no forged parent, no mutable policy and no compromised peer. Separate OS users do not fix it. A limit refuses excess ancestry; it never lowers recorded ancestry until it fits.",
+  "config": { "seatA": "seat-a", "seatB": "seat-b", "maxDepthFromForeignSeat": 2, "maxDepth": 2, "bothSeatsHonest": true },
+  "sequence": [
+    { "hop": 1, "target": "seatB", "parentLineageDepth": 0, "expected": { "admitted": true, "recordedLineageDepth": 1 } },
+    { "hop": 2, "target": "seatA", "parentLineageDepth": 1, "expected": { "admitted": true, "recordedLineageDepth": 2 } },
+    { "hop": 3, "target": "seatB", "parentLineageDepth": 2, "expected": { "admitted": false, "exit": 1, "reason": "depth-exceeds-allowance", "names": [3, 2], "childCreated": false, "recordMinted": false, "slotHeld": false } }
+  ],
+  "redIf": [
+    "hop 3 is admitted at a saturated recordedLineageDepth of 2",
+    "any recordedLineageDepth is lower than parentLineageDepth + 1",
+    "the alternation continues indefinitely with all hops passing",
+    "a slot is held or a record exists at either seat after the refusal"
+  ],
+  "additionalControls": [
+    { "case": "a deeper signed parent presented directly (parentLineageDepth 5, allowance 2)", "expected": "refused; a valid signature never relaxes the allowance, and the record is not written at a lowered value" },
+    { "case": "the producer retries the refused hop under the same operationId", "expected": "the same refusal; a retry is not a new budget and mints no child" },
+    { "case": "a parent record omitted entirely", "expected": "treated as lineageDepth 0 with lineageEvidence unverified-foreign, admitted only within the allowance, and the design claims no enforced GLOBAL recursion bound on this basis" }
+  ],
+  "$claimBoundary": "this seat bounds its own out-degree and the ancestry it can verify. Global recursion depth is not bounded, because a peer may omit or self-mint a parent record and no seat sees the whole chain."
+}

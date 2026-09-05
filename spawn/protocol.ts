@@ -6,8 +6,11 @@
  * that pin it. Onboarding is argv at exec, never a PTY write.
  */
 
+import type { DeliveredEnvelope } from "./delivered-line.ts";
+
 export const FRAME_TYPES = Object.freeze([
   "hello",
+  "open",
   "deliver",
   "attach",
   "attach-input",
@@ -17,13 +20,17 @@ export const FRAME_TYPES = Object.freeze([
 
 export type FrameType = (typeof FRAME_TYPES)[number];
 
+export const ADMISSION_KINDS = Object.freeze(["native-enqueue", "receiver-atomic-accept"] as const);
+export type AdmissionKind = (typeof ADMISSION_KINDS)[number];
+export type Admission = { kind: AdmissionKind; id: string };
+
 export type HelloFrame = { type: "hello"; bootEpoch: number };
+export type OpenFrame = { type: "open"; spawnId: string; cmd?: string[] };
 export type DeliverFrame = {
   type: "deliver";
   spawnId: string;
-  deliveryId: string;
-  admissionId: string;
-  line: string;
+  admission: Admission;
+  envelope: DeliveredEnvelope;
 };
 export type AttachFrame = { type: "attach"; spawnId: string; session: string };
 export type AttachInputFrame = {
@@ -37,6 +44,7 @@ export type CloseFrame = { type: "close"; spawnId: string };
 
 export type Frame =
   | HelloFrame
+  | OpenFrame
   | DeliverFrame
   | AttachFrame
   | AttachInputFrame
@@ -63,12 +71,22 @@ export function parseFrame(value: unknown): Frame {
       if (!Number.isInteger(bootEpoch) || Number(bootEpoch) <= 0) throw new Error("hello needs bootEpoch");
       return { type, bootEpoch: Number(bootEpoch) };
     }
+    case "open": {
+      const cmd = rec.cmd;
+      if (cmd !== undefined && (!Array.isArray(cmd) || cmd.some((c) => typeof c !== "string"))) {
+        throw new Error("open.cmd must be a string array");
+      }
+      return { type, spawnId: str(rec.spawnId, "open.spawnId"), cmd: cmd as string[] | undefined };
+    }
     case "deliver": {
-      const spawnId = str(rec.spawnId, "deliver.spawnId");
-      const deliveryId = str(rec.deliveryId, "deliver.deliveryId");
-      const admissionId = str(rec.admissionId, "deliver.admissionId");
-      const line = str(rec.line, "deliver.line");
-      return { type, spawnId, deliveryId, admissionId, line };
+      if ("line" in rec) throw new Error("deliver refuses a line key; the authority renders the envelope");
+      if ("admissionId" in rec) throw new Error("deliver refuses admissionId; admission is {kind, id}");
+      return {
+        type,
+        spawnId: str(rec.spawnId, "deliver.spawnId"),
+        admission: parseAdmission(rec.admission),
+        envelope: parseEnvelope(rec.envelope),
+      };
     }
     case "attach":
       return { type, spawnId: str(rec.spawnId, "attach.spawnId"), session: str(rec.session, "attach.session") };
@@ -93,4 +111,38 @@ export function parseFrame(value: unknown): Frame {
 function str(value: unknown, field: string): string {
   if (typeof value !== "string" || value.length === 0) throw new Error(`${field} must be a non-empty string`);
   return value;
+}
+
+export function isAdmissionKind(value: unknown): value is AdmissionKind {
+  return typeof value === "string" && (ADMISSION_KINDS as readonly string[]).includes(value);
+}
+
+function parseAdmission(value: unknown): Admission {
+  if (!value || typeof value !== "object") throw new Error("deliver needs admission {kind, id}");
+  const rec = value as Record<string, unknown>;
+  const kind = rec.kind;
+  if (kind === "idle-sample" || kind === "idle") {
+    throw new Error("admission.kind idle-sample is not an admission");
+  }
+  if (!isAdmissionKind(kind)) throw new Error("admission.kind is not a receiver-owned admission");
+  return { kind, id: str(rec.id, "admission.id") };
+}
+
+function parseEnvelope(value: unknown): DeliveredEnvelope {
+  if (!value || typeof value !== "object") throw new Error("deliver needs envelope");
+  const rec = value as Record<string, unknown>;
+  const cursorRange = rec.cursorRange;
+  if (!cursorRange || typeof cursorRange !== "object") throw new Error("envelope needs cursorRange");
+  const range = cursorRange as Record<string, unknown>;
+  return {
+    deliveryId: str(rec.deliveryId, "envelope.deliveryId"),
+    seat: str(rec.seat, "envelope.seat"),
+    bearer: str(rec.bearer, "envelope.bearer"),
+    room: str(rec.room, "envelope.room"),
+    cursorRange: {
+      from: str(range.from, "envelope.cursorRange.from"),
+      to: str(range.to, "envelope.cursorRange.to"),
+    },
+    since: str(rec.since, "envelope.since"),
+  };
 }

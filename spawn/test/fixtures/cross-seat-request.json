@@ -1,0 +1,47 @@
+{
+  "$fixture": "test 6; a cross-seat spawn admitted by the target's own policy, depth derived from the verified parent record",
+  "operationId": "c41d80a5-6b3f-4a19-9e2c-7d0518f3a6bb",
+  "harness": "codex",
+  "model": "gpt-5-codex",
+  "role": "transport",
+  "unit": "agora-native-adapters/cross-seat-admission",
+  "room": "house",
+  "answersTo": "grace@seat-a",
+  "cwd": "~/src/agora",
+  "briefDigest": "sha256:c7a1e5602b48d93f176ea20b5c8341fd9e06b72a4c1358df0ba6e29147c3d015",
+  "targetSeat": "seat-b",
+  "parentRecord": {
+    "$note": "the origin's own signed record, verbatim; the target verifies the signature against the roster key for seat-a and derives depth = parent.depth + 1",
+    "spawnId": "spawn-01JZ8Q4K7N2X",
+    "depth": 1,
+    "seat": "seat-a",
+    "signature": {
+      "alg": "ed25519",
+      "seat": "seat-a",
+      "sig": "base64:UjZ4...Qg=="
+    }
+  },
+  "$expected": {
+    "recordMintedBy": "seat-b",
+    "recordSignedWith": "the target seat key",
+    "policyApplied": "the target's own allowSpawners, allowHarnesses, caps, backend",
+    "refusalCase": {
+      "harness": "grok",
+      "outcome": "exit 1 'harness-not-allowed-at-target'",
+      "originHasNoRecord": true,
+      "redIf": "a record or a held slot existing at either seat after the refusal"
+    },
+    "verificationRecorded": "parentVerified travels on the record as a fact; it never relaxes the clamp",
+    "label": "cross-seat depth is accountability under the cooperative profile; enforcement waits on a separate OS user (K14's premise, inherited by K18)",
+    "lineageDepth": "parent.depth + 1 = 2, recorded as computed and never lowered",
+    "admissionAllowance": "maxDepthFromForeignSeat; with 1 configured this request is REFUSED exit 1 depth-exceeds-allowance naming 2 and 1",
+    "lineageEvidence": "verified-foreign; recorded as a fact and never used to relax the allowance",
+    "redIf": [
+      "a recorded lineageDepth lower than parent.depth + 1",
+      "an admission above the allowance",
+      "a retry under the same operationId earning a fresh allowance"
+    ]
+  },
+  "$revised3": "2026-09-05, layer-1 review: the depth clamp applies to every foreign parent, verified or not, because a peer at the origin can mint a validly-signed parent under the cooperative profile.",
+  "$revised5": "2026-09-05: the clamp saturated instead of bounding (six honest hops recorded [1,1,1,1,1,1] under cap 1). Depth now refuses."
+}

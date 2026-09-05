@@ -1,0 +1,74 @@
+{
+  "$fixture": "operator-authored spawn policy; absent file means spawning is off",
+  "$path": "<state>/spawn/policy.json",
+  "$mode": "0600 in a 0700 state root",
+  "version": 1,
+  "profile": "cooperative",
+  "profileStatement": "Every spawned peer runs as this OS user. Policy and record are accountability, not security: a peer can read every secret this user can read, including the seat key, and can reach a pane below the API. The pane authority CANNOT attribute live input. Read bytes plus a write ledger do not identify an input event, because ordinary application output and untracked input produce identical master bytes; the output-anomaly counter is a heuristic whose false-positive and false-negative rates are controlled-fixture results only, and it is never evidence that a particular input did or did not happen. Enforcement waits on a separate OS user per peer.",
+  "allowSpawners": [
+    "grace@seat-a",
+    "sol@seat-a"
+  ],
+  "allowHarnesses": [
+    "claude",
+    "codex",
+    "grok",
+    "bravo",
+    "omp"
+  ],
+  "denyHarnesses": {
+    "hermes": "no interactive initial-prompt mechanism measured on 0.21.0; one-shot is not a peer"
+  },
+  "maxConcurrent": 3,
+  "maxDepth": 2,
+  "maxDepthFromForeignSeat": 1,
+  "maxPerHour": 6,
+  "maxOrientationTokensPerDay": 600000,
+  "envAllow": [
+    "PATH",
+    "HOME",
+    "USERPROFILE",
+    "SystemRoot",
+    "TEMP",
+    "LANG",
+    "HOUSE_HARNESS"
+  ],
+  "privateHome": {
+    "codex": true,
+    "hermes": true,
+    "omp": "session-dir"
+  },
+  "panes": {
+    "posix": "tmux",
+    "win32": "wt",
+    "backend": "bun-terminal",
+    "launch": "lazy: the pane authority starts on the first spawn or attach, never at serve, so the root CLI takes no startup dependency on the Bun package",
+    "absentPackage": "spawn and attach exit 1 'pane-package-absent' naming the path and the install line; doctor reports presence, version and whether the authority is running"
+  },
+  "attach": {
+    "humanOnly": true,
+    "leaseSeconds": 30,
+    "exclusive": true
+  },
+  "$revised3": "2026-09-05, layer-1 review: maxConcurrent's reclamation is operator-driven for orphans, and the pane package is a lazy dependency.",
+  "maxConcurrentNote": "an orphan (pid gone, no exit append) holds its slot until an operator runs spawn stop; under repeated SIGKILL this is an operator-reclaimed resource, the deliberate trade against releasing on an unconfirmed death",
+  "$revised5": "2026-09-05, P3 review of revision 4: the profileStatement carried the falsified detector claim on an operator-facing surface. Replaced. Depth refuses instead of clamping; the daily cap reads a charge ledger, not live occupancy.",
+  "maxDepthFromForeignSeatNote": "an admission allowance, not a clamp: a request whose lineageDepth exceeds it is refused exit 1 depth-exceeds-allowance; recorded lineage is never lowered to fit",
+  "orientationBudget": {
+    "cap": 600000,
+    "window": "UTC day",
+    "ledger": "<state>/spawn/charges/<window>.jsonl, one append per admission keyed by operationId",
+    "reservedAt": "admission, atomically, before launch",
+    "survives": [
+      "child exit",
+      "service restart"
+    ],
+    "refundableOnly": [
+      "brief write failed",
+      "pane open failed",
+      "slot lost"
+    ],
+    "retention": "35 days",
+    "$note": "live occupancy is a separate quantity and governs maxConcurrent only"
+  }
+}

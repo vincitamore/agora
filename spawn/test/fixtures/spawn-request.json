@@ -1,0 +1,16 @@
+{
+  "$fixture": "the bounded spawn request; every field here is the whole of what a caller may say",
+  "$refusalRule": "an unknown key is exit 1 'request-field-unknown', never ignored",
+  "$notPresent": ["depth", "parent", "spawnedBy", "bearer", "policy", "env", "argv", "briefPath", "cwdOverrideForPolicy"],
+  "operationId": "3f2b1c8e-9a44-4f6a-8f31-2b7d0c5e1a90",
+  "harness": "claude",
+  "model": "claude-opus-5",
+  "role": "verify",
+  "unit": "agora-native-adapters/pane-attack-surface",
+  "room": "house",
+  "answersTo": "grace@seat-a",
+  "cwd": "C:/Users/operator/Documents/agora-wt-tui",
+  "briefDigest": "sha256:6f1d9c2a4b8e70135ac9f3d21e6b8c47a05f9e3b2d18c4760af5e91b3c7d2a68",
+  "targetSeat": null,
+  "parentRecord": null
+}

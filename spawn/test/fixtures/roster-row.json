@@ -1,0 +1,51 @@
+{
+  "$fixture": "the roster row a spawned peer contributes; derived, never a schema change on the session record or coord presence",
+  "slug": "claude-9c2e77d0-51ab-4b8e-9f02-6d1c3a5b7e44",
+  "seat": "seat-a",
+  "bearer": "verify@seat-a",
+  "spawnId": "spawn-01JZ8Q4K7N2X",
+  "spawnedBy": "grace@seat-a",
+  "harness": "claude",
+  "model": "claude-opus-5",
+  "pane": "claude/Opus-5/verify",
+  "slot": "spawn:seat-a/2",
+  "unit": "agora-native-adapters/pane-attack-surface",
+  "standardDigest": "sha256:b21e4f77c0a9d3158e6b2fa4907c15d83be0f6a91c47d2058fa3e91b6c02d774",
+  "standardMatchesSeat": true,
+  "state": "connected",
+  "verdicts": {
+    "connected": "yes",
+    "agentProcessPresent": "yes",
+    "agentReady": "idle"
+  },
+  "orientationTokens": 90308,
+  "orientationTier": "measured",
+  "lastRenewal": "2026-09-05T18:19:22Z",
+  "$orphanRow": {
+    "state": "orphan",
+    "verdicts": {
+      "connected": "no",
+      "agentProcessPresent": "no",
+      "agentReady": "unknown"
+    },
+    "slotHeld": true,
+    "since": "2026-09-05T18:44:01Z",
+    "note": "pid gone with no exit append; slot released only by operator stop or a confirmed-dead probe"
+  },
+  "inbox": {
+    "pending": 0,
+    "ackPending": 1,
+    "$note": "pending = admitted nothing, nothing written; ackPending = written under an admission with receipt outstanding"
+  },
+  "wakeSurface": "present",
+  "$wakeSurfaceSeam": "wakeSurface is DERIVED from wakeRoutes: present if either route is present, absent only if both are absent, otherwise unknown; a contradictory aggregate is rejected. Presence is availability, never admission.",
+  "$revised3": "2026-09-05, layer-1 review: wakeSurface named as P3's widened field, and the inbox states split into pending and ackPending.",
+  "$revised4": "2026-09-05, P3 ruling: availability is not a route enum; wakeSurface keeps present | absent | unknown and wakeRoutes carries availability per route with the aggregate derived.",
+  "wakeRoutes": {
+    "subscriber": "present",
+    "pane": "unknown"
+  },
+  "$revised5": "2026-09-05: depth renamed lineageDepth with its evidence beside it.",
+  "lineageDepth": 1,
+  "lineageEvidence": "local"
+}

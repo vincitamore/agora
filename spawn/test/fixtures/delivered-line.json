@@ -1,0 +1,155 @@
+{
+  "$fixture": "the delivered-line envelope and its rendered form; peer text never rides here, only a pointer",
+  "$revised": "2026-09-05: the rendered line carries its deliveryId, lookup binds to recipient and generation, replays deduplicate. Record existence proves a prior event, never a fresh authorized wake.",
+  "deliveryId": "dl-01JZ8Q9R3T7B",
+  "recipient": {
+    "spawnId": "spawn-01JZ8Q4K7N2X",
+    "registration": "reg-7c1a",
+    "generation": 3
+  },
+  "room": "house",
+  "cursorRange": {
+    "from": "7:1281",
+    "to": "7:1284"
+  },
+  "artifact": null,
+  "provenance": {
+    "stampedBy": "seat-service",
+    "seat": "seat-a",
+    "from": "sol@seat-a",
+    "at": "2026-09-05T18:19:07Z"
+  },
+  "readiness": {
+    "verdict": "idle",
+    "probe": "claude-transcript-tail",
+    "observedAt": "2026-09-05T18:19:07.412Z",
+    "maxAgeMs": 500,
+    "$caveat": "a sampled hint, not a cross-process input transaction: the child can open an approval dialog or the human can start editing after this observation and before the write, with nothing updating the transcript in between",
+    "$role": "a hint surfaced to the roster and used to suppress a pointless enqueue; never an admission and never a licence to write"
+  },
+  "acknowledgement": {
+    "required": true,
+    "proves": "receipt only, after the fact",
+    "doesNotProve": "the turn state at write time",
+    "state": "pending",
+    "by": null,
+    "at": null
+  },
+  "disposition": "ack-pending",
+  "rendered": "[agora] dl-01JZ8Q9R3T7B from seat-a/sol · house · 7:1281-7:1284 · read with agora read house --since 7:1280",
+  "lookup": {
+    "verb": "agora inbox show dl-01JZ8Q9R3T7B",
+    "boundTo": [
+      "recipient.spawnId",
+      "recipient.registration",
+      "recipient.generation"
+    ],
+    "answers": [
+      "fresh",
+      "already-acknowledged",
+      "not-for-you",
+      "superseded-by-cursor"
+    ],
+    "$rule": "existence is not freshness; a genuine pointer proves a prior event only",
+    "exitMapping": {
+      "fresh": "exit 0",
+      "not-for-you": "exit 1, answer as a field",
+      "already-acknowledged": "exit 1, answer as a field",
+      "$rule": "the exit codes are a contract: no new code, the answer travels as a field the way service-dark does",
+      "superseded-by-cursor": "exit 1, answer as a field"
+    },
+    "$writes": "nothing: show is observational, writing no ACK and no reader position",
+    "supersededByCursor": {
+      "acceptedOnlyAgainst": "recipient-bound delivered coverage from P1/P4's authenticated progress owner",
+      "proof": {
+        "recipient": "RegistrationRef",
+        "room": "RoomRef",
+        "range": "CursorRange",
+        "progressId": "string",
+        "admissionId": "string"
+      },
+      "mustHold": [
+        "gap-free over the ENTIRE wake range",
+        "same host, room and epoch",
+        "same registration generation",
+        "rechecked at admission, not only at lookup"
+      ],
+      "notEvidence": [
+        "a cursor recorded at mint (it cannot see later subscriber progress)",
+        "an ordinary saved cursor (watch.mjs:270-321 persists the last room cursor even when fresh.length === 0, so a filtered-only range advances it with nothing delivered)",
+        "an explicit cursor --set jump"
+      ],
+      "partialCoverage": "the uncovered suffix stays pending",
+      "absentProof": "suppresses nothing",
+      "neverSupersedes": [
+        "an artifact-only delivery",
+        "another host, room, epoch or registration generation"
+      ],
+      "claims": "saves a redundant poke only; never agent acknowledgement, business completion, or deletion of a canonical event"
+    }
+  },
+  "$replayCases": [
+    {
+      "case": "a genuine pointer copied into another session",
+      "expected": "not-for-you (recipient binding fails)"
+    },
+    {
+      "case": "a genuine pointer replayed into the same session after acknowledgement",
+      "expected": "already-acknowledged (deduplicated by delivery id)"
+    },
+    {
+      "case": "a genuine pointer replayed after the recipient's generation advanced",
+      "expected": "not-for-you"
+    },
+    {
+      "case": "an invented dl- id in room text or a peer's output",
+      "expected": "no record; inert"
+    }
+  ],
+  "$pendingCase": {
+    "readiness": {
+      "verdict": "unknown",
+      "probe": "grok-none"
+    },
+    "disposition": "inbox",
+    "written": false
+  },
+  "$coalesced": {
+    "cursorRange": {
+      "from": "7:1281",
+      "to": "7:1299"
+    },
+    "collapsedFrom": 6,
+    "readCheckpointAdvanced": false
+  },
+  "$revised2": "2026-09-05 re-review: an idle observation does not admit a write and a receipt ACK does not close the turn-state race. Admission is receiver-owned; woken and ack-pending are distinct outcomes.",
+  "admission": {
+    "required": true,
+    "kinds": [
+      "native-enqueue (the harness owns the inbox, e.g. codex queue)",
+      "receiver-atomic-accept (the receiver takes the delivery at its own turn boundary)"
+    ],
+    "notAnAdmission": [
+      "a same-tick idle transcript read",
+      "an mtime debounce",
+      "a receipt acknowledgement, which arrives after the write"
+    ],
+    "granted": "native-enqueue",
+    "$rule": "absent an admission the pointer is not written at all, however idle the transcript looks"
+  },
+  "$outcomes": {
+    "inbox": "no admission existed; nothing was written",
+    "ack-pending": "written under an admission; receipt outstanding",
+    "woken": "written under an admission and receipt confirmed"
+  },
+  "$revised3": "2026-09-05, layer-1 review: exit mapping for the three answers, the cursor seam named as a known false positive, and wake-surface precedence named as P3's field.",
+  "$seams": {
+    "wake-route": "availability stays present | absent | unknown on wakeSurface; the lease gains wakeRoutes {subscriber, pane} carrying availability per route, the aggregate derived (present if either is present, absent only if both are, otherwise unknown) and a contradictory aggregate rejected (P3). P4 prefers a live authenticated recipient-bound subscriber, then a freshly receiver-admitted pane, and retains pending when neither holds; an unknown acceptance reconciles under the same deliveryId and never licenses an independent pane duplicate; a presence lease is not admission and licenses no input write.",
+    "deliveryId-vs-cursor": "see lookup.supersededByCursor; the mint-time design was rejected"
+  },
+  "verbs": {
+    "show": "agora inbox show <deliveryId>",
+    "ack": "agora inbox ack <deliveryId>, which moves ack-pending to woken"
+  },
+  "$revised4": "2026-09-05, P3 ruling (room 1788593227.833329; layer1-contract-synthesis 4.3/4.4): supersession is decided against recipient-bound delivered coverage, never a mint-time snapshot or a saved cursor; wake availability and wake route are separate."
+}

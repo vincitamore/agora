@@ -1,0 +1,119 @@
+{
+  "$fixture": "test 11; the Singulis verdict per item with the red fixture that must redden each gated one. Three words only: warranted, declared, unproven. Never green by default.",
+  "$printedBy": "agora doctor --singulis",
+  "rows": [
+    {
+      "item": "PC1",
+      "verdict": "warranted",
+      "exhibit": "the standard is a file with a digest and a git rev on every record",
+      "redFixture": "red-singulis-fixtures.json#red-unpinned-standard"
+    },
+    {
+      "item": "PC2",
+      "verdict": "warranted",
+      "exhibit": "the rev pins a retrievable prior version",
+      "redFixture": "red-singulis-fixtures.json#red-unpinned-standard"
+    },
+    {
+      "item": "PC3",
+      "verdict": "declared",
+      "exhibit": "the custodian is the operator; declared, not exhibited by the tool",
+      "redFixture": null
+    },
+    {
+      "item": "PC4",
+      "verdict": "warranted",
+      "exhibit": "the join line carries the loaded digest; a seeded private home declares its hook digest; the roster shows mismatch",
+      "redFixture": "red-singulis-fixtures.json#red-standard-divergence"
+    },
+    {
+      "item": "PC5",
+      "verdict": "warranted",
+      "exhibit": "a missing lattice at the resolved cwd is exit 1 before the pane opens",
+      "redFixture": "red-singulis-fixtures.json#red-missing-standard"
+    },
+    {
+      "item": "PC6",
+      "verdict": "warranted",
+      "exhibit": "policy.json, install-seat.py, sync-grok-orientation-rules.py and the hook files enumerated on the record; the tool writes none",
+      "redFixture": "red-policy-drift.json"
+    },
+    {
+      "item": "K6",
+      "verdict": "warranted",
+      "exhibit": "harness, model and build on the record",
+      "redFixture": "red-singulis-fixtures.json#red-unpinned-composition"
+    },
+    {
+      "item": "K9",
+      "verdict": "warranted",
+      "exhibit": "the brief digest is recorded before the child exists",
+      "redFixture": "red-singulis-fixtures.json#red-brief-after-child"
+    },
+    {
+      "item": "K12",
+      "verdict": "warranted",
+      "exhibit": "standard digest pinned per record",
+      "redFixture": "red-singulis-fixtures.json#red-unpinned-standard"
+    },
+    {
+      "item": "K15",
+      "verdict": "declared",
+      "exhibit": "the model is pinned; fallback lists are harness-internal and not assertable from here",
+      "redFixture": null
+    },
+    {
+      "item": "K16",
+      "verdict": "warranted",
+      "exhibit": "one signing bearer per spawn",
+      "redFixture": "red-forged-parent.json"
+    },
+    {
+      "item": "K17",
+      "verdict": "warranted",
+      "exhibit": "answersTo names the first reader; the slot lease bounds it",
+      "redFixture": "red-singulis-fixtures.json#red-self-selected-reader"
+    },
+    {
+      "item": "K18",
+      "verdict": "warranted",
+      "exhibit": "maxConcurrent per spawner refused with holders named; cross-seat requests refused when lineageDepth exceeds the target's allowance, recorded lineage never lowered",
+      "redFixture": "depth-refusal-control.json",
+      "profilePremise": "maxConcurrent is enforced by a service whose state root the peers can write, and global lineage is unverifiable (a peer may omit or self-mint a parent), so no enforced global recursion bound is claimed"
+    },
+    {
+      "item": "K23",
+      "verdict": "warranted",
+      "exhibit": "policy.json is the recorded admission under published criteria, under the cooperative profile named in this exhibit",
+      "redFixture": "red-singulis-fixtures.json#red-policy-absent",
+      "profilePremise": "policy.json is the recorded admission, and under the cooperative profile a peer can rewrite it; the defence is digest-drift refusal, which is detection"
+    },
+    {
+      "item": "K25",
+      "verdict": "declared",
+      "exhibit": "the brief enumerates the orientation reads and states fan-in; peer-record reads by a spawned peer are not yet enumerated",
+      "redFixture": null
+    },
+    {
+      "item": "K14",
+      "verdict": "unproven",
+      "exhibit": null,
+      "reason": "the spawn record sits inside the measured parties' write set under the cooperative profile, and the checker runs as the same OS user",
+      "candidateClose": [
+        "the cross-seat host roster as the exogenous store",
+        "the enforced profile's separate OS user"
+      ],
+      "redFixture": "red-singulis-fixtures.json#red-record-in-write-set",
+      "inheritedBy": [
+        "K18",
+        "K23",
+        "cross-seat depth derivation"
+      ]
+    }
+  ],
+  "$revised3": "2026-09-05, layer-1 review: K18 and K23 carry the cooperative-profile premise explicitly, and cross-seat depth is listed with them. The prose in the full output enumerates the same sixteen rows.",
+  "$profilePremise": "under the cooperative profile the peers can write the service's state root, its policy file and the seat key; rows resting on those are accountability, with enforcement only under a separate OS user. This is K14's premise, named wherever it is inherited.",
+  "$rowCount": 16,
+  "$crossSeatDepth": "not a Singulis item; it inherits K14's premise and is exhibited under K18, red fixture red-forged-parent.json",
+  "$revised5": "2026-09-05: K18's exhibit is refusal, not a clamp, and names the unverifiable-lineage limit."
+}

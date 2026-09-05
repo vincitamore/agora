@@ -1,0 +1,38 @@
+{
+  "$fixture": "RED. A caller supplying only schema-known keys, with a self-minted parent record that verifies. Every parent-derived field must come from the service's own state.",
+  "$revised3": "2026-09-05, layer-1 review: the unknown-key clause moved to red-unknown-request-key.json, since a refusal mints no record to inspect. The parent record here VERIFIES, which is the point: under the cooperative profile a peer can reach the origin seat key.",
+  "$redCondition": "an asserted or caller-influenced field reaches the minted record, or a verified foreign parent escapes the depth clamp",
+  "operationId": "9b1e7d33-0c22-4a58-9d77-51f0ab3e2c84",
+  "harness": "claude",
+  "model": "claude-opus-5",
+  "role": "verify",
+  "unit": "attack/forged-parent",
+  "room": "house",
+  "answersTo": "grace@seat-a",
+  "cwd": "C:/Users/operator/Documents/agora-wt-tui",
+  "briefDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "targetSeat": "seat-b",
+  "parentRecord": {
+    "$note": "self-minted at the origin by a peer that can read the origin seat key, and it VERIFIES against the roster key",
+    "spawnId": "spawn-SELFMINTED",
+    "depth": 0,
+    "seat": "seat-a",
+    "signature": {
+      "alg": "ed25519",
+      "seat": "seat-a",
+      "sig": "base64:valid"
+    }
+  },
+  "$expected": {
+    "recordSpawner": "the authenticated route, never a caller string",
+    "recordDepth": "lineageDepth = parent.depth + 1 = 1, recorded as computed; with allowance 1 this admits, and a parent at depth 1 would be refused, not clamped",
+    "verificationRecorded": "the record carries parentVerified: true as a fact, never as a licence to relax the clamp",
+    "label": "cross-seat depth is accountability under the cooperative profile; enforcement waits on a separate OS user (K14's premise)",
+    "redIf": [
+      "the minted record shows a lineageDepth lower than parent.depth + 1",
+      "an over-allowance request is admitted at a saturated value instead of refused",
+      "any caller-supplied value appears on the record"
+    ]
+  },
+  "$revised5": "2026-09-05: the clamp is withdrawn; the red is a lowered lineage or an admission past the allowance."
+}
