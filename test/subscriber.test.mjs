@@ -7,7 +7,7 @@ import path from "node:path";
 import { NativeRoomService } from "../src/native-service.mjs";
 import { SERVICE_DARK, ServiceDarkError, openNativeSubscription, serviceDescriptorPath, serviceDescriptorStatus } from "../src/wake/subscriber.mjs";
 import { nativeTransport } from "../src/transports/native.mjs";
-import { watch } from "../src/watch.mjs";
+import { isWatchStop, watch, watchStopReason } from "../src/watch.mjs";
 import { readCursor } from "../src/core.mjs";
 import { matchesAddress, parseTrailers } from "../src/trailers.mjs";
 
@@ -155,7 +155,7 @@ test("the service dying mid-stream ends the watch with service-dark, delivers wh
   assert.equal(r.delivered, 1);
   assert.equal(await readCursor(state, "nat"), `${EPOCH}:1`, "the cursor is where the last delivery left it, and no further");
   assert.equal(typeof subscription.dark(), "string");
-  await assert.rejects(subscription.read({ since: `${EPOCH}:1` }), (e) => e instanceof ServiceDarkError && e.watchReason === SERVICE_DARK && e.exitCode === 1);
+  await assert.rejects(subscription.read({ since: `${EPOCH}:1` }), (e) => e instanceof ServiceDarkError && watchStopReason(e) === SERVICE_DARK && e.exitCode === 1);
 });
 
 test("no descriptor, a hello the service refuses, and a stopped service are each service-dark, never a quiet room", async (t) => {
@@ -196,4 +196,32 @@ test("a session with no saved position subscribes from the newest window: the se
   await peer.post("m4");
   await subscription.wait(2000);
   assert.deepEqual((await subscription.read({ since: replayed.at(-1)?.cursor })).map((m) => m.text), ["m4"]);
+});
+
+test("a room the service does not host is refused, never reported as the service being dark, with or without a saved cursor", async (t) => {
+  const { root } = await fixture(t);
+  const unknown = "e".repeat(32);
+  await assert.rejects(openNativeSubscription({ stateRoot: root, roomId: unknown }),
+    (e) => !(e instanceof ServiceDarkError) && e instanceof Error && /request-refused/.test(e.message) && !isWatchStop(e), "no saved cursor: the status request is refused on a live socket");
+  await assert.rejects(openNativeSubscription({ stateRoot: root, roomId: unknown, since: `${EPOCH}:0` }),
+    (e) => !(e instanceof ServiceDarkError) && e instanceof Error && /request-refused/.test(e.message), "a saved cursor: the subscribe is refused the same way");
+  const dark = new ServiceDarkError("x");
+  assert.equal(watchStopReason(dark), SERVICE_DARK, "dark carries the declared stop protocol");
+  assert.equal(watchStopReason(new Error("watchReason: service-dark")), undefined, "a spelling is not the protocol");
+});
+
+test("a first arm on a room longer than the window names the committed positions it was never offered, as positions and not as cursor movement", async (t) => {
+  const { root, peer } = await fixture(t);
+  for (let i = 1; i <= 5; i++) await peer.post(`m${i}`);
+  const subscription = await openNativeSubscription({ stateRoot: root, roomId: ROOM, window: 3 });
+  t.after(() => subscription.close());
+  assert.deepEqual(subscription.neverOffered, { from: `${EPOCH}:1`, to: `${EPOCH}:2`, count: 2 });
+  await subscription.wait(2000);
+  assert.deepEqual((await subscription.read()).map((m) => m.text), ["m3", "m4", "m5"]);
+  const whole = await openNativeSubscription({ stateRoot: root, roomId: ROOM, window: 10 });
+  t.after(() => whole.close());
+  assert.equal(whole.neverOffered, null, "a room inside the window offers everything");
+  const explicit = await openNativeSubscription({ stateRoot: root, roomId: ROOM, since: `${EPOCH}:0`, window: 3 });
+  t.after(() => explicit.close());
+  assert.equal(explicit.neverOffered, null, "a saved or set cursor is the session's own position, not a window");
 });

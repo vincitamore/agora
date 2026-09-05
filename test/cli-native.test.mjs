@@ -103,6 +103,7 @@ test("cli: a watch on a native room rides the seat service and prints the poller
   assert.equal(result.delivered, 1);
   assert.equal(result.exit, 42);
   assert.equal(result.reason, undefined);
+  assert.equal(result.never_offered, undefined, "a room inside the window offers everything, and the line carries no field for it");
   assert.equal(JSON.parse(await readFile(cursorFile, "utf8")).cursor, `${EPOCH}:1`, "the same cursor file the poller writes");
 
   r = await agora(["watch", "nat", "--once", "--json"], grace);

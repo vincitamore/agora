@@ -1,6 +1,30 @@
 // @ts-check
 import { jitter, readCursor, redact, writeCursor, sleep as defaultSleep } from "./core.mjs";
 
+/**
+ * The one way a room read may end a watch without it being an error: an error carrying this
+ * symbol names a machine-readable reason (a subscription whose seat service went dark), and the
+ * loop ends the way a guard ends it. Declared here, by the loop that honours it, so a thrower
+ * imports the protocol rather than spelling a property name.
+ */
+export const WATCH_STOP = Symbol.for("agora.watch.stop");
+
+/**
+ * The stop reason an error carries, or undefined when it is an ordinary error.
+ * @param {unknown} e
+ * @returns {string | undefined}
+ */
+export function watchStopReason(e) {
+  if (!e || typeof e !== "object") return undefined;
+  const why = /** @type {Record<symbol, unknown>} */ (e)[WATCH_STOP];
+  return typeof why === "string" && why ? why : undefined;
+}
+
+/** @param {unknown} e */
+export function isWatchStop(e) {
+  return watchStopReason(e) !== undefined;
+}
+
 /** @typedef {{ room?: string, threads: Map<string, string> }} CursorCheckpoint */
 /** @typedef {{ delivered: number, skipped: number, filtered: number, gap?: import('./core.mjs').ReadGap, checkpoint: (message: import('./core.mjs').Message | string) => Promise<void> }} BatchInfo */
 
@@ -206,11 +230,11 @@ export async function watch(transport, opts) {
       roomMsgs = await transport.read({ thread, since: cursor, ...(pages ? { pages } : {}) });
     } catch (e) {
       // A source that can name why this watch must stop (a subscription whose seat service went
-      // dark) says so with a machine-readable `watchReason`, and the watch ends the way a guard
-      // ends it: held deliveries flushed, the reason on the result, never read as a quiet room.
-      // Any other failure is what it always was: thrown, so nothing here is checkpointed over it.
-      const why = e && typeof e === "object" && "watchReason" in e ? /** @type {{ watchReason: unknown }} */ (e).watchReason : undefined;
-      if (typeof why !== "string" || !why) throw e;
+      // dark) says so under WATCH_STOP, and the watch ends the way a guard ends it: held
+      // deliveries flushed, the reason on the result, never read as a quiet room. Any other
+      // failure is what it always was: thrown, so nothing here is checkpointed over it.
+      const why = watchStopReason(e);
+      if (why === undefined) throw e;
       reason = why;
       await flush();
       return result();

@@ -5,6 +5,7 @@ import { AgoraError, parseSignature } from "../core.mjs";
 import { NativeServiceClient } from "../native-service.mjs";
 import { nativeCursor, parseNativeCursor } from "../native-protocol.mjs";
 import { pidAlive } from "../session.mjs";
+import { WATCH_STOP } from "../watch.mjs";
 
 /**
  * The native subscriber: the wake adapter a session runs against the seat service.
@@ -35,7 +36,8 @@ export class ServiceDarkError extends AgoraError {
     super(message, 1);
     this.name = "ServiceDarkError";
     /** What a watch puts on its result line; the exit code stays 1. */
-    this.watchReason = SERVICE_DARK;
+    this.reason = SERVICE_DARK;
+    this[WATCH_STOP] = SERVICE_DARK;
   }
 }
 
@@ -171,6 +173,11 @@ export const SUBSCRIBE_WINDOW = 1000;
  * @property {(ms: number) => Promise<void>} wait resolves when something arrives, when the service
  *   goes dark, or after `ms`, whichever is first: the watch loop's sleep
  * @property {() => string | undefined} dark why the service is dark, once it is
+ * @property {{ from: string, to: string, count: number } | null} neverOffered when the session had no
+   saved position and the room was longer than the window: the committed sequence positions this
+   subscription started after, so they were never offered to this session. Stated as positions,
+   never as cursor movement (a cursor advances past filtered and own messages too, so it is no
+   evidence of delivery); `cursor --set <epoch>:0` is how the session asks to be offered them
  * @property {() => void} close
  */
 
@@ -179,7 +186,7 @@ export const SUBSCRIBE_WINDOW = 1000;
  * events it pushes afterwards form one ordered stream; the subscription keeps the stream in order
  * and hands out each sequence once. The service holds only the last sequence written to this
  * socket; the cursor is this session's and is advanced by the caller after delivery.
- * @param {{ stateRoot: string, roomId: string, since?: string, connect?: typeof NativeServiceClient.connect, timeoutMs?: number }} opts
+ * @param {{ stateRoot: string, roomId: string, since?: string, connect?: typeof NativeServiceClient.connect, timeoutMs?: number, window?: number }} opts
  * @returns {Promise<NativeSubscription>}
  */
 export async function openNativeSubscription(opts) {
@@ -187,20 +194,6 @@ export async function openNativeSubscription(opts) {
   const { client, descriptor } = await connectSeatService(opts.stateRoot, { connect: opts.connect, timeoutMs: opts.timeoutMs });
   /** @type {import('../core.mjs').Message[]} */
   let queue = [];
-  let since = opts.since;
-  if (!since) {
-    // the service refuses a subscription with no cursor (it replays the backlog after one), so a
-    // session with no saved position asks where the room is and starts at the newest window
-    let status;
-    try { status = (await client.request("status", { roomId })).status; }
-    catch (e) {
-      client.close();
-      throw new ServiceDarkError(`seat service at ${descriptor.path} is dark: ${e instanceof Error ? e.message : String(e)}`);
-    }
-    since = nativeCursor(String(status.epoch), Math.max(0, Number(status.committed) - SUBSCRIBE_WINDOW));
-  }
-  /** Highest sequence handed out by `read`; nothing at or below it is handed out again. */
-  let drained = parseNativeCursor(since).sequence;
   /** @type {string | undefined} */
   let darkReason;
   /** @type {Set<() => void>} */
@@ -209,10 +202,45 @@ export async function openNativeSubscription(opts) {
     for (const w of waiters) w();
     waiters.clear();
   };
+  /**
+   * Dark is a fact about the channel, never about the words in an error: the socket is closed or
+   * errored, or the service never answered. A request the service answered with a refusal (an
+   * unknown room, a foreign epoch, a backlog it will not replay) arrived on a live socket and is
+   * this session's to recover, so it propagates as the ordinary error it is.
+   * @param {unknown} e
+   */
+  const classify = (e) => {
+    const dark = darkReason !== undefined || client.socket.destroyed || !client.socket.writable;
+    client.close();
+    if (!dark) return e;
+    return new ServiceDarkError(`seat service at ${descriptor.path} is dark: ${e instanceof Error ? e.message : String(e)}`);
+  };
   const markDark = (/** @type {string} */ why) => {
     if (darkReason === undefined) darkReason = why;
     wake();
   };
+  client.socket.on("close", () => markDark(`seat service at ${descriptor.path} closed the connection`));
+  client.socket.on("error", (e) => markDark(`seat service at ${descriptor.path} failed: ${e instanceof Error ? e.message : String(e)}`));
+  let since = opts.since;
+  /** @type {{ from: string, to: string, count: number } | null} */
+  let neverOffered = null;
+  if (!since) {
+    // the service refuses a subscription with no cursor (it replays the backlog after one), so a
+    // session with no saved position asks where the room is and starts at the newest window
+    const window = opts.window && opts.window > 0 ? opts.window : SUBSCRIBE_WINDOW;
+    let status;
+    try { status = (await client.request("status", { roomId })).status; }
+    catch (e) { throw classify(e); }
+    const epoch = String(status.epoch);
+    const committed = Number(status.committed);
+    const start = Math.max(0, committed - window);
+    since = nativeCursor(epoch, start);
+    // what a first arm was never offered is said, never silent: the positions are named on the
+    // subscription and the caller prints them with the way to ask for them
+    if (start > 0) neverOffered = { from: nativeCursor(epoch, 1), to: nativeCursor(epoch, start), count: start };
+  }
+  /** Highest sequence handed out by `read`; nothing at or below it is handed out again. */
+  let drained = parseNativeCursor(since).sequence;
   const push = (/** @type {any[]} */ messages) => {
     let added = false;
     for (const raw of messages) {
@@ -228,22 +256,15 @@ export async function openNativeSubscription(opts) {
       wake();
     }
   };
-  client.socket.on("close", () => markDark(`seat service at ${descriptor.path} closed the connection`));
-  client.socket.on("error", (e) => markDark(`seat service at ${descriptor.path} failed: ${e instanceof Error ? e.message : String(e)}`));
   let result;
   try {
     result = await client.subscribe(roomId, since, (message) => push([message]));
-  } catch (e) {
-    client.close();
-    const message = e instanceof Error ? e.message : String(e);
-    // a refused cursor is this session's to recover, not the service being dark
-    if (darkReason !== undefined || /dark|closed|timed out/.test(message)) throw new ServiceDarkError(`seat service at ${descriptor.path} is dark: ${message}`);
-    throw e;
-  }
+  } catch (e) { throw classify(e); }
   push(Array.isArray(result?.messages) ? result.messages : []);
   return {
     roomId,
     seat: { id: descriptor.accountId, seatLabel: descriptor.seatLabel },
+    neverOffered,
     async read(readOpts = {}) {
       const floor = readOpts.since ? Math.max(drained, parseNativeCursor(readOpts.since).sequence) : drained;
       const limit = readOpts.limit && readOpts.limit > 0 ? readOpts.limit : Infinity;
