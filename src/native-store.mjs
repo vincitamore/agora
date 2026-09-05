@@ -459,7 +459,9 @@ export class NativeRoomStore {
       // behind a boundary another process may observe. Reopen reconciles the
       // old or new boundary against the retained frame.
       this.closed = true;
-      const wrapped = new AgoraError("native room committed-boundary publication failed; acceptance is unknown and the writer must reopen before retrying");
+      const code = /** @type {NodeJS.ErrnoException} */ (error)?.code;
+      const suffix = typeof code === "string" ? ` (${code})` : "";
+      const wrapped = new AgoraError(`native room committed-boundary publication failed; acceptance is unknown and the writer must reopen before retrying${suffix}`);
       if (error instanceof Error) wrapped.cause = error;
       throw wrapped;
     }
