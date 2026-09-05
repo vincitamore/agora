@@ -421,4 +421,14 @@ test("no credential shape reaches stdout, stderr, the policy record or the face 
   assert.doesNotMatch(outputs, /xoxb-1234567890/, "the row carries the reason, the record carries the reason, and neither carries the body");
   const s = await agora(["faces", "nat", "--for", `${EPOCH}:1`], env);
   assert.doesNotMatch(s.stdout + s.stderr, /xoxb-1234567890/);
+
+  // a row whose reason a transport error stamped with a credential shape is redacted on the way out
+  const id = JSON.parse(r.stdout).id;
+  await appendFaceRecord(root, ROOM, { originId: id, transport: "slack", status: "unknown", code: "lost-response", reason: `unknown: fetch failed for ${TOKENISH}; the request may have landed`, attempt: 1, at: "2026-09-05T12:00:00.000Z", pendingAt: "2026-09-05T12:00:00.000Z" });
+  for (const args of [["faces", "nat", "--for", id], ["faces", "nat", "--for", id, "--json"], ["faces", "nat", "--unknown"], ["faces", "nat", "--unknown", "--json"]]) {
+    const u = await agora(args, env);
+    assert.equal(u.code, 0, u.stderr);
+    assert.doesNotMatch(u.stdout + u.stderr, /xoxb-1234567890/, args.join(" "));
+    assert.match(u.stdout, /fetch failed for \[redacted\]; the request may have landed/, args.join(" "));
+  }
 });
