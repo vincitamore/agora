@@ -1,0 +1,18 @@
+{
+  "$fixture": "RED. policy.json edited on disk under a running service.",
+  "$scenario": [
+    "serve loads policy.json and holds digest A in memory",
+    "a peer (same OS user, cooperative profile) rewrites the file, raising maxConcurrent and adding a harness",
+    "a spawn request arrives"
+  ],
+  "$expected": {
+    "outcome": "exit 1 'policy-digest-drift'",
+    "message": "loaded sha256:aa04c7... on disk sha256:1e77b9...; run 'agora spawn policy reload' as the operator",
+    "nothingReserved": true,
+    "noRecordMinted": true,
+    "redIf": "the spawn proceeds under either digest, or the service silently reloads"
+  },
+  "loadedDigest": "sha256:aa04c71fbe9d2350c8471e0b6a2df5931cc80e47b6f19a2d3e5c07481fb2669a",
+  "onDiskDigest": "sha256:1e77b9c48a0f26d3517ec9b0428af3961dd7420e5c3a819f7b06d2415ec9038f",
+  "$honesty": "this makes the edit loud. It does not prevent it. Prevention needs the enforced profile, where the peer is a different OS user."
+}

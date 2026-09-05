@@ -1,0 +1,33 @@
+{
+  "$fixture": "revision 5, from Astra's executed arithmetic: sequential, restart, boundary and rollover controls for the daily orientation charge.",
+  "$whyThisExists": "Revision 3 summed orientationTokens over LIVE spawns. Seven sequential peers at 90,308 spend 632,156 against a 600,000 cap while every live total read at admission is 0, and maxPerHour 6 spread over two hours catches none of them. Live occupancy is not a charge ledger.",
+  "config": { "maxOrientationTokensPerDay": 600000, "estimatePerPeer": 90308, "maxPerHour": 6, "window": "UTC day", "ledger": "<state>/spawn/charges/<window>.jsonl" },
+  "sequential": {
+    "$case": "seven peers admitted one at a time, each exiting before the next is admitted, spread over two hours",
+    "expectedCharges": [90308, 180616, 270924, 361232, 451540, 541848],
+    "seventh": { "wouldReach": 632156, "expected": { "admitted": false, "exit": 1, "reason": "orientation-budget-exhausted", "names": ["window", "reserved total 541848", "estimate 90308", "cap 600000"] } },
+    "redIf": ["the seventh is admitted because live occupancy is 0", "any admission check reads live occupancy instead of the ledger", "a charge disappears when its child exits"]
+  },
+  "restart": {
+    "$case": "the seat service restarts between admissions six and seven",
+    "expected": "the seventh still refuses; the ledger is replayed from disk, never reconstructed from live rows",
+    "redIf": "the reserved total resets to 0 or to the live-row sum after restart"
+  },
+  "boundary": {
+    "$case": "a cap landing exactly on the reserved total",
+    "expected": "an admission whose reservation reaches exactly the cap is admitted; the next is refused",
+    "redIf": "an off-by-one either way"
+  },
+  "rollover": {
+    "$case": "the UTC day rolls over between admissions",
+    "expected": "the new window starts empty, migrates no charge, and carries its own window id on every entry; the old window is retained 35 days",
+    "redIf": "a charge migrates into the new window, or the old window is deleted early"
+  },
+  "retryAndRefund": {
+    "retry": { "$case": "the producer retries under the same operationId", "expected": "the existing reservation is found; one charge, one child" },
+    "refundAllowed": ["brief write failed", "pane open failed", "slot lost"],
+    "refundForbidden": ["child exit", "child crash", "operator spawn stop", "service restart"],
+    "redIf": ["a double charge or a second child from a retry", "a refund on anything but a named pre-launch failure"]
+  },
+  "$scope": "this tests the policy's declared estimate accounting. It claims no measured model-token cost."
+}

@@ -1,0 +1,25 @@
+{
+  "$fixture": "RED. Test 7. A cross-seat spawn at a seat the roster knows to be dark.",
+  "operationId": "5e93a710-2f4c-4b81-a0d6-8c3719ee54b2",
+  "harness": "claude",
+  "model": "claude-opus-5",
+  "role": "verify",
+  "unit": "attack/known-dark",
+  "room": "house",
+  "answersTo": "fable@opus-windows-primary",
+  "cwd": "~/src/agora",
+  "briefDigest": "sha256:d3b0f81a72c4956ef0182ba64c7d3915e08b27ac5f1360dd94ae2b7c1058f6a3",
+  "targetSeat": "cyberdeck",
+  "rosterState": { "seat": "cyberdeck", "lease": "expired", "lastRenewal": "2026-09-04T02:11:09Z", "verdict": "dark" },
+  "$expected": {
+    "exitCode": 1,
+    "reason": "seat-dark",
+    "message": "cyberdeck is dark: lease expired 2026-09-04T02:11:09Z",
+    "slotReserved": false,
+    "recordMinted": false,
+    "briefWritten": false,
+    "operationIdRetained": true,
+    "retryAfterTargetLive": "exactly one record; the retained operationId makes the retry idempotent",
+    "redIf": "the request queues silently, a slot is held, a brief lands on disk, or a retry yields two records"
+  }
+}

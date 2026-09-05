@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
-import { closePane, writeAttachInput, writeDeliveredLine } from "../terminal-backend.ts";
+import { closePane, openBunPane, writeAttachInput, writeDeliveredLine } from "../terminal-backend.ts";
 
 function fakeTerm() {
   const writes: string[] = [];
@@ -16,11 +16,13 @@ function fakeTerm() {
   };
 }
 
-test("deliver writes only with an admissionId; attach writes only with a live lease", () => {
+const enqueue = { kind: "native-enqueue" as const, id: "ad-1" };
+
+test("deliver writes only with a typed admission; attach writes only with a live lease", () => {
   const { writes, term } = fakeTerm();
   const pane = { spawnId: "s1", term };
-  expect(() => writeDeliveredLine(pane, "x", "")).toThrow(/admissionId/);
-  writeDeliveredLine(pane, "[agora] dl-1", "ad-1");
+  expect(() => writeDeliveredLine(pane, "x", { kind: "idle-sample" as never, id: "x" })).toThrow(/admission/);
+  writeDeliveredLine(pane, "[agora] dl-1", enqueue);
   expect(writes.at(-1)).toBe("[agora] dl-1\n");
   expect(() => writeAttachInput(pane, "hi", false)).toThrow(/lease/);
   writeAttachInput(pane, "hi", true);
@@ -31,8 +33,14 @@ test("deliver writes only with an admissionId; attach writes only with a live le
 test("deliver throws on a closed Terminal and writes nothing", () => {
   const { writes, term } = fakeTerm();
   const pane = { spawnId: "s1", term: { ...term, closed: true } };
-  expect(() => writeDeliveredLine(pane, "[agora] dl-1", "ad-1")).toThrow(/closed/);
+  expect(() => writeDeliveredLine(pane, "[agora] dl-1", enqueue)).toThrow(/closed/);
   expect(writes).toEqual([]);
+});
+
+test("openBunPane constructs a Bun.Terminal the authority owns", () => {
+  const pane = openBunPane("s1", ["node", "-e", "setTimeout(()=>{}, 50)"]);
+  expect(typeof pane.term.write).toBe("function");
+  pane.term.close();
 });
 
 test("terminal.write is only reached from terminal-backend.ts", () => {
@@ -45,7 +53,7 @@ test("terminal.write is only reached from terminal-backend.ts", () => {
       if (statSync(p).isDirectory()) walk(p);
       else if (p.endsWith(".ts")) {
         const text = readFileSync(p, "utf8");
-        if (/\.write\(/.test(text) && path.basename(p) !== "terminal-backend.ts") hits.push(p);
+        if (/\bterm\.write\(/.test(text) && path.basename(p) !== "terminal-backend.ts") hits.push(p);
       }
     }
   };

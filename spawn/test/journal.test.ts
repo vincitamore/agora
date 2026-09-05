@@ -3,9 +3,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { attributeRead, journalWrite } from "../journal.ts";
 
-const FIXTURE_DIR =
-  process.env.AGORA_P4_FIXTURES ??
-  "C:/Users/AlexMoyer/Documents/opus/forge/output/agora-native-adapters/fixtures/spawn";
+const FIXTURE_DIR = process.env.AGORA_P4_FIXTURES ?? path.join(import.meta.dir, "fixtures");
 
 test("three-arrivals: service lines journalled whole; human keystrokes as count and digest only", () => {
   const fixture = JSON.parse(readFileSync(path.join(FIXTURE_DIR, "three-arrivals.json"), "utf8"));

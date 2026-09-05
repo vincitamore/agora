@@ -1,0 +1,84 @@
+{
+  "$fixture": "the record the seat service mints and signs; the sole authority for parent, depth and budget",
+  "$path": "<state>/spawn/<spawnId>.json",
+  "$signature": "ed25519 over the canonical JSON of this object with 'signature' removed",
+  "spawnId": "spawn-01JZ8Q4K7N2X",
+  "state": "connected",
+  "operationId": "3f2b1c8e-9a44-4f6a-8f31-2b7d0c5e1a90",
+  "harness": "claude",
+  "model": "claude-opus-5",
+  "build": {
+    "version": "2.1.257",
+    "source": "path",
+    "at": "2026-09-05T18:11:04Z"
+  },
+  "role": "verify",
+  "unit": "agora-native-adapters/pane-attack-surface",
+  "room": "house",
+  "cwd": "C:/Users/AlexMoyer/Documents/agora-wt-tui",
+  "pane": {
+    "backend": "bun-terminal",
+    "scaffold": "wt",
+    "title": "claude/Opus-5/verify",
+    "cols": 120,
+    "rows": 40
+  },
+  "pid": 71904,
+  "bootEpoch": "1788600321.44",
+  "sessionIdSource": "assigned",
+  "sessionId": "9c2e77d0-51ab-4b8e-9f02-6d1c3a5b7e44",
+  "spawner": {
+    "seat": "opus-windows-primary",
+    "bearer": "fable@opus-windows-primary",
+    "account": "seatkey:ed25519:2f9c...b41d",
+    "session": "67ca8c4b-a38b-47b6-86fb-b286b94f796c"
+  },
+  "slot": {
+    "subject": "spawn:opus-windows-primary/2",
+    "nonce": "n-4a17c9",
+    "fence": "7:1284"
+  },
+  "brief": {
+    "path": "<state>/spawn/spawn-01JZ8Q4K7N2X/brief.md",
+    "mode": "0600",
+    "digest": "sha256:6f1d9c2a4b8e70135ac9f3d21e6b8c47a05f9e3b2d18c4760af5e91b3c7d2a68"
+  },
+  "standard": {
+    "path": "context/principle-lattice.md",
+    "digest": "sha256:b21e4f77c0a9d3158e6b2fa4907c15d83be0f6a91c47d2058fa3e91b6c02d774",
+    "rev": "3abcfa36"
+  },
+  "policyDigest": "sha256:aa04c71fbe9d2350c8471e0b6a2df5931cc80e47b6f19a2d3e5c07481fb2669a",
+  "hooks": {
+    "mode": "user",
+    "seededFrom": null,
+    "digest": "sha256:1d5c...9e02"
+  },
+  "orientation": {
+    "tokens": 90308,
+    "tier": "measured",
+    "source": "knowledge/infrastructure/the-orientation-surface-costs-90k-tokens-per-session-measured.md:20",
+    "at": "2026-09-05T18:12:41Z",
+    "charge": {
+      "window": "2026-09-05",
+      "reservedAt": "2026-09-05T18:11:02Z",
+      "operationId": "3f2b1c8e-9a44-4f6a-8f31-2b7d0c5e1a90",
+      "survivesExit": true,
+      "refunded": false
+    }
+  },
+  "reserved": "2026-09-05T18:11:02Z",
+  "spawned": "2026-09-05T18:11:05Z",
+  "joined": "2026-09-05T18:12:38Z",
+  "ready": "2026-09-05T18:12:41Z",
+  "connected": "2026-09-05T18:12:42Z",
+  "exited": null,
+  "signature": {
+    "alg": "ed25519",
+    "seat": "opus-windows-primary",
+    "sig": "base64:UjZ4...Qg=="
+  },
+  "$revised5": "2026-09-05: depth split into recorded lineage and its evidence; the orientation charge is a ledger reservation.",
+  "lineageDepth": 1,
+  "lineageEvidence": "local"
+}

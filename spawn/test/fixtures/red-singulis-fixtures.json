@@ -1,0 +1,50 @@
+{
+  "$fixture": "C0 requires every gated check to ship a known-red fixture. These are the overlays singulis-rows.json names, keyed; each states its red condition in one sentence and the mutation that produces it.",
+  "red-unpinned-standard": {
+    "red": "an artifact or spawn record has no standard digest or rev",
+    "overlay": { "standard": { "path": "context/principle-lattice.md", "digest": null, "rev": null } },
+    "mustRedden": ["PC1", "PC2", "K12"]
+  },
+  "red-standard-divergence": {
+    "red": "a member's attested digest differs from the current standard with no declared divergence",
+    "overlay": { "standard": { "digest": "sha256:deadbeef00000000000000000000000000000000000000000000000000000000" }, "divergence": null },
+    "mustRedden": ["PC4"]
+  },
+  "red-missing-standard": {
+    "red": "the lattice is absent at the resolved cwd and the spawn proceeds anyway",
+    "overlay": { "cwd": "C:/Users/AlexMoyer/Documents/not-a-tree", "expected": "exit 1 before pane.open; a record at state spawned is red" },
+    "mustRedden": ["PC5"]
+  },
+  "red-unpinned-composition": {
+    "red": "a load-bearing record declares no reasoner family, provider and route",
+    "overlay": { "harness": "claude", "model": null, "build": null },
+    "mustRedden": ["K6"]
+  },
+  "red-brief-after-child": {
+    "red": "the brief digest was recorded after the child existed",
+    "overlay": { "brief": { "digest": "sha256:...", "recordedAt": "2026-09-05T18:11:09Z" }, "spawned": "2026-09-05T18:11:05Z" },
+    "mustRedden": ["K9"]
+  },
+  "red-self-selected-reader": {
+    "red": "the designated first reader is the author, or the reader selected itself",
+    "overlay": { "answersTo": "verify@opus-windows-primary", "spawner": { "bearer": "verify@opus-windows-primary" } },
+    "mustRedden": ["K17"]
+  },
+  "red-out-degree": {
+    "red": "a spawner's live children exceed maxConcurrent",
+    "overlay": { "policy": { "maxConcurrent": 2 }, "liveChildren": 3 },
+    "mustRedden": ["K18"]
+  },
+  "red-policy-absent": {
+    "red": "a capability is invoked with no recorded admission decision under published criteria",
+    "overlay": { "policyPath": "<state>/spawn/policy.json", "exists": false, "expected": "exit 1 naming the path; nothing opened" },
+    "mustRedden": ["K23"]
+  },
+  "red-record-in-write-set": {
+    "red": "the conformance store sits inside the measured parties' write set, or the checker is a member of the certified population",
+    "overlay": { "recordStore": "<state>/spawn/", "writableBy": ["every spawned peer, same OS user"], "checker": "a spawned peer" },
+    "mustRedden": ["K14"],
+    "note": "this one is red today and stays red; the row's verdict is 'unproven', not 'warranted'"
+  },
+  "$neighbourRule": "a fixture that also reddens a neighbouring check is reported, not failed"
+}

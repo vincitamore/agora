@@ -1,18 +1,19 @@
 import { expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { attributeRead, journalWrite } from "../journal.ts";
 import { FRAME_TYPES } from "../protocol.ts";
-import { createAuthority, handleJson } from "../pane-authority.ts";
+import { createAuthority, handleJson, registerPane } from "../pane-authority.ts";
 import { bearerFromProvenance, renderDeliveredLine } from "../delivered-line.ts";
 import { outcomeWithoutAdmission, verdictAdmitsWrite } from "../readiness.ts";
 import { writeDeliveredLine } from "../terminal-backend.ts";
 
-const FIXTURE_DIR =
-  process.env.AGORA_P4_FIXTURES ??
-  "C:/Users/AlexMoyer/Documents/opus/forge/output/agora-native-adapters/fixtures/spawn";
+const FIXTURE_DIR = process.env.AGORA_P4_FIXTURES ?? path.join(import.meta.dir, "fixtures");
 
 const files = readdirSync(FIXTURE_DIR).filter((n) => n.endsWith(".json")).sort();
+
+const enqueue = { kind: "native-enqueue" as const, id: "ad-1" };
 
 test("the design ships nineteen spawn fixtures", () => {
   expect(files).toHaveLength(19);
@@ -36,23 +37,32 @@ test("attack-matrix pane-sock: deliver before hello is refused", () => {
     handleJson(auth, {
       type: "deliver",
       spawnId: "s",
-      deliveryId: "d",
-      admissionId: "a",
-      line: "x",
+      admission: enqueue,
+      envelope: {
+        deliveryId: "d",
+        seat: "seat",
+        bearer: "sol",
+        room: "house",
+        cursorRange: { from: "1", to: "2" },
+        since: "0",
+      },
     }),
   ).toThrow(/hello/);
 });
 
-test("attack-matrix agora-verb: the root CLI has no verb that carries bytes to a pane", () => {
-  const src = readFileSync(new URL("../../bin/agora.mjs", import.meta.url), "utf8");
-  const verbs = [...src.matchAll(/^\s{4}([a-z][a-z0-9-]*): \{ args:/gm)].map((m) => m[1]);
-  expect(verbs.length).toBeGreaterThan(5);
+test("attack-matrix agora-verb: schema --json has no verb that carries bytes to a pane", () => {
+  const bin = path.join(import.meta.dir, "..", "..", "bin", "agora.mjs");
+  const result = spawnSync("node", [bin, "schema", "--json"], { encoding: "utf8" });
+  expect(result.status).toBe(0);
+  const schema = JSON.parse(result.stdout);
+  const verbs = Object.keys(schema.verbs);
+  expect(verbs.length).toBeGreaterThan(10);
   for (const forbidden of ["write", "send", "type", "keys", "inject"]) {
     expect(verbs.includes(forbidden)).toBe(false);
   }
 });
 
-test("attack-matrix wt-any: this package exposes no send-keys, kill or enumerate", () => {
+test("attack-matrix wt-any: package source (not the Windows Terminal binary) has no send-keys or enumerate", () => {
   const matrix = JSON.parse(readFileSync(path.join(FIXTURE_DIR, "attack-matrix.json"), "utf8"));
   const vector = matrix.vectors.find((v: { id: string }) => v.id === "wt-any");
   expect(vector.childAck).toBe(false);
@@ -82,7 +92,7 @@ test("delivered-line: rendered pointer matches the fixture; peer text never ride
   expect(fixture.artifact).toBeNull();
 });
 
-test("delivered-line pending: unknown readiness writes nothing without an admission", () => {
+test("delivered-line pending: unknown readiness writes nothing; idle-sample is not an admission", () => {
   const fixture = JSON.parse(readFileSync(path.join(FIXTURE_DIR, "delivered-line.json"), "utf8"));
   expect(fixture.$pendingCase.written).toBe(false);
   expect(fixture.$pendingCase.disposition).toBe("inbox");
@@ -99,7 +109,9 @@ test("delivered-line pending: unknown readiness writes nothing without an admiss
       close() {},
     },
   };
-  expect(() => writeDeliveredLine(pane, fixture.rendered, "")).toThrow(/admissionId/);
+  expect(() => writeDeliveredLine(pane, fixture.rendered, { kind: "idle-sample" as never, id: "x" })).toThrow(
+    /admission/,
+  );
   expect(writes).toEqual([]);
 });
 
@@ -135,7 +147,7 @@ test("readiness-verdicts exitRace: a closed Terminal refuses the write", () => {
       close() {},
     },
   };
-  expect(() => writeDeliveredLine(pane, "[agora] dl-1", "ad-1")).toThrow(/closed/);
+  expect(() => writeDeliveredLine(pane, "[agora] dl-1", enqueue)).toThrow(/closed/);
   expect(writes).toEqual([]);
 });
 
@@ -179,14 +191,21 @@ test("three-arrivals races: no write occurs without an admission", () => {
     }),
   });
   handleJson(auth, { type: "hello", bootEpoch: 1 });
+  registerPane(auth, fixture.peer);
   expect(() =>
     handleJson(auth, {
       type: "deliver",
       spawnId: fixture.peer,
-      deliveryId: "dl-1",
-      admissionId: "",
-      line: fixture.arrivals[1].surface,
+      admission: { kind: "idle-sample", id: "hint" },
+      envelope: {
+        deliveryId: "dl-1",
+        seat: "seat",
+        bearer: "sol",
+        room: "house",
+        cursorRange: { from: "1", to: "2" },
+        since: "0",
+      },
     }),
-  ).toThrow(/admissionId|non-empty/);
+  ).toThrow(/idle-sample/);
   expect(writes).toEqual([]);
 });
