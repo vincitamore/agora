@@ -47,3 +47,22 @@ test("deliver refuses a line key and an idle-sample admission", () => {
     }),
   ).toThrow(/idle-sample/);
 });
+
+test("envelope fields refuse newline and C0 control bytes", () => {
+  expect(() =>
+    parseFrame({
+      type: "deliver",
+      spawnId: "s",
+      admission: { kind: "native-enqueue", id: "ad-1" },
+      envelope: { ...envelope, room: "house\nrm -rf /" },
+    }),
+  ).toThrow(/control bytes/);
+  expect(() =>
+    parseFrame({
+      type: "deliver",
+      spawnId: "s",
+      admission: { kind: "native-enqueue", id: "ad-1" },
+      envelope: { ...envelope, deliveryId: "dl\u0007X" },
+    }),
+  ).toThrow(/control bytes/);
+});

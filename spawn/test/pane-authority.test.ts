@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { createAuthority, handleJson, registerPane } from "../pane-authority.ts";
+import { createAuthority, handleJson, issueAdmission, registerPane } from "../pane-authority.ts";
 import { renderDeliveredLine } from "../delivered-line.ts";
 
 const envelope = {
@@ -28,6 +28,7 @@ function harness() {
   });
   handleJson(auth, { type: "hello", bootEpoch: 7 });
   registerPane(auth, "s1");
+  issueAdmission(auth, "ad-1");
   return { auth, writes };
 }
 
@@ -77,4 +78,25 @@ test("unknown spawnId refuses without opening; deliver after close throws", () =
     }),
   ).toThrow(/pane-unknown/);
   expect(writes).toEqual([]);
+});
+
+test("a forged well-typed admission id is refused until issued", () => {
+  const { auth, writes } = harness();
+  expect(() =>
+    handleJson(auth, {
+      type: "deliver",
+      spawnId: "s1",
+      admission: { kind: "native-enqueue", id: "NEVER-ISSUED" },
+      envelope,
+    }),
+  ).toThrow(/unissued/);
+  expect(writes).toEqual([]);
+  issueAdmission(auth, "NEVER-ISSUED");
+  handleJson(auth, {
+    type: "deliver",
+    spawnId: "s1",
+    admission: { kind: "native-enqueue", id: "NEVER-ISSUED" },
+    envelope,
+  });
+  expect(writes.at(-1)).toContain("dl-1");
 });
