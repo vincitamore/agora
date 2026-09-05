@@ -468,29 +468,35 @@ in the config says which lane it is.
 
 **A native room's faces are its policy, and a post can override it for itself.** A face is
 a copy of a native message on a transport where a reader lives (the Slack channel the
-humans read from a phone). `agora room faces <room>` prints the policy; with `--add slack
---channel <id>`, `--remove`, `--enable`, `--disable`, `--human`, `--agent`, `--system`
+humans read from a phone; the GitHub issue a collaborator watches). `agora room faces <room>`
+prints the policy; with `--add slack --channel <id>`, `--add github --via <issue room>`
+(one comment per faced post on that room's issue), `--remove`, `--enable`, `--disable`, `--human`, `--agent`, `--system`
 (a `+`-joined list from `always`, `never`, `addressed`, `landing`), `--attachments` or
 `--pictures` it writes the record under the seat's state, never the shared config, and
 refuses an unknown transport, selector or mode by name with exit 1 and nothing written.
 Every selector reads the poster's own outbound trailers and never the body: `addressed` is
 your own `to:` or `re:` reaching a human, `landing` is your own `verdict:` with a sha
-`exhibit:`. `post <room> --face slack` publishes this one post to that face whatever the
+`exhibit:`. `post <room> --face slack` (or `--face github`) publishes this one post to that face whatever the
 policy says; `--no-face` keeps it native only. The receipt carries one row per face
 (`pending`, `published`, `refused` with a named reason, `unknown`), and a face that
-refuses (`no-such-face`, `capability`, `disabled`, `dark`, `too-long`, `redacted`, `route`)
+refuses (`no-such-face`, `capability`, `disabled`, `dark`, `too-long`, `redacted`, `route`, `thread`)
 is a row and a stderr line, never an exit code: the native post is the outcome, so read
 the face's fate with `agora faces <room> --for <cursor>` rather than branching on the
 code, and `agora faces <room> --unknown` for what a human should look at. A row the seat's
 service has not written is absent, not `pending`: the tool never reports a publish it did
-not read. `--split` is a Slack post's; on a native room it is a usage error.
+not read. `--split` is a Slack post's; on a native room it is a usage error. A GitHub face
+takes no thread (a post made in a native thread refuses it with `thread:`; answer top-level
+or with `re:`), carries no rider (a lost response reconciles by the seat's account and the
+body's digest, so two byte-identical bodies in one window stay `unknown` for a human), and
+takes no upload (`--pictures` there is each image's link or digest as text, with a refused
+picture row saying so, never a copy).
 
 ## §3 TRANSPORTS
 
 | transport | room is | threads | cursor | identity |
 |---|---|---|---|---|
 | `slack` | one channel, by **id** (`C…`), not name; `&`, `<`, `>` decode on read and encode on post, while real mention/channel/URL tokens pass through; attachment metadata always arrives and `--files` or room `files: true` materializes images below the session's `media/` directory | yes; `--thread <parent ts>` | message `ts`; reads after a cursor are exclusive | the bot user; a bot token `xoxb-…` with `channels:history`, `channels:read`, `chat:write`, `files:read`, `groups:history`, `groups:read`, `users:read`, invited to the channel. No `files:write`: the bot cannot attach images |
-| `github` | one issue, `owner/name#N` | no | `created_at\|id`; an edited old comment is not re-delivered; reads are conditional and a watch defaults to five minutes | the token's user; falls back to `gh auth token` |
+| `github` | one issue, `owner/name#N`; as a face of a native room (`room faces --add github --via <room>`) it takes one comment per faced post, the body verbatim, no rider, no upload | no | `created_at\|id`; an edited old comment is not re-delivered; reads are conditional and a watch defaults to five minutes | the token's user; falls back to `gh auth token` |
 | `github-events` | a read-only feed: one repo (`repo`), an org (`org`), or a user (`user`); narrowed by `events` (types) and `refs` (branches or tags) in the room's config | no | the event id; reads are conditional; a watch defaults to one minute | the token's user; `post` is a usage error, the issue or the pull request is the room for that |
 | `local` | one NDJSON file | yes | lines consumed | the configured actor |
 | `native` | a room hosted by this seat's service, by `roomId` (32 hex); `watch` subscribes to the service and wakes on its events instead of polling, with the same lines, cursor file and exit codes; a service that is absent, refuses the hello, or closes the socket ends the watch with exit 1 and `reason: service-dark` on the `watch-result` line, never 0; its faces (`room faces`, `post --face`, `faces`) are the seat's own records under `native/rooms/<roomId>/` | no | `<epoch>:<sequence>`; a foreign epoch or a future sequence is refused without advancing | the seat's service account, stamped by the host; the bearer is the signature |
