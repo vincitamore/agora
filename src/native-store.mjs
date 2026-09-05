@@ -453,13 +453,15 @@ export class NativeRoomStore {
       end: start + frame.length, digest: record.recordDigest };
     try {
       await writeDurableAtomic(this.boundaryPath, JSON.stringify(boundary, null, 2) + "\n");
-    } catch {
+    } catch (error) {
       // Once boundary publication begins, its acceptance is unknown: rename may
       // have succeeded before a directory sync failed. Never roll the log back
       // behind a boundary another process may observe. Reopen reconciles the
       // old or new boundary against the retained frame.
       this.closed = true;
-      throw new AgoraError("native room committed-boundary publication failed; acceptance is unknown and the writer must reopen before retrying");
+      const wrapped = new AgoraError("native room committed-boundary publication failed; acceptance is unknown and the writer must reopen before retrying");
+      if (error instanceof Error) wrapped.cause = error;
+      throw wrapped;
     }
     this.boundary = boundary;
     this.end += frame.length;
