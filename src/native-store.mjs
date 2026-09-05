@@ -35,14 +35,29 @@ async function writeDurableAtomic(file, text) {
   const parent = path.dirname(file);
   await mkdir(parent, { recursive: true, mode: 0o700 });
   const temp = `${file}.tmp-${process.pid}-${randomUUID()}`;
+  let renamed = false;
+  let durable = false;
+  let primaryError;
   try {
     const handle = await open(temp, "wx", 0o600);
     try { await handle.writeFile(text, "utf8"); await handle.sync(); }
     finally { await handle.close(); }
     await rename(temp, file);
+    renamed = true;
     await syncDirectory(parent);
+    durable = true;
+  } catch (error) {
+    primaryError = error;
+    throw error;
   } finally {
-    await rm(temp, { force: true });
+    try { await rm(temp, { force: true }); }
+    catch (cleanupError) {
+      // Once rename and directory sync succeeded, failure to remove the old
+      // temp pathname cannot revoke the durable target. Before that point the
+      // primary publication failure remains authoritative and cleanup must not
+      // overwrite it with a less informative error.
+      if (!primaryError && !(renamed && durable)) throw cleanupError;
+    }
   }
 }
 
@@ -263,6 +278,7 @@ export class NativeRoomStore {
     let directory = requestedDirectory;
     let writer;
     let log;
+    let boundaryPublicationStarted = false;
     try {
       await syncDirectory(path.dirname(requestedDirectory));
       const physical = await physicalRoom(requestedDirectory);
@@ -278,13 +294,23 @@ export class NativeRoomStore {
       await log.sync();
       await syncDirectory(directory);
       const boundary = { version: 1, roomId, epoch, sequence: 0, end: 0, digest: null };
+      boundaryPublicationStarted = true;
       await writeDurableAtomic(path.join(directory, "committed.json"), JSON.stringify(boundary, null, 2) + "\n");
       return new NativeRoomStore(directory, manifest, boundary, log, writer, [], 0, 0,
         options.now ?? (() => new Date()));
     } catch (e) {
       if (log) await log.close().catch(() => {});
+      // Cleanup is safe only before the committed-boundary publication starts,
+      // and it must happen while writer authority is still held. Once that
+      // publication begins, preserve the room: rename may have succeeded before
+      // an error reached us, so recursive deletion could erase accepted state or
+      // a successor that opens after release.
+      if (!boundaryPublicationStarted) await rm(directory, { recursive: true, force: true }).catch(() => {});
       if (writer) await releaseWriter(writer).catch(() => {});
-      await rm(directory, { recursive: true, force: true });
+      if (boundaryPublicationStarted) {
+        const code = /** @type {NodeJS.ErrnoException} */ (e).code;
+        throw new AgoraError(`native room ${roomId} publication failed with unknown acceptance; state preserved for inspection${code ? ` (${code})` : ""}`);
+      }
       throw e;
     }
   }

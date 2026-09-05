@@ -3,7 +3,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import fs from "node:fs/promises";
 import { appendFile, mkdir, mkdtemp, open, readFile, realpath, rename, rm, stat, symlink, truncate } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { NativeRoomStore } from "../src/native-store.mjs";
@@ -145,6 +147,62 @@ test("boundary publication failure preserves the synced frame for explicit recon
   const reopened = await NativeRoomStore.open({ root, roomId: ROOM });
   t.after(() => reopened.close());
   assert.equal(reopened.status().recoveredTailBytes, tailBytes);
+  assert.equal(reopened.status().committed, 0);
+});
+
+test("post-publication temp cleanup failure does not revoke a durable room creation", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "agora-native-create-cleanup-"));
+  const originalRm = fs.rm;
+  let injected = false;
+  /** @type {NativeRoomStore | undefined} */
+  let store;
+  t.after(async () => {
+    fs.rm = originalRm;
+    syncBuiltinESMExports();
+    if (store) await store.close();
+    await originalRm(root, { recursive: true, force: true });
+  });
+  fs.rm = async (target, options) => {
+    if (!injected && String(target).includes("committed.json.tmp-")) {
+      injected = true;
+      throw Object.assign(new Error("injected post-publication cleanup failure"), { code: "EIO" });
+    }
+    return originalRm(target, options);
+  };
+  syncBuiltinESMExports();
+  store = await NativeRoomStore.create({ root, roomId: ROOM, epoch: EPOCH, hostAccountId: HOST });
+  assert.equal(injected, true);
+  assert.equal(store.status().committed, 0);
+});
+
+test("ambiguous creation publication preserves the room instead of deleting after release", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "agora-native-create-unknown-"));
+  const originalRename = fs.rename;
+  let injected = false;
+  /** @type {NativeRoomStore | undefined} */
+  let reopened;
+  t.after(async () => {
+    fs.rename = originalRename;
+    syncBuiltinESMExports();
+    if (reopened) await reopened.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  fs.rename = async (source, target) => {
+    await originalRename(source, target);
+    if (!injected && String(target).endsWith("committed.json")) {
+      injected = true;
+      throw Object.assign(new Error("injected lost publication response"), { code: "EIO" });
+    }
+  };
+  syncBuiltinESMExports();
+  await assert.rejects(
+    NativeRoomStore.create({ root, roomId: ROOM, epoch: EPOCH, hostAccountId: HOST }),
+    /publication failed with unknown acceptance; state preserved/,
+  );
+  fs.rename = originalRename;
+  syncBuiltinESMExports();
+  assert.equal(injected, true);
+  reopened = await NativeRoomStore.open({ root, roomId: ROOM });
   assert.equal(reopened.status().committed, 0);
 });
 

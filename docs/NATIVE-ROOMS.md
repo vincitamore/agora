@@ -70,6 +70,12 @@ or complete suffix beyond the committed boundary has no receipt and is removed o
 number of recovered bytes reported; damage at or below the boundary is never truncated as
 “recovery.”
 
+Room creation follows the same publication boundary. Before committed-boundary publication begins,
+failed setup is removed while writer authority is still held. After it begins, any ambiguous state is
+preserved for inspection and reconciliation; creation never releases ownership and then recursively
+deletes the room. Failure to clean the already-consumed temp pathname after a successful rename and
+directory sync does not revoke an otherwise durable publication.
+
 Writer ownership is an OS-owned loopback listener acquired before any scan (which may remove an
 unaccepted suffix). Its deterministic endpoint is derived from the filesystem's physical room
 identity (`device + inode`, with canonical realpath only where the filesystem exposes neither), so
