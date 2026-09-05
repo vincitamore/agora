@@ -1,7 +1,8 @@
 // @ts-check
 import test from "node:test";
 import assert from "node:assert/strict";
-import { NativeFrameDecoder, NATIVE_PROTOCOL, canonicalJson, encodeNativeFrame, nativeCursor, nativeDigest, parseNativeCursor, validateNativeEnvelope } from "../src/native-protocol.mjs";
+import { NativeFrameDecoder, NATIVE_PROTOCOL, canonicalJson, encodeNativeFrame, nativeCursor, nativeDigest,
+  nativeHandshakeProof, parseNativeCursor, validateNativeEnvelope, verifyNativeHandshakeProof } from "../src/native-protocol.mjs";
 
 test("native protocol frames survive arbitrary chunk boundaries and several frames per chunk", () => {
   const values = [
@@ -52,4 +53,14 @@ test("native payload digests are independent of object key insertion order", () 
   assert.equal(canonicalJson({ b: 2, a: [3, { z: true, y: null }] }), '{"a":[3,{"y":null,"z":true}],"b":2}');
   assert.equal(nativeDigest({ a: 1, b: 2 }), nativeDigest({ b: 2, a: 1 }));
   assert.notEqual(nativeDigest({ a: 1, b: 2 }), nativeDigest({ a: 1, b: 3 }));
+});
+
+test("native handshake proofs bind phase, boot epoch and the fresh transcript", () => {
+  const secret = "service_secret_0000000000000001";
+  const transcript = { bootEpoch: "a".repeat(32), requestId: "b".repeat(32), serverChallenge: "c".repeat(32),
+    accountId: "seat_account_0001", seatLabel: "admin-pc" };
+  const proof = nativeHandshakeProof(secret, "server", transcript);
+  assert.equal(verifyNativeHandshakeProof(proof, secret, "server", transcript), true);
+  assert.equal(verifyNativeHandshakeProof(proof, secret, "client", transcript), false);
+  assert.equal(verifyNativeHandshakeProof(proof, secret, "server", { ...transcript, bootEpoch: "d".repeat(32) }), false);
 });
