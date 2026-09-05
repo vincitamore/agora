@@ -53,16 +53,29 @@ random room epoch fences restored or superseded writers and the host assigns a s
 sequence inside it. A wrong epoch, a future sequence, a retention gap or corrupted log refuses
 without advancing.
 
-The host log uses bounded length-prefixed records with a SHA-256 record checksum. Each committed
+The host log uses bounded length-prefixed records with a SHA-256 record checksum. A separately
+synced committed-boundary record names the acknowledged byte offset, sequence and digest. Restart
+may discard bytes only beyond that boundary; a log shorter than it is acknowledged damage and
+refuses rather than reusing a cursor. Each committed
 record contains the authenticated account ID, stable operation ID, payload digest, preceding-record
 digest, assigned sequence and normalized Message. The host rebuilds its deduplication index from
 that log. Readers retain an independent `(room, epoch, sequence, digest)` checkpoint and require the
 host to reproduce that exact prefix before accepting a suffix. The internal chain detects damage but
 cannot certify its own history: a first-time reader cannot detect an invented history, and isolated
 readers cannot detect every malicious equivocation. A partial
-last frame can only precede the sync/acceptance boundary and is removed on restart with the number
-of recovered bytes reported; a complete frame with a bad checksum is corruption and is never
-truncated as “recovery.”
+or complete suffix beyond the committed boundary has no receipt and is removed on restart with the
+number of recovered bytes reported; damage at or below the boundary is never truncated as
+“recovery.”
+
+Writer ownership is an OS-owned local endpoint acquired before any scan (which may remove an
+unaccepted suffix). A second store object refuses. Process death releases the endpoint; a stale
+POSIX socket is probed and removed only when no writer answers. Serialization inside one JavaScript
+object is not treated as room exclusivity.
+
+The first store implementation keeps its committed-record and operation indexes resident. Each
+room therefore persists an explicit record ceiling (default 100,000) and refuses before crossing
+it. Retention/index compaction must replace that ceiling before this store is claimed suitable for
+an indefinitely lived high-volume room; disk durability alone is not a RAM-capacity argument.
 
 Text and attachment bytes have different commit paths. For a durable attachment message, the host
 first receives and verifies bounded bytes into an inert snapshot, syncs and atomically installs the
