@@ -1205,6 +1205,10 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         try {
           subscription = await openNativeSubscription({ stateRoot, roomId: transport.room, since: seeded.cursor });
           console.error(`agora: subscribed to ${roomAlias} through the seat service (${subscription.seat.seatLabel}); events wake this watch, nothing polls`);
+          if (subscription.neverOffered) {
+            const h = subscription.neverOffered;
+            console.error(`agora: no position was saved for ${key}, so this watch starts at the newest window: committed positions ${h.from} to ${h.to} (${h.count}) were never offered to this session by it; run \`agora cursor ${roomAlias} --set ${h.from.split(":")[0]}:0\` to be offered them from the start`);
+          }
         } catch (e) {
           if (!(e instanceof ServiceDarkError)) throw e;
           console.error(`agora: ${e.message}`);
@@ -1413,6 +1417,9 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         threads: result.threads,
         evicted,
         following: result.following || following,
+        // additive, present only when a first arm started after committed positions this session was
+        // never offered; stated as positions, not as cursor movement, so every other watch line is unchanged
+        ...(subscription?.neverOffered ? { never_offered: subscription.neverOffered } : {}),
         session_wakes: sessionWakes,
         bytes_delivered: bytesDelivered,
         ...(result.reason ? { reason: result.reason } : {}),

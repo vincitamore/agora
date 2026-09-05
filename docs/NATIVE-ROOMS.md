@@ -194,7 +194,7 @@ shared descriptor.
 
 A room whose config names `transport: native` and a `roomId` is watched by a subscriber, not a
 poller: `agora watch <alias>` connects through the descriptor, completes the service-first hello,
-subscribes from this session's saved cursor (a session with none starts at the newest window, as a read with no cursor does on every transport) and wakes on `event` frames. The subscriber holds what
+subscribes from this session's saved cursor (a session with none starts at the newest window, as a read with no cursor does on every transport; when the room is longer than that window the watch names the committed positions that were never offered to this session, as positions and never as cursor movement, carries them as `never_offered` on the `watch-result` line (present only then), and names `cursor --set <epoch>:0` as the way to be offered them) and wakes on `event` frames. The subscriber holds what
 makes a wake this session's: the cursor, the posted ledger, the `--wake` predicate, coalescing and
 the printed lines; the service is handed a room and a cursor and nothing else, so no counterpart's
 trailer can steer the fan-out. The lines, the cursor filename, the armed record (with its build,
