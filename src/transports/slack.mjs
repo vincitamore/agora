@@ -1,5 +1,6 @@
 // @ts-check
 import { AgoraError, EXIT, jitter, parseSignature, sleep as defaultSleep } from "../core.mjs";
+import { createHash } from "node:crypto";
 import { mkdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -20,6 +21,54 @@ export const SLACK_READ_PAGES = 10;
 /** A screenshot is useful; an unbounded authenticated download is a disk-fill primitive. */
 export const SLACK_IMAGE_MAX_BYTES = 20 * 1024 * 1024;
 export const SLACK_IMAGE_MAX_PER_MESSAGE = 8;
+
+/** Pages one reconciliation window walks; a face settles inside seconds, so a window is small. */
+const SLACK_HISTORY_WINDOW_PAGES = 3;
+
+/**
+ * A Slack call that failed, carrying the one fact a face needs and the message alone cannot say:
+ * whether Slack ANSWERED. `answered` is true when the request reached Slack and came back with
+ * `ok: false` or a non-429 4xx (the post did not land; a face records `refused`). It is false for
+ * a link death after send, a 5xx, or the 429 ladder exhausting (the post may have landed; a face
+ * records `unknown` and reconciles before any retry). `sent` is false only when the failure
+ * happened before any request left this process (no connection could be made), which is the one
+ * network failure that cannot have landed anything.
+ */
+export class SlackApiError extends AgoraError {
+  /** @param {string} message @param {{ answered: boolean, sent?: boolean, status?: number, error?: string, method?: string }} facts */
+  constructor(message, facts) {
+    super(message);
+    this.name = "SlackApiError";
+    this.answered = facts.answered;
+    this.sent = facts.sent ?? true;
+    this.status = facts.status;
+    this.error = facts.error;
+    this.method = facts.method;
+  }
+}
+
+const NEVER_CONNECTED = /\b(ENOTFOUND|EAI_AGAIN|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH|ENETDOWN)\b/;
+
+/** Did a fetch failure happen before any bytes left? Resolution and connection refusals cannot have landed a post. @param {unknown} e */
+export function failedBeforeSend(e) {
+  if (!(e instanceof Error)) return false;
+  const cause = /** @type {{ code?: unknown, message?: unknown }} */ (/** @type {any} */ (e).cause ?? {});
+  if (typeof cause.code === "string" && NEVER_CONNECTED.test(cause.code)) return true;
+  if (typeof cause.message === "string" && NEVER_CONNECTED.test(cause.message)) return true;
+  return NEVER_CONNECTED.test(e.message);
+}
+
+/**
+ * The face half of the transport (P5): what `src/faces.mjs` calls beyond the shared Transport
+ * contract. Every member here is reachable only through a face; the CLI's verbs never call them.
+ * @typedef {object} SlackFaceTransport
+ * @property {() => Promise<{ id: string, name: string, botId?: string }>} whoami
+ * @property {(text: string, opts?: { thread?: string, metadata?: { event_type: string, event_payload: Record<string, string> } }) => Promise<import('../core.mjs').PostResult>} post
+ * @property {(window: { oldest: string, latest: string }) => Promise<{ messages: any[], complete: boolean }>} history
+ * @property {(file: { name: string, length: number }) => Promise<{ uploadUrl: string, fileId: string }>} uploadUrl
+ * @property {(file: { uploadUrl: string, bytes: Buffer, mimetype: string, digest: string }) => Promise<void>} putUpload
+ * @property {(file: { fileId: string, title: string, thread?: string }) => Promise<{ fileId: string }>} completeUpload
+ */
 
 /** @param {any} file */
 function attachmentMeta(file) {
@@ -177,7 +226,7 @@ export function encodeSlackText(text) {
  * Scopes: channels:history, channels:read, chat:write, groups:history, groups:read, users:read.
  * @param {import('../core.mjs').RoomConfig} room
  * @param {{ token: string, fetch?: typeof fetch, sleep?: (ms: number) => Promise<void>, random?: () => number, mediaDir?: string, imageMaxBytes?: number }} deps
- * @returns {import('../core.mjs').Transport}
+ * @returns {import('../core.mjs').Transport & SlackFaceTransport}
  */
 export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep = defaultSleep, random = Math.random, mediaDir, imageMaxBytes = SLACK_IMAGE_MAX_BYTES }) {
   const channel = String(room.channel ?? "");
@@ -186,16 +235,27 @@ export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep
   /** @type {Map<string, string>} */
   const names = new Map();
 
-  /** @param {string} method @param {Record<string, string>} params @param {{ post?: boolean }} [opts] */
+  /**
+   * One Slack Web API call. A POST carries a JSON body, so a structured field (the per-message
+   * `metadata` rider) travels as an object inside it, never as a stringified form field.
+   * @param {string} method @param {Record<string, unknown>} params @param {{ post?: boolean }} [opts]
+   */
   async function call(method, params, { post = false } = {}) {
     for (let attempt = 0; attempt < 4; attempt++) {
-      const res = post
-        ? await f(`${api}/${method}`, {
-            method: "POST",
-            headers: { authorization: `Bearer ${token}`, "content-type": "application/json; charset=utf-8" },
-            body: JSON.stringify(params),
-          })
-        : await f(`${api}/${method}?${new URLSearchParams(params)}`, { headers: { authorization: `Bearer ${token}` } });
+      let res;
+      try {
+        res = post
+          ? await f(`${api}/${method}`, {
+              method: "POST",
+              headers: { authorization: `Bearer ${token}`, "content-type": "application/json; charset=utf-8" },
+              body: JSON.stringify(params),
+            })
+          : await f(`${api}/${method}?${new URLSearchParams(/** @type {Record<string, string>} */ (params))}`, { headers: { authorization: `Bearer ${token}` } });
+      } catch (e) {
+        // never echo the message: a fetch failure can carry the URL it was sent to
+        throw new SlackApiError(`slack ${method}: ${failedBeforeSend(e) ? "unreachable" : "the link died during the request"}`,
+          { answered: false, sent: !failedBeforeSend(e), method });
+      }
       if (res.status === 429) {
         // every rate-limited watcher is handed the same retry-after, so the wait is jittered:
         // without it a loose herd comes back as a tight one and limits itself again
@@ -204,14 +264,15 @@ export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep
         continue;
       }
       if (!res.ok) {
-        throw new AgoraError(`slack ${method}: HTTP ${res.status}`);
+        // a 4xx is Slack's answer to this request; a 5xx is a gateway that may have relayed it
+        throw new SlackApiError(`slack ${method}: HTTP ${res.status}`, { answered: res.status < 500, status: res.status, method });
       }
       /** @type {any} */
       const body = await res.json();
-      if (!body.ok) throw new AgoraError(`slack ${method}: ${body.error ?? "not ok"}`);
+      if (!body.ok) throw new SlackApiError(`slack ${method}: ${body.error ?? "not ok"}`, { answered: true, status: res.status, error: String(body.error ?? "not ok"), method });
       return body;
     }
-    throw new AgoraError(`slack ${method}: rate limited`);
+    throw new SlackApiError(`slack ${method}: rate limited`, { answered: false, method });
   }
 
   /** @param {string} id */
@@ -313,7 +374,7 @@ export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep
     });
   }
 
-  return {
+  return /** @type {import('../core.mjs').Transport & SlackFaceTransport} */ ({
     kind: "slack",
     room: channel,
     threads: true,
@@ -322,7 +383,73 @@ export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep
     validateThread,
     async whoami() {
       const body = await call("auth.test", {});
-      return { id: String(body.user_id), name: String(body.user) };
+      // bot_id is what Slack stamps on this app's own messages; a face reconciliation keys on it
+      return { id: String(body.user_id), name: String(body.user), ...(typeof body.bot_id === "string" ? { botId: body.bot_id } : {}) };
+    },
+    /**
+     * The face half (P5). A bounded window of raw history for reconciling a face whose response
+     * was lost: every message Slack holds between two ts values, riders (`metadata`) and `files`
+     * included, oldest first. Throws on a failed read; the caller never reposts on a throw.
+     * @param {{ oldest: string, latest: string }} window ts values, inclusive
+     */
+    async history({ oldest, latest }) {
+      /** @type {Record<string, string>} */
+      const base = { channel, limit: "200", oldest, latest, inclusive: "true" };
+      /** @type {any[]} */
+      const raw = [];
+      let cursor;
+      let complete = false;
+      for (let page = 0; page < SLACK_HISTORY_WINDOW_PAGES; page++) {
+        const body = await call("conversations.history", cursor ? { ...base, cursor } : base);
+        raw.push(...(body.messages ?? []));
+        cursor = body.response_metadata?.next_cursor || undefined;
+        if (!(cursor && body.has_more)) { complete = true; break; }
+      }
+      raw.sort((a, b) => Number(a.ts) - Number(b.ts));
+      return { messages: raw, complete };
+    },
+    /**
+     * Step one of an upload: Slack issues a pre-signed URL and the file id the bytes will carry.
+     * Nothing is visible in any channel until `completeUpload`, so this step is safe to repeat.
+     * @param {{ name: string, length: number }} file
+     */
+    async uploadUrl({ name, length }) {
+      if (length > imageMaxBytes) throw new AgoraError(`image exceeds the ${imageMaxBytes}-byte limit`);
+      const body = await call("files.getUploadURLExternal", { filename: name, length: String(length) });
+      return { uploadUrl: String(body.upload_url), fileId: String(body.file_id) };
+    },
+    /**
+     * Step two: the bytes, to the pre-signed URL. The digest is re-checked against the bytes here,
+     * so a face never carries a copy the seat did not verify. Still invisible; safe to repeat.
+     * @param {{ uploadUrl: string, bytes: Buffer, mimetype: string, digest: string }} file
+     */
+    async putUpload({ uploadUrl, bytes, mimetype, digest }) {
+      if (!mimetype.toLowerCase().startsWith("image/")) throw new AgoraError(`only images are uploaded to a face; ${mimetype} is not one`);
+      if (bytes.length > imageMaxBytes) throw new AgoraError(`image exceeds the ${imageMaxBytes}-byte limit`);
+      const actual = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+      if (actual !== digest) throw new AgoraError(`image bytes do not match their digest; not uploaded`);
+      if (!/^https:\/\/[^/]*slack\.com\//.test(uploadUrl)) throw new AgoraError(`upload url is not a slack.com origin; not uploaded`);
+      let res;
+      try {
+        res = await f(uploadUrl, { method: "POST", headers: { "content-type": mimetype }, body: new Uint8Array(bytes) });
+      } catch (e) {
+        throw new SlackApiError(`slack upload: ${failedBeforeSend(e) ? "unreachable" : "the link died during the upload"}`, { answered: false, sent: !failedBeforeSend(e), method: "upload" });
+      }
+      if (!res.ok) throw new SlackApiError(`slack upload: HTTP ${res.status}`, { answered: res.status < 500, status: res.status, method: "upload" });
+    },
+    /**
+     * Step three, the only visible one: share the uploaded file into this channel (files:write).
+     * The caller writes its pending record before this call and reconciles by file id after a
+     * lost response, because this is the step that puts a message in front of humans.
+     * @param {{ fileId: string, title: string, thread?: string }} file
+     */
+    async completeUpload({ fileId, title, thread }) {
+      /** @type {Record<string, unknown>} */
+      const params = { files: [{ id: fileId, title }], channel_id: channel };
+      if (thread) params.thread_ts = thread;
+      const body = await call("files.completeUploadExternal", params, { post: true });
+      const shared = Array.isArray(body.files) ? body.files.find((/** @type {any} */ x) => x?.id === fileId) ?? body.files[0] : undefined;
+      return { fileId: String(shared?.id ?? fileId) };
     },
     async read({ thread, since, limit = 200, pages = SLACK_READ_PAGES } = {}) {
       /** @type {Record<string, string>} */
@@ -392,16 +519,22 @@ export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep
       for (const m of window) out.push(await toMessage(m, thread));
       return out;
     },
-    async post(text, { thread } = {}) {
+    /**
+     * `metadata` is Slack's per-message structured rider (an optional machine-readable rider, never
+     * the carrier): a face puts its origin id there so a lost response can be reconciled exactly.
+     * @param {string} text @param {{ thread?: string, metadata?: { event_type: string, event_payload: Record<string, string> } }} [opts]
+     */
+    async post(text, { thread, metadata } = {}) {
       const payload = encodeSlackText(text);
       if (payload.length > SLACK_TEXT_MAX) {
         throw new AgoraError(`slack post is ${payload.length} rendered characters (trailers and signature included); the limit is ${SLACK_TEXT_MAX}`, EXIT.usage);
       }
-      /** @type {Record<string, string>} */
+      /** @type {Record<string, unknown>} */
       const params = { channel, text: payload };
       if (thread) params.thread_ts = thread;
+      if (metadata) params.metadata = metadata;
       const body = await call("chat.postMessage", params, { post: true });
       return { id: String(body.ts), cursor: String(body.ts) };
     },
-  };
+  });
 }
