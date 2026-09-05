@@ -1,7 +1,7 @@
 // @ts-check
 import test from "node:test";
 import assert from "node:assert/strict";
-import { githubTransport } from "../src/transports/github.mjs";
+import { GITHUB_COMMENT_MAX, GitHubApiError, githubFaceHalf, githubTransport } from "../src/transports/github.mjs";
 import { createTransport, tokenSource } from "../src/transports/index.mjs";
 import { fakeFetch } from "./helpers.mjs";
 
@@ -140,4 +140,40 @@ test("tokenSource and createTransport name the same GITHUB_TOKEN", async () => {
     if (prev === undefined) delete process.env.GITHUB_TOKEN;
     else process.env.GITHUB_TOKEN = prev;
   }
+});
+
+test("github face half: history is a bounded unconditional window on created_at, a call error carries the answered and sent facts, and the half reads a raw comment", async () => {
+  const { fetch, calls } = fakeFetch([
+    ["/user", () => ({ body: { id: 7, login: "vincitamore" } })],
+    ["/issues/3/comments", (url, init) => {
+      if (init?.method === "POST") return { status: 422, body: { message: "Validation Failed" } };
+      if (url.searchParams.get("page") === "2") return { status: 502, body: { message: "Bad Gateway" } };
+      return { body: comments };
+    }],
+  ]);
+  const t = githubTransport({ transport: "github", repo: "example-org/example-repo", issue: 3 }, { token: "ghp_x", fetch });
+  const win = await t.history({ since: "2026-09-03T05:30:00.000Z", until: "2026-09-03T06:00:00.000Z" });
+  assert.deepEqual(win.messages.map((c) => c.id), [11, 12], "the edited old comment (updated inside, created before) is out; the later one is past until");
+  assert.equal(win.complete, true);
+  const q = calls.at(-1)?.url.searchParams;
+  assert.equal(q?.get("since"), "2026-09-03T05:30:00.000Z");
+  assert.equal(q?.get("per_page"), "100");
+  assert.equal(/** @type {any} */ (calls.at(-1)?.init?.headers)["if-none-match"], undefined, "a reconciliation read is never conditional");
+  await assert.rejects(t.post("x"), (e) => e instanceof GitHubApiError && e.answered === true && e.sent === true && e.status === 422 && /422 Validation Failed/.test(e.message));
+  const gone = githubTransport({ transport: "github", repo: "a/b", issue: 3 }, { token: "ghp_x", fetch: async () => { throw new TypeError("fetch failed", { cause: { code: "ENOTFOUND" } }); } });
+  await assert.rejects(gone.whoami(), (e) => e instanceof GitHubApiError && e.sent === false && e.answered === false && e.message === "github GET /user: unreachable");
+  const died = githubTransport({ transport: "github", repo: "a/b", issue: 3 }, { token: "ghp_x", fetch: async () => { throw new Error("socket hang up https://api.github.com/secret?token=ghp_abcdefghijklmnopqrstu"); } });
+  await assert.rejects(died.whoami(), (e) => e instanceof GitHubApiError && e.sent === true && e.answered === false && e.message === "github GET /user: the link died during the request");
+  // the half
+  assert.equal(githubFaceHalf.textMax, GITHUB_COMMENT_MAX);
+  assert.equal(githubFaceHalf.encode("a & <b>"), "a & <b>", "verbatim on the wire");
+  assert.equal(githubFaceHalf.rider({ body: "<!-- anything -->" }), undefined, "no rider: the body is never parsed for one");
+  assert.equal(githubFaceHalf.ownAccount({ user: { id: 7, login: "vincitamore" } }, { id: "7", name: "vincitamore" }), true);
+  assert.equal(githubFaceHalf.ownAccount({ user: { id: 9, login: "other" } }, { id: "7", name: "vincitamore" }), false);
+  assert.equal(githubFaceHalf.ownAccount({}, { id: "7", name: "vincitamore" }), false);
+  assert.equal(githubFaceHalf.idOf({ id: 4242 }), "4242");
+  assert.deepEqual(githubFaceHalf.window(Date.parse("2026-09-05T11:59:55.000Z"), Date.parse("2026-09-05T12:00:30.000Z")), { since: "2026-09-05T11:59:55.000Z", until: "2026-09-05T12:00:30.000Z" });
+  assert.equal(githubFaceHalf.pictureLine({ digest: "sha256:ab" }, "image x.png (image/png, 1 bytes)"), "image x.png (image/png, 1 bytes) sha256:ab");
+  assert.equal(githubFaceHalf.pictureLine({ url: "https://h/x.png", digest: "sha256:ab" }, "L"), "L <https://h/x.png>");
+  assert.equal(githubFaceHalf.pictureLine({ url: "file:///tmp/x.png", digest: "sha256:ab" }, "L"), "L sha256:ab", "only a public http(s) link is a link");
 });
