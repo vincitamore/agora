@@ -4,6 +4,8 @@ import { localTransport } from "./local.mjs";
 import { githubTransport } from "./github.mjs";
 import { githubEventsTransport } from "./github-events.mjs";
 import { slackTransport } from "./slack.mjs";
+import { nativeTransport } from "./native.mjs";
+import { stateDir } from "../core.mjs";
 
 /** GITHUB_TOKEN / GH_TOKEN, the same pair tokenSource reports as "env" for github rooms. */
 function githubEnvToken() {
@@ -16,6 +18,7 @@ export const TRANSPORTS = Object.freeze({
   github: { needsToken: true, describe: "one issue on a repo; comments are messages; no threads" },
   "github-events": { needsToken: true, describe: "a read-only feed of a repo's, an org's, or a user's activity; events are messages; cursor = event id; narrow it with events and refs" },
   slack: { needsToken: true, describe: "one channel; threads are Slack threads; bot token" },
+  native: { needsToken: false, describe: "a room hosted by this seat's native service; cursor = <epoch>:<sequence>; a watch subscribes to the service instead of polling" },
 });
 
 /**
@@ -46,6 +49,8 @@ export async function createTransport(alias, room, cfg, deps = {}) {
       if (!token) throw new AgoraError(`room "${alias}": no token (set tokenEnv or tokenFile to the bot token)`);
       return slackTransport(room, { token, fetch: deps.fetch, mediaDir: deps.mediaDir });
     }
+    case "native":
+      return nativeTransport(room, { actor: cfg.actor, stateRoot: stateDir(cfg) });
     default:
       throw new AgoraError(`room "${alias}": unknown transport "${room.transport}" (have: ${Object.keys(TRANSPORTS).join(", ")})`);
   }
@@ -56,7 +61,7 @@ export async function createTransport(alias, room, cfg, deps = {}) {
  * @param {import('../core.mjs').RoomConfig} room
  */
 export async function tokenSource(room) {
-  if (room.transport === "local") return "none";
+  if (room.transport === "local" || room.transport === "native") return "none";
   const { source } = await resolveToken(room);
   if (source !== "missing") return source;
   if (room.transport === "github" || room.transport === "github-events") {

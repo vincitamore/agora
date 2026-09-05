@@ -63,6 +63,7 @@ import { formatTrailers, matchesAddress, parseTrailers, TRAILER_VALUE_MAX, trail
 import { SLACK_TEXT_MAX, chunkAtLines, encodeSlackText } from "../src/transports/slack.mjs";
 import { codexLiveness, codexSpawnWarning, codexThread, queueCodex, resolveCodexBinary } from "../src/codex.mjs";
 import { buildLabel, buildPredates, cacheTtls, clearWatchMode, installedBuild, touchWatchMode, watchModeSentinel } from "../src/harness.mjs";
+import { SERVICE_DARK, ServiceDarkError, openNativeSubscription, serviceDescriptorStatus } from "../src/wake/subscriber.mjs";
 
 /**
  * The arithmetic `doctor`'s poll rate is: the threads every watching session follows, each read at
@@ -146,7 +147,7 @@ const SCHEMA = {
         "--digest <s>": "render each message as author, cursor, first 80 characters, one envelope per period; the tool never summarises what a message means. A room config key digest (seconds) enables it when the flag is omitted; never a per-transport default",
         "--files": "materialize Slack-hosted images into this session's media directory; metadata is always carried",
       },
-      does: "deliver new messages since this session's saved cursor and advance it after delivery, skipping what this session posted; exit 42 when something arrived, 0 when nothing did, in every mode; always ends with one watch-result line. On each poll, a session on this seat that has gone dark and that has state in this room is announced to the room once, by whichever watch notices first, one post for the whole sweep",
+      does: "deliver new messages since this session's saved cursor and advance it after delivery, skipping what this session posted; exit 42 when something arrived, 0 when nothing did, in every mode; always ends with one watch-result line. On each poll, a session on this seat that has gone dark and that has state in this room is announced to the room once, by whichever watch notices first, one post for the whole sweep. On a native room the watch subscribes to the seat service and wakes on its events instead of polling, with the same lines, cursor and exit codes; a service that is absent, refuses the hello, or closes the socket ends the watch with exit 1 and reason service-dark on the watch-result line, never as a quiet room",
     },
     cursor: {
       args: ["<room>"],
@@ -342,6 +343,8 @@ async function pollRates(cfg, stateRoot) {
   for (const { slug, dir, key, armed } of await listArmed(stateRoot)) {
     // a registration from before a reboot names a pid that now belongs to something else
     if (!armedAlive(armed)) continue;
+    // a subscriber reads nothing on a cadence: the service pushes, so it spends no poll budget
+    if (armed.subscriber) continue;
     const room = cfg.rooms[armed.room];
     if (!room) continue;
     const followed = armed.follow ? Object.keys((await readFollow(dir, key)).threads).length : 0;
@@ -725,6 +728,21 @@ async function main(argv) {
     }
     // The armed registrations this seat is actually paying for; a pid that is gone is a leftover.
     const armedHere = (await listArmed(stateRoot)).filter((a) => armedAlive(a.armed));
+    // The seat service is a seat resource, not a session: named by its descriptor's public fields
+    // (never the secret) and by whether the pid it names still answers. A native subscriber is a
+    // live watch on that service, listed with the build it loaded like every other watch; it is
+    // left out of the poll arithmetic because the service pushes and it reads nothing on a cadence.
+    const native = await serviceDescriptorStatus(stateRoot);
+    const subscribersHere = armedHere.filter((a) => a.armed.subscriber);
+    if (json) {
+      console.log(JSON.stringify({ type: "native-service", ...native }));
+      for (const a of subscribersHere)
+        console.log(JSON.stringify({ type: "subscriber", session: a.slug, room: a.armed.room, key: a.key, pid: a.armed.pid, wake: a.armed.wake ?? "all", mode: a.armed.mode ?? null, build: a.armed.build ?? null, buildLabel: buildLabel(a.armed.build), since: a.armed.since ?? null, startedAt: a.armed.startedAt }));
+    } else {
+      console.log(`\nnative  service ${native.present ? `descriptor ${native.descriptor}  pid ${native.pid ?? "unknown"} ${native.pidAlive === undefined ? "" : native.pidAlive ? "(answers)" : "(gone)"}  seat ${native.seatLabel} account ${native.accountId} boot ${native.bootEpoch}` : `absent (${native.error})`}`);
+      for (const a of subscribersHere)
+        console.log(`        subscriber ${a.slug} ${a.armed.room} pid ${a.armed.pid} wake ${a.armed.wake ?? "all"} build ${buildLabel(a.armed.build)}`);
+    }
 
     const rows = await listRecords(stateRoot);
     const live = rows.filter((r) => r.record && r.state !== "gone");
@@ -1109,10 +1127,13 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         throw new AgoraError(`--follow watches the room and the threads this session posted in; it cannot be combined with --thread`, EXIT.usage);
       const mode = values.once ? "once" : values.stream ? "stream" : "until-new";
       const key = cursorKey(roomAlias, thread);
-      const interval = roomInterval(room, positive(values.interval, "interval"));
+      const pollInterval = roomInterval(room, positive(values.interval, "interval"));
       const pages = positive(values.pages, "pages");
       const threadInterval = roomThreadInterval(room, positive(values["thread-interval"], "thread-interval"));
       const forSeconds = num(values.for, "for", 0) ?? 0;
+      // a subscriber is woken by events, so on a native room the interval only bounds the idle wait
+      // between housekeeping passes; a budget shorter than it is honoured as the wait, not as one poll
+      const interval = room.transport === "native" && forSeconds > 0 ? Math.min(pollInterval, forSeconds) : pollInterval;
       const coalesceSeconds = positive(values.coalesce, "coalesce");
       const maxBatch = positive(values["max-batch"], "max-batch");
       const digestSeconds = positive(values.digest, "digest") ?? (Number(room.digest) > 0 ? Number(room.digest) : undefined);
@@ -1120,7 +1141,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       const holdSeconds = coalesceSeconds ?? digestSeconds;
       // the loop gives up before a poll that would land past the deadline, so a budget under one
       // interval is one poll in milliseconds -- exit 0 there means "nothing in 140 ms", not "in 10 s"
-      if (forSeconds > 0 && forSeconds < interval)
+      if (forSeconds > 0 && forSeconds < interval && room.transport !== "native")
         console.error(`agora: --for ${forSeconds} is shorter than the ${interval}s poll interval, so this is a single poll (use --once, or lower --interval)`);
       /** @type {{ thread: string, bin: string } | undefined} */
       let codexQueue;
@@ -1156,6 +1177,41 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       // armedAlive, not pidAlive: a registration written before a reboot names a pid that now
       // belongs to something else, and warning about a watch that is not there never self-heals
       if (held && armedAlive(held)) console.error(`agora: another watch holds this cursor (pid ${held.pid}); two watches on one key double-deliver`);
+      // Named before the registration is written, so a rejected value never leaves an armed record
+      // behind, and so the record says what wakes this watch: `doctor` reads it back to tell a seat
+      // whose every watch is narrowed that nothing here will wake for an unaddressed request.
+      const wakeMode = /** @type {'all' | 'addressed' | 'mine'} */ (values.wake ?? "all");
+      if (!["all", "addressed", "mine"].includes(wakeMode)) throw new AgoraError(`--wake takes all, addressed, or mine`, EXIT.usage);
+      let sessionWakes = 0;
+      let bytesDelivered = 0;
+      /** @param {string} s */
+      const countedLog = (s) => {
+        bytesDelivered += Buffer.byteLength(s) + 1;
+        console.log(s);
+      };
+      /** @type {Awaited<ReturnType<typeof watch>> | undefined} */
+      let result;
+      /**
+       * A native room is not polled: this process subscribes to the seat service from this session's
+       * cursor and the service pushes each committed event. The predicate, the ledger, coalescing and
+       * the cursor stay here (the service is handed a room and a cursor, nothing else), and the loop
+       * below is the same one the poller runs, its sleep now a wait that ends when an event lands. A
+       * service that is absent, refuses the hello, or closes the socket is exit 1 with `service-dark`
+       * on the result line: never 0, because 0 reads as a quiet room.
+       * @type {import('../src/wake/subscriber.mjs').NativeSubscription | undefined}
+       */
+      let subscription;
+      if (room.transport === "native") {
+        try {
+          subscription = await openNativeSubscription({ stateRoot, roomId: transport.room, since: seeded.cursor });
+          console.error(`agora: subscribed to ${roomAlias} through the seat service (${subscription.seat.seatLabel}); events wake this watch, nothing polls`);
+        } catch (e) {
+          if (!(e instanceof ServiceDarkError)) throw e;
+          console.error(`agora: ${e.message}`);
+          result = { fired: false, cursor: seeded.cursor, polls: 0, skipped: 0, filtered: 0, delivered: 0, elapsedMs: 0, following: 0, threads: {}, reason: SERVICE_DARK };
+        }
+      }
+      if (!result) {
       // Under Claude Code a persistent watch would otherwise turn every delivery into a
       // maintenance-checklist turn; the stop hook honours a sentinel beside the transcript
       // while the watch runs. Touched on every poll (the hook treats it stale after 12 h),
@@ -1165,11 +1221,6 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       const watchMode = mode === "once" ? null : watchModeSentinel(process.env, process.cwd());
       if ((await touchWatchMode(watchMode)) === "created")
         console.error(`agora: watch-mode sentinel ${watchMode?.sentinel} (the stop hook stays quiet while this watch runs)`);
-      // Named before the registration is written, so a rejected value never leaves an armed record
-      // behind, and so the record says what wakes this watch: `doctor` reads it back to tell a seat
-      // whose every watch is narrowed that nothing here will wake for an unaddressed request.
-      const wakeMode = /** @type {'all' | 'addressed' | 'mine'} */ (values.wake ?? "all");
-      if (!["all", "addressed", "mine"].includes(wakeMode)) throw new AgoraError(`--wake takes all, addressed, or mine`, EXIT.usage);
       await writeArmed(sdir, key, {
         room: roomAlias,
         thread,
@@ -1180,6 +1231,8 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         wake: wakeMode,
         pid: process.pid,
         build,
+        transport: room.transport,
+        ...(subscription ? { subscriber: true } : {}),
         ...(harnessPid(cfg, process.env).pid !== undefined ? { harnessPid: harnessPid(cfg, process.env).pid } : {}),
         since: seeded.cursor ?? null,
         startedAt: new Date().toISOString(),
@@ -1262,21 +1315,17 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         }
       };
 
-      let sessionWakes = 0;
-      let bytesDelivered = 0;
-      /** @param {string} s */
-      const countedLog = (s) => {
-        bytesDelivered += Buffer.byteLength(s) + 1;
-        console.log(s);
-      };
-      let result;
+      // the subscription is the room read; everything else (the departure announcement's post,
+      // whoami for the wake rule) still goes through the transport
+      const source = subscription ? { ...transport, read: (/** @type {import('../src/core.mjs').ReadOptions | undefined} */ o) => subscription.read(o) } : transport;
       try {
-        result = await watch(transport, {
+        result = await watch(source, {
           stateDir: sdir,
           key,
           thread,
           cursor: seeded.cursor,
           mode,
+          ...(subscription ? { sleep: (/** @type {number} */ ms) => subscription.wait(ms) } : {}),
           own: values.all ? undefined : () => readPosted(sdir),
           wake: wakeRule,
           urgent: holdSeconds || maxBatch ? urgent : undefined,
@@ -1334,8 +1383,10 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
           },
         });
       } finally {
+        subscription?.close();
         await removeArmed(sdir, key); // a thrown delivery must not leave the key registered
         await clearWatchMode(watchMode).catch(() => undefined);
+      }
       }
       // 42 means a watch delivered, in every mode: the schema and the design's contract line both
       // state it without a carve-out, and a bounded --stream is the shape a harness with no monitor

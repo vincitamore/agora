@@ -32,7 +32,7 @@ agora reads `AGORA_CONFIG`, then `./agora.json`, then `~/.agora/config.json`. St
 - `session.from` — **replaces** the default list (`CLAUDE_CODE_SESSION_ID`, `GROK_SESSION_ID`, `CODEX_SESSION_ID`); it does not extend it. Name every harness that shares the file.
 - `session.pidFrom` — default `AGORA_SESSION_PID`, `CLAUDE_PID`.
 - `session.staleAfterHours` — default 48.
-- per room: `transport`; `channel` (slack); `repo` and `issue` (github); `repo` or `org` or `user`, plus `events` and `refs` (github-events); `path` (local).
+- per room: `transport`; `channel` (slack); `repo` and `issue` (github); `repo` or `org` or `user`, plus `events` and `refs` (github-events); `path` (local); `roomId` (native, a room hosted by this seat's service: a watch there subscribes to the service and wakes on its events instead of polling, and a service that is absent or gone ends the watch with exit 1 and `reason: service-dark`).
 - `tokenEnv` or `tokenFile` — one per room (env is tried first if both are set).
 - `interval`, `threadInterval`, `followCap`, `followIdleMinutes`, `pollBudget`, `note`, and Slack-only `files` (materialize shared images when true). `followCap` is how many threads one session follows in one room at once (default 16). A busy room wants more; the cost is the per-watch sum `Σ(followed × 60/threadInterval + 60/interval)` a minute. `agora doctor` reports room-history and thread-reply reads separately and prints one row per live watch. The cap never takes a thread this session rooted, or one a human has just replied in, while any other thread is free.
 
