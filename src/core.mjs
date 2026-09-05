@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 
 const execFileAsync = promisify(execFile);
@@ -295,14 +296,14 @@ export function cursorKey(alias, thread) {
  * half-written file, and a half-written cursor reads as *absent*, which sends the seed path over
  * a real position. The rename is atomic, so a reader sees the old bytes or the new ones and never
  * a torn file. (`fs.promises.rename` replaces an existing file on Windows as well as on POSIX;
- * measured here before this was relied on.) The temp name carries the pid, so two processes
- * writing the same file do not share a temp file, and it is removed on failure rather than left
- * beside the state it was meant to become.
+ * measured here before this was relied on.) The temp name carries the pid and a per-call id, so
+ * two writers — two processes, or two calls in one process — do not share a temp file, and it is
+ * removed on failure rather than left beside the state it was meant to become.
  * @param {string} file @param {string} data
  */
 export async function writeFileAtomic(file, data) {
   await mkdir(path.dirname(file), { recursive: true });
-  const tmp = `${file}.tmp-${process.pid}`;
+  const tmp = `${file}.tmp-${process.pid}-${randomUUID()}`;
   try {
     await writeFile(tmp, data, "utf8");
     let last;
