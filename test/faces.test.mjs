@@ -14,7 +14,7 @@ import { validateOriginReference } from "../src/protocol/origin.mjs";
 import { SLACK_IMAGE_MAX_BYTES, SlackApiError, encodeSlackText, slackTransport } from "../src/transports/slack.mjs";
 import { GitHubApiError, githubTransport } from "../src/transports/github.mjs";
 import {
-  FACE_MAX_ATTEMPTS, FaceRunner, appendFaceRecord, classifyFaceFailure, faceKey, faceRecordsPath, faceText, isAddressed, isLanding,
+  FACE_BUILT, FACE_HALVES, FACE_MAX_ATTEMPTS, FaceRunner, faceHalf, appendFaceRecord, classifyFaceFailure, faceKey, faceRecordsPath, faceText, isAddressed, isLanding,
   normalizeSelectors, readFacePolicy, readFaceRecords, selectFaces, toFacePublication, writeFacePolicy,
 } from "../src/faces.mjs";
 import { fakeFetch, tmp } from "./helpers.mjs";
@@ -893,6 +893,13 @@ async function ghRig(o = {}) {
   const reader = () => transport.read({ since: "2026-09-05T00:00:00Z|0" });
   return { dir, cleanup, clock: c, runner, face, transport, calls, posts, lists, bodyOf, warned, reader, records: () => readFaceRecords(dir, ROOM), file: faceRecordsPath(dir, ROOM) };
 }
+
+test("the built faces are the halves the runner carries: FACE_BUILT is derived from FACE_HALVES and names github beside slack", () => {
+  assert.deepEqual([...FACE_BUILT], Object.keys(FACE_HALVES), "an admission list stated apart from the halves would let --add name a face the runner cannot publish, or refuse one it can");
+  assert.deepEqual([...FACE_BUILT], ["slack", "github"]);
+  assert.equal(faceHalf("github")?.transport, "github");
+  assert.equal(faceHalf("local"), undefined);
+});
 
 test("github / fixture 02 and 09 row 1: a native answer to a human faces the issue as ONE comment, the receipt before the call, the pending line before the request, the body verbatim with no rider", async () => {
   /** @type {string[]} */
