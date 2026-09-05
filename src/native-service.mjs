@@ -14,6 +14,7 @@ const REQUEST_TIMEOUT_MS = 10_000;
 const ENDPOINT_PROBE_TIMEOUT_MS = 500;
 
 const RECLAIM_AUTHORITY_FILE = "reclaim-authority.sqlite";
+const MAX_PORTABLE_UNIX_SOCKET_PATH_BYTES = 103;
 
 /** @param {string} directory @param {string} label */
 async function ensurePrivateStateDirectory(directory, label) {
@@ -38,8 +39,8 @@ function unusableReclaimAuthority(endpoint, file) {
 /**
  * SQLite is the one zero-dependency cross-process authority available in both
  * supported runtimes. Its OS lock is released on process death; placing the
- * database below the canonical 0700 state directory keeps the authority at
- * the same principal boundary as the Unix socket it protects.
+ * database beside the socket in its state-root-derived 0700 runtime directory
+ * keeps the authority at the same principal boundary as the endpoint.
  * @param {string} endpoint
  */
 async function acquireReclaimAuthority(endpoint) {
@@ -129,7 +130,20 @@ export async function nativeServiceEndpoint(root, accountId, platform = process.
   }
   const nativeDirectory = path.join(physicalRoot, "native");
   await ensurePrivateStateDirectory(nativeDirectory, "state directory");
-  return path.join(nativeDirectory, "service.sock");
+  const uid = process.getuid?.();
+  if (!Number.isSafeInteger(uid) || Number(uid) < 0) throw new AgoraError("native service cannot determine this POSIX user's uid");
+  // Darwin's sockaddr_un.sun_path is only 104 bytes including the terminator.
+  // State roots routinely exceed that under /private/var/folders, so bind at a
+  // short owner-only runtime path keyed by the canonical state root instead.
+  const runtimeRoot = path.join("/tmp", `agora-${uid}`);
+  await ensurePrivateStateDirectory(runtimeRoot, "runtime root");
+  const seat = createHash("sha256").update(physicalRoot).digest("hex").slice(0, 32);
+  const runtimeDirectory = path.join(runtimeRoot, seat);
+  await ensurePrivateStateDirectory(runtimeDirectory, "runtime directory");
+  const endpoint = path.join(runtimeDirectory, "service.sock");
+  if (Buffer.byteLength(endpoint, "utf8") > MAX_PORTABLE_UNIX_SOCKET_PATH_BYTES)
+    throw new AgoraError(`native service endpoint exceeds the portable Unix-socket path bound: ${endpoint}`);
+  return endpoint;
 }
 
 /** @param {net.Server} server @param {string} endpoint */
@@ -184,7 +198,7 @@ async function listenOwnedEndpoint(server, endpoint) {
   }
   // Probing and moving a stale Unix socket are two operations. Serialize the
   // whole second-probe -> quarantine -> bind window with a crash-releasing
-  // SQLite transaction under the same 0700 directory as the endpoint. A TCP
+  // SQLite transaction under the same 0700 runtime directory as the endpoint. A TCP
   // port is not equivalent: any local principal can bind it and the OS may
   // allocate it for an unrelated outbound connection.
   const authority = await acquireReclaimAuthority(endpoint);
