@@ -2,7 +2,7 @@
 import { ProtocolValidationError, readEnum, readInteger, readRecord, readString, readTimestamp, validateCursor, validateDigest, validateEpoch, validateNativeId, validateRoomId } from './common.mjs';
 
 /** @typedef {{scheme:'native'|'slack'|'github',authority:string,id:string}} AccountRef */
-/** @typedef {{host:AccountRef}} AcceptedHostContext Syntax projection, NOT a locally authenticated handle. */
+/** @typedef {{host:NativeAccountRef}} AcceptedHostContext Syntax projection, NOT a locally authenticated handle. */
 /** @typedef {{serviceId:string,serviceBootId:string}} ServiceRef */
 /** @typedef {{accountId:string,registrationId:string,generation:number}} RegistrationRef */
 /** @typedef {ReturnType<typeof validateNativeAccountRef>} NativeAccountRef */

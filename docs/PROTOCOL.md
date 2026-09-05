@@ -277,3 +277,8 @@ does not invent account attestations, registrations, attachment lifetime or
 custody. It is not a replacement decoder for historical frames: stored v1
 verification happens first, against unchanged bytes. New ingress remains
 strict rather than weakening its rules to match historical inputs.
+Historical unpaired surrogates cannot enter this new UTF-8 DTO; a consumer must
+report that representation refusal, never silently normalize or skip the frame.
+Well-formed legacy metadata retains its historical UTF-16-unit bounds. The
+compile-only `test/protocol-type-surface.mjs` fixture pins native host types,
+origin discrimination and the closed capability vocabulary under `npm run check`.

@@ -2,19 +2,19 @@
 import { ProtocolValidationError, readEnum, readRecord, readString, readTimestamp, validateRoomId } from './common.mjs';
 import { validateNativeAccountRef, validateServiceRef } from './identity.mjs';
 
-/** @typedef {ReturnType<typeof validateOriginSource>} OriginSource */
+/** @typedef {{transport:'native',host:import('./identity.mjs').NativeAccountRef,room:string,id:string}|{transport:'slack'|'github',room:string,id:string}} OriginSource */
 /** @typedef {ReturnType<typeof validateOriginReference>} OriginReference */
 
 /** Source metadata is distinct from destination identity and cannot manufacture host authority.
- * @param {unknown} value */
+ * @param {unknown} value @returns {OriginSource} */
 export function validateOriginSource(value) {
   const candidate = readRecord(value, ['transport', 'room', 'id'], ['host']);
   const transport = readEnum(candidate.transport, 'transport', ['native', 'slack', 'github']);
   const v = readRecord(value, ['transport', 'room', 'id', ...(transport === 'native' ? ['host'] : [])]);
-  return { transport,
-    ...(transport === 'native' ? { host: validateNativeAccountRef(v.host) } : {}),
-    room: transport === 'native' ? validateRoomId(v.room) : readString(v.room, 'room', { min: 1, max: 512, controls: true }),
-    id: readString(v.id, 'id', transport === 'native' ? { min: 64, max: 64, pattern: /^[a-f0-9]{64}$/ } : { min: 1, max: 512, controls: true }) };
+  if (transport === 'native') return { transport, host: validateNativeAccountRef(v.host),
+    room: validateRoomId(v.room), id: readString(v.id, 'id', { min: 64, max: 64, pattern: /^[a-f0-9]{64}$/ }) };
+  return { transport, room: readString(v.room, 'room', { min: 1, max: 512, controls: true }),
+    id: readString(v.id, 'id', { min: 1, max: 512, controls: true }) };
 }
 /** @param {unknown} value */
 export function validateOriginReference(value) {

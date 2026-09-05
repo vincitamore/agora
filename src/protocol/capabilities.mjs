@@ -7,7 +7,7 @@ import { validateAcceptedHostContext, validateNativeAccountRef } from './identit
 /** @typedef {ReturnType<typeof validateCapabilityOffer>} CapabilityOffer */
 /** @typedef {ReturnType<typeof validateNegotiatedCapabilities>} NegotiatedCapabilities */
 
-export const NATIVE_CAPABILITIES = Object.freeze(['contracts-v2', 'board-v1']);
+export const NATIVE_CAPABILITIES = Object.freeze(/** @type {const} */ (['contracts-v2', 'board-v1']));
 /** @param {unknown} value */
 function capabilities(value) {
   const result = readArray(value, 'capabilities', PROTOCOL_LIMITS.capabilities, (v) => readEnum(v, 'capabilities', NATIVE_CAPABILITIES));
