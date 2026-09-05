@@ -3,7 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { chmod, mkdir, mkdtemp, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import net from "node:net";
 import path from "node:path";
@@ -215,6 +215,44 @@ test("POSIX endpoint identity follows the state directory object across a rename
   await rename(root, moved);
   const after = await nativeServiceEndpoint(moved, ACCOUNT);
   assert.equal(after, before, "renaming one physical state directory does not mint a second service endpoint");
+});
+
+test("POSIX endpoint identity does not survive deletion and recreation of the state root", {
+  skip: process.platform === "win32" ? "POSIX persistent seat identity only" : false,
+}, async (t) => {
+  const parent = await mkdtemp(path.join(tmpdir(), "agora-native-endpoint-recreated-"));
+  const root = path.join(parent, "root");
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const before = await nativeServiceEndpoint(root, ACCOUNT);
+  await rm(root, { recursive: true });
+  const after = await nativeServiceEndpoint(root, ACCOUNT);
+  assert.notEqual(after, before, "a new state root cannot inherit stale runtime authority from the deleted root");
+});
+
+test("POSIX concurrent endpoint discovery publishes one complete seat identity", {
+  skip: process.platform === "win32" ? "POSIX persistent seat identity only" : false,
+}, async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "agora-native-endpoint-concurrent-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const endpoints = await Promise.all(Array.from({ length: 20 }, () => nativeServiceEndpoint(root, ACCOUNT)));
+  assert.equal(new Set(endpoints).size, 1);
+  const nativeFiles = await readdir(path.join(root, "native"));
+  assert.deepEqual(nativeFiles, ["seat-id"], "candidate files are removed after one atomic publication");
+  assert.match((await readFile(path.join(root, "native", "seat-id"), "utf8")).trim(), /^[a-f0-9]{32}$/);
+});
+
+test("POSIX invalid seat identity fails closed instead of minting another endpoint", {
+  skip: process.platform === "win32" ? "POSIX persistent seat identity only" : false,
+}, async (t) => {
+  const sandbox = await mkdtemp(path.join(tmpdir(), "agora-native-endpoint-invalid-"));
+  const root = path.join(sandbox, "state");
+  const runtimeBase = path.join(sandbox, "runtime");
+  t.after(() => rm(sandbox, { recursive: true, force: true }));
+  await mkdir(path.join(root, "native"), { recursive: true, mode: 0o700 });
+  await mkdir(runtimeBase, { mode: 0o700 });
+  await writeFile(path.join(root, "native", "seat-id"), "partial", { mode: 0o600 });
+  await assert.rejects(nativeServiceEndpoint(root, ACCOUNT, process.platform, runtimeBase), /seat identity is invalid/);
+  assert.deepEqual(await readdir(path.join(runtimeBase, `agora-${process.getuid?.()}`)), [], "invalid identity creates no endpoint namespace");
 });
 
 test("POSIX runtime directory refuses symlink substitution before changing its target", {

@@ -1,7 +1,7 @@
 // @ts-check
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { chmod, lstat, mkdir, open, readFile, realpath, rename, rm, stat } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, open, readFile, realpath, rename, rm, stat } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
 import { AgoraError } from "./core.mjs";
@@ -14,6 +14,7 @@ const REQUEST_TIMEOUT_MS = 10_000;
 const ENDPOINT_PROBE_TIMEOUT_MS = 500;
 
 const RECLAIM_AUTHORITY_FILE = "reclaim-authority.sqlite";
+const SEAT_IDENTITY_FILE = "seat-id";
 const MAX_PORTABLE_UNIX_SOCKET_PATH_BYTES = 103;
 
 /** @param {string} directory @param {string} label */
@@ -59,6 +60,42 @@ async function ensureProtectedRuntimeBase(directory) {
   const privatelyOwned = uid !== undefined && info.uid === BigInt(uid) && (info.mode & 0o77n) === 0n;
   if (!info.isDirectory() || (!sticky && !privatelyOwned))
     throw new AgoraError(`native POSIX runtime base must be sticky or private to this OS user: ${directory}`);
+}
+
+/** @param {string} nativeDirectory */
+async function readOrCreateSeatIdentity(nativeDirectory) {
+  const file = path.join(nativeDirectory, SEAT_IDENTITY_FILE);
+  const identity = randomUUID().replaceAll("-", "");
+  const candidate = `${file}.tmp-${process.pid}-${identity}`;
+  const created = await open(candidate, "wx", 0o600);
+  try { await created.writeFile(`${identity}\n`, "utf8"); await created.sync(); }
+  finally { await created.close(); }
+  let published = false;
+  try {
+    await link(candidate, file);
+    published = true;
+    const directory = await open(nativeDirectory, "r");
+    try { await directory.sync(); }
+    finally { await directory.close(); }
+  } catch (error) {
+    if (/** @type {NodeJS.ErrnoException} */ (error).code !== "EEXIST") throw error;
+  } finally {
+    await rm(candidate, { force: true });
+  }
+  if (published) return identity;
+  const before = await lstat(file, { bigint: true });
+  const uid = process.getuid?.();
+  if (!before.isFile() || before.isSymbolicLink() || uid === undefined || before.uid !== BigInt(uid))
+    throw new AgoraError(`native seat identity must be a regular file owned by this OS user: ${file}`);
+  if ((before.mode & 0o177n) !== 0n) await chmod(file, 0o600);
+  const after = await lstat(file, { bigint: true });
+  if (!after.isFile() || after.isSymbolicLink() || before.dev !== after.dev || before.ino !== after.ino
+    || after.uid !== BigInt(uid) || (after.mode & 0o177n) !== 0n)
+    throw new AgoraError(`native seat identity changed while it was verified: ${file}`);
+  const existingIdentity = (await readFile(file, "utf8")).trim();
+  if (!/^[a-f0-9]{32}$/.test(existingIdentity))
+    throw new AgoraError(`native seat identity is invalid; stop every Agora process using this state root, remove ${file}, then start again`);
+  return existingIdentity;
 }
 
 /** @param {string} endpoint @param {string} file */
@@ -164,12 +201,14 @@ export async function nativeServiceEndpoint(root, accountId, platform = process.
   if (!Number.isSafeInteger(uid) || Number(uid) < 0) throw new AgoraError("native service cannot determine this POSIX user's uid");
   // Darwin's sockaddr_un.sun_path is only 104 bytes including the terminator.
   // State roots routinely exceed that under /private/var/folders, so bind at a
-  // short owner-only runtime path keyed by the physical state root instead.
+  // short owner-only runtime path keyed by an Agora-minted identity inside the
+  // physical state root. Names and inode numbers can both change or be reused;
+  // the protected marker survives aliases and renames but not root recreation.
   await ensureProtectedRuntimeBase(posixRuntimeBase);
   const runtimeRoot = path.join(posixRuntimeBase, `agora-${uid}`);
   await ensurePrivateRuntimeDirectory(runtimeRoot, "runtime root");
-  const rootIdentity = await stat(physicalRoot, { bigint: true });
-  const seat = createHash("sha256").update(`${rootIdentity.dev}:${rootIdentity.ino}`).digest("hex").slice(0, 32);
+  const rootIdentity = await readOrCreateSeatIdentity(nativeDirectory);
+  const seat = createHash("sha256").update(rootIdentity).digest("hex").slice(0, 32);
   const runtimeDirectory = path.join(runtimeRoot, seat);
   await ensurePrivateRuntimeDirectory(runtimeDirectory, "runtime directory");
   const endpoint = path.join(runtimeDirectory, "service.sock");
