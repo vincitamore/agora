@@ -1,9 +1,6 @@
 name: vendor-tailcat
 on:
   workflow_dispatch:
-  push:
-    branches: [astra/tailcat-vendor]
-    paths: ['.github/workflows/vendor-tailcat.yml', 'scripts/vendor-tailcat.mjs', 'vendor/tailcat/source.json']
 permissions:
   contents: read
 jobs:
@@ -46,7 +43,7 @@ jobs:
         with:
           name: ${{ matrix.target }}
           path: |
-            vendor/tailcat/${{ matrix.target }}-*/
+            vendor/tailcat/${{ matrix.target }}-*/tailcat.gz
             vendor/tailcat/${{ matrix.target }}-*.json
             vendor/tailcat/LICENSE
           if-no-files-found: error
