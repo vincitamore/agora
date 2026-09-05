@@ -12,14 +12,17 @@ const xml=/** @param {string} s */s=>s.replaceAll('&','&amp;').replaceAll('<','&
 /**
  * Live IPC ownership, without an independent OS residency registration. The caller must
  * retain this handle. `closed` requires the worker's cleanup acknowledgement AND exit;
- * abrupt worker death rejects it because nested cleanup is then unconfirmed.
+ * abrupt worker death rejects it because nested cleanup is then unconfirmed. `stop`
+ * has a bounded wait; its cleanup-pending error leaves actual `closed` observable.
  * @param {string} directory @param {string} id
- * @param {{workerPath?:string,startupTimeoutMs?:number}} [options]
+ * @param {{workerPath?:string,startupTimeoutMs?:number,stopTimeoutMs?:number}} [options]
  */
 export function launchManagedOffer(directory,id,options={}) {
   if(!/^[a-f0-9-]{36}$/.test(id))throw new AgoraError('Invalid offer id. Retry agora share.');
   const timeout=options.startupTimeoutMs??100000;
   if(!Number.isSafeInteger(timeout)||timeout<1)throw new AgoraError('Invalid managed offer startup timeout.',2);
+  const stopTimeout=options.stopTimeoutMs??10000;
+  if(!Number.isSafeInteger(stopTimeout)||stopTimeout<1||stopTimeout>2147483647)throw new AgoraError('Invalid managed offer stop timeout.',2);
   const child=spawn(process.execPath,[options.workerPath??worker,'--managed-offer-worker',directory],
     // Windows otherwise kills the worker with its owner before IPC disconnect can reap
     // routes. This process group remains referenced and owned through the live IPC handle.
@@ -32,15 +35,27 @@ export function launchManagedOffer(directory,id,options={}) {
   /** @type {(error:unknown)=>void} */ let rejectClosed;
   const closed=new Promise((resolve,reject)=>{resolveClosed=resolve;rejectClosed=reject;});
   void ready.catch(()=>{});void closed.catch(()=>{});
+  /** @type {Promise<{code:number|null,signal:NodeJS.Signals|null}> | undefined} */ let stopResult;
   /** @param {string} message */
   const failReady=message=>{if(!readySettled){readySettled=true;clearTimeout(timer);rejectReady(new AgoraError(message));}};
   const stop=()=>{
+    if(!stopResult){
+      stopResult=new Promise((resolve,reject)=>{
+        const deadline=setTimeout(()=>reject(Object.assign(new AgoraError(
+          'Managed offer cleanup is still pending. Retain the handle and observe closed before releasing ownership.'),
+        {code:'AGORA_CLEANUP_PENDING',cleanupPending:true})),stopTimeout);
+        void closed.then(result=>{clearTimeout(deadline);resolve(result);},error=>{clearTimeout(deadline);reject(error);});
+      });
+      // Automatic readiness cancellation also calls stop; its failure stays observable
+      // to explicit callers without creating an unhandled rejection in the owner.
+      void stopResult.catch(()=>{});
+    }
     if(!stopping){
       stopping=true;failReady('Managed offer stopped before readiness. Retry agora share.');
       // Keep IPC open for the cleanup acknowledgement. Owner death instead disconnects it.
       if(child.connected)child.send({type:'agora-offer-stop'},error=>{if(error&&child.connected)child.disconnect();});
     }
-    return closed;
+    return stopResult;
   };
   const timer=setTimeout(()=>{
     failReady('Managed offer readiness timed out. Check relay connectivity, then retry agora share.');

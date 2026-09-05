@@ -182,7 +182,7 @@ test('managed ready is live IPC evidence; stopped joins nested cleanup and worke
   await writeFile(path.join(root,'ready.json'),JSON.stringify({id:'stale'}));
   const runtime=launchManagedOffer(root,id,{workerPath});t.after(()=>runtime.stop());
   assert.equal((await runtime.ready).id,id);assert.equal(await controlOffer(root,'health'),true);
-  const stopped=runtime.stop();assert.strictEqual(stopped,runtime.stop());assert.strictEqual(stopped,runtime.closed);
+  const stopped=runtime.stop();assert.strictEqual(stopped,runtime.stop());
   const result=await stopped;assert.equal(result.signal,null);
   assert.equal(await readFile(path.join(root,'route-closed'),'utf8'),'closed');
   assert.equal(await controlOffer(root,'health'),false);await absent(path.join(root,'ready.json'));
@@ -254,4 +254,34 @@ await launchOffer(${JSON.stringify(root)},${JSON.stringify(id)},{workerPath:${JS
   assert.equal(await controlOffer(root,'stop'),true);
   await waitFor(async()=>{await access(path.join(root,'stopped.json'));return true;});
   assert.equal(await readFile(path.join(root,'route-closed'),'utf8'),'closed');
+});
+
+for (const acknowledge of [false, true]) test(`managed stop reports cleanup-pending while a ${acknowledge ? 'cleanup-acknowledged' : 'silent'} worker remains alive`, {timeout:10000}, async t => {
+  const root=await mkdtemp(path.join(tmpdir(),'agora-stop-bound-'));
+  const id=randomUUID();
+  const workerPath=path.join(root,'wedged-worker.mjs');
+  const releasePath=path.join(root,'release-worker');
+  await writeFile(workerPath,`import{access}from'node:fs/promises';
+process.on('message',message=>{if(message.type==='agora-offer-stop'&&${acknowledge})process.send({type:'agora-offer-closed'});});
+process.send({type:'agora-offer-ready',offer:{id:${JSON.stringify(id)}}});
+const poll=setInterval(async()=>{try{await access(${JSON.stringify(releasePath)});clearInterval(poll);process.send({type:'agora-offer-closed'},()=>process.disconnect());}catch{}},20);
+`);
+  const runtime=launchManagedOffer(root,id,/** @type {any} */({workerPath,stopTimeoutMs:50}));
+  t.after(async()=>{try{await writeFile(releasePath,'release');await runtime.closed;}finally{await rm(root,{recursive:true,force:true});}});
+  await runtime.ready;
+  let actuallyClosed=false;
+  void runtime.closed.then(()=>{actuallyClosed=true;});
+  const stopped=runtime.stop();
+  assert.strictEqual(stopped,runtime.stop(),'concurrent stops share one bounded result');
+  const outcome=await Promise.race([stopped.then(()=>({kind:'success'}),error=>({kind:'error',error})),delay(400).then(()=>({kind:'still-waiting'}))]);
+  assert.equal(outcome.kind,'error','stop must report failure before the test observation deadline');
+  const error=/** @type {{kind:string,error:any}} */(outcome).error;
+  assert.equal(error.code,'AGORA_CLEANUP_PENDING');
+  assert.equal(error.cleanupPending,true);
+  assert.equal(actuallyClosed,false,'timeout must not settle actual closure');
+  await writeFile(releasePath,'release');
+  const result=await runtime.closed;
+  assert.equal(result.signal,null);
+  assert.equal(actuallyClosed,true,'actual late closure remains observable');
+  await assert.rejects(runtime.stop(),e=>/** @type {any} */(e).code==='AGORA_CLEANUP_PENDING');
 });
