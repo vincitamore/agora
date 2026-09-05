@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { AgoraError, parseSignature } from "../core.mjs";
 import { NativeServiceClient } from "../native-service.mjs";
-import { parseNativeCursor } from "../native-protocol.mjs";
+import { nativeCursor, parseNativeCursor } from "../native-protocol.mjs";
 import { pidAlive } from "../session.mjs";
 
 /**
@@ -153,6 +153,15 @@ export function nativeMessage(message) {
 const sequenceOf = (m) => parseNativeCursor(m.cursor).sequence;
 
 /**
+ * What a session with no saved position subscribes from: the newest window, as a read with no
+ * cursor returns on every transport (a local room gives the newest 1000 lines). The service
+ * requires the cursor to be explicit and replays everything after it, so "from the start" on a
+ * long room would replay the whole log; the window keeps a first arm bounded, and `cursor --set
+ * <epoch>:0` is the way to ask for the start on purpose.
+ */
+export const SUBSCRIBE_WINDOW = 1000;
+
+/**
  * @typedef {object} NativeSubscription
  * @property {string} roomId
  * @property {{ id: string, seatLabel: string }} seat the service account this seat posts as
@@ -178,8 +187,20 @@ export async function openNativeSubscription(opts) {
   const { client, descriptor } = await connectSeatService(opts.stateRoot, { connect: opts.connect, timeoutMs: opts.timeoutMs });
   /** @type {import('../core.mjs').Message[]} */
   let queue = [];
+  let since = opts.since;
+  if (!since) {
+    // the service refuses a subscription with no cursor (it replays the backlog after one), so a
+    // session with no saved position asks where the room is and starts at the newest window
+    let status;
+    try { status = (await client.request("status", { roomId })).status; }
+    catch (e) {
+      client.close();
+      throw new ServiceDarkError(`seat service at ${descriptor.path} is dark: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    since = nativeCursor(String(status.epoch), Math.max(0, Number(status.committed) - SUBSCRIBE_WINDOW));
+  }
   /** Highest sequence handed out by `read`; nothing at or below it is handed out again. */
-  let drained = opts.since ? parseNativeCursor(opts.since).sequence : -1;
+  let drained = parseNativeCursor(since).sequence;
   /** @type {string | undefined} */
   let darkReason;
   /** @type {Set<() => void>} */
@@ -211,7 +232,7 @@ export async function openNativeSubscription(opts) {
   client.socket.on("error", (e) => markDark(`seat service at ${descriptor.path} failed: ${e instanceof Error ? e.message : String(e)}`));
   let result;
   try {
-    result = await client.subscribe(roomId, /** @type {string} */ (opts.since), (message) => push([message]));
+    result = await client.subscribe(roomId, since, (message) => push([message]));
   } catch (e) {
     client.close();
     const message = e instanceof Error ? e.message : String(e);
