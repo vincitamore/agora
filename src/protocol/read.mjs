@@ -3,7 +3,7 @@ import { ProtocolValidationError, parseCursor, readArray, readInteger, readRecor
 import { validateNativeAccountRef } from './identity.mjs';
 import { validateLegacyUnattestedMessage, validateNativeMessage } from './message.mjs';
 
-/** @typedef {{host:import('./identity.mjs').AccountRef,roomId:string,epoch:string}} NativeReadRoom */
+/** @typedef {{host:import('./identity.mjs').NativeAccountRef,roomId:string,epoch:string}} NativeReadRoom */
 /** @typedef {{room:NativeReadRoom,fromExclusive:string,toInclusive:string,committedThrough:string}} NativeReadCoverage */
 /** @typedef {ReturnType<typeof validateNativeMessage>|ReturnType<typeof validateLegacyUnattestedMessage>} NativeReadMessage */
 /** @typedef {ReturnType<typeof validateNativeCheckpoint>} NativeCheckpoint */
