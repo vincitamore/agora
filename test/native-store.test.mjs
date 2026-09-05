@@ -1,7 +1,7 @@
 // @ts-check
 import test from "node:test";
 import assert from "node:assert/strict";
-import { appendFile, mkdtemp, open, readFile, rm } from "node:fs/promises";
+import { appendFile, mkdtemp, open, readFile, rm, stat, truncate } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { NativeRoomStore } from "../src/native-store.mjs";
@@ -40,8 +40,9 @@ test("native room retries return the original receipt and conflicting reuse is r
   const input = { operationId: "operation_retry_001", authorName: "Peer/agent", text: "hello" };
   const first = await store.append(input, { accountId: PEER });
   const retry = await store.append(input, { accountId: PEER });
-  assert.deepEqual(first, { id: input.operationId, cursor: `${EPOCH}:1`, duplicate: false });
-  assert.deepEqual(retry, { id: input.operationId, cursor: `${EPOCH}:1`, duplicate: true });
+  assert.match(first.id, /^[a-f0-9]{64}$/);
+  assert.deepEqual(first, { id: retry.id, cursor: `${EPOCH}:1`, duplicate: false });
+  assert.deepEqual(retry, { id: first.id, cursor: `${EPOCH}:1`, duplicate: true });
   await assert.rejects(store.append({ ...input, text: "different" }, { accountId: PEER }), /already committed with different bytes/);
   assert.equal(store.status().committed, 1);
 });
@@ -67,6 +68,41 @@ test("reader-held checkpoints witness an exact prefix rather than trusting a sel
   assert.throws(() => store.assertCheckpoint({ ...anchor, digest: `sha256:${"f".repeat(64)}` }), /digest does not match/);
   assert.throws(() => store.assertCheckpoint({ ...anchor, epoch: "3".repeat(32) }), /another epoch/);
   assert.throws(() => store.assertCheckpoint({ ...anchor, sequence: 99 }), /sequence is unavailable/);
+});
+
+test("different authenticated authors cannot collide in Message.id", async (t) => {
+  const { store } = await room(t);
+  const input = { operationId: "operation_shared_01", authorName: "Agent", text: "same caller id" };
+  const own = await store.append(input, { accountId: HOST });
+  const foreign = await store.append(input, { accountId: PEER });
+  assert.notEqual(own.id, foreign.id);
+  assert.deepEqual(store.read().map((message) => message.id), [own.id, foreign.id]);
+});
+
+test("truncating an acknowledged frame is damage, never an unaccepted tail whose cursor may be reused", async (t) => {
+  const { root, store } = await room(t);
+  await store.append({ operationId: "operation_keep_001", authorName: "Peer", text: "retained" }, { accountId: PEER });
+  await store.append({ operationId: "operation_lost_001", authorName: "Peer", text: "acknowledged" }, { accountId: PEER });
+  const file = store.logPath;
+  await store.close();
+  await truncate(file, (await stat(file)).size - 1);
+  await assert.rejects(NativeRoomStore.open({ root, roomId: ROOM }), /truncated below its acknowledged/);
+});
+
+test("one room has one OS-owned writer even when opened through separate store objects", async (t) => {
+  const { root } = await room(t);
+  await assert.rejects(NativeRoomStore.open({ root, roomId: ROOM }), /already has a live writer|writer endpoint is busy/);
+});
+
+test("the persisted resident-record ceiling refuses before memory grows without bound", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "agora-native-limit-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = await NativeRoomStore.create({ root, roomId: ROOM, epoch: EPOCH, hostAccountId: HOST, recordLimit: 2 });
+  t.after(() => store.close());
+  await store.append({ operationId: "operation_limit_001", authorName: "Peer", text: "one" }, { accountId: PEER });
+  await store.append({ operationId: "operation_limit_002", authorName: "Peer", text: "two" }, { accountId: PEER });
+  await assert.rejects(store.append({ operationId: "operation_limit_003", authorName: "Peer", text: "three" }, { accountId: PEER }), /2-record resident limit/);
+  assert.equal(store.status().recordLimit, 2);
 });
 
 test("a partial final frame is an unaccepted tail; restart removes it and reports the recovery", async (t) => {
