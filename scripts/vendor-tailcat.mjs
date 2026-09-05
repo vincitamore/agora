@@ -20,7 +20,8 @@ if (mode === 'build') {
   if (goVersion !== `go${source.go}`) throw Error(`Expected go${source.go}, got ${goVersion}`);
   const tags = readFileSync(resolve(cwd, 'build-tags.txt'), 'utf8').trim();
   if (!tags || /\s/.test(tags)) throw Error('Invalid upstream release build tags');
-  const license = readFileSync(resolve(cwd, 'LICENSE'));
+  // Git object bytes avoid Windows checkout autocrlf changing the shipped license hash.
+  const license = execFileSync('git', ['show', 'HEAD:LICENSE'], { cwd });
   if (!license.toString().startsWith('BSD 3-Clause License')) throw Error('Unexpected upstream license');
   if (!['windows', 'linux', 'darwin'].includes(os)) throw Error('Expected windows, linux or darwin');
   for (const arch of ['amd64', 'arm64']) {
@@ -45,7 +46,7 @@ if (mode === 'build') {
       console.log(`${target}: built, hash=${hash(bytes)}, native version PASS`);
     } else console.log(`${target}: cross-built, hash=${hash(bytes)}`);
   }
-  copyFileSync(resolve(cwd, 'LICENSE'), resolve(vendor, 'LICENSE'));
+  writeFileSync(resolve(vendor, 'LICENSE'), license);
 } else if (mode === 'collect') {
   const artifacts = resolve(input);
   const entries = {};
@@ -57,19 +58,22 @@ if (mode === 'build') {
     const expected = `${target}/tailcat.gz`;
     if (entry.target !== target || entry.path !== expected || JSON.stringify(entry.source) !== JSON.stringify(source)) throw Error(`Bad manifest: ${target}`);
     if (build && JSON.stringify(build) !== JSON.stringify(entry.build)) throw Error('Different build flags across targets');
-    if (licenseSha256 && licenseSha256 !== entry.licenseSha256) throw Error('Different licenses across targets');
     build = entry.build;
-    licenseSha256 = entry.licenseSha256;
     const capsule = readFileSync(resolve(dir, expected));
     if (capsule.length !== entry.capsuleSize || hash(capsule) !== entry.capsuleSha256) throw Error(`Capsule mismatch: ${target}`);
     const bytes = gunzipSync(capsule, { maxOutputLength: 100 * 1024 * 1024 });
     if (hash(bytes) !== entry.sha256 || bytes.length !== entry.size) throw Error(`Artifact integrity mismatch: ${target}`);
     const license = readFileSync(resolve(dir, 'LICENSE'));
-    if (hash(license) !== licenseSha256) throw Error('License mismatch');
+    if (hash(license) !== entry.licenseSha256) throw Error('License mismatch');
+    // Accept the initial Windows runner's CRLF checkout only after verifying its artifact hash.
+    // Content must be identical across targets; canonical repository text is LF.
+    const canonicalLicense = Buffer.from(license.toString('utf8').replaceAll('\r\n', '\n'));
+    if (licenseSha256 && licenseSha256 !== hash(canonicalLicense)) throw Error('Different license text across targets');
+    licenseSha256 = hash(canonicalLicense);
     const out = resolve(vendor, expected);
     mkdirSync(dirname(out), { recursive: true });
     writeFileSync(out, capsule);
-    writeFileSync(resolve(vendor, 'LICENSE'), license);
+    writeFileSync(resolve(vendor, 'LICENSE'), canonicalLicense);
     entries[target] = { path: expected, capsuleSha256: entry.capsuleSha256, capsuleSize: entry.capsuleSize, sha256: entry.sha256, size: entry.size };
   }
   writeFileSync(resolve(vendor, 'lock.json'), JSON.stringify({ version: 1, source, build, license: { path: 'LICENSE', sha256: licenseSha256 }, targets: entries }, null, 2) + '\n');
