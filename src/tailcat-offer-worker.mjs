@@ -7,8 +7,8 @@ import { atomicJson, nodeKeyValid, validateTransferManifest } from './tailcat.mj
 import { createTransferListener, readTailcatAddress } from './tailcat-http.mjs';
 import { spawnTailcat } from './tailcat-process.mjs';
 
-/** @param {string} directory */
-export async function runOfferWorker(directory) {
+/** @param {string} directory @param {{spawn?:typeof spawnTailcat}} [deps] */
+export async function runOfferWorker(directory,deps={}) {
   const spec=JSON.parse(await readFile(path.join(directory,'worker.json'),'utf8'));
   const files=validateTransferManifest(spec.files);
   if(!Array.isArray(spec.peers)||!spec.peers.length||spec.peers.length>4||
@@ -27,7 +27,7 @@ export async function runOfferWorker(directory) {
   });
   const stop=async()=>{
     if(stopping)return;stopping=true;
-    for(const {child} of resources)child.disconnect(); // guardian owns and reaps actual binary
+    for(const {child} of resources)if(child.connected)child.disconnect(); // a route that already exited has no IPC channel
     await Promise.all(resources.map(({child,listener})=>Promise.all([
       new Promise(resolve=>{if(child.exitCode!==null)resolve(undefined);else child.once('exit',()=>resolve(undefined));}),listener.close()])));
     control.closeAllConnections();control.close();
@@ -48,7 +48,7 @@ export async function runOfferWorker(directory) {
       const listener=await createTransferListener({payloadDir:path.join(directory,'payload'),files,
         receiptPath:path.join(directory,`receipt-${index}.json`),expires:spec.expires,once:spec.once,receiptDigest:peer.receiptDigest});
       let child;
-      try {child=await spawnTailcat(['serve','--key=new','--full-address','--json',`--allow=${peer.nodeKey}`,String(listener.port)],
+      try {child=await (deps.spawn??spawnTailcat)(['serve','--key=new','--full-address','--json',`--allow=${peer.nodeKey}`,String(listener.port)],
         {stateRoot:spec.stateRoot,deadline:spec.expires,...spec.runtime});}
       catch(e){await listener.close();throw e;}
       if(stopping){if(child.connected)child.disconnect();await listener.close();throw Error('Stopped');}
