@@ -566,6 +566,54 @@ test("a malformed id in this session's own follow set is dropped, never a usage 
   }
 });
 
+test("on the slack transport itself, a malformed follow is reported with the reason and never read; the well-formed follow delivers", async () => {
+  const { dir, cleanup } = await tmp();
+  const good = "1700000000.000100";
+  // what a `post --thread 1788589282.659969` typed unquoted into pwsh wrote into the follow file
+  const bad = "1788589282.65997";
+  const { fetch, calls } = fakeFetch([
+    ["users.info", () => ({ body: { ok: true, user: { id: "U2", real_name: "bone" } } })],
+    ["conversations.history", () => ({ body: { ok: true, messages: [], has_more: false } })],
+    ["conversations.replies", () => ({
+      body: {
+        ok: true,
+        has_more: false,
+        messages: [
+          { ts: good, user: "U2", text: "parent", thread_ts: good, reply_count: 1 },
+          { ts: "1700000000.000200", user: "U2", text: "the reply in the good thread", thread_ts: good },
+        ],
+      },
+    })],
+  ]);
+  const transport = slackTransport({ transport: "slack", channel: "C1" }, { token: "x", fetch });
+  const follow = followSet([bad, good], 1);
+  /** @type {string[]} */
+  const reported = [];
+  const error = console.error;
+  console.error = (/** @type {unknown[]} */ ...a) => { reported.push(a.map(String).join(" ")); };
+  try {
+    /** @type {string[]} */
+    const seen = [];
+    const r = await watch(transport, {
+      stateDir: path.join(dir, "s"), key: "r", mode: "once",
+      threads: follow.set,
+      onBatch: (m) => { seen.push(...m.map((x) => x.text)); },
+    });
+    assert.ok(seen.includes("the reply in the good thread"), `the good thread still delivers (got ${JSON.stringify(seen)})`);
+    assert.deepEqual(follow.dropped, [bad], "the bad key is gone from the set");
+    assert.deepEqual(Object.keys(r.threads), [good]);
+    const asked = calls.filter((c) => String(c.url).includes("conversations.replies")).map((c) => new URL(String(c.url)).searchParams.get("ts"));
+    assert.deepEqual(asked, [good], "Slack was asked for the good thread only; the malformed id never reached the API");
+    const line = reported.find((l) => l.includes(`dropped follow ${bad}`));
+    assert.ok(line, `the drop is reported (stderr was ${JSON.stringify(reported)})`);
+    assert.match(String(line), /5 digits after the dot, not 6/);
+    assert.match(String(line), /unquoted ts loses its trailing digits under PowerShell/);
+  } finally {
+    console.error = error;
+    await cleanup();
+  }
+});
+
 test("a followed thread the transport cannot read is dropped and the room watch carries on", async () => {
   const { dir, cleanup } = await tmp();
   try {
