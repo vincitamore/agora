@@ -27,6 +27,7 @@ class Drawing:
     def __init__(self):
         self.im = Image.new("RGBA", (192*SS, 192*SS))
         self.d = ImageDraw.Draw(self.im)
+        self.ornament = None
 
     def polygon(self, points, color):
         fill = INK[color] + (255,) if color is not None else (0, 0, 0, 0)
@@ -54,6 +55,10 @@ class Drawing:
                         px=min(192*SS-1, max(0, int((x+.5+dx)*192*SS/size)))
                         py=min(192*SS-1, max(0, int((y+.5+dy)*192*SS/size)))
                         p=self.im.getpixel((px,py))
+                        if self.ornament is not None:
+                            color=self.ornament((x+.5+dx)*192/size,
+                                                (y+.5+dy)*192/size)
+                            if color is not None: p=color+(255,)
                         if p[3]: pixels.append(p[:3])
                 row.append(tuple(round(sum(p[k] for p in pixels)/len(pixels))
                                  for k in range(3)) if len(pixels)>=5 else None)
@@ -190,6 +195,13 @@ def threshold():
     for y,w in ((175,78),(169,72),(163,66),(157,60)):
         d.rect((96-w,y-4,96+w,y),"stone")
         d.rect((96-w,y,96+w,y+3),"bronze")
+    # Each outer pedestal rests on a continuous plinth down to the broad step.
+    # The upper stair alone is narrower than the columns' outside undersides.
+    for x in (37,155):
+        d.rect((x-10,150,x+10,159),"gold")
+        d.rect((x+5,150,x+10,159),"bronze")
+        d.rect((x-12,158,x+12,163),"stone")
+        d.rect((x-12,163,x+12,165),"bronze")
     # Receding interior arcade and a luminous path through the open portal.
     d.polygon([(60,152),(81,114),(111,114),(132,152)],"deep")
     for y in (123,132,141,149):
@@ -223,16 +235,27 @@ def threshold():
         d.rect((x-11,77,x+11,83),"light")
         d.rect((x-8,71,x+8,77),"gold")
         d.ellipse((x-5,66,x+5,72),"bronze")
-        spark(d,x,61,5)
         innerx=x+12 if x<96 else x-12
         d.polygon([(innerx-3,90),(innerx+3,90),(innerx+3,119),(innerx,124),(innerx-3,119)],"teal")
-    # A carved sunburst over the keystone, subordinate to the open doorway.
-    d.ellipse((90,14,102,26),"gold")
-    d.ellipse((93,17,99,23),"flame")
-    for a in range(0,360,45):
-        t=math.radians(a)
-        d.line([(96+8*math.cos(t),20+8*math.sin(t)),
-                (96+11*math.cos(t),20+11*math.sin(t))],"gold",1)
+    # Filled ornaments sampled directly in continuous dot-space. Sending these
+    # small details through an intermediate integer-pixel line raster shaved
+    # one finial and the upper-left sun ray differently from their counterparts.
+    # Both crosses have a real stem and transverse bar, not tapered sparkles.
+    def ornaments(px,py):
+        for cx in (37,155):
+            if (abs(px-cx)<1.8 and 52<py<67) or (abs(px-cx)<5.4 and 56<py<59.6):
+                return INK['flame']
+        dx,dy=px-96,py-20
+        r2=dx*dx+dy*dy
+        if r2<9: return INK['flame']
+        if r2<36: return INK['gold']
+        for a in range(0,360,45):
+            t=math.radians(a)
+            along=dx*math.cos(t)+dy*math.sin(t)
+            across=-dx*math.sin(t)+dy*math.cos(t)
+            if 8<along<12 and abs(across)<1.2: return INK['gold']
+        return None
+    d.ornament=ornaments
     return d
 
 
@@ -285,12 +308,13 @@ def font(size,serif=False):
     return ImageFont.load_default(size=size)
 
 
-def gif(name,cells,size):
+def gif(name,cells,size,edge=16):
     frames=[]
     for i in range(60):
         center=-.45+2.4*i/43 if i<43 else None
-        # A native 3px pitch at 512px avoids resizing the animation's lattice.
-        frames.append(on_dark(render(cells,size,pitch=3,shimmer=center),512))
+        # Both 512px full and 300px compact use native 3px pitch.
+        width=size*3+edge*2
+        frames.append(on_dark(render(cells,size,edge=edge,pitch=3,shimmer=center),width))
     samples=Image.new("RGB",(128,128*60))
     for i,f in enumerate(frames):
         samples.paste(f.resize((128,128),Image.Resampling.NEAREST),(0,i*128))
@@ -347,6 +371,7 @@ def main(animated=True):
                 # Purpose-built 300px tier: 96 dots * 3px + 12px padding.
                 # No non-integral raster resize to beat against the dot lattice.
                 on_dark(render(cells,n,edge=6,pitch=3),300).save(OUT/f"{name}-readme-300.png")
+                if animated and name=='threshold': gif(name+'-compact',cells,n,edge=6)
         d.text((300+i*600,742),f"0{i+1} / {title}",anchor="mt",font=font(21,True),fill=INK['light'])
         d.text((300+i*600,780),caption,anchor="mt",font=font(16),fill=(141,159,162))
         d.text((300+i*600,1120),"48 × 24 CELLS / INDEPENDENT SMALL STUDY",anchor="mt",font=font(12),fill=(120,142,148))
