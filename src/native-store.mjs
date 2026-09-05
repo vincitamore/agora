@@ -88,39 +88,82 @@ async function physicalRoom(directory) {
   return { directory: canonical, identity };
 }
 
-/** @param {string} identity */
-function writerEndpoint(identity) {
-  // An OS-owned loopback listener disappears with its process, so there is no
-  // stale pathname to probe/unlink and no check-then-reclaim race. A hash
-  // collision or unrelated listener can only refuse a writer, never admit two.
-  const digest = createHash("sha256").update(identity).digest();
-  return { host: "127.0.0.1", port: 20_000 + (digest.readUInt32BE(0) % 20_000) };
+const WRITER_LOCK = "writer.lock";
+const WRITER_PROBE_MS = 200;
+
+/** @param {{host:string,port:number}} endpoint @returns {Promise<"live"|"dead">} */
+function probeWriter(endpoint) {
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host: endpoint.host, port: endpoint.port });
+    const timer = setTimeout(() => finish("live"), WRITER_PROBE_MS);
+    timer.unref?.();
+    const finish = (/** @type {"live"|"dead"} */ verdict) => {
+      clearTimeout(timer);
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(verdict);
+    };
+    socket.once("connect", () => finish("live"));
+    socket.once("error", (error) => finish(/** @type {NodeJS.ErrnoException} */ (error).code === "ECONNREFUSED" ? "dead" : "live"));
+  });
 }
 
-/** @param {{host:string,port:number}} endpoint */
-async function listenWriter(endpoint) {
+async function listenEphemeralWriter() {
   const server = net.createServer((socket) => socket.destroy());
-  server.listen({ ...endpoint, exclusive: true });
+  server.listen({ host: "127.0.0.1", port: 0, exclusive: true });
   try { await Promise.race([once(server, "listening"), once(server, "error").then(([error]) => Promise.reject(error))]); }
   catch (error) { try { if (server.listening) server.close(); } catch {} throw error; }
-  return server;
-}
-
-/** @param {string} identity */
-async function acquireWriter(identity) {
-  const endpoint = writerEndpoint(identity);
-  try { return { server: await listenWriter(endpoint), endpoint, identity }; }
-  catch (error) {
-    const code = /** @type {NodeJS.ErrnoException} */ (error).code;
-    if (code === "EADDRINUSE" || code === "EACCES")
-      throw new AgoraError(`native room already has a live writer or its OS-owned endpoint ${endpoint.host}:${endpoint.port} is unavailable`);
-    throw error;
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    try { if (server.listening) server.close(); } catch {}
+    throw new AgoraError("native room writer bound no TCP port");
   }
+  return { server, endpoint: { host: "127.0.0.1", port: address.port } };
 }
 
-/** @param {{ server: net.Server, endpoint: {host:string,port:number}, identity:string }} writer */
+/**
+ * Exclusive create of writer.lock is the acquire. After EEXIST, only
+ * ECONNREFUSED on the recorded port licenses unlink; timeout, any other
+ * probe error, or a malformed lock refuse. The probe never takes the lock
+ * on its own.
+ * @param {string} directory @param {string} identity
+ */
+async function acquireWriter(directory, identity) {
+  const lockPath = path.join(directory, WRITER_LOCK);
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      const lock = await open(lockPath, "wx", 0o600);
+      try {
+        const { server, endpoint } = await listenEphemeralWriter();
+        await lock.writeFile(`${JSON.stringify({ identity, pid: process.pid, host: endpoint.host, port: endpoint.port })}\n`, "utf8");
+        await lock.sync();
+        return { server, endpoint, identity, lock, lockPath };
+      } catch (error) {
+        await lock.close().catch(() => {});
+        await rm(lockPath, { force: true }).catch(() => {});
+        throw error;
+      }
+    } catch (error) {
+      if (/** @type {NodeJS.ErrnoException} */ (error).code !== "EEXIST") throw error;
+      let recorded = /** @type {{ host?: unknown, port?: unknown }} */ ({});
+      try { recorded = JSON.parse(await readFile(lockPath, "utf8")); }
+      catch { throw new AgoraError(`native room writer lock ${lockPath} is unusable`); }
+      const host = typeof recorded.host === "string" ? recorded.host : "";
+      const port = typeof recorded.port === "number" && Number.isInteger(recorded.port) ? recorded.port : 0;
+      if (!host || !port) throw new AgoraError(`native room writer lock ${lockPath} is unusable`);
+      if (await probeWriter({ host, port }) === "live")
+        throw new AgoraError(`native room already has a live writer or its OS-owned endpoint ${host}:${port} is unavailable`);
+      await rm(lockPath, { force: true });
+    }
+  }
+  throw new AgoraError("native room writer lock could not be acquired");
+}
+
+/** @param {{ server: net.Server, endpoint: {host:string,port:number}, identity:string, lock?: import('node:fs/promises').FileHandle, lockPath?: string }} writer */
 async function releaseWriter(writer) {
   if (writer.server.listening) await new Promise((resolve) => writer.server.close(() => resolve(undefined)));
+  if (writer.lock) await writer.lock.close().catch(() => {});
+  if (writer.lockPath) await rm(writer.lockPath, { force: true }).catch(() => {});
 }
 
 /** @param {unknown} value */
@@ -283,7 +326,7 @@ export class NativeRoomStore {
       await syncDirectory(path.dirname(requestedDirectory));
       const physical = await physicalRoom(requestedDirectory);
       directory = physical.directory;
-      writer = await acquireWriter(physical.identity);
+      writer = await acquireWriter(physical.directory, physical.identity);
       const confirmed = await physicalRoom(requestedDirectory);
       if (confirmed.identity !== physical.identity)
         throw new AgoraError("native room identity changed while acquiring its writer; refusing without publishing it");
@@ -321,7 +364,7 @@ export class NativeRoomStore {
     let physical;
     try { physical = await physicalRoom(requestedDirectory); }
     catch { throw new AgoraError(`native room ${options.roomId} has no valid manifest`); }
-    const writer = await acquireWriter(physical.identity);
+    const writer = await acquireWriter(physical.directory, physical.identity);
     const directory = physical.directory;
     let manifest;
     let handle;

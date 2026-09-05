@@ -7,6 +7,7 @@ import fs from "node:fs/promises";
 import { appendFile, mkdir, mkdtemp, open, readFile, realpath, rename, rm, stat, symlink, truncate } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
+import net from "node:net";
 import path from "node:path";
 import { NativeRoomStore } from "../src/native-store.mjs";
 
@@ -106,6 +107,23 @@ test("filesystem aliases cannot mint a second writer authority for one physical 
   assert.equal(await realpath(alias), await realpath(root));
   await assert.rejects(NativeRoomStore.open({ root: alias, roomId: ROOM }), /already has a live writer|OS-owned endpoint/);
   assert.equal(store.status().committed, 0);
+});
+
+test("a closed writer can be reopened immediately without waiting out TIME_WAIT on its last port", async (t) => {
+  const { root, store } = await room(t);
+  const lastPort = store.writer.endpoint.port;
+  await store.close();
+  const occupant = net.createServer();
+  t.after(() => new Promise((resolve) => occupant.close(() => resolve(undefined))));
+  await new Promise((resolve, reject) => {
+    occupant.once("error", reject);
+    occupant.listen({ host: "127.0.0.1", port: lastPort, exclusive: true }, resolve);
+  });
+  const reopened = await NativeRoomStore.open({ root, roomId: ROOM });
+  t.after(() => reopened.close());
+  assert.notEqual(reopened.writer.endpoint.port, lastPort);
+  await reopened.append({ operationId: "operation_reopen_001", authorName: "Peer", text: "after" }, { accountId: PEER });
+  assert.equal(reopened.read()[0].text, "after");
 });
 
 test("abrupt writer process death releases OS-owned room authority without stale reclaim", async (t) => {
