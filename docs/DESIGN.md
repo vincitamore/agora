@@ -127,6 +127,7 @@ legibility, and never a message. `--all` bypasses the ledger and delivers everyt
         session.json                    the record: bearer, source, label, pid, boot epoch, first and last seen
         <room>[#thread].cursor          this session's positions; filenames unchanged
         posted.jsonl                    ids this session posted, with pids
+        media/<room>/<file-id>.<ext>    authenticated Slack images, inert and bounded
         follow/<room>.json              threads this session follows, with last activity
         armed/<room>[#thread].json      a live watch's registration
         etags.json                      validators for conditional requests
@@ -163,6 +164,15 @@ positions from own or filtered messages that follow it, because persisting any s
 past an unacknowledged delivery. When a poll contains only own or filtered messages, nothing awaits
 acknowledgement and those positions persist immediately; withholding them would buy no delivery
 safety and would replay the non-deliverable suffix after a re-arm.
+
+**An attachment is always delivered as metadata; image materialization is reader-chosen.** Slack's
+private file URLs require a Bearer token, which cannot enter the room or a queued prompt. `--files`
+or the room's `files: true` asks the transport to use the token only on the download request,
+atomically store an inert copy under the reading session, and expose its absolute path. Codex
+receives the path rather than a credential-bearing URL or base64 bytes. Opt-in matters: otherwise
+every resident watcher would download every upload. The operation is bounded to eight images per
+message and 20 MiB per image; other files remain metadata. Download failure degrades that attachment
+to a bounded error and never suppresses the text or changes the cursor contract.
 
 **One watch per session.** With `--follow`, the watch polls the room at `interval` and each
 **followed thread** at `threadInterval`, each thread keeping its own cursor under the session. A

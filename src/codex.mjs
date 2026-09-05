@@ -219,9 +219,12 @@ export async function resolveCodexBinary(opts = {}) {
  */
 export function codexPrompt(room, message) {
   const from = message.signedAs ?? message.author.name;
+  const attachments = message.attachments?.length
+    ? `\n\n[Agora attachments]\n${message.attachments.map((a) => `- ${a.kind} ${JSON.stringify(a.name)}${a.mimetype ? ` (${a.mimetype}${a.size !== undefined ? `, ${a.size} bytes` : ""})` : a.size !== undefined ? ` (${a.size} bytes)` : ""}${a.path ? `; local path ${JSON.stringify(a.path)}` : ""}${a.error ? `; ${a.error}` : ""}`).join("\n")}`
+    : "";
   return `[Agora delivery; room ${room}; cursor ${message.cursor}; from ${from}]\n` +
     `[Codex no-op policy: only when this turn needs no tool call, state change, claim, or maintenance capture, append <!-- agora:no-maintenance --> to the final reply; otherwise omit it.]\n` +
-    message.text;
+    message.text + attachments;
 }
 
 /**

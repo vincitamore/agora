@@ -1,5 +1,7 @@
 // @ts-check
 import { AgoraError, EXIT, jitter, parseSignature, sleep as defaultSleep } from "../core.mjs";
+import { mkdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import path from "node:path";
 
 const SKIP_SUBTYPES = new Set(["channel_join", "channel_leave", "group_join", "group_leave"]);
 /** Subtypes that are still a person (or bot) speaking, not a platform event. */
@@ -14,6 +16,84 @@ export const SLACK_TEXT_MAX = 3900;
  * behind than that walks deeper deliberately rather than having the tool decide for it.
  */
 export const SLACK_READ_PAGES = 10;
+
+/** A screenshot is useful; an unbounded authenticated download is a disk-fill primitive. */
+export const SLACK_IMAGE_MAX_BYTES = 20 * 1024 * 1024;
+export const SLACK_IMAGE_MAX_PER_MESSAGE = 8;
+
+/** @param {any} file */
+function attachmentMeta(file) {
+  const mimetype = typeof file.mimetype === "string" ? file.mimetype : undefined;
+  const size = Number(file.size);
+  return /** @type {import('../core.mjs').Attachment} */ ({
+    id: String(file.id ?? "unknown"),
+    name: String(file.name ?? file.title ?? file.id ?? "attachment"),
+    kind: mimetype?.startsWith("image/") ? "image" : "file",
+    ...(mimetype ? { mimetype } : {}),
+    ...(Number.isFinite(size) && size >= 0 ? { size } : {}),
+    ...(Number.isFinite(Number(file.original_w)) ? { width: Number(file.original_w) } : {}),
+    ...(Number.isFinite(Number(file.original_h)) ? { height: Number(file.original_h) } : {}),
+    ...(typeof file.permalink === "string" ? { url: file.permalink } : {}),
+  });
+}
+
+/**
+ * Slack's file object contains credential-gated download and thumbnail URLs. `raw` is part of the
+ * public JSON message contract, so preserve the diagnostic record without turning those transport
+ * URLs into output. The human-facing permalink remains available in attachment metadata.
+ * @param {any} file
+ */
+function publicFile(file) {
+  return Object.fromEntries(
+    Object.entries(file ?? {}).filter(([key]) => key !== "url_private" && key !== "url_private_download" && !key.startsWith("thumb_")),
+  );
+}
+
+/** @param {any} message */
+function publicRaw(message) {
+  if (!Array.isArray(message.files)) return message;
+  return {
+    ...message,
+    files: message.files.map(publicFile),
+  };
+}
+
+/** @param {any} file */
+function imageExtension(file) {
+  const byMime = new Map([
+    ["image/jpeg", ".jpg"], ["image/png", ".png"], ["image/gif", ".gif"],
+    ["image/webp", ".webp"], ["image/bmp", ".bmp"], ["image/tiff", ".tiff"],
+    ["image/heic", ".heic"], ["image/heif", ".heif"], ["image/svg+xml", ".svg"],
+  ]);
+  const mime = String(file.mimetype ?? "").toLowerCase();
+  const known = byMime.get(mime);
+  if (known) return known;
+  const ext = path.extname(String(file.name ?? "")).toLowerCase();
+  return /^\.[a-z0-9]{1,8}$/.test(ext) ? ext : ".image";
+}
+
+/** Read a response without letting a false or absent Content-Length bypass the cap. @param {Response} res @param {number} max */
+async function boundedBody(res, max) {
+  const declared = Number(res.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > max) throw new AgoraError(`image exceeds the ${max}-byte materialization limit`);
+  if (!res.body) return Buffer.alloc(0);
+  const reader = res.body.getReader();
+  /** @type {Buffer[]} */
+  const chunks = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const chunk = Buffer.from(value);
+    total += chunk.length;
+    if (total > max) {
+      await reader.cancel();
+      throw new AgoraError(`image exceeds the ${max}-byte materialization limit`);
+    }
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks, total);
+}
 
 /** Split text so each piece is at most `budget` characters, preferring line boundaries. @param {string} text @param {number} budget */
 export function chunkAtLines(text, budget) {
@@ -74,10 +154,10 @@ export function encodeSlackText(text) {
  * The token is a bot token (xoxb-…) whose app has been invited to the channel.
  * Scopes: channels:history, channels:read, chat:write, groups:history, groups:read, users:read.
  * @param {import('../core.mjs').RoomConfig} room
- * @param {{ token: string, fetch?: typeof fetch, sleep?: (ms: number) => Promise<void>, random?: () => number }} deps
+ * @param {{ token: string, fetch?: typeof fetch, sleep?: (ms: number) => Promise<void>, random?: () => number, mediaDir?: string, imageMaxBytes?: number }} deps
  * @returns {import('../core.mjs').Transport}
  */
-export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep = defaultSleep, random = Math.random }) {
+export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep = defaultSleep, random = Math.random, mediaDir, imageMaxBytes = SLACK_IMAGE_MAX_BYTES }) {
   const channel = String(room.channel ?? "");
   if (!/^[A-Z][A-Z0-9]+$/.test(channel)) throw new AgoraError(`slack room needs a channel id (like C0123ABC), not a name`);
   const api = String(room.api ?? "https://slack.com/api").replace(/\/$/, "");
@@ -127,6 +207,59 @@ export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep
     }
   }
 
+  /**
+   * Materialize only images: screenshots become inspectable local paths while arbitrary shared
+   * binaries remain inert metadata. Slack file URLs require the same Bearer token plus files:read;
+   * the token is used on the request and never written beside the bytes or returned in a message.
+   * @param {any} file
+   * @param {number} imageIndex
+   */
+  async function attachment(file, imageIndex) {
+    const meta = attachmentMeta(file);
+    if (meta.kind !== "image" || !mediaDir) return meta;
+    if (imageIndex >= SLACK_IMAGE_MAX_PER_MESSAGE)
+      return { ...meta, error: `not materialized: more than ${SLACK_IMAGE_MAX_PER_MESSAGE} images on one message` };
+    if (typeof file.url_private_download !== "string" && typeof file.url_private !== "string")
+      return { ...meta, error: "not materialized: Slack supplied no private download URL" };
+    if (typeof meta.size === "number" && meta.size > imageMaxBytes)
+      return { ...meta, error: `not materialized: image exceeds the ${imageMaxBytes}-byte limit` };
+    const safeId = String(file.id ?? "attachment").replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 80) || "attachment";
+    const target = path.resolve(mediaDir, `${safeId}${imageExtension(file)}`);
+    try {
+      const existing = await stat(target).catch(() => undefined);
+      if (existing?.isFile() && existing.size > 0 && (meta.size === undefined || existing.size === meta.size)) return { ...meta, path: target };
+      const res = await f(String(file.url_private_download ?? file.url_private), { headers: { authorization: `Bearer ${token}` } });
+      if (!res.ok) {
+        const hint = res.status === 403 ? "; reinstall the Slack app with files:read" : "";
+        return { ...meta, error: `not materialized: Slack file download returned HTTP ${res.status}${hint}` };
+      }
+      const contentType = res.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+      if (contentType && !contentType.startsWith("image/"))
+        return { ...meta, error: `not materialized: Slack returned ${contentType} for an image` };
+      const bytes = await boundedBody(res, imageMaxBytes);
+      await mkdir(mediaDir, { recursive: true });
+      const temp = `${target}.${process.pid}.${Date.now()}.part`;
+      await writeFile(temp, bytes, { flag: "wx" });
+      try {
+        await rename(temp, target);
+      } catch (e) {
+        await rm(temp, { force: true });
+        const won = await stat(target).catch(() => undefined);
+        if (!won?.isFile()) throw e;
+      }
+      // Stat once after the atomic rename: a zero-byte proxy response is not a viewable image.
+      const saved = await stat(target);
+      if (!saved.size) {
+        await rm(target, { force: true });
+        return { ...meta, error: "not materialized: Slack returned an empty image" };
+      }
+      return { ...meta, path: target };
+    } catch (e) {
+      // Network errors can include the private URL in their message. Never echo them.
+      return { ...meta, error: e instanceof AgoraError ? `not materialized: ${e.message}` : "not materialized: authenticated download failed" };
+    }
+  }
+
   /** @param {any} m @param {string | undefined} thread */
   async function toMessage(m, thread) {
     const subtype = typeof m.subtype === "string" ? m.subtype : undefined;
@@ -136,6 +269,13 @@ export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep
     let name = m.username ?? m.bot_profile?.name ?? m.user_profile?.real_name;
     if (!name) name = m.user ? await userName(m.user) : id;
     const text = decodeSlackText(String(m.text ?? ""));
+    const files = Array.isArray(m.files) ? m.files : [];
+    let imageIndex = 0;
+    const attachments = [];
+    for (const file of files) {
+      const isImage = String(file?.mimetype ?? "").startsWith("image/");
+      attachments.push(await attachment(file, isImage ? imageIndex++ : -1));
+    }
     return /** @type {import('../core.mjs').Message} */ ({
       id: String(m.ts),
       room: channel,
@@ -145,8 +285,9 @@ export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep
       signedAs: parseSignature(text),
       ts: new Date(Number(m.ts) * 1000).toISOString(),
       cursor: String(m.ts),
-      raw: m,
+      raw: publicRaw(m),
       ...(subtype ? { subtype } : {}),
+      ...(attachments.length ? { attachments } : {}),
     });
   }
 

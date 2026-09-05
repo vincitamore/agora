@@ -1,8 +1,9 @@
 // @ts-check
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { slackTransport, decodeSlackText, encodeSlackText, SLACK_TEXT_MAX, chunkAtLines, validateThread } from "../src/transports/slack.mjs";
-import { fakeFetch } from "./helpers.mjs";
+import { fakeFetch, tmp } from "./helpers.mjs";
 
 const history = [
   { ts: "1756900000.000400", user: "U2", text: "latest human", thread_ts: undefined },
@@ -74,6 +75,85 @@ test("slack history: ascending, pages, skips joins and thread replies, names use
   assert.equal(msgs[2].ts, "2025-09-03T11:46:40.000Z");
   assert.equal(calls.filter((c) => c.url.pathname.endsWith("users.info")).length, 1, "user name is cached");
   assert.equal(calls.filter((c) => c.url.pathname.endsWith("conversations.history")).length, 2, "paged once");
+});
+
+test("slack image attachments are authenticated into bounded local media without exposing the token", async () => {
+  const tdir = await tmp();
+  try {
+    const bytes = Buffer.from([0xff, 0xd8, 0xff, 0xdb, 0x01, 0x02, 0x03]);
+    const file = {
+      id: "F0123IMAGE",
+      name: "screen shot.jpg",
+      mimetype: "image/jpeg",
+      size: bytes.length,
+      original_w: 1080,
+      original_h: 2340,
+      permalink: "https://workspace.slack.com/files/U1/F0123IMAGE/screen-shot",
+      url_private_download: "https://files.slack.com/files-pri/T1-F0123IMAGE/download/screen-shot.jpg",
+      url_private: "https://files.slack.com/files-pri/T1-F0123IMAGE/screen-shot.jpg",
+      thumb_360: "https://files.slack.com/files-tmb/T1-F0123IMAGE/screen-shot-360.jpg",
+    };
+    const api = fakeFetch([
+      ["users.info", () => ({ body: { ok: true, user: { id: "U2", real_name: "Alex" } } })],
+      ["conversations.history", () => ({ body: { ok: true, messages: [{ ts: "1756900000.000100", user: "U2", text: "look", files: [file] }], has_more: false } })],
+    ]);
+    /** @type {RequestInit | undefined} */
+    let downloadInit;
+    const fetchFile = /** @type {typeof globalThis.fetch} */ (async (input, init) => {
+      if (String(input).startsWith("https://files.slack.com/")) {
+        downloadInit = init;
+        return new Response(bytes, { headers: { "content-type": "image/jpeg", "content-length": String(bytes.length) } });
+      }
+      return api.fetch(input, init);
+    });
+    const transport = slackTransport({ transport: "slack", channel: "C1" }, { token: "xoxb-private", fetch: fetchFile, mediaDir: tdir.dir });
+    const [message] = await transport.read();
+    assert.equal(message.attachments?.length, 1);
+    assert.deepEqual(message.attachments?.[0], {
+      id: "F0123IMAGE", name: "screen shot.jpg", kind: "image", mimetype: "image/jpeg",
+      size: bytes.length, width: 1080, height: 2340,
+      url: "https://workspace.slack.com/files/U1/F0123IMAGE/screen-shot",
+      path: message.attachments?.[0].path,
+    });
+    assert.match(message.attachments?.[0].path ?? "", /F0123IMAGE\.jpg$/);
+    assert.deepEqual(await readFile(message.attachments?.[0].path ?? ""), bytes);
+    assert.equal(/** @type {Record<string, string>} */ (downloadInit?.headers).authorization, "Bearer xoxb-private");
+    const raw = /** @type {any} */ (message.raw);
+    assert.equal(raw.files[0].url_private, undefined);
+    assert.equal(raw.files[0].url_private_download, undefined);
+    assert.equal(raw.files[0].thumb_360, undefined);
+    assert.equal(raw.files[0].permalink, file.permalink);
+    assert.ok(!JSON.stringify(message.attachments).includes("xoxb-private"));
+    assert.ok(!JSON.stringify(message).includes("files-pri"));
+  } finally {
+    await tdir.cleanup();
+  }
+});
+
+test("slack still delivers attachment metadata when image bytes are unavailable or over the cap", async () => {
+  const tdir = await tmp();
+  try {
+    const files = [
+      { id: "F403", name: "denied.png", mimetype: "image/png", size: 12, url_private: "https://files.slack.com/denied" },
+      { id: "FBIG", name: "huge.png", mimetype: "image/png", size: 99, url_private: "https://files.slack.com/huge" },
+      { id: "FDOC", name: "notes.txt", mimetype: "text/plain", size: 4, url_private: "https://files.slack.com/doc" },
+    ];
+    const api = fakeFetch([
+      ["users.info", () => ({ body: { ok: true, user: { id: "U2", real_name: "Alex" } } })],
+      ["conversations.history", () => ({ body: { ok: true, messages: [{ ts: "1756900000.000100", user: "U2", text: "files", files }], has_more: false } })],
+    ]);
+    const fetchFile = /** @type {typeof globalThis.fetch} */ (async (input, init) => String(input).startsWith("https://files.slack.com/")
+      ? new Response("denied", { status: 403, headers: { "content-type": "text/html" } })
+      : api.fetch(input, init));
+    const transport = slackTransport({ transport: "slack", channel: "C1" }, { token: "x", fetch: fetchFile, mediaDir: tdir.dir, imageMaxBytes: 50 });
+    const [message] = await transport.read();
+    assert.match(message.attachments?.[0].error ?? "", /HTTP 403; reinstall the Slack app with files:read/);
+    assert.match(message.attachments?.[1].error ?? "", /exceeds the 50-byte limit/);
+    assert.deepEqual(message.attachments?.[2], { id: "FDOC", name: "notes.txt", kind: "file", mimetype: "text/plain", size: 4 });
+    assert.equal(message.text, "files", "attachment failure never suppresses the message text");
+  } finally {
+    await tdir.cleanup();
+  }
 });
 
 test("slack history without a cursor returns the newest messages up to the limit; with one, the oldest after it", async () => {

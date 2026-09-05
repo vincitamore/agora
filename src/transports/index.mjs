@@ -24,7 +24,7 @@ export const TRANSPORTS = Object.freeze({
  * @param {string} alias
  * @param {import('../core.mjs').RoomConfig} room
  * @param {import('../core.mjs').Config} cfg
- * @param {{ fetch?: typeof fetch, token?: string, cache?: { get: (key: string) => Promise<string | undefined>, set: (key: string, value: string) => Promise<void> } }} [deps]
+ * @param {{ fetch?: typeof fetch, token?: string, mediaDir?: string, cache?: { get: (key: string) => Promise<string | undefined>, set: (key: string, value: string) => Promise<void> } }} [deps]
  * @returns {Promise<import('../core.mjs').Transport>}
  */
 export async function createTransport(alias, room, cfg, deps = {}) {
@@ -44,7 +44,7 @@ export async function createTransport(alias, room, cfg, deps = {}) {
     case "slack": {
       const token = deps.token ?? (await resolveToken(room)).token;
       if (!token) throw new AgoraError(`room "${alias}": no token (set tokenEnv or tokenFile to the bot token)`);
-      return slackTransport(room, { token, fetch: deps.fetch });
+      return slackTransport(room, { token, fetch: deps.fetch, mediaDir: deps.mediaDir });
     }
     default:
       throw new AgoraError(`room "${alias}": unknown transport "${room.transport}" (have: ${Object.keys(TRANSPORTS).join(", ")})`);

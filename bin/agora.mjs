@@ -4,6 +4,7 @@ import { parseArgs } from "node:util";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import path from "node:path";
 import {
   AgoraError,
   EXIT,
@@ -94,7 +95,7 @@ const SCHEMA = {
     whoami: { args: ["<room>"], options: {}, does: "the identity this side posts as, per the transport" },
     read: {
       args: ["<room>"],
-      options: { "--thread <id>": "a thread inside the room", "--since <cursor>": "only what came after", "--limit <n>": "cap (default transport)", "--pages <n>": "pages of history to walk back through when --since is given (Slack, default 10 of 200 messages). A walk that does not reach the cursor returns nothing and names the gap rather than a partial window from the middle of the backlog", "--threads": "fold the room's live threads in: replies after --since, interleaved by time (Slack never shows them in a room read)" },
+      options: { "--thread <id>": "a thread inside the room", "--since <cursor>": "only what came after", "--limit <n>": "cap (default transport)", "--pages <n>": "pages of history to walk back through when --since is given (Slack, default 10 of 200 messages). A walk that does not reach the cursor returns nothing and names the gap rather than a partial window from the middle of the backlog", "--threads": "fold the room's live threads in: replies after --since, interleaved by time (Slack never shows them in a room read)", "--files": "materialize Slack-hosted images into this session's media directory; metadata is always carried" },
       does: "print messages ascending; never touches the saved cursor",
     },
     post: {
@@ -138,6 +139,7 @@ const SCHEMA = {
         "--coalesce <s>": "hold deliveries for this many seconds, then one envelope naming every cursor; a message whose to: names this bearer flushes immediately",
         "--max-batch <n>": "flush a coalesced window once this many messages are held",
         "--digest <s>": "render each message as author, cursor, first 80 characters, one envelope per period; the tool never summarises what a message means. A room config key digest (seconds) enables it when the flag is omitted; never a per-transport default",
+        "--files": "materialize Slack-hosted images into this session's media directory; metadata is always carried",
       },
       does: "deliver new messages since this session's saved cursor and advance it after delivery, skipping what this session posted; exit 42 when something arrived, 0 when nothing did, in every mode; always ends with one watch-result line. On each poll, a session on this seat that has gone dark and that has state in this room is announced to the room once, by whichever watch notices first, one post for the whole sweep",
     },
@@ -183,6 +185,7 @@ const OPTIONS = /** @type {const} */ ({
   limit: { type: "string" },
   pages: { type: "string" },
   threads: { type: "boolean", default: false },
+  files: { type: "boolean", default: false },
   file: { type: "string" },
   trailer: { type: "string", multiple: true },
   to: { type: "string", multiple: true },
@@ -270,7 +273,10 @@ function trailerLine(m) {
 function human(m) {
   const who = m.signedAs && m.signedAs !== m.author.name ? `${m.author.name} as ${m.signedAs}` : m.author.name;
   const where = m.thread ? `  thread ${m.thread}` : "";
-  return `[${m.ts}] ${who} (${m.author.kind})${where}  cursor ${m.cursor}\n${trailerLine(m)}${indent(m.text)}`;
+  const attachments = m.attachments?.length
+    ? `\n  attachments\n${m.attachments.map((a) => `    ${a.kind} ${a.name}${a.mimetype ? ` (${a.mimetype}` : ""}${a.size !== undefined ? `${a.mimetype ? ", " : " ("}${a.size} bytes` : ""}${a.mimetype || a.size !== undefined ? ")" : ""}${a.path ? `\n      local ${a.path}` : ""}${a.url ? `\n      source ${a.url}` : ""}${a.error ? `\n      ${a.error}` : ""}`).join("\n")}`
+    : "";
+  return `[${m.ts}] ${who} (${m.author.kind})${where}  cursor ${m.cursor}\n${trailerLine(m)}${indent(m.text)}${attachments}`;
 }
 
 /**
@@ -869,7 +875,11 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
   if (!roomAlias) throw new AgoraError(`${verb} needs a room (one of: ${Object.keys(cfg.rooms).join(", ")})`, EXIT.usage);
   const room = cfg.rooms[roomAlias];
   if (!room) throw new AgoraError(`no room "${roomAlias}" (have: ${Object.keys(cfg.rooms).join(", ")})`, EXIT.usage);
-  const transport = await createTransport(roomAlias, room, cfg, { cache: etagCache(sdir) });
+  const materializeFiles = values.files || room.files === true;
+  const transport = await createTransport(roomAlias, room, cfg, {
+    cache: etagCache(sdir),
+    ...(materializeFiles ? { mediaDir: path.join(sdir, "media", roomAlias) } : {}),
+  });
   const thread = values.thread;
   if (thread && !transport.threads) throw new AgoraError(`${transport.kind} rooms have no threads`, EXIT.usage);
   // Validation belongs at the caller boundaries only. An id typed here (or into --re) is a usage
