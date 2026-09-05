@@ -183,7 +183,7 @@ shared descriptor.
 
 A room whose config names `transport: native` and a `roomId` is watched by a subscriber, not a
 poller: `agora watch <alias>` connects through the descriptor, completes the service-first hello,
-subscribes from this session's saved cursor and wakes on `event` frames. The subscriber holds what
+subscribes from this session's saved cursor (a session with none starts at the newest window, as a read with no cursor does on every transport) and wakes on `event` frames. The subscriber holds what
 makes a wake this session's: the cursor, the posted ledger, the `--wake` predicate, coalescing and
 the printed lines; the service is handed a room and a cursor and nothing else, so no counterpart's
 trailer can steer the fan-out. The lines, the cursor filename, the armed record (with its build,
