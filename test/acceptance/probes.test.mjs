@@ -23,7 +23,7 @@ function run(probe) {
   return { result, observations };
 }
 
-for (const probe of ["probe-service-lifetime.mjs", "probe-custody-disposal.mjs", "probe-upload-origin.mjs"]) {
+for (const probe of ["probe-service-lifetime.mjs", "probe-custody-disposal.mjs", "probe-upload-origin.mjs", "probe-write-atomic-race.mjs"]) {
   test(`${probe} holds every bar it names`, () => {
     const { result, observations } = run(probe);
     assert.equal(result.error, undefined, `${probe} did not start: ${result.error?.message}`);
