@@ -28,6 +28,13 @@ test("deliver writes only with an admissionId; attach writes only with a live le
   closePane(pane);
 });
 
+test("deliver throws on a closed Terminal and writes nothing", () => {
+  const { writes, term } = fakeTerm();
+  const pane = { spawnId: "s1", term: { ...term, closed: true } };
+  expect(() => writeDeliveredLine(pane, "[agora] dl-1", "ad-1")).toThrow(/closed/);
+  expect(writes).toEqual([]);
+});
+
 test("terminal.write is only reached from terminal-backend.ts", () => {
   const root = path.join(import.meta.dir, "..");
   const hits: string[] = [];
