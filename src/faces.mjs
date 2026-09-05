@@ -743,7 +743,8 @@ export class FaceRunner {
   /**
    * Reconcile one `unknown` (or swept `pending`) face against the channel before any retry: a
    * bounded `conversations.history` over `[pendingAt - lookback, now]`. Found: `published`, zero
-   * posts. Not found and the read succeeded: repost. Read failed: stay `unknown`, zero posts.
+   * posts. Not found and the read covered the window: repost. Read failed, or truncated at the
+   * page cap (`complete: false`): stay `unknown`, zero posts.
    * Ambiguous (no rider, byte-identical bodies): stay `unknown`, quarantine the candidates.
    * @param {Face} face @param {FaceRecord} record
    * @returns {Promise<{ outcome: 'published' | 'reposted' | 'read-failed' | 'ambiguous' | 'refused' | 'exhausted', record?: FaceRecord }>}
@@ -791,7 +792,13 @@ export class FaceRunner {
         reason: `unknown: ${quarantine.length} byte-identical candidates from this seat inside the window and no rider; a human decides (agora faces --unknown)`, quarantine });
       return { outcome: "ambiguous", record: line };
     }
-    // the read succeeded and the message is not there: the attempt never landed, so a repost is not a duplicate
+    if (!hist.complete) {
+      // the read did not cover the window (the page cap stopped the walk), so "not there" is not known:
+      // a repost past a truncated read is the duplicate; the face stays as it was, like a failed read
+      this.warn(`face ${face.transport} reconciliation read for ${record.originId.slice(0, 12)} was truncated at the page cap; no repost until a read covers the window`);
+      return { outcome: "read-failed" };
+    }
+    // the read succeeded, covered the window, and the message is not there: the attempt never landed, so a repost is not a duplicate
     const attempt = (record.attempt ?? 1) + 1;
     if (attempt > FACE_MAX_ATTEMPTS) {
       const line = await this.#append({ originId: record.originId, transport: face.transport, ...(record.part ? { part: record.part, attachmentId: record.attachmentId } : {}),

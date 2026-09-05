@@ -1003,6 +1003,43 @@ test("github / fixture 03: a lost response is unknown, reconciled through the is
   } finally { die = false; await r.cleanup(); }
 });
 
+test("github / fixture 03 (P6 hold at 7c19360): a reconciliation read truncated at the page cap covers nothing, so a face with no candidate is NOT reposted; the outcome is read-failed and the sweep holds the room", async () => {
+  const text = "ack & done\n\nto: Alex\n\n-- Fable";
+  const unknownRec = { originId: ORIGIN_A, cursor: `${EPOCH}:41`, transport: "github", status: "unknown", code: "lost-response", attempt: 1, at: "2026-09-05T12:00:00.000Z", pendingAt: "2026-09-05T12:00:00.000Z", payloadDigest: sha(text) };
+  const c = clock("2026-09-05T12:00:45.000Z");
+  const r = await ghRig({ clock: c, records: [unknownRec], lookupCursor: (cur) => (cur === `${EPOCH}:41` ? msg({ text }) : undefined) });
+  try {
+    // three full pages and still no match: the half reports complete: false, as the real transport does past GITHUB_HISTORY_WINDOW_PAGES
+    let complete = false;
+    let reads = 0;
+    const truncated = /** @type {any} */ ({ ...r.transport, history: async () => { reads++; return { messages: Array.from({ length: 300 }, (_, i) => comment(5000 + i, `filler ${i}`, { login: "bone", uid: 2, at: "2026-09-05T12:00:01Z" })), complete }; } });
+    const runner = new FaceRunner({ stateRoot: r.dir, roomId: ROOM, attestor: ATTESTOR, now: c.now, membership: [ALEX], warn: (l) => r.warned.push(l), transportFor: async () => truncated,
+      lookupCursor: (cur) => (cur === `${EPOCH}:41` ? msg({ text }) : undefined) });
+    const linesBefore = (await readFile(r.file, "utf8")).trim().split("\n").length;
+    const out = await runner.reconcile(r.face, /** @type {any} */ (unknownRec));
+    assert.equal(out.outcome, "read-failed", "a read that did not cover the window licenses no repost");
+    assert.equal(r.posts().length, 0, "no second comment");
+    const linesAfter = (await readFile(r.file, "utf8")).trim().split("\n").length;
+    assert.equal(linesAfter, linesBefore, "no second pending line is appended");
+    const rec = (await r.records()).get(faceKey(ORIGIN_A, "github"));
+    assert.equal(rec?.status, "unknown");
+    assert.equal(rec?.attempt, 1);
+    assert.match(r.warned.at(-1) ?? "", /truncated at the page cap; no repost until a read covers the window/);
+    // the sweep holds the room on it, as it does on a failed read
+    const swept = await runner.sweep();
+    assert.equal(swept.held, true);
+    assert.deepEqual(swept.outcomes.map((o) => o.outcome), ["read-failed"]);
+    assert.equal(r.posts().length, 0);
+    // the same window read to completion with no match is the repost the design licenses
+    complete = true;
+    const again = await runner.reconcile(r.face, /** @type {any} */ (unknownRec));
+    assert.equal(again.outcome, "reposted");
+    assert.equal(r.posts().length, 1);
+    assert.equal((await r.records()).get(faceKey(ORIGIN_A, "github"))?.attempt, 2);
+    assert.equal(reads, 3);
+  } finally { await r.cleanup(); }
+});
+
 test("github / fixture 07 and 05: a comment from a human is ingested with a validated OriginReference and an unverified key, an own echo by id is not, our own login with no record IS, and our own login while a face is pending is held", async () => {
   const c = clock("2026-09-05T12:00:20.000Z");
   const publishedGh = { originId: ORIGIN_A, cursor: `${EPOCH}:41`, transport: "github", status: "published", id: "4242", attempt: 1, at: "2026-09-05T12:00:00.300Z" };
