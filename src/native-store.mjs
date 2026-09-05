@@ -1,9 +1,8 @@
 // @ts-check
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { mkdir, open, readFile, realpath, rename, rm, stat } from "node:fs/promises";
 import net from "node:net";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import { AgoraError } from "./core.mjs";
 import { nativeCursor, nativeDigest, parseNativeCursor, validateNativeEpoch, validateNativeId } from "./native-protocol.mjs";
@@ -33,70 +32,80 @@ function roomDirectory(root, roomId) {
 
 /** @param {string} file @param {string} text */
 async function writeDurableAtomic(file, text) {
-  await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+  const parent = path.dirname(file);
+  await mkdir(parent, { recursive: true, mode: 0o700 });
   const temp = `${file}.tmp-${process.pid}-${randomUUID()}`;
   try {
     const handle = await open(temp, "wx", 0o600);
     try { await handle.writeFile(text, "utf8"); await handle.sync(); }
     finally { await handle.close(); }
     await rename(temp, file);
+    await syncDirectory(parent);
   } finally {
     await rm(temp, { force: true });
   }
 }
 
+/**
+ * POSIX needs the directory entry persisted after an atomic rename. Windows
+ * does not permit fsync on a directory handle through Node; its file flush +
+ * rename path is the strongest portable runtime primitive available there.
+ * @param {string} directory
+ */
+async function syncDirectory(directory) {
+  if (process.platform === "win32") return;
+  const handle = await open(directory, "r");
+  try { await handle.sync(); }
+  finally { await handle.close(); }
+}
+
 /** @param {string} directory */
-function writerEndpoint(directory) {
-  const name = createHash("sha256").update(directory).digest("hex").slice(0, 32);
-  return process.platform === "win32" ? `\\\\.\\pipe\\agora-native-writer-${name}`
-    : path.join(tmpdir(), `agora-native-writer-${name}.sock`);
+async function physicalRoom(directory) {
+  const canonical = await realpath(directory);
+  const info = await stat(canonical, { bigint: true });
+  if (!info.isDirectory()) throw new AgoraError("native room path is not a directory");
+  // dev+ino survives symlink, junction, case and bind-mount aliases. Some
+  // Windows filesystems expose zeroes; realpath is the safe refusal-oriented
+  // fallback there and is case-folded because the namespace is insensitive.
+  const identity = info.dev !== 0n || info.ino !== 0n
+    ? `fs:${info.dev}:${info.ino}`
+    : `path:${process.platform === "win32" ? canonical.toLowerCase() : canonical}`;
+  return { directory: canonical, identity };
 }
 
-/** @param {string} endpoint */
-function probeWriter(endpoint) {
-  return new Promise((resolve, reject) => {
-    const socket = net.createConnection(endpoint);
-    const timer = setTimeout(() => { socket.destroy(); resolve(true); }, 1000);
-    socket.once("connect", () => { clearTimeout(timer); socket.destroy(); resolve(true); });
-    socket.once("error", (error) => {
-      clearTimeout(timer);
-      const code = /** @type {NodeJS.ErrnoException} */ (error).code;
-      if (code === "ECONNREFUSED" || code === "ENOENT") resolve(false);
-      else reject(error);
-    });
-  });
+/** @param {string} identity */
+function writerEndpoint(identity) {
+  // An OS-owned loopback listener disappears with its process, so there is no
+  // stale pathname to probe/unlink and no check-then-reclaim race. A hash
+  // collision or unrelated listener can only refuse a writer, never admit two.
+  const digest = createHash("sha256").update(identity).digest();
+  return { host: "127.0.0.1", port: 20_000 + (digest.readUInt32BE(0) % 20_000) };
 }
 
-/** @param {string} endpoint */
+/** @param {{host:string,port:number}} endpoint */
 async function listenWriter(endpoint) {
   const server = net.createServer((socket) => socket.destroy());
-  server.listen(endpoint);
+  server.listen({ ...endpoint, exclusive: true });
   try { await Promise.race([once(server, "listening"), once(server, "error").then(([error]) => Promise.reject(error))]); }
   catch (error) { try { if (server.listening) server.close(); } catch {} throw error; }
   return server;
 }
 
-/** @param {string} directory */
-async function acquireWriter(directory) {
-  const endpoint = writerEndpoint(directory);
-  try { return { server: await listenWriter(endpoint), endpoint }; }
+/** @param {string} identity */
+async function acquireWriter(identity) {
+  const endpoint = writerEndpoint(identity);
+  try { return { server: await listenWriter(endpoint), endpoint, identity }; }
   catch (error) {
-    if (/** @type {NodeJS.ErrnoException} */ (error).code !== "EADDRINUSE") throw error;
-  }
-  if (await probeWriter(endpoint)) throw new AgoraError("native room already has a live writer");
-  if (process.platform === "win32") throw new AgoraError("native room writer endpoint is busy");
-  await rm(endpoint, { force: true });
-  try { return { server: await listenWriter(endpoint), endpoint }; }
-  catch (error) {
-    if (/** @type {NodeJS.ErrnoException} */ (error).code === "EADDRINUSE") throw new AgoraError("native room already has a live writer");
+    const code = /** @type {NodeJS.ErrnoException} */ (error).code;
+    if (code === "EADDRINUSE" || code === "EACCES")
+      throw new AgoraError(`native room already has a live writer or its OS-owned endpoint ${endpoint.host}:${endpoint.port} is unavailable`);
     throw error;
   }
 }
 
-/** @param {{ server: net.Server, endpoint: string }} writer */
+/** @param {{ server: net.Server, endpoint: {host:string,port:number}, identity:string }} writer */
 async function releaseWriter(writer) {
   if (writer.server.listening) await new Promise((resolve) => writer.server.close(() => resolve(undefined)));
-  if (process.platform !== "win32") await rm(writer.endpoint, { force: true });
 }
 
 /** @param {unknown} value */
@@ -216,7 +225,7 @@ async function scan(handle, manifest, boundary) {
 }
 
 export class NativeRoomStore {
-  /** @param {string} directory @param {any} manifest @param {any} boundary @param {import('node:fs/promises').FileHandle} handle @param {{server: net.Server, endpoint: string}} writer @param {any[]} records @param {number} end @param {number} recoveredTailBytes @param {() => Date} now */
+  /** @param {string} directory @param {any} manifest @param {any} boundary @param {import('node:fs/promises').FileHandle} handle @param {{server: net.Server, endpoint: {host:string,port:number}, identity:string}} writer @param {any[]} records @param {number} end @param {number} recoveredTailBytes @param {() => Date} now */
   constructor(directory, manifest, boundary, handle, writer, records, end, recoveredTailBytes, now) {
     this.directory = directory;
     this.logPath = path.join(directory, "room.frames");
@@ -231,6 +240,7 @@ export class NativeRoomStore {
     this.now = now;
     this.queue = Promise.resolve();
     this.closed = false;
+    this.resourcesClosed = false;
     this.operations = new Map(records.map((r) => [`${r.accountId}\0${r.operationId}`, r]));
   }
 
@@ -243,23 +253,37 @@ export class NativeRoomStore {
     const recordLimit = options.recordLimit ?? DEFAULT_RECORD_LIMIT;
     if (!Number.isSafeInteger(recordLimit) || recordLimit < 1 || recordLimit > 10_000_000)
       throw new AgoraError("native room record limit must be 1-10000000");
-    const directory = roomDirectory(options.root, roomId);
-    await mkdir(path.dirname(directory), { recursive: true, mode: 0o700 });
-    try { await mkdir(directory, { mode: 0o700 }); }
+    const requestedDirectory = roomDirectory(options.root, roomId);
+    await mkdir(path.dirname(requestedDirectory), { recursive: true, mode: 0o700 });
+    try { await mkdir(requestedDirectory, { mode: 0o700 }); }
     catch (e) {
       if (/** @type {NodeJS.ErrnoException} */ (e).code === "EEXIST") throw new AgoraError(`native room ${roomId} already exists`);
       throw e;
     }
+    let directory = requestedDirectory;
+    let writer;
+    let log;
     try {
+      await syncDirectory(path.dirname(requestedDirectory));
+      const physical = await physicalRoom(requestedDirectory);
+      directory = physical.directory;
+      writer = await acquireWriter(physical.identity);
+      const confirmed = await physicalRoom(requestedDirectory);
+      if (confirmed.identity !== physical.identity)
+        throw new AgoraError("native room identity changed while acquiring its writer; refusing without publishing it");
       const manifest = { version: MANIFEST_VERSION, roomId, epoch, hostAccountId: options.hostAccountId, recordLimit,
         createdAt: (options.now ?? (() => new Date()))().toISOString() };
       await writeDurableAtomic(path.join(directory, "room.json"), JSON.stringify(manifest, null, 2) + "\n");
-      const log = await open(path.join(directory, "room.frames"), "wx+", 0o600);
+      log = await open(path.join(directory, "room.frames"), "wx+", 0o600);
       await log.sync();
-      await log.close();
-      await writeDurableAtomic(path.join(directory, "committed.json"), JSON.stringify({ version: 1, roomId, epoch, sequence: 0, end: 0, digest: null }, null, 2) + "\n");
-      return NativeRoomStore.open({ root: options.root, roomId, now: options.now });
+      await syncDirectory(directory);
+      const boundary = { version: 1, roomId, epoch, sequence: 0, end: 0, digest: null };
+      await writeDurableAtomic(path.join(directory, "committed.json"), JSON.stringify(boundary, null, 2) + "\n");
+      return new NativeRoomStore(directory, manifest, boundary, log, writer, [], 0, 0,
+        options.now ?? (() => new Date()));
     } catch (e) {
+      if (log) await log.close().catch(() => {});
+      if (writer) await releaseWriter(writer).catch(() => {});
       await rm(directory, { recursive: true, force: true });
       throw e;
     }
@@ -267,17 +291,24 @@ export class NativeRoomStore {
 
   /** @param {{ root: string, roomId: string, now?: () => Date }} options */
   static async open(options) {
-    const directory = roomDirectory(options.root, options.roomId);
-    let manifest;
-    try { manifest = JSON.parse(await readFile(path.join(directory, "room.json"), "utf8")); }
+    const requestedDirectory = roomDirectory(options.root, options.roomId);
+    let physical;
+    try { physical = await physicalRoom(requestedDirectory); }
     catch { throw new AgoraError(`native room ${options.roomId} has no valid manifest`); }
-    if (manifest?.version !== MANIFEST_VERSION || manifest.roomId !== options.roomId || !ROOM_RE.test(manifest.roomId ?? "") ||
-        !/^[A-Za-z0-9_-]{16,128}$/.test(manifest.hostAccountId ?? "") || !Number.isSafeInteger(manifest.recordLimit) ||
-        manifest.recordLimit < 1 || manifest.recordLimit > 10_000_000) throw new AgoraError(`native room ${options.roomId} manifest is invalid`);
-    validateNativeEpoch(manifest.epoch);
-    const writer = await acquireWriter(directory);
+    const writer = await acquireWriter(physical.identity);
+    const directory = physical.directory;
+    let manifest;
     let handle;
     try {
+      const confirmed = await physicalRoom(requestedDirectory);
+      if (confirmed.identity !== physical.identity)
+        throw new AgoraError("native room identity changed while acquiring its writer; refusing before scan");
+      try { manifest = JSON.parse(await readFile(path.join(directory, "room.json"), "utf8")); }
+      catch { throw new AgoraError(`native room ${options.roomId} has no valid manifest`); }
+      if (manifest?.version !== MANIFEST_VERSION || manifest.roomId !== options.roomId || !ROOM_RE.test(manifest.roomId ?? "") ||
+          !/^[A-Za-z0-9_-]{16,128}$/.test(manifest.hostAccountId ?? "") || !Number.isSafeInteger(manifest.recordLimit) ||
+          manifest.recordLimit < 1 || manifest.recordLimit > 10_000_000) throw new AgoraError(`native room ${options.roomId} manifest is invalid`);
+      validateNativeEpoch(manifest.epoch);
       handle = await open(path.join(directory, "room.frames"), "r+");
       let boundary;
       try { boundary = JSON.parse(await readFile(path.join(directory, "committed.json"), "utf8")); }
@@ -344,15 +375,24 @@ export class NativeRoomStore {
     try {
       await writeAll(this.handle, frame, start);
       await this.handle.sync();
-      const boundary = { version: 1, roomId: this.manifest.roomId, epoch: this.manifest.epoch, sequence,
-        end: start + frame.length, digest: record.recordDigest };
-      await writeDurableAtomic(this.boundaryPath, JSON.stringify(boundary, null, 2) + "\n");
-      this.boundary = boundary;
     } catch (e) {
       try { await this.handle.truncate(start); await this.handle.sync(); }
       catch { this.closed = true; }
       throw e;
     }
+    const boundary = { version: 1, roomId: this.manifest.roomId, epoch: this.manifest.epoch, sequence,
+      end: start + frame.length, digest: record.recordDigest };
+    try {
+      await writeDurableAtomic(this.boundaryPath, JSON.stringify(boundary, null, 2) + "\n");
+    } catch {
+      // Once boundary publication begins, its acceptance is unknown: rename may
+      // have succeeded before a directory sync failed. Never roll the log back
+      // behind a boundary another process may observe. Reopen reconciles the
+      // old or new boundary against the retained frame.
+      this.closed = true;
+      throw new AgoraError("native room committed-boundary publication failed; acceptance is unknown and the writer must reopen before retrying");
+    }
+    this.boundary = boundary;
     this.end += frame.length;
     this.records.push(record);
     this.operations.set(key, record);
@@ -404,10 +444,11 @@ export class NativeRoomStore {
   }
 
   async close() {
-    if (this.closed) return;
+    if (this.resourcesClosed) return;
     await this.queue;
     this.closed = true;
-    await this.handle.close();
-    await releaseWriter(this.writer);
+    this.resourcesClosed = true;
+    try { await this.handle.close(); }
+    finally { await releaseWriter(this.writer); }
   }
 }
