@@ -52,7 +52,7 @@ test("attack-matrix pane-sock: deliver before hello is refused", () => {
 
 test("attack-matrix agora-verb: schema --json has no verb that carries bytes to a pane", () => {
   const bin = path.join(import.meta.dir, "..", "..", "bin", "agora.mjs");
-  const result = spawnSync("node", [bin, "schema", "--json"], { encoding: "utf8" });
+  const result = spawnSync(process.execPath, [bin, "schema", "--json"], { encoding: "utf8" });
   expect(result.status).toBe(0);
   const schema = JSON.parse(result.stdout);
   const verbs = Object.keys(schema.verbs);
