@@ -305,7 +305,19 @@ export async function writeFileAtomic(file, data) {
   const tmp = `${file}.tmp-${process.pid}`;
   try {
     await writeFile(tmp, data, "utf8");
-    await rename(tmp, file);
+    let last;
+    for (let attempt = 0; attempt < 8; attempt++) {
+      try {
+        await rename(tmp, file);
+        return;
+      } catch (e) {
+        last = e;
+        const code = /** @type {NodeJS.ErrnoException} */ (e).code;
+        if (code !== "EPERM" && code !== "EACCES" && code !== "EBUSY") throw e;
+        await new Promise((resolve) => setTimeout(resolve, 10 * (attempt + 1)));
+      }
+    }
+    throw last;
   } catch (e) {
     await rm(tmp, { force: true });
     throw e;
