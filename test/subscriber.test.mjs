@@ -184,3 +184,16 @@ test("a refused cursor is this session's to recover, not the service being dark"
   await assert.rejects(openNativeSubscription({ stateRoot: root, roomId: ROOM, since: `${"8".repeat(32)}:0` }),
     (e) => !(e instanceof ServiceDarkError) && /epoch/.test(String(e)));
 });
+
+test("a session with no saved position subscribes from the newest window: the service requires an explicit cursor and replays after it", async (t) => {
+  const { root, peer } = await fixture(t);
+  for (let i = 1; i <= 3; i++) await peer.post(`m${i}`);
+  const subscription = await openNativeSubscription({ stateRoot: root, roomId: ROOM });
+  t.after(() => subscription.close());
+  await subscription.wait(2000);
+  const replayed = await subscription.read();
+  assert.deepEqual(replayed.map((m) => m.text), ["m1", "m2", "m3"], "a short room is the whole room, as a local read with no cursor");
+  await peer.post("m4");
+  await subscription.wait(2000);
+  assert.deepEqual((await subscription.read({ since: replayed.at(-1)?.cursor })).map((m) => m.text), ["m4"]);
+});
