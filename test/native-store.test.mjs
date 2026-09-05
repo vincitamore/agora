@@ -161,9 +161,10 @@ test("boundary publication failure preserves the synced frame for explicit recon
     (error) => error,
   );
   assert.match(String(failed.message), /acceptance is unknown/);
-  assert.equal(failed.message.includes("("), false, "the caller-facing message is unchanged");
   assert.ok(failed.cause instanceof Error, "the OS error is carried as cause, not discarded");
-  assert.equal(typeof /** @type {NodeJS.ErrnoException} */ (failed.cause).code, "string");
+  const code = /** @type {NodeJS.ErrnoException} */ (failed.cause).code;
+  assert.equal(typeof code, "string");
+  assert.match(String(failed.message), new RegExp(`\\(${code}\\)`), "TAP only prints the message, so the errno lives there");
   assert.ok((await stat(store.logPath)).size > before, "a possibly committed frame is not rolled back");
   await store.close();
   await rm(store.boundaryPath, { recursive: true, force: true });
