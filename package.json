@@ -14,7 +14,8 @@
   "scripts": {
     "test": "node --test \"test/**/*.test.mjs\"",
     "check": "tsc --noEmit -p .",
-    "smoke": "node bin/agora.mjs schema --json"
+    "smoke": "node bin/agora.mjs schema --json",
+    "tui": "cd tui && bun run index.tsx"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
