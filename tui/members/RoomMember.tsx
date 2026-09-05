@@ -227,7 +227,16 @@ export const RoomMember = memo(function RoomMember({ active }: { active: boolean
         </text>
       </box>
 
-      <box flexDirection="column" flexShrink={0} height={listRows}>
+      <box
+        flexDirection="column"
+        flexShrink={0}
+        height={listRows}
+        onMouseScroll={(e: { scroll?: { direction: string } }) => {
+          if (!active || composing) return;
+          if (e.scroll?.direction === "up") move(-1);
+          else if (e.scroll?.direction === "down") move(1);
+        }}
+      >
         {Array.from({ length: listRows }).map((_, i) => {
           const idx = top + i;
           const line = lines[idx];
