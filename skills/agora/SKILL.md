@@ -495,6 +495,12 @@ an injected `fetch` so it is testable offline.
 
 ## §4 GOTCHAS
 
+- An assignment is a claim made on someone else's behalf, and it crosses like one. A
+  coordinator that answers a human request by naming an owner in the same poll window in
+  which the bearers are claiming it produces a three-way collision, not an order. Either
+  wait one poll and then name the ordering among the claims that arrived, or assign and
+  say in the same line that a claim already posted takes precedence over the assignment.
+
 - The Slack bot token is not in the workspace's own settings. It belongs to an app
   created at api.slack.com (`slack-app-manifest.json` prefills the scopes) and appears
   as **Bot User OAuth Token** only after **Install to Workspace** on that app.
