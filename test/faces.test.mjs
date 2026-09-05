@@ -685,6 +685,57 @@ test("fixture 10 / 03: a lost completeUpload response is unknown, reconciled by 
   } finally { await r.cleanup(); }
 });
 
+test("upload origin (P6 finding at 2f7ea47): the host must BE slack.com or a subdomain, over https, and a redirect is refused with nothing forwarded", async () => {
+  const bytes = Buffer.from("\x89PNG\r\n\x1a\n fake image bytes");
+  const digest = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+  /**
+   * A fetch that behaves like a real one on redirects: it forwards the body to the Location host
+   * unless the request said `redirect: "error"`, in which case it throws before contacting it.
+   * @param {Record<string, { status: number, location?: string }>} hosts
+   */
+  function spy(hosts) {
+    /** @type {{ host: string, redirect: unknown }[]} */
+    const contacted = [];
+    /** @type {typeof fetch} */
+    const f = async (input, init) => {
+      const url = new URL(String(input));
+      const rule = hosts[url.hostname] ?? { status: 200 };
+      if (rule.status >= 300 && rule.status < 400 && rule.location) {
+        contacted.push({ host: url.hostname, redirect: init?.redirect });
+        if (init?.redirect === "error") throw new TypeError("fetch failed: redirect");
+        return f(rule.location, init);
+      }
+      contacted.push({ host: url.hostname, redirect: init?.redirect });
+      return new Response("OK", { status: rule.status });
+    };
+    const t = slackTransport(CHANNEL, { token: "xoxb-fake-test", fetch: f });
+    return { t, contacted };
+  }
+  for (const host of ["evilslack.com", "notslack.com", "slack.com.evil.example", "xslack.com"]) {
+    const { t, contacted } = spy({});
+    await assert.rejects(t.putUpload({ uploadUrl: `https://${host}/upload`, bytes, mimetype: "image/png", digest }), /not a slack\.com origin; not uploaded/);
+    assert.deepEqual(contacted, [], `no byte reaches ${host}`);
+  }
+  {
+    const { t, contacted } = spy({});
+    await assert.rejects(t.putUpload({ uploadUrl: "http://files.slack.com/upload", bytes, mimetype: "image/png", digest }), /not a slack\.com origin/);
+    await assert.rejects(t.putUpload({ uploadUrl: "not a url", bytes, mimetype: "image/png", digest }), /not a URL/);
+    assert.deepEqual(contacted, []);
+  }
+  // a 307 off a valid slack.com URL: refused, and the body never reaches the other host
+  {
+    const { t, contacted } = spy({ "files.slack.com": { status: 307, location: "https://evilslack.com/upload" } });
+    await assert.rejects(t.putUpload({ uploadUrl: "https://files.slack.com/upload/v1/abc", bytes, mimetype: "image/png", digest }), SlackApiError);
+    assert.deepEqual(contacted, [{ host: "files.slack.com", redirect: "error" }], "the request carries redirect: error and nothing is forwarded");
+  }
+  // the pin is not over-restrictive: the apex and a real subdomain are accepted
+  for (const host of ["slack.com", "files.slack.com"]) {
+    const { t, contacted } = spy({});
+    await t.putUpload({ uploadUrl: `https://${host}/upload`, bytes, mimetype: "image/png", digest });
+    assert.deepEqual(contacted, [{ host, redirect: "error" }]);
+  }
+});
+
 // ---------------------------------------------------------------------------------------------
 
 const staleA = { originId: ORIGIN_A, cursor: `${EPOCH}:41`, transport: "slack", status: "pending", attempt: 1, at: "2026-09-05T11:00:00.000Z", pendingAt: "2026-09-05T11:00:00.000Z", selector: "addressed" };

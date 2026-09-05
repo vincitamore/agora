@@ -428,10 +428,16 @@ export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep
       if (bytes.length > imageMaxBytes) throw new AgoraError(`image exceeds the ${imageMaxBytes}-byte limit`);
       const actual = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
       if (actual !== digest) throw new AgoraError(`image bytes do not match their digest; not uploaded`);
-      if (!/^https:\/\/[^/]*slack\.com\//.test(uploadUrl)) throw new AgoraError(`upload url is not a slack.com origin; not uploaded`);
+      // Parse, never pattern-match: a suffix test on the string admits evilslack.com. The host must
+      // BE slack.com or a subdomain of it, over https, and a redirect is refused rather than
+      // followed, so the bytes cannot be forwarded off a valid URL by a 307/308 (P6 finding at 2f7ea47).
+      let u;
+      try { u = new URL(uploadUrl); } catch { throw new AgoraError(`upload url is not a URL; not uploaded`); }
+      if (u.protocol !== "https:" || !(u.hostname === "slack.com" || u.hostname.endsWith(".slack.com")))
+        throw new AgoraError(`upload url is not a slack.com origin; not uploaded`);
       let res;
       try {
-        res = await f(uploadUrl, { method: "POST", headers: { "content-type": mimetype }, body: new Uint8Array(bytes) });
+        res = await f(u.href, { method: "POST", headers: { "content-type": mimetype }, body: new Uint8Array(bytes), redirect: "error" });
       } catch (e) {
         throw new SlackApiError(`slack upload: ${failedBeforeSend(e) ? "unreachable" : "the link died during the upload"}`, { answered: false, sent: !failedBeforeSend(e), method: "upload" });
       }
