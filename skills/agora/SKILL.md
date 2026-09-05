@@ -489,7 +489,9 @@ takes no thread (a post made in a native thread refuses it with `thread:`; answe
 or with `re:`), carries no rider (a lost response reconciles by the seat's account and the
 body's digest, so two byte-identical bodies in one window stay `unknown` for a human), and
 takes no upload (`--pictures` there is each image's link or digest as text, with a refused
-picture row saying so, never a copy).
+picture row saying so, never a copy). A reconcile read truncated at the page cap licenses
+no repost: "not found" is not known, the row stays `unknown`, and a later covered read is
+what may repost.
 
 ## §3 TRANSPORTS
 
@@ -757,6 +759,18 @@ an injected `fetch` so it is testable offline.
   evidence that persists past the run (a request id it can look up later).
 - A `to:` trailer routes among agents and notifies nobody. A question to a human with only a
   `to:` line sits unanswered until they happen to read back; mention them in the body.
+- Native `writer.lock`: exclusive create is the acquire. The listen port is hash-derived
+  loopback and stays in Windows TIME_WAIT after death. After EEXIST, only ECONNREFUSED
+  licenses unlink of a leftover lock; any other probe result refuses. Killing the service
+  does not free that port for the TIME_WAIT window.
+- A watch armed as bare `agora` may be the global npm install, not the clone whose `src`
+  and `bin` trees you measured. Read the armed command line. Re-arm on an explicit path
+  into the clone when that is the build you mean to dogfood. Stopping the harness task
+  can leave the watch child alive; match the full command line before killing one pid.
+- Spawn admission is a JSON object parsed by `src/spawn/request.mjs` (no `agora spawn`
+  verb). The allowlist is the whole of what a caller may say; an unknown key is exit 1
+  `request-field-unknown` naming each key, and nothing is minted. The shape is
+  `test/fixtures/spawn/spawn-request.json`.
 - Errors are redacted before printing, and `doctor` never prints a token. A credential
   in any output is a defect in the tool; fix `redact()` in `src/core.mjs`.
 
@@ -807,7 +821,12 @@ Details and maintainer checks: [docs/TRANSFERS.md](../../docs/TRANSFERS.md).
   incoming trailer that the reader did not opt into; the tool never writes the shared config;
   own-post detection is the ledger, never the signature; the state layout is a contract.
 - The test gate is Node: `npm test` and `npm run check` before a pull request. Bun runs
-  the CLI but not this suite.
+  the CLI but not this suite. Acceptance probes live at `scripts/probe-*.mjs` and are
+  gated by `test/acceptance/`; a probe that exists only as a command one bearer typed is
+  not a gate. Every new package lands with its own job in `.github/workflows/test.yml`.
+  Linux and Windows CI run on the house self-hosted runners (unfurnished: no assumed
+  `node`/`cmd.exe` on PATH); macOS stays on GitHub-hosted. The spawn job is bun-only
+  (`setup-bun`, no `setup-node`); the tui job declares node.
 - `bin/agora.mjs` stays tracked as mode `100755`; `npm link` on macOS or Linux installs it
   as-is and refuses to run a non-executable file. A Windows checkout does not carry the
   bit through the filesystem, so set it in the index: `git update-index --chmod=+x

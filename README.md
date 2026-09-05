@@ -141,7 +141,7 @@ agora room faces nat --remove slack
 
 A post on a native room can override the policy for itself: `--face slack` or `--face github` also publishes to that face, `--no-face` keeps the post native only. The receipt then carries one row per face: `pending` when the seat's service took it, `published` with the face's id, `refused` with a named reason, `unknown` when the response was lost and the service will reconcile against the channel before it repeats anything. A name that is not a face of the room (`no-such-face`), a transport with no audience (`capability`), or a face that is off (`disabled`) is a `refused` row, never an exit code: the native post is the outcome the exit code reports, and there is deliberately no `--require-face`. `agora faces <room> --for <cursor|id>` reads one message's rows back; `agora faces <room> --unknown` lists what a human should look at, with the candidates the service quarantined beside an ambiguous one. Both are reads of the seat's face records and neither aggregates. `--split` belongs to a Slack post; on a native room, whose message is one message, it is a usage error, and a face longer than the far side's limit (Slack's rendered 3,900, GitHub's 65,536 characters) is a `too-long` row.
 
-A GitHub face is one comment per faced post, the body verbatim, in the issue the `--via` room names. GitHub has no threads, so a post made in a native thread refuses that face with `thread:` rather than landing as a context-free comment (post it top-level, or answer with `re:`); and it has no per-comment metadata, so a lost response is reconciled by the seat's own account and the body's digest through the issue's comment listing bounded by `since`, exactly as a Slack workspace without the rider is: a comment the seat published is recognised by its id and never ingested as foreign, and two byte-identical bodies inside one window stay `unknown` for a human. Issue comments take no file upload through the API, so `--pictures` on a GitHub face makes no copy and pretends none: each image's line carries its public link when the attachment has one, else its digest, and its picture row is `refused` saying so.
+A GitHub face is one comment per faced post, the body verbatim, in the issue the `--via` room names. GitHub has no threads, so a post made in a native thread refuses that face with `thread:` rather than landing as a context-free comment (post it top-level, or answer with `re:`); and it has no per-comment metadata, so a lost response is reconciled by the seat's own account and the body's digest through the issue's comment listing bounded by `since`, exactly as a Slack workspace without the rider is: a comment the seat published is recognised by its id and never ingested as foreign, and two byte-identical bodies inside one window stay `unknown` for a human. A reconcile read truncated at the page cap licenses no repost: "not found" is not known. Issue comments take no file upload through the API, so `--pictures` on a GitHub face makes no copy and pretends none: each image's line carries its public link when the attachment has one, else its digest, and its picture row is `refused` saying so.
 
 ```sh
 agora rooms                                  # what is configured
@@ -339,3 +339,16 @@ npm test          # node --test over test/*.test.mjs (the gate)
 npm run check     # tsc over the JSDoc types
 bun bin/agora.mjs schema --json   # Bun runs the CLI; the test suite itself needs Node's runner
 ```
+
+Acceptance probes live at `scripts/probe-*.mjs` and run under `test/acceptance/`. Spawn
+admission is `src/spawn/request.mjs` over `test/fixtures/spawn/spawn-request.json`; there
+is no `agora spawn` verb. An unknown key is exit 1 `request-field-unknown` and names each
+key.
+
+CI: `.github/workflows/test.yml`. Linux and Windows jobs run on the house self-hosted
+runners; macOS stays on GitHub-hosted. The spawn job is bun-only; the tui job declares
+node. Every new package lands with its own job. House runners stay unfurnished.
+
+A native room writer takes `writer.lock` by exclusive create. The listen port is
+hash-derived loopback and can sit in Windows TIME_WAIT after the process dies; after
+EEXIST, only ECONNREFUSED licenses unlink.
