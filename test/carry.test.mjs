@@ -11,7 +11,8 @@ import { AgoraError, writeCursor } from "../src/core.mjs";
 import { carryState, carryWindow, foldRoom, renderCarry } from "../src/carry.mjs";
 import { appendPosted, inheritSession, readPosted } from "../src/session.mjs";
 import { writeFollow } from "../src/follow.mjs";
-import { tmp } from "./helpers.mjs";
+import { slackTransport } from "../src/transports/slack.mjs";
+import { fakeFetch, tmp } from "./helpers.mjs";
 
 const run = promisify(execFile);
 const BIN = new URL("../bin/agora.mjs", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
@@ -223,6 +224,48 @@ test("carry: a malformed thread id and a thread that is gone are recorded, never
     { id: "p9", reason: "slack conversations.replies: thread_not_found" },
     { id: "178845964", reason: "not a thread id here (an unquoted timestamp loses its last digits under pwsh)" },
   ], "a thread that is gone and one this read cannot reach are the same fact: named, not fatal");
+});
+
+test("carry: through the slack transport, a thread whose ts lost its digits is named unread with the reason and never read", async () => {
+  const good = "1700000000.000100";
+  const bad = "1788589282.65997";
+  const { fetch, calls } = fakeFetch([
+    ["users.info", () => ({ body: { ok: true, user: { id: "U2", real_name: "bone" } } })],
+    ["conversations.history", () => ({
+      body: {
+        ok: true,
+        has_more: false,
+        messages: [
+          // a broadcast reply (the one kind of reply a room read keeps) whose thread_ts is mangled:
+          // the fold roots a thread on it, and that root must be named unread, not read
+          { ts: "1700000000.000300", user: "U2", subtype: "thread_broadcast", text: "a reply whose thread lost its last digits", thread_ts: bad },
+          { ts: good, user: "U2", text: "parent", thread_ts: good, reply_count: 1, latest_reply: "1700000000.000200" },
+        ],
+      },
+    })],
+    ["conversations.replies", () => ({
+      body: {
+        ok: true,
+        has_more: false,
+        messages: [
+          { ts: good, user: "U2", text: "parent", thread_ts: good, reply_count: 1 },
+          { ts: "1700000000.000200", user: "U2", text: "the reply in the good thread", thread_ts: good },
+        ],
+      },
+    })],
+  ]);
+  const t = slackTransport({ transport: "slack", channel: "C1" }, { token: "x", fetch });
+  const w = await carryWindow(t, { limit: 200 });
+  assert.deepEqual(w.threads, [good], "the readable thread is folded");
+  assert.equal(w.threadsUnread.length, 1);
+  assert.equal(w.threadsUnread[0].id, bad);
+  assert.match(w.threadsUnread[0].reason, /5 digits after the dot, not 6/);
+  assert.match(w.threadsUnread[0].reason, /unquoted ts loses its trailing digits under PowerShell/);
+  assert.ok(w.messages.some((m) => m.text === "the reply in the good thread"));
+  const asked = calls.filter((c) => String(c.url).includes("conversations.replies")).map((c) => new URL(String(c.url)).searchParams.get("ts"));
+  assert.deepEqual(asked, [good], "the malformed id never reached the API");
+  const text = renderCarry({ ...foldRoom(w.messages, new Set(), { bearer: "Fable/watch" }), threadsUnread: w.threadsUnread, cursorKey: "down", cursor: null, threads: w.threads });
+  assert.match(text, /unread {6}1788589282\.65997: a Slack thread id is the parent message's ts/);
 });
 
 test("carry: --no-threads carries the field empty, and the room read is the one failure that is fatal", async () => {

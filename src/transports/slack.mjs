@@ -123,9 +123,31 @@ export function chunkAtLines(text, budget) {
 const KEEP_TOKEN = /<@U[A-Z0-9]+(?:\|[^>]*)?>|<#C[A-Z0-9]+(?:\|[^>]*)?>|<https?:\/\/[^>]+>/g;
 const THREAD_TS = /^\d{10}\.\d{6}$/;
 
-/** True only for a Slack message ts (10 digits, a dot, 6 digits). Callers refuse; read() does not. @param {unknown} id */
+/**
+ * Why `id` is not a Slack thread id (the parent message's ts: 10 digits, a dot, 6 digits), or
+ * nothing when it is one. The Transport hook contract: a reason string names the malformation so
+ * the caller boundary (`--thread`, `--re`) can refuse with it, and a follow set or a carry fold
+ * can report it, before any read is spent on an id Slack cannot resolve. `read()` itself never
+ * refuses. The reason does not repeat the id; the caller prefixes it.
+ *
+ * The malformation this exists for: PowerShell parses an unquoted `1788589282.659969` as a
+ * number and hands the tool `1788589282.65997`, which is a `thread_not_found` on every read.
+ * @param {unknown} id
+ * @returns {string | undefined}
+ */
 export function validateThread(id) {
-  return typeof id === "string" && THREAD_TS.test(id);
+  const shape = "a Slack thread id is the parent message's ts: 10 digits, a dot, 6 digits (like 1788589282.659969)";
+  if (typeof id !== "string") return `${shape}; got ${id === undefined || id === null ? "nothing" : `a ${typeof id}`}`;
+  if (!id.trim()) return `${shape}; got an empty string`;
+  if (THREAD_TS.test(id)) return undefined;
+  const m = /^(\d+)\.(\d+)$/.exec(id);
+  if (!m) return `${shape}; ${JSON.stringify(id)} is not a ts at all`;
+  const [, secs, frac] = m;
+  if (secs.length !== 10) return `${shape}; ${secs.length} digit${secs.length === 1 ? "" : "s"} before the dot, not 10`;
+  const n = frac.length;
+  const digits = `${n} digit${n === 1 ? "" : "s"} after the dot, not 6`;
+  // fewer digits than Slack ever emits is the shell's doing, not a typo: the cure is quoting
+  return n < 6 ? `${shape}; ${digits} (an unquoted ts loses its trailing digits under PowerShell; quote it)` : `${shape}; ${digits}`;
 }
 
 /** Slack's API entity-encodes & < > on the way out. Decode so a reader sees the text that was posted. @param {string} text */
@@ -295,6 +317,9 @@ export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep
     kind: "slack",
     room: channel,
     threads: true,
+    // the boundary guard the CLI, the watch and carry consult; a transport that does not carry it
+    // is one whose malformed ids reach the API and come back as thread_not_found
+    validateThread,
     async whoami() {
       const body = await call("auth.test", {});
       return { id: String(body.user_id), name: String(body.user) };
