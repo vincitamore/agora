@@ -240,6 +240,58 @@ gaps, index lag and authorized continuations retain separate contracts. A scan
 also is not recipient-delivered coverage. Wake supersession requires the latter
 with recipient/generation checks; neither scan nor wake implies agent ACK.
 
+### Presence routes and recipient-delivered coverage
+
+`lease.mjs` exports `validateWakeRoutes`, `deriveWakeSurface`,
+`validatePublicBearer`, `validatePresenceLease`, `assertPresenceContext`, and
+`evaluatePresenceLease`. A public bearer has `registration:RegistrationRef`,
+`bearer`, `harnessId`, `persistence` (`persistent | one-shot | unknown`),
+`processPresent` (`yes | no | unknown`), `wakeRoutes:{subscriber,pane}` and
+`wakeSurface`. Each route is `present | absent | unknown`. The aggregate is
+present if either is present, absent only if both are absent, otherwise unknown.
+Contradictory aggregates are rejected; both routes may coexist.
+
+`PresenceLease={seat:AccountBinding,service:ServiceRef,leaseId,renewal,renewedAt,
+expects_agents,build:{version,git?},bearers:PublicBearer[]}`. The binding attestor
+equals the service. Registration tuples are distinct, the roster is bounded at
+1024 entries, renewal is a positive safe integer, and an optional Git revision is
+40 lowercase hex characters. No PID, local path or serialized `isLive` crosses
+this boundary. An empty roster does not imply a service-only seat.
+`assertPresenceContext` takes independently held `{seat,service,leaseId,role}`;
+`role:agent-capable | service-only` determines `expects_agents`, not roster size.
+
+Freshness takes receiver-local monotonic milliseconds
+`{acceptedRenewal,acceptedAt,now,connected}` for this exact lease. The receiver
+must reject replay before updating its accepted timing; the pure evaluator does
+not store renewal history. Sender `renewedAt` is descriptive, never an expiry
+clock. The accepted renewal must match; disconnect or elapsed time of 45000 ms
+returns `dark`. Freshness and route presence never admit a wake or prove process
+death. P4 selects an authenticated recipient-bound subscriber before a freshly
+admitted pane; unknown handoff reconciles the same delivery ID, not an independent
+second write. Those mechanisms remain consumer work.
+
+`delivered-coverage.mjs` exports `validateNativeDeliveredCoverage`,
+`validateDeliveryRange`, `assertDeliveredCoverageContext`, `coversDeliveredRange`.
+The record is `{recipient:RegistrationRef,service:ServiceRef,
+coverage:NativeReadCoverage,progressId,admissionId}`. It composes the **unchanged**
+native scan grammar but asserts a different event: P1/P4's authenticated progress
+owner handed that contiguous interval to this recipient under this admission.
+A scan alone, saved/manual cursor, or `gapFree:true` flag is not this record;
+validation cannot prove the asserted event. No read-to-delivered conversion is
+provided. Disjoint intervals are not merged or given inferred coverage of gaps.
+
+The assertion requires independently authenticated
+`{recipient,service,room,progressId,admissionId}`. All recipient fields, service
+boot, host authority/identity, room, epoch and proof references must match.
+The range predicate takes `{after,through}`, checks that context first and then
+requires full containment in `(fromExclusive,toInclusive]`; `committedThrough`
+does not extend delivered coverage. Partial coverage returns false, retaining
+uncovered work pending. Artifact-only pointers cannot enter this range API.
+An authenticated owner must recheck live progress at actual admission: a prior
+lookup success or mint-time cursor is not authorization. These pure functions
+write no cursor, ACK, delivery record or queue entry. Supersession avoids a
+redundant poke only; it asserts neither agent acknowledgment nor completion.
+
 ### Route and child ownership
 
 Service boot, room epoch, specific grant revision and route generation are
