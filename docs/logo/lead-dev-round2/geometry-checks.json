@@ -1,0 +1,41 @@
+{
+  "rotunda": {
+    "dots": 19495,
+    "text": [
+      96,
+      48
+    ],
+    "png": [
+      864,
+      864
+    ],
+    "gif_ms": 4800,
+    "same_loop_endpoints": true
+  },
+  "leaf-gate": {
+    "dots": 15191,
+    "text": [
+      96,
+      48
+    ],
+    "png": [
+      864,
+      864
+    ],
+    "gif_ms": 4800,
+    "same_loop_endpoints": true
+  },
+  "bell": {
+    "dots": 10875,
+    "text": [
+      96,
+      48
+    ],
+    "png": [
+      864,
+      864
+    ],
+    "gif_ms": 4800,
+    "same_loop_endpoints": true
+  }
+}
