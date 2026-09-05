@@ -194,9 +194,12 @@ export function portableTransferName(name) {
 
 /** @param {string} filename */
 export async function digestFile(filename) {
-  const hash=createHash('sha256');let size=0;
-  for await(const chunk of createReadStream(filename)) {size+=chunk.length;hash.update(chunk);}
-  return {size,digest:`sha256:${hash.digest('hex')}`};
+  const hash=createHash('sha256');let size=0;let prefix=Buffer.alloc(0);
+  for await(const chunk of createReadStream(filename)) {
+    size+=chunk.length;hash.update(chunk);
+    if(prefix.length<12)prefix=Buffer.concat([prefix,chunk.subarray(0,12-prefix.length)]);
+  }
+  return {size,digest:`sha256:${hash.digest('hex')}`,mimetype:transferMediaType(prefix)};
 }
 
 /** Snapshot only named regular files; generated payload ids never double as untrusted paths.
@@ -261,6 +264,7 @@ export async function commitReceivedFiles(staging,destination,files) {
   validateTransferManifest(files);
   await privateDirectory(destination);
   /** @type {string[]} */const created=[];
+  const attachments=[];
   try {
     for(const file of files) {
       const source=path.join(staging,file.id), target=path.join(destination,file.name);
@@ -276,9 +280,10 @@ export async function commitReceivedFiles(staging,destination,files) {
         const existing=await digestFile(target);
         if(existing.size!==file.size || existing.digest!==file.digest) throw new AgoraError('Destination collision; no existing file was changed. Retry agora fetch with --into <empty-directory>.');
       }
+      attachments.push({...transferAttachment({...file,mimetype:actual.mimetype}),path:target});
     }
     // Files were fsynced before linking. Persist directory entries where supported before ACK.
     if(process.platform!=='win32') {const dir=await open(destination,'r');try {await dir.sync();} finally {await dir.close();}}
-    return files.map(file=>({...transferAttachment(file),path:path.join(destination,file.name)}));
+    return attachments;
   } catch(e) {for(const file of created) await rm(file,{force:true});throw e;}
 }

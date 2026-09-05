@@ -17,10 +17,15 @@ test('a screenshot remains an image attachment after verified materialization, w
   const staging=path.join(root,'snapshot'),destination=path.join(root,'received');
   const files=await snapshotTransferFiles(staging,[input]);
   assert.equal(files[0].mimetype,'image/png');
+  files[0].mimetype='application/octet-stream'; // receiving presentation cannot trust a peer label
   const received=await commitReceivedFiles(staging,destination,files);
   assert.equal(received[0].kind,'image');assert.deepEqual(await readFile(received[0].path),png);
   const fake=path.join(root,'not-an-image.png');await writeFile(fake,'plain bytes');
-  assert.equal((await snapshotTransferFiles(path.join(root,'fake-snapshot'),[fake]))[0].mimetype,'application/octet-stream');
+  const fakeStaging=path.join(root,'fake-snapshot'),fakeFiles=await snapshotTransferFiles(fakeStaging,[fake]);
+  assert.equal(fakeFiles[0].mimetype,'application/octet-stream');
+  fakeFiles[0].mimetype='image/png';
+  const plain=await commitReceivedFiles(fakeStaging,path.join(root,'fake-received'),fakeFiles);
+  assert.equal(plain[0].mimetype,'application/octet-stream');assert.equal(plain[0].kind,'file');
 });
 /** @param {import("node:test").TestContext} t */
 async function fixture(t){const root=await realpath(await mkdtemp(path.join(os.tmpdir(),'agora-transfer-')));t.after(()=>rm(root,{recursive:true,force:true}));return root;}

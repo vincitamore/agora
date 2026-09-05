@@ -114,8 +114,8 @@ export async function pruneOffers(root){
   return removed;
 }
 
-/** @param {import('./core.mjs').Transport} transport @param {string} stateRoot @param {string} root @param {string} id @param {{into?:string,pages?:number,room?:string}} [options] */
-export async function fetchFiles(transport,stateRoot,root,id,options={}){
+/** @param {import('./core.mjs').Transport} transport @param {string} stateRoot @param {string} root @param {string} id @param {{into?:string,pages?:number,room?:string}} [options] @param {{openClient?:typeof openTransferClient}} [deps] */
+export async function fetchFiles(transport,stateRoot,root,id,options={},deps={}){
   offerDirectory(root,id);const who=await transport.whoami();const identity=await localTransferIdentity(stateRoot);
   const pages=options.pages??20;
   const messages=await transport.read({limit:pages*200,pages});
@@ -134,9 +134,14 @@ export async function fetchFiles(transport,stateRoot,root,id,options={}){
   const connection={...route,stateRoot,keyPath:identity.keyPath,deadline:offer.expires};
   const receiptPath=path.join(destination,'.agora-receipt-'+id+'.json');
   let committed=false;
+  /** @type {any[]} */let attachments=[];
   try{const receipt=JSON.parse(await readFile(receiptPath,'utf8'));committed=receipt.digest===digest;
-    if(committed)for(const file of files){const actual=await digestFile(path.join(destination,file.name));if(actual.size!==file.size||actual.digest!==file.digest){committed=false;break;}}}catch{}
-  const client=await openTransferClient(connection);
+    if(committed)for(const file of files){
+      const target=path.join(destination,file.name),actual=await digestFile(target);
+      if(actual.size!==file.size||actual.digest!==file.digest){committed=false;break;}
+      attachments.push({...transferAttachment({...file,mimetype:actual.mimetype}),path:target});
+    }}catch{committed=false;}
+  const client=await (deps.openClient??openTransferClient)(connection);
   try{
   if(!committed){
     const manifest=await client.request('/manifest',{maximum:32768});
@@ -145,11 +150,10 @@ export async function fetchFiles(transport,stateRoot,root,id,options={}){
     const staging=path.join(destination,'.agora-stage-'+randomUUID());await mkdir(staging,{mode:0o700});
     try{
       for(const file of files)await client.request('/files/'+file.id,{target:path.join(staging,file.id),maximum:file.size});
-      await commitReceivedFiles(staging,destination,files);
+      attachments=await commitReceivedFiles(staging,destination,files);
       await atomicJson(receiptPath,{digest});
     }finally{await rm(staging,{recursive:true,force:true});}
   }
-  const attachments=files.map(file=>({...transferAttachment(file),path:path.join(destination,file.name)}));
   try{await client.request('/receipt',{body:JSON.stringify({digest}),maximum:256});}
   catch{ return {offerId:id,status:'saved-receipt-pending',attachments,next:{command:'agora',args:['fetch',options.room??'<room>',id,'--into',destination]}}; }
   return {offerId:id,status:'received',attachments};
