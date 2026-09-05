@@ -26,15 +26,23 @@ export type Authority = {
   panes: Map<string, OpenedPane>;
   leases: Map<string, Lease>;
   journal: JournalEntry[];
+  greeted: boolean;
+  bootEpoch: number;
   now: () => number;
   open: (spawnId: string) => OpenedPane;
 };
 
-export function createAuthority(opts: { open: (spawnId: string) => OpenedPane; now?: () => number }): Authority {
+export function createAuthority(opts: {
+  open: (spawnId: string) => OpenedPane;
+  now?: () => number;
+  bootEpoch: number;
+}): Authority {
   return {
     panes: new Map(),
     leases: new Map(),
     journal: [],
+    greeted: false,
+    bootEpoch: opts.bootEpoch,
     now: opts.now ?? Date.now,
     open: opts.open,
   };
@@ -43,9 +51,13 @@ export function createAuthority(opts: { open: (spawnId: string) => OpenedPane; n
 const LEASE_MS = 30_000;
 
 export function handleFrame(auth: Authority, frame: Frame): void {
+  if (frame.type === "hello") {
+    if (frame.bootEpoch !== auth.bootEpoch) throw new Error("hello bootEpoch does not match this authority");
+    auth.greeted = true;
+    return;
+  }
+  if (!auth.greeted) throw new Error("pane.sock requires hello from the seat service or the human channel first");
   switch (frame.type) {
-    case "hello":
-      return;
     case "deliver":
       return deliver(auth, frame);
     case "attach":
