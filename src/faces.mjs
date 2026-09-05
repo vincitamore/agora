@@ -43,7 +43,9 @@ export const FACE_STATUSES = Object.freeze(["pending", "published", "refused", "
 const SHA40 = /^[0-9a-f]{40}$/;
 const POLICY_VERSION = 1;
 /** Transports with an audience a face can reach. `local` is a file; `native` is the log itself. */
-const FACE_CAPABLE = new Set(["slack", "github"]);
+export const FACE_CAPABLE = new Set(["slack", "github"]);
+/** Transports whose face half is built: `agora room faces --add` admits these and the runner publishes to them. */
+export const FACE_BUILT = Object.freeze(["slack"]);
 
 /** @typedef {'always'|'never'|'addressed'|'landing'} FaceSelector */
 /** @typedef {'none'|'metadata'|'pictures'} FaceAttachmentMode */
@@ -209,6 +211,16 @@ export function foldFaceRecords(lines) {
   return byKey;
 }
 
+/**
+ * The face rows for one message (`agora faces <room> --for`), and every `unknown` row (`--unknown`):
+ * reads over the folded log, never an aggregate.
+ * @param {string} stateRoot @param {string} roomId @param {{ originId?: string, status?: FaceRecord['status'] }} [only]
+ */
+export async function listFaceRecords(stateRoot, roomId, only = {}) {
+  const records = await readFaceRecords(stateRoot, roomId);
+  return [...records.values()].filter((r) => (only.originId === undefined || r.originId === only.originId) && (only.status === undefined || r.status === only.status));
+}
+
 /** @param {string} stateRoot @param {string} roomId */
 export async function readFaceRecords(stateRoot, roomId) {
   let text = "";
@@ -272,7 +284,7 @@ function selectorFor(message, face, ctx) {
  * selector; `face: [...]` is the poster's `--face` and names transports, each of which must be a
  * face of the room (else `no-such-face`) and on (else `disabled`).
  * @param {FacePolicy} policy @param {any} message @param {Parameters<typeof isAddressed>[2]} ctx
- * @param {{ face?: 'auto' | 'none' | string[] }} [opts]
+ * @param {{ face?: 'auto' | 'none' | string[], alias?: string }} [opts] `alias` is the name the caller typed for the native room, used in the refusal reasons
  * @returns {{ selected: { face: Face, selector: string }[], refusals: { transport: string, code: string, reason: string }[] }}
  */
 export function selectFaces(policy, message, ctx, opts = {}) {
@@ -285,12 +297,12 @@ export function selectFaces(policy, message, ctx, opts = {}) {
   if (Array.isArray(mode)) {
     for (const transport of new Set(mode)) {
       const face = policy.faces.find((f) => f.transport === transport);
-      const alias = policy.faces[0]?.alias ?? policy.roomId;
+      const alias = opts.alias ?? policy.faces[0]?.alias ?? policy.roomId;
       if (!FACE_CAPABLE.has(transport)) refusals.push({ transport, code: "capability", reason: transport === "local"
         ? "capability: the local transport is an append-only NDJSON file with no audience to face to"
         : `capability: the ${transport} transport has no audience to face to` });
       else if (!face) refusals.push({ transport, code: "no-such-face", reason: `no-such-face: room ${alias} has no ${transport} face; set one with agora room faces ${alias} --add ${transport} --channel <id>` });
-      else if (!face.enabled) refusals.push({ transport, code: "disabled", reason: `disabled: the ${transport} face of ${face.alias} is off; turn it on with agora room faces ${face.alias} --enable ${transport}` });
+      else if (!face.enabled) refusals.push({ transport, code: "disabled", reason: `disabled: the ${transport} face of ${opts.alias ?? face.alias} is off; turn it on with agora room faces ${opts.alias ?? face.alias} --enable ${transport}` });
       else selected.push({ face, selector: "flag" });
     }
     return { selected, refusals };
@@ -530,7 +542,7 @@ export class FaceRunner {
   /** The refusals decided before any call: capability, redacted, route, too-long. @param {Face} face @param {any} message */
   #precheck(face, message) {
     if (face.transport === "local") return { code: "capability", reason: "capability: the local transport is an append-only NDJSON file with no audience to face to" };
-    if (face.transport !== "slack") return { code: "capability", reason: `capability: the ${face.transport} face is not built in this unit` };
+    if (!FACE_BUILT.includes(face.transport)) return { code: "capability", reason: `capability: the ${face.transport} face is not built in this unit` };
     const text = faceText(message, face.attachments);
     if (redact(text) !== text) return { code: "redacted", reason: "redacted: the body carries a credential shape and a face is byte-identical or it is not sent" };
     if (decodeTransfer(message.text)?.kind === "offer") return { code: "route", reason: "route: the body carries a transfer route, which is an ACL-restricted address and a face is a broadcast surface" };
