@@ -46,7 +46,7 @@ async function agora(args, env) {
 /** @param {string} out */
 const typed = (out) => out.trim().split(/\r?\n/).filter((l) => l.trim()).map((l) => JSON.parse(l));
 
-/** @param {import('node:test').TestContext} t @param {{ slackRooms?: number }} [o] */
+/** @param {import('node:test').TestContext} t @param {{ slackRooms?: number, githubRoom?: boolean }} [o] */
 async function fixture(t, o = {}) {
   const root = await mkdtemp(path.join(tmpdir(), "agora-cli-faces-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -64,6 +64,7 @@ async function fixture(t, o = {}) {
     down: { transport: "local", path: path.join(root, "down.ndjson") },
   };
   if (o.slackRooms === 2) rooms.ops = { transport: "slack", channel: "C0999OPS", tokenEnv: "AGORA_TEST_UNSET_TOKEN" };
+  if (o.githubRoom) rooms.issue = { transport: "github", repo: "example-org/example-repo", issue: 3, tokenEnv: "AGORA_TEST_UNSET_TOKEN" };
   const cfgText = JSON.stringify({ actor: { name: "seat", kind: "agent" }, rooms }, null, 2);
   await writeFile(cfgPath, cfgText);
   const env = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "grace", AGORA_ACTOR: "Grace/agora-orchestrator" };
@@ -166,9 +167,10 @@ test("fixture 01: the selector and attachment edits write exactly the field name
   assert.match(r.stderr, /room nat already has a slack face/);
   r = await agora(["room", "faces", "nat", "--add", "local"], env);
   assert.equal(r.code, 1);
-  assert.match(r.stderr, /--add local: not a face this build publishes \(have: slack\)/);
+  assert.match(r.stderr, /--add local: not a face this build publishes \(have: slack, github\)/);
   r = await agora(["room", "faces", "nat", "--add", "github"], env);
-  assert.equal(r.code, 1, "the github face half is not built, so the record never names it");
+  assert.equal(r.code, 1, "a github face borrows a configured github room's token and issue; none is configured here");
+  assert.match(r.stderr, /--add github needs a configured github room to borrow a token from, and none is configured/);
   r = await agora(["room", "faces", "nat", "--agent", "never", "--face", "github"], env);
   assert.equal(r.code, 1);
   assert.match(r.stderr, /--face: room nat has no github face/);
@@ -221,6 +223,47 @@ test("room faces: the verb shape is generic (transport as a value), a non-native
   assert.ok("--face <name>" in schema.verbs.post.options && "--no-face" in schema.verbs.post.options);
   assert.ok("--add <transport>" in schema.verbs.room.options && "--agent <selectors>" in schema.verbs.room.options);
   assert.deepEqual(schema.exit, { ok: 0, error: 1, usage: 2, fired: 42 }, "no new code, no new meaning");
+});
+
+test("fixture 09 row 9 by name: --add github --via <issue room> writes a github face whose target is that room's issue, FACE_BUILT lists github, --channel is refused for it, and --face github rides the append frame as an admitted name", async (t) => {
+  const { env, root, policyFile, configUnchanged } = await fixture(t, { githubRoom: true });
+  // the one configured github room supplies the token source and the issue, so --via may be left out
+  let r = await agora(["room", "faces", "nat", "--add", "github", "--json"], env);
+  assert.equal(r.code, 0, r.stderr);
+  const { updatedAt, ...rest } = JSON.parse(await readFile(policyFile, "utf8"));
+  assert.deepEqual(rest, {
+    version: 1, roomId: ROOM,
+    faces: [{ transport: "github", alias: "issue", target: { repo: "example-org/example-repo", issue: "3" }, enabled: true,
+      post: { human: ["always"], agent: ["addressed", "landing"], system: ["never"] }, attachments: "metadata", backfill: null }],
+  }, "the target is the --via room's issue; the token room is the alias");
+  assert.doesNotMatch(await readFile(policyFile, "utf8"), /ghp_|AGORA_TEST_UNSET_TOKEN/);
+  await configUnchanged();
+  r = await agora(["room", "faces", "nat"], env);
+  assert.match(r.stdout, /github {3}via issue {2}repo example-org\/example-room issue 3 {2}enabled/);
+  // a second face beside it, named explicitly
+  r = await agora(["room", "faces", "nat", "--remove", "github"], env);
+  assert.equal(r.code, 0, r.stderr);
+  r = await agora(["room", "faces", "nat", "--add", "github", "--via", "issue", "--channel", "C0123ABC"], env);
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /--channel names a Slack channel; the github face takes its target from the --via room/);
+  r = await agora(["room", "faces", "nat", "--add", "github", "--via", "house"], env);
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /--via house: not a configured github room \(have: issue\)/);
+  r = await agora(["room", "faces", "nat", "--add", "github", "--via", "issue", "--agent", "never"], env);
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual((await readFacePolicy(root, ROOM)).faces.map((f) => [f.transport, f.alias, f.post.agent]), [["github", "issue", ["never"]]]);
+  // --face github is an admitted name: no refusal row is recorded by the CLI, the receipt says the service wrote none
+  r = await agora(["post", "nat", "for the issue", "--face", "github", "--json"], env);
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout).faces, [], "absent, never pending: the seat service runs no publisher here");
+  assert.match(r.stderr, /no face rows for .*: the seat service wrote none/);
+  assert.deepEqual([...(await readFaceRecords(root, ROOM)).values()], [], "an admitted name records nothing at the CLI");
+  // an unbuilt name beside it is still refused by name
+  r = await agora(["post", "nat", "x", "--face", "github,local", "--json"], env);
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout).faces.map((/** @type {any} */ f) => [f.transport, f.status, f.code]), [["local", "refused", "capability"]]);
+  r = await agora(["schema", "--json"], env);
+  assert.match(JSON.parse(r.stdout).verbs.room.options["--add <transport>"], /\(slack, github\)/);
 });
 
 test("fixture 09 rows 2, 3, 4, 5: --face on a face the seat can refuse without a call is a recorded refused row on the receipt, the native post commits, the exit code is the native outcome, and --no-face is an empty receipt", async (t) => {

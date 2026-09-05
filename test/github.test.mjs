@@ -160,6 +160,8 @@ test("github face half: history is a bounded unconditional window on created_at,
   assert.equal(q?.get("per_page"), "100");
   assert.equal(/** @type {any} */ (calls.at(-1)?.init?.headers)["if-none-match"], undefined, "a reconciliation read is never conditional");
   await assert.rejects(t.post("x"), (e) => e instanceof GitHubApiError && e.answered === true && e.sent === true && e.status === 422 && /422 Validation Failed/.test(e.message));
+  const throttled = githubTransport({ transport: "github", repo: "a/b", issue: 3 }, { token: "ghp_x", fetch: (await import("./helpers.mjs")).fakeFetch([["/comments", () => ({ status: 429, body: { message: "API rate limit exceeded" }, headers: { "retry-after": "30" } })]]).fetch });
+  await assert.rejects(throttled.post("x"), (e) => e instanceof GitHubApiError && e.answered === false && e.sent === true && e.status === 429, "a 429 is not GitHub's answer to the comment: throttled before or after it landed, so a face reconciles rather than refuses");
   const gone = githubTransport({ transport: "github", repo: "a/b", issue: 3 }, { token: "ghp_x", fetch: async () => { throw new TypeError("fetch failed", { cause: { code: "ENOTFOUND" } }); } });
   await assert.rejects(gone.whoami(), (e) => e instanceof GitHubApiError && e.sent === false && e.answered === false && e.message === "github GET /user: unreachable");
   const died = githubTransport({ transport: "github", repo: "a/b", issue: 3 }, { token: "ghp_x", fetch: async () => { throw new Error("socket hang up https://api.github.com/secret?token=ghp_abcdefghijklmnopqrstu"); } });
@@ -167,7 +169,7 @@ test("github face half: history is a bounded unconditional window on created_at,
   // the half
   assert.equal(githubFaceHalf.textMax, GITHUB_COMMENT_MAX);
   assert.equal(githubFaceHalf.encode("a & <b>"), "a & <b>", "verbatim on the wire");
-  assert.equal(githubFaceHalf.rider({ body: "<!-- anything -->" }), undefined, "no rider: the body is never parsed for one");
+  assert.equal(githubFaceHalf.rider({ body: `<!-- agora_face:${"a".repeat(64)} --> origin=${"a".repeat(64)}` }), undefined, "no rider: the body is never parsed for one, whatever shape it quotes");
   assert.equal(githubFaceHalf.ownAccount({ user: { id: 7, login: "vincitamore" } }, { id: "7", name: "vincitamore" }), true);
   assert.equal(githubFaceHalf.ownAccount({ user: { id: 9, login: "other" } }, { id: "7", name: "vincitamore" }), false);
   assert.equal(githubFaceHalf.ownAccount({}, { id: "7", name: "vincitamore" }), false);
