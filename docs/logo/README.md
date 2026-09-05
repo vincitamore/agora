@@ -60,8 +60,10 @@ and produces an incorrectly dark GIF even when the source PNG is bright.
 
 The separate [lead-dev exploratory sheet](exploratory-lead-dev/studies.png) is
 retained as a different author's sketch set. Its original generator was
-overwritten in a crossed worktree and is not recoverable from the branch; those
-older rasters are **not** outputs of this generator. No artifact was deleted.
+overwritten in a crossed worktree, then recovered from the original tool-call
+patch and independently checked against all eight preserved outputs. It now
+lives beside those sketches. Those older rasters are **not** outputs of the
+generator in this directory. No artifact was deleted.
 
 ## Selection boundary
 
