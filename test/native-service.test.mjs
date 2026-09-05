@@ -3,7 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { chmod, mkdir, mkdtemp, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import net from "node:net";
 import path from "node:path";
@@ -202,6 +202,35 @@ test("filesystem aliases resolve to one physical seat endpoint", async (t) => {
   await nativeServiceEndpoint(root, ACCOUNT);
   await symlink(root, alias, process.platform === "win32" ? "junction" : "dir");
   assert.equal(await nativeServiceEndpoint(root, ACCOUNT), await nativeServiceEndpoint(alias, ACCOUNT));
+});
+
+test("POSIX endpoint identity follows the state directory object across a rename", {
+  skip: process.platform === "win32" ? "POSIX filesystem identity only" : false,
+}, async (t) => {
+  const parent = await mkdtemp(path.join(tmpdir(), "agora-native-endpoint-identity-"));
+  const root = path.join(parent, "root");
+  const moved = path.join(parent, "moved");
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const before = await nativeServiceEndpoint(root, ACCOUNT);
+  await rename(root, moved);
+  const after = await nativeServiceEndpoint(moved, ACCOUNT);
+  assert.equal(after, before, "renaming one physical state directory does not mint a second service endpoint");
+});
+
+test("POSIX runtime directory refuses symlink substitution before changing its target", {
+  skip: process.platform === "win32" ? "POSIX runtime directory only" : false,
+}, async (t) => {
+  const sandbox = await mkdtemp(path.join(tmpdir(), "agora-native-runtime-symlink-"));
+  const root = path.join(sandbox, "state");
+  const runtimeBase = path.join(sandbox, "runtime");
+  const target = path.join(sandbox, "target");
+  t.after(() => rm(sandbox, { recursive: true, force: true }));
+  await mkdir(runtimeBase, { mode: 0o700 });
+  await mkdir(target, { mode: 0o755 });
+  await symlink(target, path.join(runtimeBase, `agora-${process.getuid?.()}`), "dir");
+  await assert.rejects(nativeServiceEndpoint(root, ACCOUNT, process.platform, runtimeBase), /must be a real directory, not a symlink/);
+  assert.equal((await stat(target)).mode & 0o777, 0o755, "a substituted target is neither chmodded nor populated");
+  assert.deepEqual(await readdir(target), [], "a substituted target receives no runtime files");
 });
 
 test("POSIX service endpoint stays below Darwin's socket-path bound for a long state root", {

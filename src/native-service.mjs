@@ -1,7 +1,7 @@
 // @ts-check
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { chmod, mkdir, open, readFile, realpath, rename, rm, stat } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readFile, realpath, rename, rm, stat } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
 import { AgoraError } from "./core.mjs";
@@ -29,6 +29,36 @@ async function ensurePrivateStateDirectory(directory, label) {
   const after = await stat(directory);
   if ((after.mode & 0o077) !== 0)
     throw new AgoraError(`native ${label} must deny group and other access: chmod 700 ${JSON.stringify(directory)}`);
+}
+
+/** @param {string} directory @param {string} label */
+async function ensurePrivateRuntimeDirectory(directory, label) {
+  try { await mkdir(directory, { mode: 0o700 }); }
+  catch (error) {
+    if (/** @type {NodeJS.ErrnoException} */ (error).code !== "EEXIST") throw error;
+  }
+  const before = await lstat(directory, { bigint: true });
+  const uid = process.getuid?.();
+  if (!before.isDirectory() || before.isSymbolicLink())
+    throw new AgoraError(`native ${label} must be a real directory, not a symlink: ${directory}`);
+  if (uid === undefined || before.uid !== BigInt(uid))
+    throw new AgoraError(`native ${label} is not owned by this OS user: ${directory}`);
+  if ((before.mode & 0o77n) !== 0n) await chmod(directory, 0o700);
+  const after = await lstat(directory, { bigint: true });
+  if (!after.isDirectory() || after.isSymbolicLink() || before.dev !== after.dev || before.ino !== after.ino)
+    throw new AgoraError(`native ${label} changed identity while its permissions were checked: ${directory}`);
+  if (after.uid !== BigInt(uid) || (after.mode & 0o77n) !== 0n)
+    throw new AgoraError(`native ${label} must be owned by this OS user and deny group and other access: ${directory}`);
+}
+
+/** @param {string} directory */
+async function ensureProtectedRuntimeBase(directory) {
+  const info = await stat(directory, { bigint: true });
+  const uid = process.getuid?.();
+  const sticky = (info.mode & 0o1000n) !== 0n;
+  const privatelyOwned = uid !== undefined && info.uid === BigInt(uid) && (info.mode & 0o77n) === 0n;
+  if (!info.isDirectory() || (!sticky && !privatelyOwned))
+    throw new AgoraError(`native POSIX runtime base must be sticky or private to this OS user: ${directory}`);
 }
 
 /** @param {string} endpoint @param {string} file */
@@ -117,9 +147,9 @@ function requiredString(value, label) {
  * from the physical state root rather than caller path spelling. The service
  * is seat-global: account identity belongs in its authenticated descriptor,
  * not in the exclusion endpoint, or two accounts can own one root at once.
- * @param {string} root @param {string} accountId @param {NodeJS.Platform} [platform]
+ * @param {string} root @param {string} accountId @param {NodeJS.Platform} [platform] @param {string} [posixRuntimeBase]
  */
-export async function nativeServiceEndpoint(root, accountId, platform = process.platform) {
+export async function nativeServiceEndpoint(root, accountId, platform = process.platform, posixRuntimeBase = "/tmp") {
   validateNativeId(accountId, "service account id");
   await ensurePrivateStateDirectory(path.resolve(root), "state root");
   const physicalRoot = await realpath(path.resolve(root));
@@ -134,12 +164,14 @@ export async function nativeServiceEndpoint(root, accountId, platform = process.
   if (!Number.isSafeInteger(uid) || Number(uid) < 0) throw new AgoraError("native service cannot determine this POSIX user's uid");
   // Darwin's sockaddr_un.sun_path is only 104 bytes including the terminator.
   // State roots routinely exceed that under /private/var/folders, so bind at a
-  // short owner-only runtime path keyed by the canonical state root instead.
-  const runtimeRoot = path.join("/tmp", `agora-${uid}`);
-  await ensurePrivateStateDirectory(runtimeRoot, "runtime root");
-  const seat = createHash("sha256").update(physicalRoot).digest("hex").slice(0, 32);
+  // short owner-only runtime path keyed by the physical state root instead.
+  await ensureProtectedRuntimeBase(posixRuntimeBase);
+  const runtimeRoot = path.join(posixRuntimeBase, `agora-${uid}`);
+  await ensurePrivateRuntimeDirectory(runtimeRoot, "runtime root");
+  const rootIdentity = await stat(physicalRoot, { bigint: true });
+  const seat = createHash("sha256").update(`${rootIdentity.dev}:${rootIdentity.ino}`).digest("hex").slice(0, 32);
   const runtimeDirectory = path.join(runtimeRoot, seat);
-  await ensurePrivateStateDirectory(runtimeDirectory, "runtime directory");
+  await ensurePrivateRuntimeDirectory(runtimeDirectory, "runtime directory");
   const endpoint = path.join(runtimeDirectory, "service.sock");
   if (Buffer.byteLength(endpoint, "utf8") > MAX_PORTABLE_UNIX_SOCKET_PATH_BYTES)
     throw new AgoraError(`native service endpoint exceeds the portable Unix-socket path bound: ${endpoint}`);
