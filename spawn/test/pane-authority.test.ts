@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
 import { createAuthority, handleJson, issueAdmission, registerPane } from "../pane-authority.ts";
+import { paneHelloProof } from "../protocol.ts";
 import { renderDeliveredLine } from "../delivered-line.ts";
+
+const NONCE = "a".repeat(32);
 
 const envelope = {
   deliveryId: "dl-1",
@@ -15,6 +18,7 @@ function harness() {
   const writes: string[] = [];
   const auth = createAuthority({
     bootEpoch: 7,
+    nonce: NONCE,
     now: () => 1_000,
     open: (spawnId) => ({
       spawnId,
@@ -26,11 +30,31 @@ function harness() {
       },
     }),
   });
-  handleJson(auth, { type: "hello", bootEpoch: 7 });
+  handleJson(auth, {
+    type: "hello",
+    bootEpoch: 7,
+    proof: paneHelloProof(NONCE, 7, auth.challenge),
+  });
   registerPane(auth, "s1");
   issueAdmission(auth, "ad-1");
   return { auth, writes };
 }
+
+test("an unproven hello is refused; open.cmd is refused at parse so it never opens", () => {
+  const opens: string[] = [];
+  const auth = createAuthority({
+    bootEpoch: 7,
+    nonce: NONCE,
+    now: () => 1_000,
+    open: (spawnId) => {
+      opens.push(spawnId);
+      return { spawnId, term: { write() {}, close() {} } };
+    },
+  });
+  expect(() => handleJson(auth, { type: "hello", bootEpoch: 7 })).toThrow(/unproven hello/);
+  expect(() => handleJson(auth, { type: "open", spawnId: "s1", cmd: ["whoami"] })).toThrow(/cmd key|proven hello/);
+  expect(opens).toEqual([]);
+});
 
 test("deliver writes the rendered envelope; attach-input without a lease refuses", () => {
   const { auth, writes } = harness();

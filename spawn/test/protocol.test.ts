@@ -21,6 +21,11 @@ test("the frame union is closed: hello, open, deliver, attach, attach-input, res
   expect(round.type).toBe("deliver");
 });
 
+test("open refuses a caller-supplied cmd; the authority decides the pane child", () => {
+  expect(() => parseFrame({ type: "open", spawnId: "s", cmd: ["cmd.exe", "/c", "whoami"] })).toThrow(/cmd key/);
+  expect(parseFrame({ type: "open", spawnId: "s" }).type).toBe("open");
+});
+
 test("write, send, type and keys are not frames; adding a writer requires editing the union", () => {
   for (const type of ["write", "send", "type", "keys"]) {
     expect(() => parseFrame({ type, spawnId: "s" })).toThrow(/not a writer this package has/);

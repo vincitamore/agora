@@ -6,6 +6,7 @@
  * that pin it. Onboarding is argv at exec, never a PTY write.
  */
 
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { DeliveredEnvelope } from "./delivered-line.ts";
 
 export const FRAME_TYPES = Object.freeze([
@@ -24,8 +25,8 @@ export const ADMISSION_KINDS = Object.freeze(["native-enqueue", "receiver-atomic
 export type AdmissionKind = (typeof ADMISSION_KINDS)[number];
 export type Admission = { kind: AdmissionKind; id: string };
 
-export type HelloFrame = { type: "hello"; bootEpoch: number };
-export type OpenFrame = { type: "open"; spawnId: string; cmd?: string[] };
+export type HelloFrame = { type: "hello"; bootEpoch: number; proof?: string; challenge?: string };
+export type OpenFrame = { type: "open"; spawnId: string };
 export type DeliverFrame = {
   type: "deliver";
   spawnId: string;
@@ -69,14 +70,24 @@ export function parseFrame(value: unknown): Frame {
     case "hello": {
       const bootEpoch = rec.bootEpoch;
       if (!Number.isInteger(bootEpoch) || Number(bootEpoch) <= 0) throw new Error("hello needs bootEpoch");
-      return { type, bootEpoch: Number(bootEpoch) };
+      const proof = rec.proof;
+      const challenge = rec.challenge;
+      if (proof !== undefined && (typeof proof !== "string" || !/^[a-f0-9]{64}$/.test(proof))) {
+        throw new Error("hello proof must be 64 hex");
+      }
+      if (challenge !== undefined && (typeof challenge !== "string" || challenge.length < 16)) {
+        throw new Error("hello challenge must be a nonce");
+      }
+      return {
+        type,
+        bootEpoch: Number(bootEpoch),
+        ...(proof ? { proof } : {}),
+        ...(challenge ? { challenge } : {}),
+      };
     }
     case "open": {
-      const cmd = rec.cmd;
-      if (cmd !== undefined && (!Array.isArray(cmd) || cmd.some((c) => typeof c !== "string"))) {
-        throw new Error("open.cmd must be a string array");
-      }
-      return { type, spawnId: str(rec.spawnId, "open.spawnId"), cmd: cmd as string[] | undefined };
+      if ("cmd" in rec) throw new Error("open refuses a cmd key; the authority decides the pane child");
+      return { type, spawnId: str(rec.spawnId, "open.spawnId") };
     }
     case "deliver": {
       if ("line" in rec) throw new Error("deliver refuses a line key; the authority renders the envelope");
@@ -155,4 +166,23 @@ function field(value: unknown, name: string): string {
     if (code < 32 || code === 127) throw new Error(`${name} refuses control bytes`);
   }
   return s;
+}
+
+export function mintPaneNonce(): string {
+  return randomBytes(16).toString("hex");
+}
+
+export function mintPaneChallenge(): string {
+  return randomBytes(16).toString("hex");
+}
+
+/** HMAC-SHA256 of the hello transcript under the per-authority nonce. The nonce never rides the wire. */
+export function paneHelloProof(nonce: string, bootEpoch: number, challenge: string): string {
+  return createHmac("sha256", nonce).update(`pane-hello:${bootEpoch}:${challenge}`).digest("hex");
+}
+
+export function verifyPaneHelloProof(nonce: string, bootEpoch: number, challenge: string, proof: string): boolean {
+  if (!/^[a-f0-9]{64}$/.test(proof)) return false;
+  const expected = paneHelloProof(nonce, bootEpoch, challenge);
+  return timingSafeEqual(Buffer.from(proof, "hex"), Buffer.from(expected, "hex"));
 }

@@ -771,6 +771,12 @@ an injected `fetch` so it is testable offline.
   verb). The allowlist is the whole of what a caller may say; an unknown key is exit 1
   `request-field-unknown` naming each key, and nothing is minted. The shape is
   `test/fixtures/spawn/spawn-request.json`.
+- The pane authority (`spawn/`) requires a proven hello before any execute-capable
+  frame: HMAC-SHA256 of the hello challenge under a per-authority nonce that never
+  rides the wire (it lives in the seat's private state). Echoing `bootEpoch` is not
+  proof. `open` refuses a `cmd` key; the authority decides the pane child. An unproven
+  frame is refused and logged without the frame body. On Windows the named pipe is
+  machine-visible; the proof is the gate.
 - Errors are redacted before printing, and `doctor` never prints a token. A credential
   in any output is a defect in the tool; fix `redact()` in `src/core.mjs`.
 

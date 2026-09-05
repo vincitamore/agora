@@ -3,7 +3,9 @@
  * Started lazily by the seat service on first spawn or attach.
  */
 import {
+  mintPaneChallenge,
   parseFrame,
+  verifyPaneHelloProof,
   type AttachFrame,
   type AttachInputFrame,
   type CloseFrame,
@@ -30,6 +32,8 @@ export type Authority = {
   journal: JournalEntry[];
   greeted: boolean;
   bootEpoch: number;
+  nonce: string;
+  challenge: string;
   now: () => number;
   open: (spawnId: string, cmd?: string[]) => OpenedPane;
   opens: string[];
@@ -40,6 +44,7 @@ export function createAuthority(opts: {
   open: (spawnId: string, cmd?: string[]) => OpenedPane;
   now?: () => number;
   bootEpoch: number;
+  nonce: string;
 }): Authority {
   return {
     panes: new Map(),
@@ -47,6 +52,8 @@ export function createAuthority(opts: {
     journal: [],
     greeted: false,
     bootEpoch: opts.bootEpoch,
+    nonce: opts.nonce,
+    challenge: mintPaneChallenge(),
     now: opts.now ?? Date.now,
     open: opts.open,
     opens: [],
@@ -83,12 +90,15 @@ export type Conn = { greeted: boolean };
 export function handleFrame(auth: Authority, frame: Frame, conn?: Conn): void {
   if (frame.type === "hello") {
     if (frame.bootEpoch !== auth.bootEpoch) throw new Error("hello bootEpoch does not match this authority");
+    if (!frame.proof || !verifyPaneHelloProof(auth.nonce, frame.bootEpoch, auth.challenge, frame.proof)) {
+      throw new Error("unproven hello");
+    }
     if (conn) conn.greeted = true;
     else auth.greeted = true;
     return;
   }
   const greeted = conn ? conn.greeted : auth.greeted;
-  if (!greeted) throw new Error("pane.sock requires hello from the seat service or the human channel first");
+  if (!greeted) throw new Error("pane.sock requires a proven hello before any execute-capable frame");
   switch (frame.type) {
     case "open":
       return openSpawn(auth, frame);
@@ -110,7 +120,7 @@ export function handleJson(auth: Authority, value: unknown, conn?: Conn): void {
 }
 
 function openSpawn(auth: Authority, frame: OpenFrame): void {
-  registerPane(auth, frame.spawnId, frame.cmd);
+  registerPane(auth, frame.spawnId);
 }
 
 function deliver(auth: Authority, frame: DeliverFrame): void {
