@@ -123,7 +123,7 @@ const SCHEMA = {
         "--exhibit <locator>": `what settles it, repeatable (same ${TRAILER_VALUE_MAX}-character cap as --trailer)`,
         "--because <text>": `the reasoning behind it (same ${TRAILER_VALUE_MAX}-character cap as --trailer)`,
         "--fyi": "emit ack: none, licensing the reader's silence. Honouring it is a judgement; the tool never filters, suppresses or delays on an incoming ack:",
-        "--face <name>": "native rooms: also publish this post to the named face of the room (slack, ...), whatever the room's policy would have chosen; repeatable or comma-separated. A name that is not a face of the room, a transport with no audience, or a face that is off is a refused row on the receipt, never an exit code: the native post is the outcome",
+        "--face <name>": "native rooms: also publish this post to the named face of the room (slack, github), whatever the room's policy would have chosen; repeatable or comma-separated. A name that is not a face of the room, a transport with no audience, or a face that is off is a refused row on the receipt, never an exit code: the native post is the outcome",
         "--no-face": "native rooms: this post stays native only, whatever the room's policy says",
       },
       does: "post one message signed as this session's bearer, with any trailers in a block above the signature; prints id and cursor. On a native room the receipt also carries one row per face of the room (pending | published | refused | unknown), read from the seat's face records; agora faces <room> --for <cursor> reads them again later",
@@ -131,8 +131,8 @@ const SCHEMA = {
     room: {
       args: ["faces", "<room>"],
       options: {
-        "--add <transport>": "give the native room a face on this transport (one of the built faces); the token is borrowed from a configured room of that transport",
-        "--via <room>": "with --add: the configured room whose token and target the face borrows (default: the one configured room of that transport)",
+        "--add <transport>": `give the native room a face on this transport (${FACE_BUILT.join(", ")}); the token is borrowed from a configured room of that transport. A github face is the --via room's issue: one comment per faced post, no threads, no upload (an image faces as its link or its digest)`,
+        "--via <room>": "with --add: the configured room whose token and target the face borrows (default: the one configured room of that transport); a github face takes its repo and issue from here",
         "--channel <id>": "with --add slack: the channel to face to (default: the --via room's channel)",
         "--remove <transport>": "drop that face from the record",
         "--enable <transport>": "turn that face on",
@@ -991,6 +991,14 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
           if (!channel) throw new AgoraError(`--add slack needs --channel <id>, or a --via room that names one`);
           target.channel = channel;
         } else if (values.channel !== undefined) throw new AgoraError(`--channel names a Slack channel; the ${transport} face takes its target from the --via room`);
+        if (transport === "github") {
+          // the issue the --via room names is the face's target; its repo and issue are the transport's own validation
+          const repo = typeof source.repo === "string" ? source.repo : "";
+          const issue = Number(source.issue);
+          if (!repo || !Number.isInteger(issue) || issue <= 0) throw new AgoraError(`--via ${via}: the github room needs repo "owner/name" and an issue number for a face to target`);
+          target.repo = repo;
+          target.issue = String(issue);
+        }
         policy.faces.push({ transport, alias: via, target, enabled: true, post: { human: ["always"], agent: ["addressed", "landing"], system: ["never"] }, attachments: "metadata", backfill: null });
       }
       if (values.remove !== undefined) {
@@ -1026,7 +1034,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         console.log(`  ${f.transport.padEnd(8)} via ${f.alias}  ${where}  ${f.enabled ? "enabled" : "DISABLED"}`);
         console.log(`  ${"".padEnd(8)} human: ${f.post.human.join("+")}  agent: ${f.post.agent.join("+")}  system: ${f.post.system.join("+")}  attachments: ${f.attachments}`);
       }
-      if (!written.faces.length) console.log(`  no faces; add one: agora room faces ${alias} --add slack --via <slack room> [--channel <id>]`);
+      if (!written.faces.length) console.log(`  no faces; add one: agora room faces ${alias} --add slack --via <slack room> [--channel <id>], or --add github --via <github room>`);
     }
     return EXIT.ok;
   }

@@ -901,7 +901,7 @@ test("github / fixture 02 and 09 row 1: a native answer to a human faces the iss
   const r = await ghRig({ onPost: (body) => { recordsAtCall.push(readFileSync(file, "utf8")); return { status: 201, body: comment(4242, body.body) }; } });
   file = r.file;
   try {
-    const text = "the derper is up on 443 and 3478\n\nto: Alex\n\n-- Fable/agora-orchestrator";
+    const text = "the derper is up on 443 & 3478 <ok>\n\nto: Alex\n\n-- Fable/agora-orchestrator";
     const { faces, settled } = await r.runner.face(msg({ text }));
     assert.deepEqual(faces, [{ transport: "github", status: "pending" }]);
     assert.equal(r.posts().length, 0, "the receipt returns before any comment is posted");
@@ -913,7 +913,7 @@ test("github / fixture 02 and 09 row 1: a native answer to a human faces the iss
     const pendingLine = JSON.parse(recordsAtCall[0].trim().split("\n").at(-1) ?? "{}");
     assert.equal(pendingLine.status, "pending");
     assert.equal(pendingLine.transport, "github");
-    assert.equal(pendingLine.payloadDigest, sha(text), "the digest is of the verbatim text, which is what the wire carries");
+    assert.equal(pendingLine.payloadDigest, sha(text), "the digest is of the verbatim text, which is what the wire carries (no Slack escaping of & or <)");
     assert.equal(pendingLine.thread, undefined);
     const rec = (await r.records()).get(faceKey(ORIGIN_A, "github"));
     assert.equal(rec?.status, "published");
@@ -936,7 +936,7 @@ test("github / fixture 02 and 09 row 1: a native answer to a human faces the iss
 });
 
 test("github / fixture 03: a lost response is unknown, reconciled through the issue's listing with a since bound by account and digest, reposted only when the read succeeded and found nothing, and a failed read never licenses a repost", async () => {
-  const text = "ack\n\nto: Alex\n\n-- Fable";
+  const text = "ack & done <3>\n\nto: Alex\n\n-- Fable";
   // arm 1: the link dies during the POST
   let die = true;
   const r = await ghRig({ onPost: () => { if (die) throw new Error("socket hang up"); return { status: 201, body: comment(4300, text) }; }, comments: () => listed });
@@ -1004,6 +1004,7 @@ test("github / fixture 07 and 05: a comment from a human is ingested with a vali
     comment(4243, "good. name it in doctor", { login: "bone", uid: 2, at: "2026-09-05T12:00:05Z" }),
     comment(4244, "posted by the other seat through the same token", { at: "2026-09-05T12:00:06Z" }),
     comment(4245, "bot says\n\n-- Codex/ops", { login: "app[bot]", uid: 5, type: "Bot", at: "2026-09-05T12:00:07Z" }),
+    comment(4246, `quoting a record line: agora_face:${ORIGIN_A} origin=${ORIGIN_A}`, { login: "bone", uid: 2, at: "2026-09-05T12:00:08Z" }),
   ] });
   try {
     /** @type {any[]} */
@@ -1011,13 +1012,13 @@ test("github / fixture 07 and 05: a comment from a human is ingested with a vali
     const polled = await r.runner.poll(r.face, { read: r.reader, appendForeign: async (m) => { appended.push(m); } });
     assert.equal(polled.held, false);
     assert.deepEqual(polled.notIngested.map((x) => x.id), ["4242"], "the own echo, by id");
-    assert.deepEqual(appended.map((m) => [m.origin.source.id, m.author.id, m.author.kind, m.key, m.signedAs]), [["4243", "bone", "human", "unverified", undefined], ["4244", "vincitamore", "human", "unverified", undefined], ["4245", "app[bot]", "agent", "unverified", "Codex/ops"]]);
+    assert.deepEqual(appended.map((m) => [m.origin.source.id, m.author.id, m.author.kind, m.key, m.signedAs]), [["4243", "bone", "human", "unverified", undefined], ["4244", "vincitamore", "human", "unverified", undefined], ["4245", "app[bot]", "agent", "unverified", "Codex/ops"], ["4246", "bone", "human", "unverified", undefined]], "a body that quotes an origin id is a body, never a rider: the comment is foreign and ingested");
     assert.ok(!("bearer" in appended[0]), "bearer is seat-attested and never stamped on a foreign line");
     for (const m of appended) validateOriginReference(m.origin);
     assert.deepEqual(appended[0].origin, { source: { transport: "github", room: "bonejohnson8/slopcannon#3", id: "4243" }, ts: "2026-09-05T12:00:05.000Z", author: { id: "bone", name: "bone", kind: "human" }, attestor: ATTESTOR });
     assert.deepEqual(appended[0].account, { transport: "github", id: "bone" });
     assert.equal(appended[0].thread, undefined, "github has no threads; nothing is invented");
-    assert.equal(polled.cursor, "2026-09-05T12:00:07Z|4245");
+    assert.equal(polled.cursor, "2026-09-05T12:00:08Z|4246");
     assert.equal(r.posts().length, 0);
   } finally { await r.cleanup(); }
   // rule 3: our own login while a github face is pending inside the settle window is held, the cursor withheld
