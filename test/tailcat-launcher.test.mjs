@@ -32,6 +32,16 @@ await launchOffer(${JSON.stringify(directory)},${JSON.stringify(id)},{workerPath
     if(process.platform==='darwin')await promisify(execFile)('/bin/launchctl',['bootout',`gui/${process.getuid?.()}/org.agora.offer.${id}`]).catch(()=>{});
     await rm(root,{recursive:true,force:true});
   });
+  // Windows CIM startup has its own 20-second deadline. Do not spend the worker's
+  // 10-second readiness budget while PowerShell is still starting on a cold CI host.
+  await new Promise((resolve,reject)=>{
+    let stdout='',stderr='';
+    const timer=setTimeout(()=>reject(Error('native launcher did not return within 25 seconds: '+stderr)),25000);
+    parent.stderr.on('data',chunk=>{stderr=(stderr+chunk).slice(-4096);});
+    parent.stdout.on('data',chunk=>{stdout+=chunk;if(stdout.includes('launched')){clearTimeout(timer);resolve(undefined);}});
+    parent.once('error',error=>{clearTimeout(timer);reject(error);});
+    parent.once('exit',code=>{clearTimeout(timer);reject(Error('native launcher exited '+code+': '+stderr));});
+  });
   for(let n=0;n<100&&!await controlOffer(directory,'health');n++)await delay(100);
   assert.equal(await controlOffer(directory,'health'),true,'native startup must preserve metacharacter-heavy argv');
   parent.kill('SIGKILL');await delay(200);
