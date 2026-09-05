@@ -726,6 +726,32 @@ an injected `fetch` so it is testable offline.
 - Errors are redacted before printing, and `doctor` never prints a token. A credential
   in any output is a defect in the tool; fix `redact()` in `src/core.mjs`.
 
+## Native file handoffs
+
+`agora enroll <room>` publishes this seat's explicit Agora-owned public key. First
+address a recipient by its transport-authenticated account id, never a `signedAs`
+label: `agora share <room> <file ...> --to <account-id> --once`. Recipient:
+`agora fetch <room> <offer-id> [--into <directory>]`. A received offer is inert.
+Only a deliberate fetch receives files; attachments expose verified `path` and
+`digest` after commit, never a partial destination. No downloaded file is executed.
+
+Six pinned compressed Tailcat binaries travel in the checkout. Every execution
+checks the binary hash; `doctor --offline` verifies/expands the local cache and
+`--repair-tailcat` explicitly restores it. No external runtime installer or Go build
+belongs in an agent's workflow. Overrides identify themselves and require a hash.
+
+`share --list` measures local offer liveness. `--stop <id>` stops owned routes.
+After ambiguous publication use `--resume <id>` to reconcile; never silently issue
+another offer. `--forget <id>` explicitly releases the operation guard after checking
+the room. On `saved-receipt-pending`, files are safely saved: retry the returned fetch
+command with the same destination to acknowledge without redownloading.
+
+An unknown peer republishes with `enroll`. A changed key requires out-of-band
+fingerprint verification followed by `enroll --trust <account-id> --fingerprint <hex>`.
+Courtesy aliases cannot authenticate first contact. These are live, expiring offers;
+they require the sender online and do not promise native-room offline attachment delivery.
+Details and maintainer checks: [docs/TRANSFERS.md](../../docs/TRANSFERS.md).
+
 ## §5 CHANGING AGORA
 
 - Zero runtime dependencies. Use web `fetch`; never add an HTTP or Slack client

@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 // @ts-check
+import { tailcatDoctor } from "../src/tailcat-runtime.mjs";
+import { decodeTransfer, encodeTransfer, localTransferIdentity, requireAuthenticatedTransport, trustTransferPeer } from "../src/tailcat.mjs";
+import { shareFiles, fetchFiles, listOffers, stopOffer, resumeOffer, forgetOffer, pruneOffers } from "../src/tailcat-offers.mjs";
 import { parseArgs } from "node:util";
+import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
@@ -171,7 +175,10 @@ const SCHEMA = {
       options: { "--as <bearer>": "register this session as this bearer", "--label <name>": "a human label for this session's record", "--limit <n>": "how many recent messages to show (default 20)" },
       does: "register, start this session's cursor at the latest message, and show the recent messages: session --as, cursor --now, read, in one call",
     },
-    doctor: { args: [], options: { "--offline": "skip the identity check" }, does: "config, token presence per room, identity per room, this session and bearer and where each came from, the harness prompt-cache TTL where this seat can read one, and the reads a minute this seat spends with the arithmetic behind the number; three preflights for a resident bearer warn when a watch is armed against a five-minute TTL (cache-ttl), when a watch polls within half to one and a half times a TTL that was read (interval-near-ttl), and when no live watch in a room wakes on all (no-all-watch). Everything is derived at the call and nothing is written" },
+    enroll: { args: ["<room>"], options: {"--trust <account-id>": "explicitly replace a peer pin after out-of-band verification", "--fingerprint <hex>": "confirmed peer fingerprint for --trust", "--pages <n>": "enrollment scan depth"}, does: "publish or republish this seat's Agora-owned transfer public key; never uses an ambient Tailcat identity" },
+    share: { args: ["<room>", "[file ...]"], options: {"--to <account-id>": "authenticated recipient account; repeatable, maximum four", "--once": "consume each recipient route after verified receipt", "--expires-in <seconds>": "60 to 86400, default 3600", "--list": "local offers and measured liveness", "--prune": "remove expired offline offers owned by this session", "--stop <id>": "stop a local offer", "--resume <id>": "reconcile uncertain publication without duplicate posting", "--forget <id>": "explicitly release the operation guard after checking publication"}, does: "snapshot named files and publish a recipient-restricted native transfer offer after every route is ready" },
+    fetch: { args: ["<room>","<offer-id>"], options: {"--into <directory>": "destination; existing files are never overwritten", "--pages <n>": "offer discovery depth"}, does: "explicitly receive, verify and commit files before acknowledging; receiving an offer never executes or fetches automatically" },
+    doctor: { args: [], options: { "--offline": "skip the identity check", "--repair-tailcat": "restore the cached runtime from its hash-verified bundled capsule" }, does: "config, token presence per room, identity per room, this session and bearer and where each came from, the harness prompt-cache TTL where this seat can read one, and the reads a minute this seat spends with the arithmetic behind the number; three preflights for a resident bearer warn when a watch is armed against a five-minute TTL (cache-ttl), when a watch polls within half to one and a half times a TTL that was read (interval-near-ttl), and when no live watch in a room wakes on all (no-all-watch). Room and watch reports are derived. Tailcat integrity is verified locally; first use expands the bundled capsule into state, and --repair-tailcat explicitly restores a corrupt cache" },
     schema: { args: [], options: { "--json": "the whole surface as JSON, protocol included" }, does: "this description" },
   },
 };
@@ -220,6 +227,13 @@ const OPTIONS = /** @type {const} */ ({
   now: { type: "boolean", default: false },
   set: { type: "string" },
   offline: { type: "boolean", default: false },
+  "repair-tailcat": { type: "boolean", default: false },
+  "expires-in": { type: "string" },
+  into: { type: "string" },
+  stop: { type: "string" },
+  resume: { type: "string" },
+  trust: { type: "string" },
+  fingerprint: { type: "string" },
   label: { type: "string" },
   list: { type: "boolean", default: false },
   prune: { type: "boolean", default: false },
@@ -249,6 +263,7 @@ function decorate(m) {
   const { trailers, to } = parseTrailers(m.text);
   return {
     ...m,
+    ...(decodeTransfer(m.text)?.kind === "offer" ? { offer: decodeTransfer(m.text).offer } : {}),
     ...(to.length ? { to } : {}),
     ...(trailers.length ? { trailers } : {}),
   };
@@ -479,6 +494,15 @@ async function main(argv) {
   }
   const { values, positionals } = parsed;
   const [verb, roomAlias, ...rest] = positionals;
+  // Native pipes/IPC use the supported Node >=22 runtime even when the caller runs the
+  // ordinary CLI through Bun. Bun's Duplex/HTTP premature-close semantics differ on Windows.
+  if(process.versions.bun && ['doctor','enroll','share','fetch'].includes(verb)){
+    return await new Promise((resolve,reject)=>{
+      const child=spawn('node',[entryFile,...argv],{stdio:'inherit',windowsHide:true});
+      child.once('error',()=>reject(new AgoraError('Native transfers require Agora\'s Node 22+ runtime. Install Node, then rerun the same agora command.')));
+      child.once('close',code=>resolve(code??EXIT.error));
+    });
+  }
   if (!verb) {
     console.log(usage());
     return values.help ? EXIT.ok : EXIT.usage;
@@ -676,6 +700,9 @@ async function main(argv) {
 
   if (verb === "doctor") {
     let bad = 0;
+    const runtime = await tailcatDoctor({ stateRoot, repair: values["repair-tailcat"] });
+    if (json) console.log(JSON.stringify(runtime));
+    else console.log(`tailcat ${runtime.status}${"target" in runtime ? ` ${runtime.target} (${runtime.source})` : `: ${runtime.error}`}`);
     /** Every warning `doctor` can raise, typed under --json so an agent can self-check what the human path prints. @type {Array<{ code: string, message: string, alias?: string }>} */
     const warnings = [];
     for (const [alias, room] of Object.entries(cfg.rooms)) {
@@ -892,6 +919,33 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
   }
 
   switch (verb) {
+    case "share": {
+      requireAuthenticatedTransport(transport);
+      if(values.list){for(const row of await listOffers(sdir))console.log(JSON.stringify(row));return EXIT.ok;}
+      if(values.prune){console.log(JSON.stringify({removed:await pruneOffers(sdir)}));return EXIT.ok;}
+      if(values.stop){await stopOffer(sdir,values.stop);console.log(`Offer ${values.stop} is offline.`);return EXIT.ok;}
+      if(values.forget){if(!rest[0])throw new AgoraError('Use agora share <room> --forget <offer-id>.',2);await forgetOffer(sdir,rest[0]);console.log('Operation guard released; the offer record remains local.');return EXIT.ok;}
+      if(values.resume){console.log(JSON.stringify(await resumeOffer(transport,sdir,values.resume,positive(values.pages,'pages'))));return EXIT.ok;}
+      const result=await shareFiles(transport,sdir,stateRoot,rest,values.to??[],{room:roomAlias,sign:text=>sign(text,cfg.actor),once:values.once,expiresIn:positive(values['expires-in'],'expires-in'),pages:positive(values.pages,'pages')});
+      await appendPosted(sdir,result.id);console.log(JSON.stringify(result));return EXIT.ok;
+    }
+    case "fetch": {
+      requireAuthenticatedTransport(transport);
+      if(rest.length!==1)throw new AgoraError('Use agora fetch <room> <offer-id> [--into <directory>].',2);
+      const result=await fetchFiles(transport,stateRoot,sdir,rest[0],{room:roomAlias,into:values.into,pages:positive(values.pages,'pages')});
+      console.log(JSON.stringify(result));return result.status==='received'?EXIT.ok:EXIT.error;
+    }
+    case "enroll": {
+      requireAuthenticatedTransport(transport);
+      if(values.trust){console.log(JSON.stringify(await trustTransferPeer(transport,stateRoot,values.trust,values.fingerprint??'',positive(values.pages,'pages'))));return EXIT.ok;}
+      const who = await transport.whoami();
+      const key = await localTransferIdentity(stateRoot);
+      const payload = sign(`Transfer enrollment for account ${who.id}; fingerprint ${key.fingerprint}. This key identifies the seat, not an individual bearer.\n${encodeTransfer({version:1,kind:"enrollment",nodeKey:key.nodeKey})}`, cfg.actor);
+      const result = await transport.post(payload);
+      await appendPosted(sdir, result.id);
+      console.log(json ? JSON.stringify({type:"enrollment",account:who.id,name:who.name,nodeKey:key.nodeKey,fingerprint:key.fingerprint,...result}) : `Transfer enrollment published for ${who.id} (${who.name}), fingerprint ${key.fingerprint}. Share to this account id on first use.`);
+      return EXIT.ok;
+    }
     case "join": {
       await register(true);
       const key = cursorKey(roomAlias, thread);
@@ -929,7 +983,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       for (const [name, r] of rows) {
         const mine = here(name);
         const state = mine.length ? mine.map((x) => x.state).join("/") : "";
-        if (json) console.log(JSON.stringify({ type: "who", name, last: r.last, count: r.count, kind: r.kind, ...(mine.length ? { here: mine.map((x) => ({ session: x.slug, state: x.state, lastSeen: x.record?.lastSeen })) } : {}) }));
+        if (json) console.log(JSON.stringify({ type: "who", name, accountIds: [...new Set(msgs.filter(m => (m.signedAs ?? m.author.name) === name).map(m => m.author.id))], last: r.last, count: r.count, kind: r.kind, ...(mine.length ? { here: mine.map((x) => ({ session: x.slug, state: x.state, lastSeen: x.record?.lastSeen })) } : {}) }));
         else console.log(`${name.padEnd(20)} last spoke ${r.last}  (${r.count} message${r.count === 1 ? "" : "s"}, ${r.kind})${state ? `  here: ${state}` : ""}`);
       }
       const horizon = msgs.length ? `read ${msgs.length} messages back to ${msgs[0].ts}` : "read 0 messages";

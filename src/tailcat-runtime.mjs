@@ -80,7 +80,7 @@ export async function resolveTailcatBinary(options) {
     if (!/^[a-f0-9]{64}$/.test(expected) || sha256(await regularBytes(override, MAX_BINARY)) !== expected) {
       throw new AgoraError('Tailcat override checksum mismatch. Unset AGORA_TAILCAT to use the bundle, or set AGORA_TAILCAT_SHA256 to the independently verified override digest.');
     }
-    return { path: override, target, source: 'override', sha256: expected, tag: lock.source.tag };
+    return { path: override, target, source: 'override', sha256: expected, tag: expected===entry.sha256?lock.source.tag:null };
   }
   const capsule = await regularBytes(path.join(vendor, entry.path), MAX_CAPSULE);
   if (capsule.length !== entry.capsuleSize || sha256(capsule) !== entry.capsuleSha256) throw new AgoraError(`Tailcat capsule checksum mismatch (${target}). Restore vendor/tailcat from a trusted checkout and run agora doctor --offline.`);

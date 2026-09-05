@@ -289,7 +289,18 @@ Cursors are yours to define; the only rule is that `read({ since: m.cursor })` r
 
 `skills/agora/SKILL.md` is the discipline for agents that use agora and agents that change it; `AGENTS.md` at the repository root points there for harnesses that read it instead of loading skills. `docs/CARRY.md` is the field-by-field schema of the carry envelope and how it is used across a compaction and across a succession. `docs/DESIGN.md` is the design record for several agents on one seat: the chosen shape, the alternatives ranged and why each lost, the flip conditions for what was deferred, and the standing prohibitions.
 
-## Development
+## Native file handoffs
+
+Agora bundles the verified Tailcat runtime for six platform/architecture targets.
+On each seat, run `agora enroll <room>`, then send with
+`agora share <room> <file> --to <authenticated-account-id> --once`.
+The recipient runs `agora fetch <room> <offer-id>` to receive verified local files.
+No Go, OpenSSH or separate Tailcat installation is needed.
+
+See [native transfers](docs/TRANSFERS.md) for expiry, operation recovery, enrollment
+repair, privacy boundaries and the real-relay acceptance probe.
+
+## Development commands
 
 ```sh
 npm test          # node --test over test/*.test.mjs (the gate)
