@@ -67,8 +67,8 @@ export function validateSeatBinding(value) {
   // here grants authority from it. A future consuming service must authenticate the mapping
   // against independent expected context before treating a binding as enforced, and a
   // consumer that relies on this field directly is a real missing-boundary defect with a
-  // cut-wire test owed at that seam. (Adjudicated at house :401 after this record briefly
-  // refused the enum outright, which was inconsistent with the observation path.)
+  // cut-wire test owed at that seam. Refusing the claim here while the observation record
+  // admits the same one would make two records that mean the same thing behave differently.
   const attestation = readEnum(v.attestation, 'attestation', ATTESTATIONS);
   return {
     poolId: validateNativeId(v.poolId),
@@ -103,7 +103,7 @@ export function windowKey(/** @type {unknown} */ value) {
   // The period and the scope are part of the identity, not decoration on it. Dropping them
   // made two genuinely different windows collide under one limit id, so a snapshot carrying
   // both was refused as a duplicate: the module could not represent a shape a real provider
-  // returns. Reported independently by two readers at head 9bf57acb.
+  // returns.
   return JSON.stringify([w.limitId, w.unit, w.durationMinutes ?? null, w.scope ?? null]);
 }
 
@@ -149,7 +149,6 @@ export function percentToBasisPoints(percent) {
   // places, so the test is the two-decimal rendering round-tripping exactly. An epsilon
   // tolerance was the first attempt and it rounded precisely what this function promises to
   // refuse: 21.000000001 became 2100 and 1e-9 became 0. Reported independently by two
-  // readers at head 9bf57acb.
   if (Number(percent.toFixed(2)) !== percent) throw new ProtocolValidationError('range', 'percent');
   return Math.round(percent * 100);
 }
@@ -250,7 +249,7 @@ export function windowFreshness(reading, now) {
   if (!r.available) return 'unknown';
   // No reset metadata is NOT evidence of freshness: a reading with no `resetsAt` was
   // reported fresh a year later. Absence is unknown until a source states a non-expiring
-  // window explicitly. Reported independently by two readers at head 9bf57acb.
+  // window explicitly.
   if (r.resetsAt === undefined) return 'unknown';
   return new Date(r.resetsAt).getTime() <= at ? 'reset-due' : 'fresh';
 }
