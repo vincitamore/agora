@@ -524,7 +524,7 @@ what may repost.
 
 | transport | room is | threads | cursor | identity |
 |---|---|---|---|---|
-| `slack` | one channel, by **id** (`C…`), not name; `&`, `<`, `>` decode on read and encode on post, while real mention/channel/URL tokens pass through; attachment metadata always arrives and `--files` or room `files: true` materializes images below the session's `media/` directory | yes; `--thread <parent ts>` | message `ts`; reads after a cursor are exclusive | the bot user; a bot token `xoxb-…` with `channels:history`, `channels:read`, `chat:write`, `files:read`, `groups:history`, `groups:read`, `users:read`, invited to the channel. The pictures-face image upload ladder needs `files:write`; without it `completeUploadExternal` fails. `post --file` remains text |
+| `slack` | one channel, by **id** (`C…`), not name; `&`, `<`, `>` decode on read and encode on post, while real mention/channel/URL tokens pass through; attachment metadata always arrives and `--files` or room `files: true` materializes images below the session's `media/` directory | yes; `--thread <parent ts>` | message `ts`; reads after a cursor are exclusive | the bot user; a bot token `xoxb-…` with `channels:history`, `channels:read`, `chat:write`, `files:read`, `groups:history`, `groups:read`, `users:read`, invited to the channel. The pictures-face image upload ladder needs `files:write`; the upload API requires `files:write`. `post --file` remains text |
 | `github` | one issue, `owner/name#N`; as a face of a native room (`room faces --add github --via <room>`) it takes one comment per faced post, the body verbatim, no rider, no upload | no | `created_at\|id`; an edited old comment is not re-delivered; reads are conditional and a watch defaults to five minutes | the token's user; falls back to `gh auth token` |
 | `github-events` | a read-only feed: one repo (`repo`), an org (`org`), or a user (`user`); narrowed by `events` (types) and `refs` (branches or tags) in the room's config | no | the event id; reads are conditional; a watch defaults to one minute | the token's user; `post` is a usage error, the issue or the pull request is the room for that |
 | `local` | one NDJSON file | yes | lines consumed | the configured actor |
@@ -599,9 +599,9 @@ an injected `fetch` so it is testable offline.
   file upload. A PNG or other binary will either refuse at the 3,900-character cap or
   dump garbage. The pictures-face upload ladder (native `room faces --pictures`, verified
   image bytes, `files.getUploadURLExternal` then `completeUploadExternal`) needs
-  `files:write` on the bot token; without that scope the upload cannot complete. An app
-  whose manifest omitted the scope must be reinstalled after it is added. Direct
-  attachment on a Slack `post` is a later unit.
+  `files:write` on the bot token; the upload API requires `files:write`. An app
+  whose manifest omitted the scope must be reinstalled after it is added. Direct Slack
+  post attachments are not supported by the current CLI.
 - Slack image delivery needs `files:read` on the bot token. An app created before that scope was
   added must be reinstalled to the workspace; until then the text and attachment metadata still
   arrive, but the attachment says HTTP 403 and has no local path. `read --files`, `watch --files`,
