@@ -148,17 +148,22 @@ export function percentToBasisPoints(percent) {
   // A percentage is representable in basis points only when it has at most two decimal
   // places, so the test is the two-decimal rendering round-tripping exactly. An epsilon
   // tolerance was the first attempt and it rounded precisely what this function promises to
-  // refuse: 21.000000001 became 2100 and 1e-9 became 0. Reported independently by two
+  // refuse: 21.000000001 became 2100 and 1e-9 became 0.
   if (Number(percent.toFixed(2)) !== percent) throw new ProtocolValidationError('range', 'percent');
   return Math.round(percent * 100);
 }
 
 /**
  * A COMPLETE observation: one full snapshot of one pool at one capture time, retaining
- * every window the source represented. `kind` is `full` and only `full`; a sparse or
- * partial frame is refused here by construction, because a partial frame stored as an
- * observation has absent fields that read as unknown or zero. A later adapter may use a
- * sparse frame as a bounded refetch signal; it may never arrive here.
+ * every window the source represented. `kind` is `full` and only `full`, so a frame that
+ * labels itself sparse is refused outright.
+ *
+ * What is checked here is DECLARED-FULL SHAPE, not completeness. A well-formed non-empty
+ * subset of a source's windows, labelled `full`, parses — and must, because nothing in this
+ * module knows what the source represented, and a validator cannot verify a claim about
+ * data it never saw. Completeness is the ADAPTER's obligation: emit `full` only for a
+ * snapshot read whole, and treat a sparse frame as a bounded refetch signal rather than
+ * something to forward.
  *
  * `sequence` is assigned by the PRODUCING adapter, not by the receiver: a receiver
  * numbering on arrival gives a late reading the higher number and the stale one wins.
