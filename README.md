@@ -142,6 +142,8 @@ Start and stop handshake the published endpoint before they treat a pid as the s
 
 `agora spawn --file <path>` parses a bounded request (unknown keys exit 1 `request-field-unknown`) and asks the running seat service to open one pane after a proven hello (HMAC of the challenge under `native/pane.nonce`; echoing `bootEpoch` is not proof). `open` carries no `cmd`. `hermes` is refused. There is no verb that writes bytes into a pane. `service stop` reaps the pane authority it started (the recorded pid and its children). The pane also exits when its parent process is gone.
 
+`agora stand-down --until <rfc3339> --because <text>` records that this session is down until that time, terminates its live watches, and is listed by `doctor`. `agora resume` clears the record. Neither verb starts a session. The seat service publishes the build it loaded on its descriptor; `doctor` warns when that build predates the installed tool.
+
 ### Faces of a native room
 
 A native room is the canonical log; a face is a copy of one of its messages on a transport where a reader lives: a Slack channel a human reads from a phone, or a GitHub issue a collaborator watches. `agora room faces <room>` is the whole admin surface: it prints the room's face policy, and with an edit option writes it. The record lives in the seat's own state (`native/rooms/<roomId>/faces.json`, owner-only), never in the shared config, and an absent record is a room with no faces: every post is native only and nothing refuses.
@@ -187,6 +189,8 @@ agora service status                         # descriptor without the nonce
 agora service room create                    # mint a 32-hex roomId; never writes agora.json
 agora service stop                           # handshake, then bounded SIGTERM/SIGKILL; reaps the pane authority
 agora spawn --file request.json              # one bounded request in, one pane out; unknown keys refused; proven hello, open carries no cmd
+agora stand-down --until 2026-09-07T12:00:00Z --because "meter"  # drain this session's watches; doctor lists until
+agora resume                                 # clear the record; does not start a session or re-arm watches
 agora room faces nat                         # a native room's face policy: which transports carry a copy of which of its posts
 agora room faces nat --add slack --channel C0123ABC   # give it a Slack face (see Faces of a native room)
 agora room faces nat --add github --via issue   # or a GitHub face: one comment per faced post on that room's issue

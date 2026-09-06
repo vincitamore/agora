@@ -67,6 +67,7 @@ import { buildLabel, buildPredates, cacheTtls, clearWatchMode, installedBuild, t
 import { SERVICE_DARK, ServiceDarkError, openNativeSubscription, serviceDescriptorStatus, validateNativeRoomId } from "../src/wake/subscriber.mjs";
 import { createServiceRoom, runService, seatAccountId, seatLabel, serviceStatus, startService, stopService } from "../src/service-cli.mjs";
 import { spawnFromFile } from "../src/spawn-cli.mjs";
+import { clearStandDown, declareStandDown, listStandDowns } from "../src/stand-down.mjs";
 import { FACE_ATTACHMENT_MODES, FACE_BUILT, FACE_SELECTORS, appendFaceRecord, facePolicyPath, listFaceRecords, normalizeSelectors, readFacePolicy, selectFaces, writeFacePolicy } from "../src/faces.mjs";
 
 /**
@@ -234,6 +235,19 @@ const SCHEMA = {
       options: { "--file <path>": "the bounded spawn-request JSON; unknown keys exit 1 request-field-unknown" },
       does: "one request file in, one pane out: parse the bounded request, ask the running seat service to open a pane after a proven hello. hermes is refused. open carries no cmd. Never writes the shared config. There is no write/send/type/keys verb",
     },
+    "stand-down": {
+      args: [],
+      options: {
+        "--until <rfc3339>": "when this session intends to be back; must be in the future",
+        "--because <text>": "why it is standing down (required, at most 400 characters)",
+      },
+      does: "declare this session down until a time, SIGTERM its live watches, and write a seat-visible record who and doctor print. Does not start a session later. resume clears the record from a live session. Never writes the shared config",
+    },
+    resume: {
+      args: [],
+      options: {},
+      does: "clear this session's stand-down record. Does not start a session and does not re-arm watches; a live session re-arms them itself. Named remainder: nothing in agora starts a harness session",
+    },
     doctor: { args: [], options: { "--offline": "skip the identity check", "--repair-tailcat": "restore the cached runtime from its hash-verified bundled capsule" }, does: "config, token presence per room, identity per room, this session and bearer and where each came from, the harness prompt-cache TTL where this seat can read one, and the reads a minute this seat spends with the arithmetic behind the number; three preflights for a resident bearer warn when a watch is armed against a five-minute TTL (cache-ttl), when a watch polls within half to one and a half times a TTL that was read (interval-near-ttl), and when no live watch in a room wakes on all (no-all-watch). Room and watch reports are derived. Tailcat integrity is verified locally; first use expands the bundled capsule into state, and --repair-tailcat explicitly restores a corrupt cache" },
     schema: { args: [], options: { "--json": "the whole surface as JSON, protocol included" }, does: "this description" },
   },
@@ -316,6 +330,7 @@ const OPTIONS = /** @type {const} */ ({
   help: { type: "boolean", short: "h", default: false },
   daemon: { type: "boolean", default: false },
   "room-id": { type: "string" },
+  until: { type: "string" },
 });
 
 /**
@@ -756,7 +771,7 @@ async function main(argv) {
     if (action === "daemon") {
       const accountId = process.env.AGORA_SERVICE_ACCOUNT || await seatAccountId(stateRoot);
       const label = process.env.AGORA_SERVICE_LABEL || seatLabel();
-      await runService({ root: stateRoot, accountId, seatLabel: label });
+      await runService({ root: stateRoot, accountId, seatLabel: label, build });
       await new Promise(() => {});
       return EXIT.ok;
     }
@@ -800,6 +815,27 @@ async function main(argv) {
     const spawnId = await spawnFromFile(stateRoot, file);
     if (json) console.log(JSON.stringify({ type: "spawn", spawnId }));
     else console.log(spawnId);
+    return EXIT.ok;
+  }
+
+  if (verb === "stand-down") {
+    const until = values.until !== undefined ? String(values.until).trim() : "";
+    const because = values.because !== undefined ? String(values.because) : "";
+    if (!until) throw new AgoraError("stand-down needs --until <rfc3339>", EXIT.usage);
+    const armed = (await listArmed(stateRoot)).filter((a) => a.dir === sdir).map((a) => ({ key: a.key, armed: a.armed }));
+    const rec = await declareStandDown({
+      sessionDir: sdir, slug: session.slug, bearer: bearer.name, until, because, armed,
+    });
+    if (json) console.log(JSON.stringify({ type: "stand-down", ...rec }));
+    else console.log(`stand-down until ${rec.until}: ${rec.because} (drained ${rec.drained.length} watch${rec.drained.length === 1 ? "" : "es"}). resume from a live session clears this; nothing starts a session.`);
+    return EXIT.ok;
+  }
+
+  if (verb === "resume") {
+    const rec = await clearStandDown(sdir);
+    if (json) console.log(JSON.stringify({ type: "resume", cleared: Boolean(rec), ...(rec ?? {}) }));
+    else if (rec) console.log(`stand-down cleared (was until ${rec.until}). Re-arm watches from this live session; nothing started a session.`);
+    else console.log("no stand-down record for this session");
     return EXIT.ok;
   }
 
@@ -896,10 +932,27 @@ async function main(argv) {
       for (const a of subscribersHere)
         console.log(JSON.stringify({ type: "subscriber", session: a.slug, room: a.armed.room, key: a.key, pid: a.armed.pid, wake: a.armed.wake ?? "all", mode: a.armed.mode ?? null, build: a.armed.build ?? null, buildLabel: buildLabel(a.armed.build), since: a.armed.since ?? null, startedAt: a.armed.startedAt }));
     } else {
-      console.log(`\nnative  service ${native.present ? `descriptor ${native.descriptor}  pid ${native.pid ?? "unknown"} ${native.pidAlive === undefined ? "" : native.pidAlive ? "(answers)" : "(gone)"}  seat ${native.seatLabel} account ${native.accountId} boot ${native.bootEpoch}` : `absent (${native.error})`}`);
+      console.log(`\nnative  service ${native.present ? `descriptor ${native.descriptor}  pid ${native.pid ?? "unknown"} ${native.pidAlive === undefined ? "" : native.pidAlive ? "(answers)" : "(gone)"}  seat ${native.seatLabel} account ${native.accountId} boot ${native.bootEpoch} build ${buildLabel(native.build)}` : `absent (${native.error})`}`);
       for (const a of subscribersHere)
         console.log(`        subscriber ${a.slug} ${a.armed.room} pid ${a.armed.pid} wake ${a.armed.wake ?? "all"} build ${buildLabel(a.armed.build)}`);
     }
+    if (native.present) {
+      const older = buildPredates(native.build, build);
+      if (older === true) {
+        warnings.push({
+          code: "stale-service-build",
+          message: `seat service pid ${native.pid ?? "unknown"} loaded ${buildLabel(native.build)}, older than installed ${buildLabel(build)}; restart it to dogfood the current build (every house watch goes service-dark until re-armed)`,
+        });
+      } else if (!native.build) {
+        warnings.push({
+          code: "unknown-service-build",
+          message: `seat service pid ${native.pid ?? "unknown"} recorded no build identity; restart it once so freshness becomes measurable`,
+        });
+      }
+    }
+    const downs = await listStandDowns(stateRoot);
+    if (json) for (const d of downs) console.log(JSON.stringify({ type: "stand-down", ...d.rec }));
+    else for (const d of downs) console.log(`stand-down  ${d.slug} until ${d.rec.until}: ${d.rec.because}`);
 
     const rows = await listRecords(stateRoot);
     const live = rows.filter((r) => r.record && r.state !== "gone");

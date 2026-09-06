@@ -35,7 +35,7 @@ export async function serviceStatus(stateRoot) {
 
 /**
  * Run the service in this process until SIGTERM/SIGINT. Used by the supervisor child.
- * @param {{ root: string, accountId: string, seatLabel: string }} options
+ * @param {{ root: string, accountId: string, seatLabel: string, build?: import("./harness.mjs").BuildIdentity }} options
  */
 export async function runService(options) {
   const service = new NativeRoomService(options);

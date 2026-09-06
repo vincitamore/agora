@@ -53,6 +53,8 @@ test("service start, status, stop, and a second start after stop", async (t) => 
   const st = JSON.parse(status.stdout.trim().split(/\r?\n/).at(-1) ?? "{}");
   assert.equal(st.present, true);
   assert.equal(st.pidAlive, true);
+  assert.equal(typeof st.build?.version, "string");
+  assert.ok(st.build?.git || st.build?.at);
   const again = await agora(["service", "start", "--json"], env);
   assert.equal(again.code, 1);
   assert.match(again.stderr, /already running/);
