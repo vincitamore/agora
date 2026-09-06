@@ -56,7 +56,7 @@ export function humanOperationSigningBytes(value) {
 }
 /** Signature LENGTH/encoding only; a successful parse must not stamp human authority.
  * @param {unknown} value */
-export function validateHumanOperationProof(value) {
+export function parseUnverifiedHumanOperationProof(value) {
   const v = readRecord(value, ['challenge', 'signature']);
   return { challenge: validateHumanOperationChallenge(v.challenge), signature: hex(v.signature, 64, 'signature') };
 }

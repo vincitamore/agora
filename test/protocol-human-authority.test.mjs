@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign, verify } from 'node:crypto';
 import { ProtocolValidationError } from '../src/protocol/common.mjs';
-import { humanKeyId, validateHumanKeyCandidate, validateHumanOperationChallenge, validateHumanOperationProof, humanOperationSigningBytes } from '../src/protocol/human-authority.mjs';
+import { humanKeyId, validateHumanKeyCandidate, validateHumanOperationChallenge, parseUnverifiedHumanOperationProof, humanOperationSigningBytes } from '../src/protocol/human-authority.mjs';
 
 const key = generateKeyPairSync('ed25519');
 const stranger = generateKeyPairSync('ed25519');
@@ -25,7 +25,7 @@ const proof = { challenge, signature: sign(null, humanOperationSigningBytes(chal
 // Trusted arguments model host-retained state; none is obtained from the proof.
 /** @param {unknown} value @param {{active?:boolean,profile?:string,now?:string,expected?:unknown}} [options] */
 function oracle(value, { active = true, profile = 'enforced', now = '2026-09-06T03:00:30.000Z', expected = challenge } = {}) {
-  const p = validateHumanOperationProof(value);
+  const p = parseUnverifiedHumanOperationProof(value);
   if (!active) throw new Error('grant-revoked');
   if (profile !== 'enforced') throw new Error('custody-unproven');
   if (!humanOperationSigningBytes(p.challenge).equals(humanOperationSigningBytes(expected))) throw new Error('context-mismatch');
@@ -91,12 +91,12 @@ test('valid signature does not substitute for grant, protected custody or target
 
 test('wire authority labels, unknown actions and bad lifetimes are rejected without echoing input', () => {
   for (const field of ['authorKind', 'verified', 'profile', 'grant', 'privateKey']) {
-    assert.throws(() => validateHumanOperationProof({ ...proof, [field]: 'SECRET-SENTINEL' }), (e) => e instanceof ProtocolValidationError && !e.message.includes('SECRET-SENTINEL'));
+    assert.throws(() => parseUnverifiedHumanOperationProof({ ...proof, [field]: 'SECRET-SENTINEL' }), (e) => e instanceof ProtocolValidationError && !e.message.includes('SECRET-SENTINEL'));
   }
   for (const mutation of [{ action: 'room-enroll' }, { expiresAt: challenge.issuedAt }, { expiresAt: '2026-09-06T03:02:00.001Z' }, { nonce: '4'.repeat(63) }, { policyRevision: 0 }]) {
     assert.throws(() => validateHumanOperationChallenge({ ...challenge, ...mutation }), ProtocolValidationError);
   }
-  assert.throws(() => validateHumanOperationProof({ ...proof, signature: proof.signature.toUpperCase() }), ProtocolValidationError);
+  assert.throws(() => parseUnverifiedHumanOperationProof({ ...proof, signature: proof.signature.toUpperCase() }), ProtocolValidationError);
 });
 
 test('both first consumers use the same closed contract without changing general OperatorAct', () => {
