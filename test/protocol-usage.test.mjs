@@ -2,9 +2,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ProtocolValidationError } from '../src/protocol/common.mjs';
+import * as usageModule from '../src/protocol/usage.mjs';
 import {
   acceptCompleteObservation, percentToBasisPoints, supersedes, validateCompleteObservation,
-  validatePoolPrincipal, validateSeatBinding, validateWindowReading, windowFreshness, windowKey,
+  validatePoolPrincipal, validateSeatBinding, validateWindowIdentity, validateWindowReading, windowFreshness, windowKey,
 } from '../src/protocol/usage.mjs';
 
 // Synthetic throughout: no live identifier, no credential, no account. Passing these
@@ -31,14 +32,14 @@ const fullObservation = {
 test('two seats bind to one principal and the pool is one identity, never two', () => {
   const principal = validatePoolPrincipal({ poolId: POOL, provider: 'example-provider', principalRef: 'org-uuid-synthetic', identity: 'unverified' });
   const a = validateSeatBinding({ poolId: POOL, registration: seat('account_synthetic_00001'), attestation: 'cooperative' });
-  const b = validateSeatBinding({ poolId: POOL, registration: seat('account_synthetic_00002'), attestation: 'enforced', evidenceRef: 'measured on this seat' });
+  const b = validateSeatBinding({ poolId: POOL, registration: seat('account_synthetic_00002'), attestation: 'cooperative', evidenceRef: 'measured on this seat' });
   assert.equal(a.poolId, principal.poolId);
   assert.equal(b.poolId, principal.poolId);
   assert.notEqual(a.registration.accountId, b.registration.accountId);
-  // Per-binding attestation: two seats on one pool may be bound on different grounds, and
-  // the pool record carries neither of them.
-  assert.equal(a.attestation, 'cooperative');
-  assert.equal(b.attestation, 'enforced');
+  // Per-binding evidence: two seats on one pool may be bound on different grounds, and the
+  // pool record carries none of it.
+  assert.equal(Object.hasOwn(a, 'evidenceRef'), false);
+  assert.equal(b.evidenceRef, 'measured on this seat');
   assert.equal(Object.hasOwn(principal, 'attestation'), false);
   // An unverified principal cannot be promoted by anything in this module.
   assert.equal(principal.identity, 'unverified');
@@ -186,6 +187,82 @@ test('SUPERSESSION: an unseen generation is unordered, never newer', () => {
 
 test('SUPERSESSION: two different pools are never ordered against each other', () => {
   assert.throws(() => supersedes({ ...fullObservation, poolId: 'pool_synthetic_0000002' }, fullObservation), ProtocolValidationError);
+});
+
+// --- Regressions from the independent reads of 9bf57acb ----------------------------
+// Four defects, three reproduced by two readers independently and one found by a third.
+// Their falsifiers are the regression: each of these failed at that head.
+
+test('REGRESSION R1: a near-integer or near-zero percentage is refused, not rounded', () => {
+  // At 9bf57acb an epsilon tolerance returned 2100 and 0 for these, silently rounding
+  // exactly what this function's contract promises to refuse.
+  assert.throws(() => percentToBasisPoints(21.000000001), ProtocolValidationError);
+  assert.throws(() => percentToBasisPoints(1e-9), ProtocolValidationError);
+  assert.throws(() => percentToBasisPoints(0.005), ProtocolValidationError);
+  // The representable cases must survive the repair.
+  assert.equal(percentToBasisPoints(21), 2100);
+  assert.equal(percentToBasisPoints(0.05), 5);
+  assert.equal(percentToBasisPoints(0.29), 29);
+  assert.equal(percentToBasisPoints(100), 10000);
+  assert.equal(percentToBasisPoints(0), 0);
+});
+
+test('REGRESSION R2: two periods under one limit id are two windows, and a snapshot may carry both', () => {
+  // The shape a real provider returns: one limit id, a short window and a weekly one.
+  const short = { limitId: 'provider_limit_a', unit: 'basis-points', durationMinutes: 300 };
+  const week = { limitId: 'provider_limit_a', unit: 'basis-points', durationMinutes: 10080 };
+  assert.notEqual(windowKey(short), windowKey(week));
+  // At 9bf57acb these collided, so an observation carrying both was refused as a duplicate:
+  // the module could not represent data the provider actually returns.
+  const observation = validateCompleteObservation({
+    ...fullObservation,
+    windows: [
+      { window: short, available: true, value: 100, sense: 'used' },
+      { window: week, available: true, value: 3100, sense: 'used' },
+    ],
+  });
+  assert.equal(observation.windows.length, 2);
+  // A scope discriminator separates two windows a provider distinguishes by name, and the
+  // provider's own limit id is preserved untouched in both.
+  const primary = { limitId: 'provider_limit_b', unit: 'basis-points', scope: 'primary' };
+  const secondary = { limitId: 'provider_limit_b', unit: 'basis-points', scope: 'secondary' };
+  assert.notEqual(windowKey(primary), windowKey(secondary));
+  assert.equal(validateWindowIdentity(primary).limitId, 'provider_limit_b');
+  // Genuinely identical identities still collide, which is the property that must survive.
+  assert.equal(windowKey(short), windowKey({ ...short }));
+});
+
+test('REGRESSION R3: a reading with no reset metadata is unknown, never fresh', () => {
+  const noReset = { window: windowOf('no_reset', 'tokens'), available: true, value: 5, sense: 'used' };
+  // At 9bf57acb this returned fresh a year later: absence of reset metadata was read as
+  // evidence of freshness.
+  assert.equal(windowFreshness(noReset, '2027-09-06T00:00:00.000Z'), 'unknown');
+  assert.equal(windowFreshness(noReset, '2026-09-06T20:35:02.000Z'), 'unknown');
+  // A reading that does carry a reset time still discriminates.
+  assert.equal(windowFreshness(fiveHour, '2026-09-06T23:00:00.000Z'), 'fresh');
+  assert.equal(windowFreshness(fiveHour, '2026-09-07T01:00:00.000Z'), 'reset-due');
+});
+
+test('R4: a seat binding parses a CLAIMED attestation and grants nothing by it', () => {
+  // Adjudicated at house :401. This is a syntax reader, so a claimed `enforced` parses here
+  // exactly as it does on an unaccepted observation; an enum surviving syntax is not an
+  // authority bypass. What makes that safe is that no consumer of this field exists in this
+  // module, so nothing derives authority from the claim.
+  const claimed = validateSeatBinding({ poolId: POOL, registration: seat('account_synthetic_00003'), attestation: 'enforced' });
+  assert.equal(claimed.attestation, 'enforced', 'the claim parses');
+  // The same value on an observation is likewise only a claim until the boundary tests it,
+  // which is the consistency the adjudication turned on.
+  const claimedObservation = validateCompleteObservation({ ...fullObservation, attestation: 'enforced' });
+  assert.equal(claimedObservation.attestation, 'enforced');
+  // And the observation boundary is where a claim is actually tested.
+  assert.throws(
+    () => acceptCompleteObservation({ ...fullObservation, attestation: 'enforced' }, { poolId: POOL, attestor: OTHER_SERVICE }, '2026-09-06T20:35:02.000Z'),
+    ProtocolValidationError,
+  );
+  // No equivalent boundary exists for a binding in this module, and that absence is the
+  // point: a future consumer that reads this field without authenticating the mapping is a
+  // missing-boundary defect owed a cut-wire test at that seam.
+  assert.equal(typeof /** @type {Record<string, unknown>} */ (usageModule).acceptSeatBinding, 'undefined');
 });
 
 // --- Mutation controls -------------------------------------------------------------
