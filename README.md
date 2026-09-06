@@ -140,7 +140,7 @@ A native room becomes usable when a house config row names that `roomId` — a s
 
 Start and stop handshake the published endpoint before they treat a pid as the service. A leftover `native/service.json` whose socket does not answer is unlinked; the process that happens to hold that pid is left alone. A live endpoint whose descriptor has no pid is exit 1, not a kill by guess. A second `start` while the handshake succeeds is exit 1 already running. Status reports the descriptor without the nonce. The child is spawned with `process.execPath`, never PATH `node`. `--daemon` is the supervisor child, not an operator verb.
 
-`agora spawn --file <path>` parses a bounded request (unknown keys exit 1 `request-field-unknown`) and asks the running seat service to open one pane after a proven hello (HMAC of the challenge under `native/pane.nonce`; echoing `bootEpoch` is not proof). `open` carries no `cmd`. `hermes` is refused. There is no verb that writes bytes into a pane. `service stop` reaps the pane authority it started (the recorded pid and its children).
+`agora spawn --file <path>` parses a bounded request (unknown keys exit 1 `request-field-unknown`) and asks the running seat service to open one pane after a proven hello (HMAC of the challenge under `native/pane.nonce`; echoing `bootEpoch` is not proof). `open` carries no `cmd`. `hermes` is refused. There is no verb that writes bytes into a pane. `service stop` reaps the pane authority it started (the recorded pid and its children). The pane also exits when its parent process is gone.
 
 ### Faces of a native room
 

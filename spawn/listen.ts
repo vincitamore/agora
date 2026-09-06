@@ -94,6 +94,35 @@ function accept(auth: Authority, socket: net.Socket): void {
   });
 }
 
+/** Exit when AGORA_PANE_PARENT_PID is gone. Windows children outlive a killed parent. */
+export function armParentWatch(
+  env: NodeJS.ProcessEnv = process.env,
+  opts: {
+    intervalMs?: number;
+    kill?: (pid: number, signal: 0) => void;
+    exit?: (code: number) => void;
+    setIntervalFn?: typeof setInterval;
+  } = {},
+): ReturnType<typeof setInterval> | undefined {
+  const parent = Number(env.AGORA_PANE_PARENT_PID);
+  if (!Number.isInteger(parent) || parent <= 0) return undefined;
+  const intervalMs = opts.intervalMs ?? 250;
+  const kill = opts.kill ?? ((pid, signal) => process.kill(pid, signal));
+  const exit = opts.exit ?? ((code) => process.exit(code));
+  const setInt = opts.setIntervalFn ?? setInterval;
+  const tick = () => {
+    try {
+      kill(parent, 0);
+    } catch {
+      exit(0);
+    }
+  };
+  tick();
+  const id = setInt(tick, intervalMs);
+  if (typeof id === "object" && id && "unref" in id) (id as NodeJS.Timeout).unref();
+  return id;
+}
+
 export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Started> {
   const state = env.AGORA_STATE ?? path.join(env.USERPROFILE ?? env.HOME ?? ".", ".agora", "state");
   const sock = env.AGORA_PANE_SOCK ?? paneSockPath(state);
@@ -109,6 +138,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<Starte
     bootEpoch: Number.isInteger(bootEpoch) && bootEpoch > 0 ? bootEpoch : Date.now(),
   });
   process.stdout.write(`${JSON.stringify({ type: "listening", sock: started.sock, bootEpoch: started.auth.bootEpoch })}\n`);
+  armParentWatch(env);
   return started;
 }
 

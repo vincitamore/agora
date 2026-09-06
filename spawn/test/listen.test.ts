@@ -4,7 +4,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { issueAdmission } from "../pane-authority.ts";
-import { startAuthority } from "../listen.ts";
+import { armParentWatch, startAuthority } from "../listen.ts";
 import { paneHelloProof } from "../protocol.ts";
 import { renderDeliveredLine } from "../delivered-line.ts";
 
@@ -123,4 +123,28 @@ test("bun run start stays alive and prints listening", async () => {
   expect(child.exitCode).toBeNull();
   child.kill();
   await new Promise((resolve) => child.once("exit", resolve));
+});
+
+test("armParentWatch exits when the parent pid is gone", () => {
+  let exited: number | undefined;
+  armParentWatch(
+    { AGORA_PANE_PARENT_PID: "4242" },
+    {
+      kill: () => {
+        throw new Error("gone");
+      },
+      exit: (code) => {
+        exited = code;
+      },
+      setIntervalFn: (() => 0) as unknown as typeof setInterval,
+    },
+  );
+  expect(exited).toBe(0);
+});
+
+test("armParentWatch is a no-op without a parent pid", () => {
+  let exited: number | undefined;
+  const id = armParentWatch({}, { exit: (code) => { exited = code; } });
+  expect(id).toBeUndefined();
+  expect(exited).toBeUndefined();
 });

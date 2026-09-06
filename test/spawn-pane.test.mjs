@@ -8,6 +8,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import net from "node:net";
 import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { ensurePaneAuthority, openPane, paneAlive, paneHelloProof, paneSockPath, reapPane, resolveBunBin } from "../src/spawn-pane.mjs";
 
 const NONCE = "ab".repeat(16);
@@ -90,6 +91,53 @@ test("ensurePaneAuthority pid is gone after reapPane", {
   const deadline = Date.now() + 3000;
   while (Date.now() < deadline && paneAlive(pane.pid)) await new Promise((r) => setTimeout(r, 50));
   assert.equal(paneAlive(pane.pid), false);
+});
+
+test("pane exits when its parent is gone", {
+  skip: resolveBunBin() ? false : "no bun at BUN or ~/.bun/bin",
+}, async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "agora-pane-pdeath-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const spawnPane = pathToFileURL(fileURLToPath(new URL("../src/spawn-pane.mjs", import.meta.url))).href;
+  const script = path.join(root, "parent.mjs");
+  await writeFile(script, `import { ensurePaneAuthority } from ${JSON.stringify(spawnPane)};
+const pane = await ensurePaneAuthority(process.env.AGORA_STATE);
+process.stdout.write(JSON.stringify({ pid: pane.pid }) + "\\n");
+setInterval(() => {}, 1000);
+`);
+  const parent = spawn(process.execPath, [script], {
+    env: { ...process.env, AGORA_STATE: root },
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
+  });
+  const parentPid = parent.pid;
+  t.after(() => { try { if (parentPid) process.kill(parentPid); } catch { /* gone */ } });
+  /** @type {string[]} */
+  const errChunks = [];
+  parent.stderr.on("data", (chunk) => { errChunks.push(chunk.toString("utf8")); });
+  const line = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`parent stayed silent: ${errChunks.join("")}`)), 8000);
+    parent.stdout.once("data", (chunk) => {
+      clearTimeout(timer);
+      resolve(chunk.toString("utf8"));
+    });
+    parent.once("exit", (code) => {
+      clearTimeout(timer);
+      reject(new Error(`parent exited ${code}: ${errChunks.join("")}`));
+    });
+  });
+  const { pid: panePid } = JSON.parse(line.trim().split("\n")[0]);
+  assert.equal(typeof panePid, "number");
+  assert.equal(paneAlive(panePid), true);
+  if (typeof parentPid !== "number") throw new Error("parent pid missing");
+  if (process.platform === "win32") {
+    spawn("taskkill", ["/PID", String(parentPid), "/F"], { stdio: "ignore", windowsHide: true });
+  } else {
+    process.kill(parentPid, "SIGKILL");
+  }
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline && paneAlive(panePid)) await new Promise((r) => setTimeout(r, 50));
+  assert.equal(paneAlive(panePid), false);
 });
 
 test("echoing bootEpoch is not a proven hello", () => {
