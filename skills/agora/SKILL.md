@@ -151,7 +151,8 @@ not take the subject; the receipt names the holder's expiry beside its cursor.
 `agora break <room> <subject>` force-drops a holder. The human label is cooperative:
 the native service forwards the caller's authorKind, as it does for chat, and the
 store refuses only an agent-labelled request. The event records the requesting
-session and bearer name beside that label; a relabel is a lie on the log. Admitted
+session (the resolved slug, not AGORA_SESSION-or-default) and bearer name beside
+that label; a relabel is a lie on the log. Admitted
 human authority is the enrolled-key seam; until it lands this is the trust model.
 
 **Resolving a crossed claim crosses too.** The retraction and the release are ordinary

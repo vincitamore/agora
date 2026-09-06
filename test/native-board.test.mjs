@@ -1,10 +1,11 @@
 // @ts-check
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { NativeRoomStore } from "../src/native-store.mjs";
+import { nativeTransport } from "../src/transports/native.mjs";
 
 const ROOM = "1".repeat(32);
 const EPOCH = "2".repeat(32);
@@ -170,4 +171,38 @@ test("reopen restores the holder; a chat append still reads without board rows",
   t.after(() => reopened.close());
   assert.equal(reopened.board()[0].accountId, HOST);
   assert.equal(reopened.read().length, 1);
+});
+
+test("nativeTransport.board records the resolved session slug, not AGORA_SESSION-or-default", async (t) => {
+  const prev = process.env.AGORA_SESSION;
+  t.after(() => {
+    if (prev === undefined) delete process.env.AGORA_SESSION;
+    else process.env.AGORA_SESSION = prev;
+  });
+  delete process.env.AGORA_SESSION;
+  const root = await mkdtemp(path.join(tmpdir(), "agora-native-board-session-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(path.join(root, "native"), { recursive: true });
+  await writeFile(path.join(root, "native", "service.json"), JSON.stringify({
+    path: "\\\\.\\pipe\\agora-board-session-probe", nonce: "n", bootEpoch: EPOCH,
+    accountId: HOST, seatLabel: "probe",
+  }));
+  /** @type {any[]} */
+  const frames = [];
+  const connect = async () => ({
+    socket: { unref() {}, once() {}, destroyed: false },
+    request: async (/** @type {string} */ type, /** @type {any} */ fields) => {
+      frames.push({ type, ...fields });
+      return { cursor: `${EPOCH}:1` };
+    },
+  });
+  const tr = nativeTransport({ transport: "native", roomId: ROOM }, {
+    actor: { name: "Codex-Astra/meta-wizard", kind: "agent" },
+    stateRoot: root,
+    session: "codex-fixture_codex_session",
+    connect: /** @type {any} */ (connect),
+  });
+  await /** @type {(payload: { action: string, subject: string, because: string }) => Promise<unknown>} */ (tr.board)({ action: "contest", subject: "work:session", because: "probe" });
+  assert.equal(frames[0].operation.session, "codex-fixture_codex_session");
+  assert.notEqual(frames[0].operation.session, "default");
 });
