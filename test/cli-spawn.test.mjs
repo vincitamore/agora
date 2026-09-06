@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { resolveBunBin } from "../src/spawn-pane.mjs";
 
 const run = promisify(execFile);
 const BIN = new URL("../bin/agora.mjs", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
@@ -37,6 +38,15 @@ async function agora(args, env) {
   }
 }
 
+/** @param {import("node:test").TestContext} t */
+async function withConfig(t) {
+  const root = await mkdtemp(path.join(tmpdir(), "agora-spawn-"));
+  const cfg = path.join(root, "agora.json");
+  await writeFile(cfg, JSON.stringify({ actor: { name: "seat", kind: "agent" }, rooms: { scratch: { transport: "local", path: path.join(root, "room.ndjson") } } }));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  return { root, env: { AGORA_STATE: root, AGORA_CONFIG: cfg, AGORA_SESSION: "sp" } };
+}
+
 test("schema lists spawn --file", async () => {
   const { code, stdout } = await agora(["schema", "--json"], {});
   assert.equal(code, 0);
@@ -45,34 +55,35 @@ test("schema lists spawn --file", async () => {
   assert.equal(schema.verbs.spawn.options["--file <path>"] !== undefined, true);
 });
 
-test("spawn without --file is usage", async () => {
-  const { code, stderr } = await agora(["spawn"], {});
+test("spawn without --file is usage", async (t) => {
+  const { env } = await withConfig(t);
+  const { code, stderr } = await agora(["spawn"], env);
   assert.equal(code, 2);
   assert.match(stderr, /spawn needs --file/);
 });
 
 test("spawn --file unknown key is request-field-unknown and mints nothing", async (t) => {
-  const root = await mkdtemp(path.join(tmpdir(), "agora-spawn-unknown-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  const { root, env } = await withConfig(t);
   const file = path.join(root, "req.json");
   await writeFile(file, JSON.stringify({ ...REQUEST, depth: 0 }));
-  const { code, stderr } = await agora(["spawn", "--file", file], { AGORA_STATE: root, AGORA_SESSION: "sp" });
+  const { code, stderr } = await agora(["spawn", "--file", file], env);
   assert.equal(code, 1);
   assert.match(stderr, /request-field-unknown/);
   assert.match(stderr, /depth/);
 });
 
 test("spawn --file hermes is spawn-unsupported", async (t) => {
-  const root = await mkdtemp(path.join(tmpdir(), "agora-spawn-hermes-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  const { root, env } = await withConfig(t);
   const file = path.join(root, "req.json");
   await writeFile(file, JSON.stringify({ ...REQUEST, harness: "hermes" }));
-  const { code, stderr } = await agora(["spawn", "--file", file], { AGORA_STATE: root, AGORA_SESSION: "sp" });
+  const { code, stderr } = await agora(["spawn", "--file", file], env);
   assert.equal(code, 1);
   assert.match(stderr, /spawn-unsupported/);
 });
 
-test("spawn --file with a live service opens one pane and prints a 32-hex id", async (t) => {
+test("spawn --file with a live service opens one pane and prints a 32-hex id", {
+  skip: resolveBunBin() ? false : "no bun at BUN or ~/.bun/bin",
+}, async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "agora-spawn-ok-"));
   const cfg = path.join(root, "agora.json");
   await writeFile(cfg, JSON.stringify({ actor: { name: "seat", kind: "agent" }, rooms: { scratch: { transport: "local", path: path.join(root, "room.ndjson") } } }));
@@ -89,4 +100,17 @@ test("spawn --file with a live service opens one pane and prints a 32-hex id", a
   assert.equal(spawned.code, 0, spawned.stderr);
   const line = JSON.parse(spawned.stdout.trim().split(/\r?\n/).at(-1) ?? "{}");
   assert.match(String(line.spawnId), /^[a-f0-9]{32}$/);
+});
+
+test("spawn --file without bun is pane-bun-absent", async (t) => {
+  const { root, env } = await withConfig(t);
+  const envNoBun = { ...env, BUN: path.join(root, "no-such-bun") };
+  t.after(async () => { await agora(["service", "stop"], envNoBun); });
+  const started = await agora(["service", "start", "--json"], envNoBun);
+  assert.equal(started.code, 0, started.stderr);
+  const file = path.join(root, "req.json");
+  await writeFile(file, JSON.stringify(REQUEST));
+  const spawned = await agora(["spawn", "--file", file], envNoBun);
+  assert.equal(spawned.code, 1, spawned.stderr);
+  assert.match(spawned.stderr, /pane-bun-absent/);
 });
