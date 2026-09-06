@@ -760,6 +760,7 @@ export function pidAlive(pid, kill) {
  *   polling; `doctor` lists it as a live watch and leaves it out of the poll arithmetic
  * @property {string | null} [since] the cursor it started from
  * @property {string} startedAt
+ * @property {string} [generation] unique id of this arming; stand-down stop/ack bind to it
  */
 
 const armedDir = (/** @type {string} */ dir) => path.join(dir, "armed");

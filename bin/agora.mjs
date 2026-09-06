@@ -5,6 +5,7 @@ import { decodeTransfer, encodeTransfer, localTransferIdentity, requireAuthentic
 import { shareFiles, fetchFiles, listOffers, stopOffer, resumeOffer, forgetOffer, pruneOffers } from "../src/tailcat-offers.mjs";
 import { parseArgs } from "node:util";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
@@ -67,7 +68,7 @@ import { buildLabel, buildPredates, cacheTtls, clearWatchMode, installedBuild, t
 import { SERVICE_DARK, ServiceDarkError, openNativeSubscription, serviceDescriptorStatus, validateNativeRoomId } from "../src/wake/subscriber.mjs";
 import { createServiceRoom, runService, seatAccountId, seatLabel, serviceStatus, startService, stopService } from "../src/service-cli.mjs";
 import { spawnFromFile } from "../src/spawn-cli.mjs";
-import { clearStandDown, declareStandDown, listStandDowns, standDownRequested } from "../src/stand-down.mjs";
+import { ackWatchStop, clearStandDown, clearWatchStop, declareStandDown, listStandDowns, standDownRequested } from "../src/stand-down.mjs";
 import { FACE_ATTACHMENT_MODES, FACE_BUILT, FACE_SELECTORS, appendFaceRecord, facePolicyPath, listFaceRecords, normalizeSelectors, readFacePolicy, selectFaces, writeFacePolicy } from "../src/faces.mjs";
 
 /**
@@ -242,7 +243,7 @@ const SCHEMA = {
         "--because <text>": "why it is standing down (required, at most 400 characters)",
         "--keep-watches": "declare without signalling watches (Grace's overnight narrow-watch case)",
       },
-      does: "declare this session down until a time, SIGTERM its live watches, and write a seat-visible record who and doctor print. Does not start a session later. resume clears the record from a live session. Never writes the shared config",
+      does: "declare this session down until a time, ask its watches to exit via a generation-bound stop file, and write a seat-visible record doctor prints. Does not SIGTERM and does not start a session. resume clears the record from a live session. Never writes the shared config",
     },
     resume: {
       args: [],
@@ -1624,6 +1625,8 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       const watchMode = mode === "once" ? null : watchModeSentinel(process.env, process.cwd());
       if ((await touchWatchMode(watchMode)) === "created")
         console.error(`agora: watch-mode sentinel ${watchMode?.sentinel} (the stop hook stays quiet while this watch runs)`);
+      const generation = randomUUID();
+      await clearWatchStop(sdir, key);
       await writeArmed(sdir, key, {
         room: roomAlias,
         thread,
@@ -1633,6 +1636,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         follow: values.follow,
         wake: wakeMode,
         pid: process.pid,
+        generation,
         build,
         transport: room.transport,
         ...(subscription ? { subscriber: true } : {}),
@@ -1740,8 +1744,10 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
           threads,
           sweep,
           guard: async () => {
-            const armedNow = await readArmed(sdir, key);
-            if (armedNow && await standDownRequested(sdir, key, armedNow.bootEpoch)) return "stand-down";
+            if (await standDownRequested(sdir, key, generation)) {
+              await ackWatchStop(sdir, key, generation);
+              return "stand-down";
+            }
             return codexGuard ? await codexGuard() : undefined;
           },
           onBatch: async (msgs, batch) => {
