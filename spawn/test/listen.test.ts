@@ -148,3 +148,67 @@ test("armParentWatch is a no-op without a parent pid", () => {
   expect(id).toBeUndefined();
   expect(exited).toBeUndefined();
 });
+
+test("listen.ts exits promptly given a dead parent pid", async () => {
+  const dead = spawn(process.execPath, ["-e", "process.exit(0)"], { stdio: "ignore" });
+  await new Promise((resolve) => dead.once("exit", resolve));
+  const deadPid = dead.pid;
+  expect(typeof deadPid).toBe("number");
+  const sock = sockPath();
+  const child = spawn("bun", ["run", path.join(import.meta.dir, "..", "listen.ts")], {
+    env: {
+      ...process.env,
+      AGORA_PANE_SOCK: sock,
+      AGORA_BOOT_EPOCH: "3",
+      AGORA_PANE_PARENT_PID: String(deadPid),
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const code = await new Promise<number | null>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error("listen.ts stayed alive with a dead parent pid"));
+    }, 2000);
+    child.once("exit", (exitCode) => {
+      clearTimeout(timer);
+      resolve(exitCode);
+    });
+  });
+  expect(code).toBe(0);
+});
+
+test("listen.ts stays alive given a live parent pid", async () => {
+  const dummy = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  const dummyPid = dummy.pid;
+  expect(typeof dummyPid).toBe("number");
+  const sock = sockPath();
+  const child = spawn("bun", ["run", path.join(import.meta.dir, "..", "listen.ts")], {
+    env: {
+      ...process.env,
+      AGORA_PANE_SOCK: sock,
+      AGORA_BOOT_EPOCH: "3",
+      AGORA_PANE_PARENT_PID: String(dummyPid),
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const line = await new Promise<string>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("listen.ts silent")), 5000);
+    child.stdout?.once("data", (chunk) => {
+      clearTimeout(timer);
+      resolve(chunk.toString("utf8"));
+    });
+    child.once("exit", (code) => {
+      clearTimeout(timer);
+      reject(new Error(`listen.ts exited ${code} under a live parent`));
+    });
+  });
+  expect(JSON.parse(line.trim().split("\n")[0]).type).toBe("listening");
+  await new Promise((r) => setTimeout(r, 1000));
+  expect(child.exitCode).toBeNull();
+  child.kill();
+  dummy.kill();
+  await Promise.all([
+    new Promise((resolve) => child.once("exit", resolve)),
+    new Promise((resolve) => dummy.once("exit", resolve)),
+  ]);
+});
