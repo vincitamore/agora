@@ -9,7 +9,7 @@ import { NativeFrameDecoder, NATIVE_PROTOCOL, encodeNativeFrame, nativeHandshake
   validateNativeEnvelope, validateNativeId, verifyNativeHandshakeProof } from "./native-protocol.mjs";
 import { NativeRoomStore } from "./native-store.mjs";
 import { parseSpawnRequest } from "./spawn/request.mjs";
-import { ensurePaneAuthority, mintSpawnId, openPane } from "./spawn-pane.mjs";
+import { ensurePaneAuthority, mintSpawnId, openPane, reapPane } from "./spawn-pane.mjs";
 
 const MAX_PENDING_WRITE = 2 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -581,7 +581,7 @@ export class NativeRoomService {
     if (!this.server) return;
     this.running = false;
     if (this.panePid) {
-      try { process.kill(this.panePid, "SIGTERM"); } catch { /* gone */ }
+      await reapPane(this.panePid);
       this.panePid = undefined;
     }
     for (const socket of this.sockets) socket.destroy();

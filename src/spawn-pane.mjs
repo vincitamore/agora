@@ -99,7 +99,6 @@ export async function ensurePaneAuthority(stateRoot) {
   const child = spawn(bun, ["run", "listen.ts"], {
     cwd: PANE_PACKAGE,
     env: { ...process.env, AGORA_STATE: stateRoot, AGORA_PANE_SOCK: sock },
-    detached: true,
     stdio: "ignore",
     windowsHide: true,
   });
@@ -115,7 +114,39 @@ export async function ensurePaneAuthority(stateRoot) {
       await new Promise((r) => setTimeout(r, 50));
     }
   }
+  await reapPane(typeof child.pid === "number" ? child.pid : undefined);
   throw new AgoraError("pane-package-absent: pane.sock did not come up", EXIT.error);
+}
+
+/** True when the process still exists. @param {number | undefined} pid */
+export function paneAlive(pid) {
+  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Kill the pane authority and its children. Missing or already-gone pid is a no-op.
+ * @param {number | undefined} pid
+ * @returns {Promise<void>}
+ */
+export function reapPane(pid) {
+  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return Promise.resolve();
+  if (process.platform === "win32") {
+    return new Promise((resolve) => {
+      const killer = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+      const done = () => resolve();
+      killer.on("exit", done);
+      killer.on("error", done);
+    });
+  }
+  try { process.kill(-pid, "SIGTERM"); } catch { /* not a group leader */ }
+  try { process.kill(pid, "SIGTERM"); } catch { /* gone */ }
+  return Promise.resolve();
 }
 
 /**
