@@ -6,6 +6,8 @@ import net from "node:net";
 import path from "node:path";
 import { AgoraError } from "./core.mjs";
 import { nativeCursor, nativeDigest, parseNativeCursor, validateNativeEpoch, validateNativeId } from "./native-protocol.mjs";
+import { ProtocolValidationError } from "./protocol/common.mjs";
+import { validateBoardPayload } from "./protocol/operation.mjs";
 
 const LOG_VERSION = 1;
 const MANIFEST_VERSION = 1;
@@ -230,7 +232,17 @@ function validateRecord(record, manifest, expectedSequence, expectedPreviousDige
   if (!/^sha256:[a-f0-9]{64}$/.test(record.payloadDigest ?? "")) throw new AgoraError("native room log contains an invalid payload digest");
   if (record.previousDigest !== expectedPreviousDigest) throw new AgoraError(`native room log hash-chain mismatch at sequence ${expectedSequence}; do not advance or truncate it`);
   validateNativeId(record.accountId, "record account id");
-  if (!record.message || record.message.id !== messageId(manifest.roomId, record.accountId, record.operationId) ||
+  if (record.kind === "board") {
+    if (record.message) throw new AgoraError("native room board record must not carry a chat message");
+    try { validateBoardPayload(record.board); }
+    catch (error) {
+      if (error instanceof ProtocolValidationError) throw new AgoraError(`native room board record is invalid (${error.message})`);
+      throw error;
+    }
+    if (record.boardId !== messageId(manifest.roomId, record.accountId, record.operationId) ||
+        record.cursor !== nativeCursor(manifest.epoch, expectedSequence))
+      throw new AgoraError("native room board identity does not match its committed position");
+  } else if (!record.message || record.message.id !== messageId(manifest.roomId, record.accountId, record.operationId) ||
       record.message.author?.id !== record.accountId || record.message.room !== manifest.roomId ||
       record.message.cursor !== nativeCursor(manifest.epoch, expectedSequence)) throw new AgoraError("native room log message identity does not match its committed position");
   const { recordDigest, ...unsigned } = record;
@@ -300,6 +312,9 @@ export class NativeRoomStore {
     this.closed = false;
     this.resourcesClosed = false;
     this.operations = new Map(records.map((r) => [`${r.accountId}\0${r.operationId}`, r]));
+    /** @type {Map<string, { accountId: string, cursor: string, leaseId: string, fence: string }>} */
+    this.holders = new Map();
+    for (const r of records) this.#applyBoard(r);
   }
 
   /** @param {{ root: string, roomId?: string, epoch?: string, hostAccountId: string, recordLimit?: number, now?: () => Date }} options */
@@ -394,7 +409,7 @@ export class NativeRoomStore {
 
   /**
    * The authenticated account id comes from the route-bound handler, never from the request body.
-   * @param {{ operationId: string, authorName: string, authorKind?: 'human'|'agent'|'unknown', text: string, thread?: string, attachments?: unknown[] }} input
+   * @param {any} input
    * @param {{ accountId: string }} authenticated
    */
   async append(input, authenticated) {
@@ -404,11 +419,12 @@ export class NativeRoomStore {
   }
 
   /**
-   * @param {{ operationId: string, authorName: string, authorKind?: 'human'|'agent'|'unknown', text: string, thread?: string, attachments?: unknown[] }} input
+   * @param {any} input
    * @param {{ accountId: string }} authenticated
    */
   async #append(input, authenticated) {
     if (this.closed) throw new AgoraError("native room store is closed");
+    if (/** @type {any} */ (input).kind === "board") return this.#appendBoard(/** @type {any} */ (input), authenticated);
     validateNativeId(input.operationId, "operation id");
     validateNativeId(authenticated.accountId, "account id");
     if (typeof input.authorName !== "string" || !input.authorName.trim() || input.authorName.length > 120) throw new AgoraError("native post needs a bounded author label");
@@ -439,6 +455,74 @@ export class NativeRoomStore {
       accountId: authenticated.accountId, operationId: input.operationId,
       payloadDigest, previousDigest: this.records.at(-1)?.recordDigest ?? null, message };
     const record = { ...unsigned, recordDigest: nativeDigest(unsigned) };
+    await this.#commit(record, key);
+    return { id: message.id, cursor: message.cursor, duplicate: false };
+  }
+
+  /**
+   * Board check-and-acquire is this turn of the append queue: the holder map is
+   * consulted after every earlier append has committed. Two concurrent claims
+   * of an unheld subject cannot both return acquired.
+   * @param {{ kind: 'board', operationId: string, payload: unknown }} input
+   * @param {{ accountId: string }} authenticated
+   */
+  async #appendBoard(input, authenticated) {
+    validateNativeId(input.operationId, "operation id");
+    validateNativeId(authenticated.accountId, "account id");
+    let payload;
+    try { payload = validateBoardPayload(input.payload); }
+    catch (error) {
+      if (error instanceof ProtocolValidationError) throw new AgoraError(`native board payload is invalid (${error.message})`);
+      throw error;
+    }
+    const key = `${authenticated.accountId}\0${input.operationId}`;
+    const existing = this.operations.get(key);
+    if (existing) {
+      if (existing.payloadDigest !== nativeDigest({ accountId: authenticated.accountId, board: payload }))
+        throw new AgoraError(`native operation ${input.operationId} was already committed with different bytes`);
+      return { id: existing.boardId, cursor: existing.cursor, duplicate: true, kind: "board" };
+    }
+    const holder = this.holders.get(payload.subject);
+    if (payload.action === "claim") {
+      if (holder && holder.accountId !== authenticated.accountId)
+        throw new AgoraError(`native board subject ${payload.subject} is held at ${holder.cursor} by ${holder.accountId}`);
+    } else if (payload.action === "release" || payload.action === "renew") {
+      if (!holder || holder.accountId !== authenticated.accountId || holder.leaseId !== payload.leaseId)
+        throw new AgoraError(`native board subject ${payload.subject} is not held by this account under that lease`);
+    }
+    if (this.records.length >= this.manifest.recordLimit)
+      throw new AgoraError(`native room reached its ${this.manifest.recordLimit}-record resident limit; retain or archive explicitly before accepting more`);
+    const sequence = this.records.length + 1;
+    const cursor = nativeCursor(this.manifest.epoch, sequence);
+    const boardId = messageId(this.manifest.roomId, authenticated.accountId, input.operationId);
+    const payloadDigest = nativeDigest({ accountId: authenticated.accountId, board: payload });
+    const unsigned = { version: LOG_VERSION, roomId: this.manifest.roomId, epoch: this.manifest.epoch, sequence,
+      accountId: authenticated.accountId, operationId: input.operationId, kind: "board",
+      payloadDigest, previousDigest: this.records.at(-1)?.recordDigest ?? null,
+      board: payload, boardId, cursor };
+    const record = { ...unsigned, recordDigest: nativeDigest(unsigned) };
+    await this.#commit(record, key);
+    this.#applyBoard(record);
+    return { id: boardId, cursor, duplicate: false, kind: "board",
+      ...(payload.action === "claim" ? { held: true, leaseId: input.operationId, fence: cursor } : {}),
+      ...(payload.action === "contest" ? { held: Boolean(holder), holder: holder ? { accountId: holder.accountId, cursor: holder.cursor } : undefined } : {}) };
+  }
+
+  /** @param {any} record */
+  #applyBoard(record) {
+    if (record.kind !== "board" || !record.board) return;
+    const { action, subject } = record.board;
+    if (action === "claim")
+      this.holders.set(subject, { accountId: record.accountId, cursor: record.cursor, leaseId: record.operationId, fence: record.cursor });
+    else if (action === "release") this.holders.delete(subject);
+    else if (action === "renew" && this.holders.has(subject)) {
+      const current = this.holders.get(subject);
+      if (current) this.holders.set(subject, { ...current, cursor: record.cursor });
+    }
+  }
+
+  /** @param {any} record @param {string} key */
+  async #commit(record, key) {
     const frame = storedFrame(record);
     const start = this.end;
     try {
@@ -449,7 +533,7 @@ export class NativeRoomStore {
       catch { this.closed = true; }
       throw e;
     }
-    const boundary = { version: 1, roomId: this.manifest.roomId, epoch: this.manifest.epoch, sequence,
+    const boundary = { version: 1, roomId: this.manifest.roomId, epoch: this.manifest.epoch, sequence: record.sequence,
       end: start + frame.length, digest: record.recordDigest };
     try {
       await writeDurableAtomic(this.boundaryPath, JSON.stringify(boundary, null, 2) + "\n");
@@ -469,7 +553,6 @@ export class NativeRoomStore {
     this.end += frame.length;
     this.records.push(record);
     this.operations.set(key, record);
-    return { id: message.id, cursor: message.cursor, duplicate: false };
   }
 
   /** @param {{ since?: string, limit?: number }} [options] */
@@ -477,11 +560,19 @@ export class NativeRoomStore {
     if (this.closed) throw new AgoraError("native room store is closed");
     const limit = options.limit ?? 1000;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10_000) throw new AgoraError("native room read limit must be 1-10000");
-    if (!options.since) return this.records.slice(-limit).map((r) => structuredClone(r.message));
+    /** @param {any[]} records */
+    const messages = (records) => records.filter((r) => r.message).map((r) => structuredClone(r.message));
+    if (!options.since) return messages(this.records.slice(-limit));
     const cursor = parseNativeCursor(options.since);
     if (cursor.epoch !== this.manifest.epoch) throw new AgoraError(`native room cursor belongs to epoch ${cursor.epoch}, not live epoch ${this.manifest.epoch}; recover explicitly without advancing`);
     if (cursor.sequence > this.records.length) throw new AgoraError(`native room cursor ${cursor.sequence} exceeds committed sequence ${this.records.length}; recover explicitly without advancing`);
-    return this.records.slice(cursor.sequence, cursor.sequence + limit).map((r) => structuredClone(r.message));
+    return messages(this.records.slice(cursor.sequence, cursor.sequence + limit));
+  }
+
+  /** @returns {{ subject: string, accountId: string, cursor: string, leaseId: string, fence: string }[]} */
+  board() {
+    if (this.closed) throw new AgoraError("native room store is closed");
+    return [...this.holders.entries()].map(([subject, h]) => ({ subject, ...h }));
   }
 
   /**

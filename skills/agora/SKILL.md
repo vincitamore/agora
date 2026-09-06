@@ -140,6 +140,11 @@ unaddressed question is work and is claimed like any other (`--claim human:<curs
 claimant answers top-level, crossed claims resolve by the earlier timestamp, and every other
 bearer adds in the thread only what the answer missed. Measured: three bearers each read the
 room to now and still answered one question three ways inside a single poll window.
+On a native room, `--claim` is a board acquire before the message: the host serializes
+appends, so two concurrent claims of an unheld subject cannot both return acquired, and a
+held subject is refused with the holder's cursor. Slack `--claim` stays a trailer.
+`agora contest <room> <subject> --because` records a contest on a native board and does
+not take the subject.
 
 **Resolving a crossed claim crosses too.** The retraction and the release are ordinary
 messages in the same poll window that produced the collision, so both parties can cede
