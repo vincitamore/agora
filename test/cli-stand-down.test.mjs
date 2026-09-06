@@ -7,8 +7,8 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { clearStandDown, declareStandDown, readStandDown, watchStopPath } from "../src/stand-down.mjs";
-import { bootEpoch, pidAlive, readArmed, writeArmed } from "../src/session.mjs";
+import { clearStandDown, declareStandDown, readStandDown, requestWatchStop, standDownRequested, watchAckPath, watchStopPath } from "../src/stand-down.mjs";
+import { pidAlive, readArmed, writeArmed } from "../src/session.mjs";
 
 const run = promisify(execFile);
 const BIN = fileURLToPath(new URL("../bin/agora.mjs", import.meta.url));
@@ -41,15 +41,16 @@ test("stand-down writes the record, drains a cooperative watch, and resume clear
   const root = await mkdtemp(path.join(tmpdir(), "agora-stand-down-"));
   t.after(async () => { await rm(root, { recursive: true, force: true }); });
   const sessionDir = path.join(root, "sessions", "s1");
-  const epoch = bootEpoch();
+  const generation = "gen-live-1";
   const stop = watchStopPath(sessionDir, "agora");
+  const ack = watchAckPath(sessionDir, "agora");
   const watcher = path.join(root, "watcher.cjs");
-  await writeFile(watcher, "const fs=require('fs');const stop=process.argv[2];const epoch=Number(process.argv[3]);setInterval(()=>{try{const rec=JSON.parse(fs.readFileSync(stop,'utf8'));if(rec.bootEpoch===epoch)process.exit(0);}catch{}},40);\n");
-  const dummy = spawn(process.execPath, [watcher, stop, String(epoch)], { stdio: "ignore", windowsHide: true });
+  await writeFile(watcher, "const fs=require('fs');const path=require('path');const stop=process.argv[2];const ack=process.argv[3];const gen=process.argv[4];setInterval(()=>{try{const rec=JSON.parse(fs.readFileSync(stop,'utf8'));if(rec.generation===gen){fs.mkdirSync(path.dirname(ack),{recursive:true});fs.writeFileSync(ack,JSON.stringify({generation:gen,at:new Date().toISOString()}));process.exit(0);}}catch{}},40);\n");
+  const dummy = spawn(process.execPath, [watcher, stop, ack, generation], { stdio: "ignore", windowsHide: true });
   t.after(() => { try { dummy.kill("SIGKILL"); } catch { /* gone */ } });
   assert.ok(dummy.pid);
   await writeArmed(sessionDir, "agora", {
-    room: "agora", pid: dummy.pid, interval: 15, startedAt: new Date().toISOString(),
+    room: "agora", pid: dummy.pid, interval: 15, startedAt: new Date().toISOString(), generation,
   });
   const armed = await readArmed(sessionDir, "agora");
   assert.ok(armed);
@@ -119,7 +120,7 @@ test("a watch that does not ack is refused, not drained, and the record already 
   t.after(() => { try { dummy.kill("SIGKILL"); } catch { /* gone */ } });
   assert.ok(dummy.pid);
   await writeArmed(sessionDir, "agora", {
-    room: "agora", pid: dummy.pid, interval: 15, startedAt: new Date().toISOString(),
+    room: "agora", pid: dummy.pid, interval: 15, startedAt: new Date().toISOString(), generation: "gen-noack",
   });
   const armed = await readArmed(sessionDir, "agora");
   assert.ok(armed);
@@ -142,7 +143,7 @@ test("keep-watches declares without signalling", async (t) => {
   t.after(() => { try { dummy.kill("SIGKILL"); } catch { /* gone */ } });
   assert.ok(dummy.pid);
   await writeArmed(sessionDir, "agora", {
-    room: "agora", pid: dummy.pid, interval: 15, startedAt: new Date().toISOString(),
+    room: "agora", pid: dummy.pid, interval: 15, startedAt: new Date().toISOString(), generation: "gen-keep",
   });
   const armed = await readArmed(sessionDir, "agora");
   assert.ok(armed);
@@ -156,7 +157,7 @@ test("keep-watches declares without signalling", async (t) => {
   await assert.rejects(readFile(watchStopPath(sessionDir, "agora")));
 });
 
-test("a record without bootEpoch is skipped, not signalled", async (t) => {
+test("a record without generation is skipped, not asked", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "agora-stand-down-unver-"));
   t.after(async () => { await rm(root, { recursive: true, force: true }); });
   const sessionDir = path.join(root, "sessions", "s1");
@@ -170,4 +171,15 @@ test("a record without bootEpoch is skipped, not signalled", async (t) => {
   assert.equal(rec.drained.length, 0);
   assert.equal(rec.skipped[0].reason, "unverified");
   assert.equal(pidAlive(dummy.pid), true);
+});
+
+test("a replacement generation does not inherit an old stop request, and resume clears it", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "agora-stand-down-gen-"));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const sessionDir = path.join(root, "sessions", "s1");
+  await requestWatchStop(sessionDir, "agora", "gen-old");
+  assert.equal(await standDownRequested(sessionDir, "agora", "gen-old"), true);
+  assert.equal(await standDownRequested(sessionDir, "agora", "gen-new"), false);
+  await clearStandDown(sessionDir);
+  assert.equal(await standDownRequested(sessionDir, "agora", "gen-old"), false);
 });

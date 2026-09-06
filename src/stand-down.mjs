@@ -2,12 +2,11 @@
 /**
  * Seat-visible stand-down for one session. The record lives beside that session's
  * armed watches; the seat service does not start a harness, and resume does not
- * either. Draining sends SIGTERM to this session's live watch pids only.
+ * either. Draining is a per-arm generation stop file plus an ack from that generation.
  */
 import { readdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { AgoraError, EXIT, writeFileAtomic } from "./core.mjs";
-import { armedAlive, pidAlive } from "./session.mjs";
 
 const BECAUSE_MAX = 400;
 
@@ -21,30 +20,55 @@ export function watchStopPath(sessionDir, key) {
   return path.join(sessionDir, "armed", `${key}.stop.json`);
 }
 
-/** @param {string} sessionDir @param {string} key @param {number} bootEpoch */
-export async function requestWatchStop(sessionDir, key, bootEpoch) {
-  await writeFileAtomic(watchStopPath(sessionDir, key), JSON.stringify({ bootEpoch, at: new Date().toISOString() }) + "\n");
+/** @param {string} sessionDir @param {string} key */
+export function watchAckPath(sessionDir, key) {
+  return path.join(sessionDir, "armed", `${key}.stop.ack.json`);
 }
 
-/** True when this watch's own generation is asked to stop. @param {string} sessionDir @param {string} key @param {number | undefined} bootEpoch */
-export async function standDownRequested(sessionDir, key, bootEpoch) {
-  if (typeof bootEpoch !== "number") return false;
+/** @param {string} sessionDir @param {string} key @param {string} generation */
+export async function requestWatchStop(sessionDir, key, generation) {
+  await writeFileAtomic(watchStopPath(sessionDir, key), JSON.stringify({ generation, at: new Date().toISOString() }) + "\n");
+}
+
+/** True when this running watch's own generation is asked to stop.
+ * @param {string} sessionDir @param {string} key @param {string} generation */
+export async function standDownRequested(sessionDir, key, generation) {
+  if (typeof generation !== "string" || !generation) return false;
   try {
     const rec = JSON.parse(await readFile(watchStopPath(sessionDir, key), "utf8"));
-    return Boolean(rec && rec.bootEpoch === bootEpoch);
+    return Boolean(rec && rec.generation === generation);
   } catch {
     return false;
   }
 }
 
-/** @param {number} pid @param {number} ms */
-async function waitGone(pid, ms) {
+/** @param {string} sessionDir @param {string} key @param {string} generation */
+export async function ackWatchStop(sessionDir, key, generation) {
+  await writeFileAtomic(watchAckPath(sessionDir, key), JSON.stringify({ generation, at: new Date().toISOString() }) + "\n");
+}
+
+/** @param {string} sessionDir @param {string} key @param {string} generation @param {number} ms */
+async function waitAck(sessionDir, key, generation, ms) {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
-    if (!pidAlive(pid)) return true;
+    try {
+      const rec = JSON.parse(await readFile(watchAckPath(sessionDir, key), "utf8"));
+      if (rec && rec.generation === generation) return true;
+    } catch { /* not yet */ }
     await new Promise((r) => setTimeout(r, 50));
   }
-  return !pidAlive(pid);
+  try {
+    const rec = JSON.parse(await readFile(watchAckPath(sessionDir, key), "utf8"));
+    return Boolean(rec && rec.generation === generation);
+  } catch {
+    return false;
+  }
+}
+
+/** @param {string} sessionDir @param {string} key */
+export async function clearWatchStop(sessionDir, key) {
+  await rm(watchStopPath(sessionDir, key), { force: true });
+  await rm(watchAckPath(sessionDir, key), { force: true });
 }
 
 /**
@@ -89,8 +113,8 @@ export async function listStandDowns(stateRoot) {
 /**
  * Persist the stand-down intent first, then ask matching watches to exit by a
  * generation-bound stop file. No SIGTERM: a recycled pid is never signalled.
- * A watch without bootEpoch is unverified and is not asked. A watch that does
- * not acknowledge within the bound is refused, not drained.
+ * A watch without generation is unverified and is not asked. A watch that does
+ * not ack that generation within the bound is refused, not drained. waitGone is not used.
  * @param {{ sessionDir: string, slug: string, bearer: string, until: string, because: string, keepWatches?: boolean, now?: () => Date, ackMs?: number, armed?: Array<{ key: string, armed: import("./session.mjs").ArmedWatch }> }} opts
  */
 export async function declareStandDown(opts) {
@@ -122,16 +146,13 @@ export async function declareStandDown(opts) {
   const ackMs = opts.ackMs ?? 2000;
   for (const item of opts.armed ?? []) {
     const row = { key: item.key, pid: item.armed.pid, room: item.armed.room };
-    if (typeof item.armed.bootEpoch !== "number") {
+    const generation = item.armed.generation;
+    if (typeof generation !== "string" || !generation) {
       rec.skipped.push({ ...row, reason: "unverified" });
       continue;
     }
-    if (!armedAlive(item.armed)) {
-      rec.skipped.push({ ...row, reason: "not-alive" });
-      continue;
-    }
-    await requestWatchStop(opts.sessionDir, item.key, item.armed.bootEpoch);
-    if (await waitGone(item.armed.pid, ackMs)) rec.drained.push(row);
+    await requestWatchStop(opts.sessionDir, item.key, generation);
+    if (await waitAck(opts.sessionDir, item.key, generation, ackMs)) rec.drained.push(row);
     else rec.refused.push({ ...row, reason: "no-ack" });
   }
   await writeFileAtomic(standDownPath(opts.sessionDir), JSON.stringify(rec, null, 2) + "\n");
@@ -142,5 +163,14 @@ export async function declareStandDown(opts) {
 export async function clearStandDown(sessionDir) {
   const rec = await readStandDown(sessionDir);
   await rm(standDownPath(sessionDir), { force: true });
+  /** @type {string[]} */
+  let files = [];
+  try {
+    files = await readdir(path.join(sessionDir, "armed"));
+  } catch { /* no armed dir */ }
+  for (const f of files) {
+    if (f.endsWith(".stop.json") || f.endsWith(".stop.ack.json"))
+      await rm(path.join(sessionDir, "armed", f), { force: true });
+  }
   return rec;
 }
