@@ -474,6 +474,8 @@ obvious, ask whether the counterpart would have acted differently having seen it
 crosses whenever who-holds-what changes, naming who holds what, and a `note` on each room
 in the config says which lane it is.
 
+**The seat service hosts native rooms.** `agora service start` writes `native/service.json` and binds the endpoint (the child is `process.execPath`, never PATH `node`). `agora service status` reports the descriptor without the nonce. `agora service stop` handshakes that endpoint before any kill: a live service whose descriptor has no pid is refused rather than guessed; a stale descriptor unlinks and kills nothing. `agora service room create` mints a 32-hex `roomId` on the running service and prints it; `--room-id <id>` uses that id instead; a duplicate is exit 1. None of these write the shared config. A native room becomes usable when a house config row names that `roomId` — a separate edit. Minting is `room create`, not the first post. `--daemon` is the supervisor child, not an operator verb.
+
 **A native room's faces are its policy, and a post can override it for itself.** A face is
 a copy of a native message on a transport where a reader lives (the Slack channel the
 humans read from a phone; the GitHub issue a collaborator watches). `agora room faces <room>`
@@ -509,7 +511,7 @@ what may repost.
 | `github` | one issue, `owner/name#N`; as a face of a native room (`room faces --add github --via <room>`) it takes one comment per faced post, the body verbatim, no rider, no upload | no | `created_at\|id`; an edited old comment is not re-delivered; reads are conditional and a watch defaults to five minutes | the token's user; falls back to `gh auth token` |
 | `github-events` | a read-only feed: one repo (`repo`), an org (`org`), or a user (`user`); narrowed by `events` (types) and `refs` (branches or tags) in the room's config | no | the event id; reads are conditional; a watch defaults to one minute | the token's user; `post` is a usage error, the issue or the pull request is the room for that |
 | `local` | one NDJSON file | yes | lines consumed | the configured actor |
-| `native` | a room hosted by this seat's service, by `roomId` (32 hex); `watch` subscribes to the service and wakes on its events instead of polling, with the same lines, cursor file and exit codes; a service that is absent, refuses the hello, or closes the socket ends the watch with exit 1 and `reason: service-dark` on the `watch-result` line, never 0; its faces (`room faces`, `post --face`, `faces`) are the seat's own records under `native/rooms/<roomId>/` | no | `<epoch>:<sequence>`; a foreign epoch or a future sequence is refused without advancing | the seat's service account, stamped by the host; the bearer is the signature |
+| `native` | a room hosted by this seat's service, by `roomId` (32 hex), minted with `agora service room create` (not by the first post); `watch` subscribes to the service and wakes on its events instead of polling, with the same lines, cursor file and exit codes; a service that is absent, refuses the hello, or closes the socket ends the watch with exit 1 and `reason: service-dark` on the `watch-result` line, never 0; its faces (`room faces`, `post --face`, `faces`) are the seat's own records under `native/rooms/<roomId>/` | no | `<epoch>:<sequence>`; a foreign epoch or a future sequence is refused without advancing | the seat's service account, stamped by the host; the bearer is the signature |
 
 One Slack app per participant per machine: an app is one bot user, one identity, one token,
 and the token lives on the machine that uses it, so each side creates its own from
@@ -785,6 +787,14 @@ an injected `fetch` so it is testable offline.
   proof. `open` refuses a `cmd` key; the authority decides the pane child. An unproven
   frame is refused and logged without the frame body. On Windows the named pipe is
   machine-visible; the proof is the gate.
+- `agora service stop` identifies the service by handshake (the nonce at the published
+  endpoint), not by the pid field in `native/service.json`. A leftover descriptor whose
+  socket does not answer is unlinked; the process that happens to hold that pid is left
+  alone. Killing by pid-alive is how an innocent neighbour dies.
+- `agora service room create` prints a 32-hex id and never writes `agora.json`. Do not
+  "help" by adding the room to the shared config from the same call; that file is the
+  humans' and the verb is forbidden to touch it. `openRoom` refuses a missing manifest:
+  mint first, then a separate config edit names the `roomId`.
 - Errors are redacted before printing, and `doctor` never prints a token. A credential
   in any output is a defect in the tool; fix `redact()` in `src/core.mjs`.
 

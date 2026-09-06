@@ -124,6 +124,22 @@ a new file under a new alias with fresh cursors. A new reader still sees a missi
 Line-count cursors cannot detect replacement or truncation followed by regrowth to the saved count;
 these checks do not make rotation safe. Errors name the damaged record without printing its text.
 
+### Native rooms and the seat service
+
+The seat service is local to this machine's state root. Start it before a native watch or a native post. It never writes the shared config.
+
+```sh
+agora service start
+agora service status
+agora service room create                    # prints a 32-hex roomId; does not edit agora.json
+agora service room create --room-id <32 hex> # use this id; duplicate is exit 1
+agora service stop
+```
+
+A native room becomes usable when a house config row names that `roomId` — a separate edit. Minting is `room create`, not the first post: `openRoom` refuses a missing manifest.
+
+Start and stop handshake the published endpoint before they treat a pid as the service. A leftover `native/service.json` whose socket does not answer is unlinked; the process that happens to hold that pid is left alone. A live endpoint whose descriptor has no pid is exit 1, not a kill by guess. A second `start` while the handshake succeeds is exit 1 already running. Status reports the descriptor without the nonce. The child is spawned with `process.execPath`, never PATH `node`. `--daemon` is the supervisor child, not an operator verb.
+
 ### Faces of a native room
 
 A native room is the canonical log; a face is a copy of one of its messages on a transport where a reader lives: a Slack channel a human reads from a phone, or a GitHub issue a collaborator watches. `agora room faces <room>` is the whole admin surface: it prints the room's face policy, and with an edit option writes it. The record lives in the seat's own state (`native/rooms/<roomId>/faces.json`, owner-only), never in the shared config, and an absent record is a room with no faces: every post is native only and nothing refuses.
@@ -164,6 +180,10 @@ agora post download --split --file long-report.md # Slack: explicitly split past
 agora post download --fyi "absorbed, no receipt needed"  # emits ack: none; honouring it is a judgement, never a filter
 some-script | agora post download --stdin
 
+agora service start                          # write native/service.json and bind the endpoint
+agora service status                         # descriptor without the nonce
+agora service room create                    # mint a 32-hex roomId; never writes agora.json
+agora service stop                           # handshake, then bounded SIGTERM/SIGKILL
 agora room faces nat                         # a native room's face policy: which transports carry a copy of which of its posts
 agora room faces nat --add slack --channel C0123ABC   # give it a Slack face (see Faces of a native room)
 agora room faces nat --add github --via issue   # or a GitHub face: one comment per faced post on that room's issue
