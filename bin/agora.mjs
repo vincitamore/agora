@@ -67,7 +67,7 @@ import { buildLabel, buildPredates, cacheTtls, clearWatchMode, installedBuild, t
 import { SERVICE_DARK, ServiceDarkError, openNativeSubscription, serviceDescriptorStatus, validateNativeRoomId } from "../src/wake/subscriber.mjs";
 import { createServiceRoom, runService, seatAccountId, seatLabel, serviceStatus, startService, stopService } from "../src/service-cli.mjs";
 import { spawnFromFile } from "../src/spawn-cli.mjs";
-import { clearStandDown, declareStandDown, listStandDowns } from "../src/stand-down.mjs";
+import { clearStandDown, declareStandDown, listStandDowns, standDownRequested } from "../src/stand-down.mjs";
 import { FACE_ATTACHMENT_MODES, FACE_BUILT, FACE_SELECTORS, appendFaceRecord, facePolicyPath, listFaceRecords, normalizeSelectors, readFacePolicy, selectFaces, writeFacePolicy } from "../src/faces.mjs";
 
 /**
@@ -240,6 +240,7 @@ const SCHEMA = {
       options: {
         "--until <rfc3339>": "when this session intends to be back; must be in the future",
         "--because <text>": "why it is standing down (required, at most 400 characters)",
+        "--keep-watches": "declare without signalling watches (Grace's overnight narrow-watch case)",
       },
       does: "declare this session down until a time, SIGTERM its live watches, and write a seat-visible record who and doctor print. Does not start a session later. resume clears the record from a live session. Never writes the shared config",
     },
@@ -331,6 +332,7 @@ const OPTIONS = /** @type {const} */ ({
   daemon: { type: "boolean", default: false },
   "room-id": { type: "string" },
   until: { type: "string" },
+  "keep-watches": { type: "boolean", default: false },
 });
 
 /**
@@ -824,7 +826,8 @@ async function main(argv) {
     if (!until) throw new AgoraError("stand-down needs --until <rfc3339>", EXIT.usage);
     const armed = (await listArmed(stateRoot)).filter((a) => a.dir === sdir).map((a) => ({ key: a.key, armed: a.armed }));
     const rec = await declareStandDown({
-      sessionDir: sdir, slug: session.slug, bearer: bearer.name, until, because, armed,
+      sessionDir: sdir, slug: session.slug, bearer: bearer.name, until, because,
+      keepWatches: Boolean(values["keep-watches"]), armed,
     });
     if (json) console.log(JSON.stringify({ type: "stand-down", ...rec }));
     else console.log(`stand-down until ${rec.until}: ${rec.because} (drained ${rec.drained.length} watch${rec.drained.length === 1 ? "" : "es"}). resume from a live session clears this; nothing starts a session.`);
@@ -1736,7 +1739,11 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
           pages,
           threads,
           sweep,
-          guard: codexGuard,
+          guard: async () => {
+            const armedNow = await readArmed(sdir, key);
+            if (armedNow && await standDownRequested(sdir, key, armedNow.bootEpoch)) return "stand-down";
+            return codexGuard ? await codexGuard() : undefined;
+          },
           onBatch: async (msgs, batch) => {
             sessionWakes += 1;
             // one object per poll instead of one per message: a consumer that wakes per line
