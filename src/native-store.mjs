@@ -15,6 +15,9 @@ const LOG_RECORD_MAX = 1024 * 1024;
 const MESSAGE_TEXT_MAX = 256 * 1024;
 const ATTACHMENT_MAX = 32;
 const DEFAULT_RECORD_LIMIT = 100_000;
+const DEFAULT_CLAIM_LEASE_MS = 3_600_000;
+const CLAIM_LEASE_CAP_MS = 86_400_000;
+const MISSING_EXPIRY = "1970-01-01T00:00:00.000Z";
 const ROOM_RE = /^[a-f0-9]{32}$/;
 const UTF8 = new TextDecoder("utf-8", { fatal: true });
 
@@ -312,7 +315,7 @@ export class NativeRoomStore {
     this.closed = false;
     this.resourcesClosed = false;
     this.operations = new Map(records.map((r) => [`${r.accountId}\0${r.operationId}`, r]));
-    /** @type {Map<string, { accountId: string, cursor: string, leaseId: string, fence: string }>} */
+    /** @type {Map<string, { accountId: string, cursor: string, leaseId: string, fence: string, expiresAt: string, leaseMs: number }>} */
     this.holders = new Map();
     for (const r of records) this.#applyBoard(r);
   }
@@ -346,6 +349,7 @@ export class NativeRoomStore {
       if (confirmed.identity !== physical.identity)
         throw new AgoraError("native room identity changed while acquiring its writer; refusing without publishing it");
       const manifest = { version: MANIFEST_VERSION, roomId, epoch, hostAccountId: options.hostAccountId, recordLimit,
+        claimLeaseMs: DEFAULT_CLAIM_LEASE_MS, claimLeaseCapMs: CLAIM_LEASE_CAP_MS,
         createdAt: (options.now ?? (() => new Date()))().toISOString() };
       await writeDurableAtomic(path.join(directory, "room.json"), JSON.stringify(manifest, null, 2) + "\n");
       log = await open(path.join(directory, "room.frames"), "wx+", 0o600);
@@ -464,8 +468,9 @@ export class NativeRoomStore {
    * consulted after every earlier append has committed. Two concurrent claims
    * of an unheld subject cannot both return acquired, including two operations
    * from the same account (every local client on a seat shares this.accountId).
-   * A retried operation id is a duplicate; renew is the explicit refresh.
-   * @param {{ kind: 'board', operationId: string, payload: unknown }} input
+   * A retried operation id is a duplicate; renew extends the lease; an expired
+   * holder is no holder. Break is a human-kind event that names and drops the holder.
+   * @param {{ kind: 'board', operationId: string, payload: unknown, authorKind?: string }} input
    * @param {{ accountId: string }} authenticated
    */
   async #appendBoard(input, authenticated) {
@@ -484,13 +489,19 @@ export class NativeRoomStore {
         throw new AgoraError(`native operation ${input.operationId} was already committed with different bytes`);
       return { id: existing.boardId, cursor: existing.cursor, duplicate: true, kind: "board" };
     }
-    const holder = this.holders.get(payload.subject);
+    const stored = this.holders.get(payload.subject);
+    const live = this.#liveHolder(payload.subject);
     if (payload.action === "claim") {
-      if (holder)
-        throw new AgoraError(`native board subject ${payload.subject} is held at ${holder.cursor} by ${holder.accountId}`);
+      if (live)
+        throw new AgoraError(`native board subject ${payload.subject} is held at ${live.cursor} by ${live.accountId} until ${live.expiresAt}`);
     } else if (payload.action === "release" || payload.action === "renew") {
-      if (!holder || holder.accountId !== authenticated.accountId || holder.leaseId !== payload.leaseId)
+      if (!live || live.accountId !== authenticated.accountId || live.leaseId !== payload.leaseId)
         throw new AgoraError(`native board subject ${payload.subject} is not held by this account under that lease`);
+    } else if (payload.action === "break") {
+      if (input.authorKind !== "human")
+        throw new AgoraError("native board break is a human verb");
+      if (!stored)
+        throw new AgoraError(`native board subject ${payload.subject} has no holder to break`);
     }
     if (this.records.length >= this.manifest.recordLimit)
       throw new AgoraError(`native room reached its ${this.manifest.recordLimit}-record resident limit; retain or archive explicitly before accepting more`);
@@ -498,16 +509,45 @@ export class NativeRoomStore {
     const cursor = nativeCursor(this.manifest.epoch, sequence);
     const boardId = messageId(this.manifest.roomId, authenticated.accountId, input.operationId);
     const payloadDigest = nativeDigest({ accountId: authenticated.accountId, board: payload });
+    const leaseMs = payload.action === "claim" || payload.action === "renew" ? this.#leaseMs(payload, live) : undefined;
+    const expiresAt = leaseMs !== undefined ? new Date(this.now().getTime() + leaseMs).toISOString() : undefined;
     const unsigned = { version: LOG_VERSION, roomId: this.manifest.roomId, epoch: this.manifest.epoch, sequence,
       accountId: authenticated.accountId, operationId: input.operationId, kind: "board",
       payloadDigest, previousDigest: this.records.at(-1)?.recordDigest ?? null,
-      board: payload, boardId, cursor };
+      board: payload, boardId, cursor,
+      ...(expiresAt ? { expiresAt, leaseMs } : {}),
+      ...(payload.action === "break" && stored ? { broken: { accountId: stored.accountId, cursor: stored.cursor, expiresAt: stored.expiresAt } } : {}) };
     const record = { ...unsigned, recordDigest: nativeDigest(unsigned) };
     await this.#commit(record, key);
     this.#applyBoard(record);
+    /** @param {{ accountId: string, cursor: string, expiresAt: string } | undefined} h */
+    const holderView = (h) => h ? { accountId: h.accountId, cursor: h.cursor, expiresAt: h.expiresAt } : undefined;
     return { id: boardId, cursor, duplicate: false, kind: "board",
-      ...(payload.action === "claim" ? { held: true, leaseId: input.operationId, fence: cursor } : {}),
-      ...(payload.action === "contest" ? { held: Boolean(holder), holder: holder ? { accountId: holder.accountId, cursor: holder.cursor } : undefined } : {}) };
+      ...(payload.action === "claim" ? { held: true, leaseId: input.operationId, fence: cursor, expiresAt } : {}),
+      ...(payload.action === "renew" ? { held: true, leaseId: payload.leaseId, fence: cursor, expiresAt } : {}),
+      ...(payload.action === "contest" ? { held: Boolean(live), holder: holderView(stored) } : {}),
+      ...(payload.action === "break" ? { broken: true, holder: holderView(stored) } : {}) };
+  }
+
+  /** @param {string} subject */
+  #liveHolder(subject) {
+    const holder = this.holders.get(subject);
+    if (!holder) return null;
+    if (Date.parse(holder.expiresAt) <= this.now().getTime()) return null;
+    return holder;
+  }
+
+  /**
+   * @param {{ leaseMs?: number }} payload
+   * @param {{ leaseMs: number } | null} live
+   */
+  #leaseMs(payload, live) {
+    const cap = this.manifest.claimLeaseCapMs ?? CLAIM_LEASE_CAP_MS;
+    const fallback = live?.leaseMs ?? this.manifest.claimLeaseMs ?? DEFAULT_CLAIM_LEASE_MS;
+    const leaseMs = payload.leaseMs ?? fallback;
+    if (!Number.isSafeInteger(leaseMs) || leaseMs < 1000 || leaseMs > cap)
+      throw new AgoraError(`native board lease must be 1000-${cap} ms`);
+    return leaseMs;
   }
 
   /** @param {any} record */
@@ -515,11 +555,13 @@ export class NativeRoomStore {
     if (record.kind !== "board" || !record.board) return;
     const { action, subject } = record.board;
     if (action === "claim")
-      this.holders.set(subject, { accountId: record.accountId, cursor: record.cursor, leaseId: record.operationId, fence: record.cursor });
-    else if (action === "release") this.holders.delete(subject);
+      this.holders.set(subject, { accountId: record.accountId, cursor: record.cursor, leaseId: record.operationId,
+        fence: record.cursor, expiresAt: record.expiresAt ?? MISSING_EXPIRY, leaseMs: record.leaseMs ?? DEFAULT_CLAIM_LEASE_MS });
+    else if (action === "release" || action === "break") this.holders.delete(subject);
     else if (action === "renew" && this.holders.has(subject)) {
       const current = this.holders.get(subject);
-      if (current) this.holders.set(subject, { ...current, cursor: record.cursor });
+      if (current) this.holders.set(subject, { ...current, cursor: record.cursor, fence: record.cursor,
+        expiresAt: record.expiresAt ?? current.expiresAt, leaseMs: record.leaseMs ?? current.leaseMs });
     }
   }
 
@@ -571,7 +613,7 @@ export class NativeRoomStore {
     return messages(this.records.slice(cursor.sequence, cursor.sequence + limit));
   }
 
-  /** @returns {{ subject: string, accountId: string, cursor: string, leaseId: string, fence: string }[]} */
+  /** @returns {{ subject: string, accountId: string, cursor: string, leaseId: string, fence: string, expiresAt: string, leaseMs: number }[]} */
   board() {
     if (this.closed) throw new AgoraError("native room store is closed");
     return [...this.holders.entries()].map(([subject, h]) => ({ subject, ...h }));

@@ -13,11 +13,11 @@ const PEER = "seat_peer_0000001";
 /** @param {number} n */
 const OP = (n) => `operation_board_${String(n).padStart(3, "0")}`;
 
-/** @param {import('node:test').TestContext} t */
-async function room(t) {
+/** @param {import('node:test').TestContext} t @param {{ now?: () => Date }} [opts] */
+async function room(t, opts = {}) {
   const root = await mkdtemp(path.join(tmpdir(), "agora-native-board-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const store = await NativeRoomStore.create({ root, roomId: ROOM, epoch: EPOCH, hostAccountId: HOST });
+  const store = await NativeRoomStore.create({ root, roomId: ROOM, epoch: EPOCH, hostAccountId: HOST, now: opts.now });
   t.after(() => store.close());
   return { root, store };
 }
@@ -94,6 +94,55 @@ test("contest does not take the subject; release by the holder frees it", async 
   assert.equal(store.board().length, 0);
   const taken = /** @type {any} */ (await store.append({ kind: "board", operationId: OP(4), payload: { action: "claim", subject: "work:contest" } }, { accountId: PEER }));
   assert.equal(taken.held, true);
+});
+
+test("an expired lease is acquired by a second claimant; a renewed one is not", async (t) => {
+  let now = Date.parse("2026-01-01T00:00:00.000Z");
+  const { store } = await room(t, { now: () => new Date(now) });
+  const first = /** @type {any} */ (await store.append({ kind: "board", operationId: OP(1), payload: { action: "claim", subject: "work:ttl", leaseMs: 1000 } }, { accountId: HOST }));
+  assert.equal(first.held, true);
+  now += 1001;
+  const taken = /** @type {any} */ (await store.append({ kind: "board", operationId: OP(2), payload: { action: "claim", subject: "work:ttl" } }, { accountId: PEER }));
+  assert.equal(taken.held, true);
+  assert.equal(store.board()[0].accountId, PEER);
+  const kept = /** @type {any} */ (await store.append({ kind: "board", operationId: OP(3), payload: { action: "claim", subject: "work:renew-ttl", leaseMs: 1000 } }, { accountId: HOST }));
+  now += 500;
+  await store.append({ kind: "board", operationId: OP(4), payload: { action: "renew", subject: "work:renew-ttl", leaseId: kept.leaseId, fence: kept.fence } }, { accountId: HOST });
+  now += 600;
+  await assert.rejects(
+    store.append({ kind: "board", operationId: OP(5), payload: { action: "claim", subject: "work:renew-ttl" } }, { accountId: PEER }),
+    /is held at/,
+  );
+  assert.equal(store.board().find((h) => h.subject === "work:renew-ttl")?.accountId, HOST);
+});
+
+test("break by an agent is refused; a human-kind break frees the subject", async (t) => {
+  const { store } = await room(t);
+  await store.append({ kind: "board", operationId: OP(1), payload: { action: "claim", subject: "work:break" } }, { accountId: HOST });
+  await assert.rejects(
+    store.append({ kind: "board", operationId: OP(2), payload: { action: "break", subject: "work:break" }, authorKind: "agent" }, { accountId: PEER }),
+    /break is a human verb/,
+  );
+  await assert.rejects(
+    store.append({ kind: "board", operationId: OP(3), payload: { action: "break", subject: "work:break" } }, { accountId: PEER }),
+    /break is a human verb/,
+  );
+  assert.equal(store.board()[0].accountId, HOST);
+  const broken = /** @type {any} */ (await store.append({ kind: "board", operationId: OP(4), payload: { action: "break", subject: "work:break" }, authorKind: "human" }, { accountId: PEER }));
+  assert.equal(broken.broken, true);
+  assert.equal(broken.holder?.accountId, HOST);
+  assert.equal(store.board().length, 0);
+  const taken = /** @type {any} */ (await store.append({ kind: "board", operationId: OP(5), payload: { action: "claim", subject: "work:break" } }, { accountId: PEER }));
+  assert.equal(taken.held, true);
+});
+
+test("contest reports the holder's expiry beside its cursor", async (t) => {
+  const { store } = await room(t);
+  const claim = /** @type {any} */ (await store.append({ kind: "board", operationId: OP(1), payload: { action: "claim", subject: "work:expiry-view" } }, { accountId: HOST }));
+  const contest = /** @type {any} */ (await store.append({ kind: "board", operationId: OP(2), payload: { action: "contest", subject: "work:expiry-view", because: "Evidence differs." } }, { accountId: PEER }));
+  assert.equal(contest.held, true);
+  assert.equal(contest.holder?.accountId, HOST);
+  assert.equal(contest.holder?.expiresAt, claim.expiresAt);
 });
 
 test("reopen restores the holder; a chat append still reads without board rows", async (t) => {

@@ -77,7 +77,7 @@ export function nativeTransport(room, { actor, stateRoot, connect }) {
     /**
      * A board event is not a chat message. Check-and-acquire is the host's
      * serialized append: a held subject is refused with the holder's cursor.
-     * @param {{ action: string, subject: string, because?: string, leaseId?: string, fence?: string }} payload
+     * @param {{ action: string, subject: string, because?: string, leaseId?: string, fence?: string, leaseMs?: number }} payload
      */
     async board(payload) {
       /** @type {import('../native-service.mjs').NativeServiceClient} */
@@ -85,7 +85,7 @@ export function nativeTransport(room, { actor, stateRoot, connect }) {
       try { c = await client(); }
       catch (e) { throw new AgoraError(`room-dark: ${e instanceof Error ? e.message : String(e)}; nothing was posted and no cursor was issued`); }
       const operationId = randomUUID().replaceAll("-", "");
-      return c.request("append", { roomId, operation: { kind: "board", operationId, payload } });
+      return c.request("append", { roomId, operation: { kind: "board", operationId, payload, authorKind: actor.kind } });
     },
   };
 }
