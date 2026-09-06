@@ -24,7 +24,9 @@ const UNIT_MAX = Object.freeze({ 'basis-points': 10000, 'micro-usd': 1_000_000_0
 
 /** Who measured. Separate from whether the receiver can bind it: see `attestation`. */
 export const SOURCE_KINDS = Object.freeze(/** @type {const} */ (['provider', 'harness', 'human', 'estimate']));
-/** Only `enforced` is authority, and only the acceptance boundary may conclude it. */
+/** `enforced` is a conclusion, never a syntax fact. On the OBSERVATION path only,
+ * `acceptCompleteObservation` may conclude it; elsewhere the value is a parsed claim whose
+ * authority a future consuming service must establish against independent expected context. */
 export const ATTESTATIONS = Object.freeze(/** @type {const} */ (['cooperative', 'enforced']));
 
 /**
@@ -57,6 +59,16 @@ export function validatePoolPrincipal(value) {
  */
 export function validateSeatBinding(value) {
   const v = readRecord(value, ['poolId', 'registration', 'attestation'], ['evidenceRef']);
+  // `attestation` here is a CLAIM, exactly as it is on an unaccepted observation: this is a
+  // syntax reader, and an enum surviving syntax is not an authority bypass. Parsing a
+  // claimed `enforced` binding is therefore allowed and means nothing on its own.
+  //
+  // What makes it safe is that NO CONSUMER OF THIS FIELD EXISTS IN THIS MODULE. Nothing
+  // here grants authority from it. A future consuming service must authenticate the mapping
+  // against independent expected context before treating a binding as enforced, and a
+  // consumer that relies on this field directly is a real missing-boundary defect with a
+  // cut-wire test owed at that seam. (Adjudicated at house :401 after this record briefly
+  // refused the enum outright, which was inconsistent with the observation path.)
   const attestation = readEnum(v.attestation, 'attestation', ATTESTATIONS);
   return {
     poolId: validateNativeId(v.poolId),
@@ -73,18 +85,26 @@ export function validateSeatBinding(value) {
  * @param {unknown} value
  */
 export function validateWindowIdentity(value) {
-  const v = readRecord(value, ['limitId', 'unit'], ['durationMinutes']);
+  const v = readRecord(value, ['limitId', 'unit'], ['durationMinutes', 'scope']);
   return {
     limitId: readString(v.limitId, 'limitId', { min: 1, max: 128, pattern: /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/ }),
     unit: readEnum(v.unit, 'unit', USAGE_UNITS),
     ...(Object.hasOwn(v, 'durationMinutes') ? { durationMinutes: readInteger(v.durationMinutes, 'durationMinutes', 1) } : {}),
+    // A provider may report several windows under ONE limit id, distinguished only by their
+    // period or by its own primary/secondary naming. `scope` carries that discriminator
+    // without rewriting the provider's limit id, which stays exactly as reported.
+    ...(Object.hasOwn(v, 'scope') ? { scope: readString(v.scope, 'scope', { min: 1, max: 64, pattern: /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/ }) } : {}),
   };
 }
 
 /** Key for comparing like with like. Never compare or order readings across two keys. */
 export function windowKey(/** @type {unknown} */ value) {
   const w = validateWindowIdentity(value);
-  return JSON.stringify([w.limitId, w.unit]);
+  // The period and the scope are part of the identity, not decoration on it. Dropping them
+  // made two genuinely different windows collide under one limit id, so a snapshot carrying
+  // both was refused as a duplicate: the module could not represent a shape a real provider
+  // returns. Reported independently by two readers at head 9bf57acb.
+  return JSON.stringify([w.limitId, w.unit, w.durationMinutes ?? null, w.scope ?? null]);
 }
 
 /**
@@ -125,11 +145,13 @@ export function validateWindowReading(value) {
 export function percentToBasisPoints(percent) {
   if (typeof percent !== 'number' || !Number.isFinite(percent)) throw new ProtocolValidationError('type', 'percent');
   if (percent < 0 || percent > 100) throw new ProtocolValidationError('range', 'percent');
-  const scaled = percent * 100;
-  if (!Number.isInteger(Math.round(scaled * 1e6) / 1e6) || Math.abs(scaled - Math.round(scaled)) > 1e-6) {
-    throw new ProtocolValidationError('range', 'percent');
-  }
-  return Math.round(scaled);
+  // A percentage is representable in basis points only when it has at most two decimal
+  // places, so the test is the two-decimal rendering round-tripping exactly. An epsilon
+  // tolerance was the first attempt and it rounded precisely what this function promises to
+  // refuse: 21.000000001 became 2100 and 1e-9 became 0. Reported independently by two
+  // readers at head 9bf57acb.
+  if (Number(percent.toFixed(2)) !== percent) throw new ProtocolValidationError('range', 'percent');
+  return Math.round(percent * 100);
 }
 
 /**
@@ -226,7 +248,10 @@ export function windowFreshness(reading, now) {
   const r = validateWindowReading(reading);
   const at = new Date(readTimestamp(now)).getTime();
   if (!r.available) return 'unknown';
-  if (r.resetsAt === undefined) return 'fresh';
+  // No reset metadata is NOT evidence of freshness: a reading with no `resetsAt` was
+  // reported fresh a year later. Absence is unknown until a source states a non-expiring
+  // window explicitly. Reported independently by two readers at head 9bf57acb.
+  if (r.resetsAt === undefined) return 'unknown';
   return new Date(r.resetsAt).getTime() <= at ? 'reset-due' : 'fresh';
 }
 

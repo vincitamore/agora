@@ -36,17 +36,37 @@ participants on one pool can be bound on different grounds — one on a human's 
 a provider read. The pool record carries neither, since neither is a property of the
 principal.
 
+**A binding's `attestation` is a CLAIM, not a finding.** A claimed `enforced` parses here
+exactly as it does on an observation that has not reached the acceptance boundary: this is a
+syntax reader, and an enum surviving syntax is not an authority bypass. What makes that safe
+is that **no consumer of this field exists in this module** and nothing derives authority
+from it. A future consuming service must authenticate the mapping against independent
+expected context before treating a binding as enforced; a consumer that reads this field
+directly is a missing-boundary defect, and it owes a cut-wire test at that seam.
+
 ### Window and complete observation
 
 A **window** is one limit the provider reports: a rolling period, a billing period, a
-credit balance. Its identity is the provider's `limitId` **together with its `unit`**. One
-limit id in two units is two windows and they are never compared, ordered or summed.
+credit balance. Its identity is the provider's `limitId`, its `unit`, its `durationMinutes`
+and its `scope` — all four, because providers report **several windows under one limit id**,
+distinguished only by period or by their own primary/secondary naming. Dropping the period
+from the identity makes two real windows collide, and a snapshot carrying both is then
+refused as a duplicate: the contract cannot represent data the provider actually returns.
+
+The provider's own `limitId` is preserved exactly as reported; `scope` is an additional
+discriminator, never a rewrite of it. One limit id in two units, two periods or two scopes
+is that many windows, and they are never compared, ordered or summed.
 
 Values are **bounded integers in the smallest step of their unit**. There is no floating
 point in this contract. `basis-points` is hundredths of a percent, so 21.0 percent is
 exactly `2100`. `percentToBasisPoints` converts and **refuses** anything needing finer
 precision rather than rounding it, because a silently rounded quota is a wrong number that
 reads as a right one and nothing downstream can detect the difference.
+
+The test is that the value two-decimal rendering round-trips exactly. That refuses the
+near-integer case (`21.000000001`) and the near-zero case (`1e-9`) as well as the obvious
+`0.005`; an epsilon tolerance passes all three and rounds them, which is why the shape was
+wrong rather than the constant.
 
 A window reading is either available, carrying a `value` and a required `sense`
 (`used` or `remaining`), or unavailable, carrying a reason `code` and **no value at all**.
@@ -72,8 +92,9 @@ sparse update as a bounded signal to refetch; it may never arrive here.
 They are independent because they answer different questions, and collapsing them is how an
 estimate comes to be treated as an allowance. A caller may assert `human` or `estimate`
 about itself freely. Neither `provider` nor `harness` grants authority by being written
-down: a parsed record is syntax, and `enforced` is a conclusion only the acceptance boundary
-may reach.
+down: a parsed record is syntax. `enforced` is a conclusion, and on the OBSERVATION path
+`acceptCompleteObservation` is what reaches it. Elsewhere in this module the value is a
+parsed claim whose authority a future consuming service must establish.
 
 ## The acceptance boundary
 
@@ -109,6 +130,11 @@ and the tests cut exactly that comparison to prove it is load-bearing.
 `windowFreshness(reading, now)` returns `fresh`, `reset-due` or `unknown` from an explicit
 clock. It is pure: it never mutates, replaces or refills the stored reading.
 
+A reading with **no reset metadata is `unknown`, never `fresh`**. Absence of a reset time is
+not evidence that a value is current — read the other way, such a reading stays "fresh"
+forever, which is the opposite of what the field means. A source reporting a genuinely
+non-expiring window must say so explicitly rather than by omission.
+
 **`reset-due` is not a claim that the window refilled.** It says the reset time has passed
 and nothing fresh has replaced this value. Entering that state needs no network. Leaving it
 needs a new full snapshot.
@@ -138,3 +164,10 @@ load-bearing line removed and assert the guarded behaviour is genuinely gone: cu
 attestor comparison, and cutting the freshness clock comparison. They check the anchor is
 unique before cutting, so a refactor that moves either line fails loudly instead of quietly
 passing. A guard nobody has watched fail is a guard nobody has tested.
+
+It also carries four **regressions** named for the defects they cover, each of which failed
+at an earlier head: a percentage tolerance that rounded what it promised to refuse; a window
+key that dropped the period, so two windows a provider really reports collided; a reading
+with no reset time reported as fresh indefinitely; and a seat binding whose attestation a
+caller could simply assert. Three were found independently by two reviewers and one by a
+third; their falsifiers are the tests, so the probe is inherited rather than the story.
