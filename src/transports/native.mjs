@@ -14,10 +14,10 @@ import { ServiceDarkError, connectSeatService, nativeMessage, readServiceDescrip
  * A dark service refuses a post with `room-dark` and no cursor, as the native contract says; a read
  * against a dark service is dark too (retained history labelled dark is the service's later work).
  * @param {import('../core.mjs').RoomConfig} room
- * @param {{ actor: import('../core.mjs').Actor, stateRoot: string, connect?: typeof import('../native-service.mjs').NativeServiceClient.connect }} deps
+ * @param {{ actor: import('../core.mjs').Actor, stateRoot: string, session?: string, connect?: typeof import('../native-service.mjs').NativeServiceClient.connect }} deps
  * @returns {import('../core.mjs').Transport}
  */
-export function nativeTransport(room, { actor, stateRoot, connect }) {
+export function nativeTransport(room, { actor, stateRoot, session, connect }) {
   const roomId = validateNativeRoomId(room.roomId, "native room needs a roomId that");
   /** @type {Promise<import('../native-service.mjs').NativeServiceClient> | undefined} */
   let connecting;
@@ -86,7 +86,7 @@ export function nativeTransport(room, { actor, stateRoot, connect }) {
       catch (e) { throw new AgoraError(`room-dark: ${e instanceof Error ? e.message : String(e)}; nothing was posted and no cursor was issued`); }
       const operationId = randomUUID().replaceAll("-", "");
       return c.request("append", { roomId, operation: { kind: "board", operationId, payload,
-        authorKind: actor.kind, authorName: actor.name, session: process.env.AGORA_SESSION || "default" } });
+        authorKind: actor.kind, authorName: actor.name, session: session ?? "default" } });
     },
   };
 }

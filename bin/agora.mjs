@@ -1124,6 +1124,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
   const materializeFiles = values.files || room.files === true;
   const transport = await createTransport(roomAlias, room, cfg, {
     cache: etagCache(sdir),
+    session: session.slug,
     ...(materializeFiles ? { mediaDir: path.join(sdir, "media", roomAlias) } : {}),
   });
   const thread = values.thread;
