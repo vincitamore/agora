@@ -189,13 +189,14 @@ test('SUPERSESSION: two different pools are never ordered against each other', (
   assert.throws(() => supersedes({ ...fullObservation, poolId: 'pool_synthetic_0000002' }, fullObservation), ProtocolValidationError);
 });
 
-// --- Regressions from the independent reads of 9bf57acb ----------------------------
-// Four defects, three reproduced by two readers independently and one found by a third.
-// Their falsifiers are the regression: each of these failed at that head.
+// --- Regressions ------------------------------------------------------------------
+// Each of these covers a defect this module actually shipped with and had repaired. They
+// are kept as named tests rather than as a note, so the guard is inherited by whoever
+// changes this file next.
 
 test('REGRESSION R1: a near-integer or near-zero percentage is refused, not rounded', () => {
-  // At 9bf57acb an epsilon tolerance returned 2100 and 0 for these, silently rounding
-  // exactly what this function's contract promises to refuse.
+  // An epsilon tolerance returned 2100 and 0 for these, silently rounding exactly what
+  // this function's contract promises to refuse.
   assert.throws(() => percentToBasisPoints(21.000000001), ProtocolValidationError);
   assert.throws(() => percentToBasisPoints(1e-9), ProtocolValidationError);
   assert.throws(() => percentToBasisPoints(0.005), ProtocolValidationError);
@@ -212,8 +213,8 @@ test('REGRESSION R2: two periods under one limit id are two windows, and a snaps
   const short = { limitId: 'provider_limit_a', unit: 'basis-points', durationMinutes: 300 };
   const week = { limitId: 'provider_limit_a', unit: 'basis-points', durationMinutes: 10080 };
   assert.notEqual(windowKey(short), windowKey(week));
-  // At 9bf57acb these collided, so an observation carrying both was refused as a duplicate:
-  // the module could not represent data the provider actually returns.
+  // These once collided, so an observation carrying both was refused as a duplicate and
+  // the module could not represent data a provider actually returns.
   const observation = validateCompleteObservation({
     ...fullObservation,
     windows: [
@@ -234,8 +235,8 @@ test('REGRESSION R2: two periods under one limit id are two windows, and a snaps
 
 test('REGRESSION R3: a reading with no reset metadata is unknown, never fresh', () => {
   const noReset = { window: windowOf('no_reset', 'tokens'), available: true, value: 5, sense: 'used' };
-  // At 9bf57acb this returned fresh a year later: absence of reset metadata was read as
-  // evidence of freshness.
+  // This once returned fresh a year later: absence of reset metadata was read as evidence
+  // of freshness.
   assert.equal(windowFreshness(noReset, '2027-09-06T00:00:00.000Z'), 'unknown');
   assert.equal(windowFreshness(noReset, '2026-09-06T20:35:02.000Z'), 'unknown');
   // A reading that does carry a reset time still discriminates.
@@ -244,14 +245,14 @@ test('REGRESSION R3: a reading with no reset metadata is unknown, never fresh', 
 });
 
 test('R4: a seat binding parses a CLAIMED attestation and grants nothing by it', () => {
-  // Adjudicated at house :401. This is a syntax reader, so a claimed `enforced` parses here
+  // This is a syntax reader, so a claimed `enforced` parses here
   // exactly as it does on an unaccepted observation; an enum surviving syntax is not an
   // authority bypass. What makes that safe is that no consumer of this field exists in this
   // module, so nothing derives authority from the claim.
   const claimed = validateSeatBinding({ poolId: POOL, registration: seat('account_synthetic_00003'), attestation: 'enforced' });
   assert.equal(claimed.attestation, 'enforced', 'the claim parses');
   // The same value on an observation is likewise only a claim until the boundary tests it,
-  // which is the consistency the adjudication turned on.
+  // which is the consistency this rule turns on.
   const claimedObservation = validateCompleteObservation({ ...fullObservation, attestation: 'enforced' });
   assert.equal(claimedObservation.attestation, 'enforced');
   // And the observation boundary is where a claim is actually tested.

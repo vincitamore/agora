@@ -77,10 +77,16 @@ refused rather than ignored.
 opposite meanings.
 
 A **complete observation** is one full snapshot of one pool at one capture time, retaining
-every window the source represented. Its `kind` is `full` and only `full`. A sparse or
-partial frame cannot be validated as an observation, because a partial frame stored as a
-complete one has absent fields that later read as unknown or as zero. An adapter may use a
-sparse update as a bounded signal to refetch; it may never arrive here.
+every window the source represented. Its `kind` is `full` and only `full`, so a frame
+labelled sparse is refused outright.
+
+**What the validator checks is declared-full SHAPE, not completeness itself.** A well-formed
+non-empty subset of a source's windows, labelled `full`, parses here — and it must, because
+nothing in this module knows what the source represented, and a validator cannot verify a
+claim about data it never saw. **Completeness is the adapter's obligation**: an adapter emits
+`full` only for a snapshot it read whole, and may use a sparse update as a bounded signal to
+refetch rather than as a frame to forward. Stating it the other way round would promise a
+guarantee this code cannot give, which is worse than the gap it papers over.
 
 ## Provenance is two independent fields
 
