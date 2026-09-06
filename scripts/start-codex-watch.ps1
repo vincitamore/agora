@@ -13,6 +13,8 @@ param(
     [Alias('BunPath')]
     [string]$RuntimePath,
     [string]$CodexPath = $env:AGORA_CODEX_BIN,
+    [string]$CodexServer = $env:AGORA_CODEX_SERVER,
+    [string]$CodexTokenFile = $env:AGORA_CODEX_TOKEN_FILE,
     [string]$LogPrefix,
     [double]$ThreadInterval = 120,
     [switch]$Status,
@@ -167,7 +169,8 @@ if ($Worker) {
 
     $stdoutPath = "$LogPrefix.stdout.log"
     $stderrPath = "$LogPrefix.stderr.log"
-    & $RuntimePath $agoraPath watch $Room --stream --follow --json --wake addressed --thread-interval $ThreadInterval --coalesce 20 --codex-queue --codex-thread $ThreadId --codex-bin $CodexPath 1>> $stdoutPath 2>> $stderrPath
+    $deliveryArgs = if ($CodexServer) { @('--codex-server', $CodexServer, '--codex-token-file', $CodexTokenFile) } else { @('--codex-queue', '--codex-bin', $CodexPath) }
+    & $RuntimePath $agoraPath watch $Room --stream --follow --json --wake addressed --thread-interval $ThreadInterval --coalesce 20 --max-batch 32 --codex-thread $ThreadId @deliveryArgs 1>> $stdoutPath 2>> $stderrPath
     exit $LASTEXITCODE
 }
 
@@ -195,6 +198,13 @@ $workerArgs = @(
     '-LogPrefix', $LogPrefix,
     '-ThreadInterval', [string]$ThreadInterval
 )
+if ($CodexServer) {
+    if (-not $CodexTokenFile -or -not [IO.Path]::IsPathRooted($CodexTokenFile) -or -not (Test-Path -LiteralPath $CodexTokenFile -PathType Leaf)) {
+        throw '-CodexServer requires an existing absolute -CodexTokenFile.'
+    }
+    $workerArgs += @('-CodexServer', $CodexServer, '-CodexTokenFile', $CodexTokenFile)
+}
+elseif ($CodexTokenFile) { throw '-CodexTokenFile requires -CodexServer.' }
 $commandLine = (ConvertTo-ProcessArgument $pwshPath) + ' ' + (($workerArgs | ForEach-Object { ConvertTo-ProcessArgument $_ }) -join ' ')
 $created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
     CommandLine = $commandLine

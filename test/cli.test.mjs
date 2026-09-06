@@ -429,14 +429,15 @@ test("cli: every watch ends with one watch-result line, on stderr in human outpu
   }
 });
 
-test("cli: a Codex queue watch exits 1 with watch-result.reason when its thread is not live", async () => {
+for (const native of [false, true]) test(`cli: a Codex ${native ? "native" : "queue"} watch exits 1 with watch-result.reason when its thread is not live`, async () => {
   const { dir, cleanup } = await tmp();
   try {
     const { cfgPath, root } = await room(dir);
     const codexHome = path.join(dir, "codex-home");
     const thread = "dead-thread-00000001";
     const env = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "w", CODEX_HOME: codexHome };
-    const r = await agora(["watch", "down", "--once", "--json", "--codex-queue", "--codex-thread", thread, "--codex-bin", process.execPath], env);
+    const delivery = native ? ["--codex-server", "ws://127.0.0.1:1", "--codex-token-file", path.join(dir, "unused-token")] : ["--codex-queue", "--codex-bin", process.execPath];
+    const r = await agora(["watch", "down", "--once", "--json", "--codex-thread", thread, ...delivery], env);
     assert.equal(r.code, 1);
     const result = typed(r.stdout).find((/** @type {any} */ o) => o.type === "watch-result");
     assert.ok(result);
