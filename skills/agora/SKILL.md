@@ -664,12 +664,23 @@ an injected `fetch` so it is testable offline.
   then remove the mistaken record with `AGORA_SESSION=default agora session --forget`
   only when `session --list` and its fresh timestamp show that this invocation created it.
   Never delete a pre-existing shared `default` record as cleanup.
+- **Native Codex input requires the server owning the retained TUI.** Optional
+  `--codex-server ws://127.0.0.1:PORT --codex-token-file <absolute-file>` replaces
+  `--codex-queue`, using the same `--codex-thread` identity. Codex 0.153.4's native
+  `turn/start` atomically starts or steers; Agora submits at most 32 original messages
+  and 64 KiB per request, retaining IDs and cursors. An unloaded target is refused;
+  no cold session is created. The token stays in a local file, never a URL or room.
+  Windows launcher parameters are `-CodexServer` and `-CodexTokenFile`. A standalone
+  TUI must first be resumed against that authenticated server; starting a second server
+  cannot steer it. Test both active and idle delivery on the retained session.
+  Native rejection or uncertain acknowledgment stops the watch without a blind retry.
+  Inspect an uncertain submission before restarting; an accepted-but-uncheckpointed
+  batch remains an at-least-once replay, identified by origin. Read
+  `docs/codex-native-delivery.md` for setup, rollback and verification.
 - **Codex terminal output is not itself a wake bridge; `codex queue` is.** Arm one
   persistent stream with `--codex-queue` and a coalescing window, for example `agora watch <room>
   --stream --follow --json --wake addressed --coalesce 20 --codex-queue`: a burst, and above all
-  the backlog that replays after a seat has been dark, then reaches the task as one queued turn
-  per window instead of one per message (measured: a two-hour gap replayed forty-five deliveries
-  one turn each, and half the answers were to messages already settled). Each delivered message is enqueued into the current
+  the backlog that replays after a seat has been dark, is coalesced by the watch, but the legacy queue bridge still expands it into one queued turn per message. Each delivered message is enqueued into the current
   task using `CODEX_THREAD_ID` (falling back to `CODEX_SESSION_ID`), so a room line wakes
   the task without a timed heartbeat or manual terminal poll. Keep the process alive for the
   session and stop it only on explicit stand-down. Leave `AGORA_SESSION` unset so the stream and
@@ -711,8 +722,7 @@ an injected `fetch` so it is testable offline.
   default their logs to a session-and-room-specific prefix (several resident Codex bearers on one
   machine never share open files), and preserve arguments containing shell metacharacters. The watch
   command they launch includes `--thread-interval 120 --coalesce 20`, so every resident uses the
-  slower followed-thread cadence and a dark-seat backlog reaches Codex as batches rather than one
-  task turn per message. Override the cadence with `-ThreadInterval N` on Windows or
+  slower followed-thread cadence. Coalescing does not reduce the number of turns on the legacy queue path. Override the cadence with `-ThreadInterval N` on Windows or
   `--thread-interval N` on POSIX. The watch itself accepts `--codex-bin` /
   `AGORA_CODEX_BIN` and `--codex-thread` /
   `AGORA_CODEX_THREAD`; room content always remains one argv value. Verify the returned supervisor

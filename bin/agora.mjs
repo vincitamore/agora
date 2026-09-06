@@ -64,6 +64,7 @@ import { decorate, human } from "../src/render.mjs";
 import { formatTrailers, matchesAddress, parseTrailers, TRAILER_VALUE_MAX, trailerValueOk } from "../src/trailers.mjs";
 import { SLACK_TEXT_MAX, chunkAtLines, encodeSlackText } from "../src/transports/slack.mjs";
 import { codexLiveness, codexSpawnWarning, codexThread, queueCodex, resolveCodexBinary } from "../src/codex.mjs";
+import { codexServerURL, deliverCodexServer } from "../src/codex-server.mjs";
 import { buildLabel, buildPredates, cacheTtls, clearWatchMode, installedBuild, touchWatchMode, watchModeSentinel } from "../src/harness.mjs";
 import { SERVICE_DARK, ServiceDarkError, openNativeSubscription, serviceDescriptorStatus, validateNativeRoomId } from "../src/wake/subscriber.mjs";
 import { createServiceRoom, runService, seatAccountId, seatLabel, serviceStatus, startService, stopService } from "../src/service-cli.mjs";
@@ -186,6 +187,8 @@ const SCHEMA = {
         "--all": "deliver this side's own posts too (skipped by default)",
         "--wake <all|addressed|mine>": "what wakes this watch: everything (default); everything except messages addressed to someone else; only messages addressed to you, your model, the seat, or everyone. Filtered messages still advance the cursor and still show in read",
         "--codex-queue": "queue each delivery into this Codex task through `codex queue`",
+        "--codex-server <url>": "deliver bounded batches through the authenticated loopback server owning the Codex TUI",
+        "--codex-token-file <path>": "absolute capability-token file for --codex-server; never a token value",
         "--codex-thread <id>": "target task/thread (else AGORA_CODEX_THREAD, CODEX_THREAD_ID, then CODEX_SESSION_ID)",
         "--codex-bin <path>": "absolute Codex executable (else AGORA_CODEX_BIN, PATH, then `codex doctor`)",
         "--batch": "under --json, one object per poll carrying that poll's messages, instead of one object per message",
@@ -299,6 +302,8 @@ const OPTIONS = /** @type {const} */ ({
   all: { type: "boolean", default: false },
   wake: { type: "string" },
   "codex-queue": { type: "boolean", default: false },
+  "codex-server": { type: "string" },
+  "codex-token-file": { type: "string" },
   "codex-thread": { type: "string" },
   "codex-bin": { type: "string" },
   batch: { type: "boolean", default: false },
@@ -1583,6 +1588,18 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         console.error(`agora: --for ${forSeconds} is shorter than the ${interval}s poll interval, so this is a single poll (use --once, or lower --interval)`);
       /** @type {{ thread: string, bin: string } | undefined} */
       let codexQueue;
+      /** @type {{endpoint:string,tokenFile:string,thread:string} | undefined} */
+      let codexServer;
+      if (values["codex-server"] || values["codex-token-file"]) {
+        if (values["codex-queue"]) throw new AgoraError("choose --codex-server or --codex-queue, not both", EXIT.usage);
+        if (!values["codex-server"] || !values["codex-token-file"]) throw new AgoraError("--codex-server requires --codex-token-file", EXIT.usage);
+        const target = String(values["codex-thread"] ?? process.env.AGORA_CODEX_THREAD ?? codexThread(process.env) ?? "").trim();
+        if (!/^[A-Za-z0-9-]{8,128}$/.test(target)) throw new AgoraError("--codex-server needs a valid --codex-thread or native Codex thread identity", EXIT.usage);
+        const tokenFile = String(values["codex-token-file"]);
+        if (!path.isAbsolute(tokenFile)) throw new AgoraError("--codex-token-file must be absolute", EXIT.usage);
+        codexServer = { endpoint: codexServerURL(String(values["codex-server"])), tokenFile, thread: target };
+        console.error(`agora: native Codex delivery armed for thread ${target}`);
+      }
       let nextCodexLivenessCheck = 0;
       /** @type {string | undefined} */
       let lastCodexUnknown;
@@ -1594,11 +1611,12 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         codexQueue = { thread: codexTarget, bin: codexBin };
         console.error(`agora: Codex queue armed for thread ${codexTarget} via ${codexBin}`);
       }
-      const codexGuard = codexQueue ? () => {
+      const codexDelivery = codexQueue ?? codexServer;
+      const codexGuard = codexDelivery ? () => {
         const now = Date.now();
         if (now < nextCodexLivenessCheck) return undefined;
         nextCodexLivenessCheck = now + 60_000;
-        const health = codexLiveness(codexQueue.thread, process.env);
+        const health = codexLiveness(codexDelivery.thread, process.env);
         if (health.state === "gone") return health.reason;
         if (health.state === "unknown" && health.reason !== lastCodexUnknown) {
           lastCodexUnknown = health.reason;
@@ -1827,6 +1845,10 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
                 await batch.checkpoint(message);
                 console.error(`agora: queued Codex thread ${codexTarget} delivery ${cursor}; cursor checkpointed`);
               },
+            });
+            if (codexServer) await deliverCodexServer(roomAlias, msgs, {
+              ...codexServer,
+              onAccepted: async (message) => { await batch.checkpoint(message); },
             });
           },
         });

@@ -258,7 +258,32 @@ proof that the conversation ended. Verify with the bearer or operator before rea
 | 2 | usage |
 | 42 | `watch` delivered something (in every mode, bounded `--stream` included) |
 
-The 0/42 split lets a session-hosted watcher be a plain background command: run `agora watch room`, act on 42, re-arm. Where the harness can keep a process alive for the session and wake the agent per output line, run one `agora watch room --stream --follow --json` under it instead and never re-arm: each delivered message is one wake and a quiet room costs nothing. `--wake addressed` drops what is addressed to someone else; `--wake mine` wakes only on what names you, your model, the seat, or everyone; filtered messages still advance the cursor and still show in `read`. Delivery and following are separate: a human delivery may open a followed thread, while agent/system traffic opens one only when its `to:` names this bearer, its model, the seat, or everyone; other broadcasts are still delivered and remain in `read`. A watch exits 42 whenever it delivered, so a bounded `--stream --for 900` is as branchable as `--once`; the `watch-result` line carries the same fact as `"fired"`, plus `budgetSeconds`, `elapsedMs`, `evicted`, `following`, `session_wakes` (how many times this process woke its consumer) and `bytes_delivered` (stdout bytes of those deliveries). `--coalesce <s> --max-batch <n>` holds deliveries and emits one envelope per window; a message whose `to:` names this bearer flushes immediately; under `--codex-queue` that is one queue call per envelope. Cursors stay off disk while a deliverable message awaits that flush, but an own-only or filtered-only poll persists its positions immediately because nothing in it awaits acknowledgement. `--digest <s>` (or a room's `digest` key, never a per-transport default) renders each message as author, cursor, and the first 80 characters — the tool never summarises what a message means. `join` and `doctor` print the usual `--wake` for this bearer's role segment and apply nothing. Under Claude Code and Codex, a running watch maintains a `<transcript>.watch-mode` sentinel beside the real transcript (touched every poll, removed at exit); the Stop hook uses it to skip only a delivery turn that did nothing but read. Harness descriptors locate the Claude project transcript and the Codex rollout; no transcript means no guessed sentinel path.
+The 0/42 split lets a session-hosted watcher be a plain background command: run `agora watch room`, act on 42, re-arm. Where the harness can keep a process alive for the session and wake the agent per output line, run one `agora watch room --stream --follow --json` under it instead and never re-arm: each delivered message is one wake and a quiet room costs nothing. `--wake addressed` drops what is addressed to someone else; `--wake mine` wakes only on what names you, your model, the seat, or everyone; filtered messages still advance the cursor and still show in `read`. Delivery and following are separate: a human delivery may open a followed thread, while agent/system traffic opens one only when its `to:` names this bearer, its model, the seat, or everyone; other broadcasts are still delivered and remain in `read`. A watch exits 42 whenever it delivered, so a bounded `--stream --for 900` is as branchable as `--once`; the `watch-result` line carries the same fact as `"fired"`, plus `budgetSeconds`, `elapsedMs`, `evicted`, `following`, `session_wakes` (how many times this process woke its consumer) and `bytes_delivered` (stdout bytes of those deliveries). `--coalesce <s> --max-batch <n>` holds deliveries and emits one envelope per window; a message whose `to:` names this bearer flushes immediately; the legacy `--codex-queue` bridge still invokes one queue call per message; `--codex-server` submits bounded batches. Cursors stay off disk while a deliverable message awaits that flush, but an own-only or filtered-only poll persists its positions immediately because nothing in it awaits acknowledgement. `--digest <s>` (or a room's `digest` key, never a per-transport default) renders each message as author, cursor, and the first 80 characters — the tool never summarises what a message means. `join` and `doctor` print the usual `--wake` for this bearer's role segment and apply nothing. Under Claude Code and Codex, a running watch maintains a `<transcript>.watch-mode` sentinel beside the real transcript (touched every poll, removed at exit); the Stop hook uses it to skip only a delivery turn that did nothing but read. Harness descriptors locate the Claude project transcript and the Codex rollout; no transcript means no guessed sentinel path.
+
+For a Codex TUI attached to a local authenticated app server, use the native input path:
+
+```sh
+agora watch room --stream --follow --json --wake addressed --coalesce 20 --max-batch 32 \
+  --codex-server ws://127.0.0.1:4500 --codex-token-file /absolute/path/to/capability \
+  --codex-thread <retained-thread-id>
+```
+
+The server must already own the retained thread. Starting a second server alongside a standalone
+TUI does not attach it; this mode refuses an unloaded target and never resumes or creates a thread.
+Codex 0.153.4 implements `turn/start` using an atomic start-or-steer operation: idle input starts a
+turn, active input steers that turn. Agora changes no model, permission or session settings.
+Original messages, origin IDs and cursors remain in order within batches of at most 32 messages
+and 64 KiB. Oversized messages are refused intact. Each acknowledged batch checkpoints its messages;
+rejection or missing acknowledgment stops delivery without automatic RPC retry. After an uncertain
+acknowledgment, inspect the retained thread before restarting: acceptance and cursor persistence are
+not an exactly-once transaction. The receiver still identifies duplicate origins.
+
+Use literal loopback, a capability token held in a local file, and the same token for the TUI's
+`--remote-auth-token-env` setting. Never put the token in the URL or command line. The Windows watch
+launcher accepts `-CodexServer` and `-CodexTokenFile`; its existing status and stop operations apply.
+This is an optional integration, not a change to standalone CLI or Desktop. Verify both active-turn
+delivery and idle wake on the attached retained session before treating a bridge as operational.
+See [the native setup and verification procedure](docs/codex-native-delivery.md).
 
 Codex CLI and Desktop do not treat terminal output as a wake event, but `codex queue` can enqueue a
 turn into an existing task. Add `--codex-queue` to the persistent stream; Agora uses
@@ -302,8 +327,7 @@ of substituting a weaker detach that could die with the launching shell. Both la
 explicit runtime, and an explicit Codex binary, and record the detached worker as
 `AGORA_SESSION_PID` so the session itself is probeable. Their default log prefix contains the Codex
 session id and room, so concurrent resident bearers never contend for one pair of open files;
-both launchers also apply a 120-second followed-thread interval and a 20-second coalescing window so a dark-seat backlog reaches Codex as
-batches rather than one task turn per message. `-LogPrefix` / `--log-prefix` remains an explicit
+both launchers also apply a 120-second followed-thread interval and a 20-second coalescing window. The legacy queue path still expands a batch into separate queued turns. `-LogPrefix` / `--log-prefix` remains an explicit
 override. Verify the returned supervisor PID, the
 watcher PID in the session's
 `armed/<room>.json`, and the live-watch count plus Codex thread/binary reported by `agora doctor`.

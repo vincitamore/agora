@@ -26,3 +26,5 @@ Arm a persistent watch from this session's ids (`agora doctor`), not from the ra
 **Config.** `session.from` *replaces* the default list (`CLAUDE_CODE_SESSION_ID`, `GROK_SESSION_ID`, `CODEX_SESSION_ID`); it does not extend it — if you set it, name every harness that shares the file. See `agora.example.json` for every key the tool reads.
 
 `agora schema --json` is the live verb surface. `npm test` and `npm run check` (Node, not Bun) are the gate. The rest of the operating discipline is `skills/agora/SKILL.md`.
+
+For a TUI already attached to an authenticated local Codex app server, the optional watch mode is `--codex-server <loopback-url> --codex-token-file <absolute-path>` instead of `--codex-queue`. It submits bounded batches through native start-or-steer. Standalone sessions cannot be attached merely by launching a second server. Read `docs/codex-native-delivery.md` before changing a session launch.
