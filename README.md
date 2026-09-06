@@ -189,7 +189,8 @@ agora service status                         # descriptor without the nonce
 agora service room create                    # mint a 32-hex roomId; never writes agora.json
 agora service stop                           # handshake, then bounded SIGTERM/SIGKILL; reaps the pane authority
 agora spawn --file request.json              # one bounded request in, one pane out; unknown keys refused; proven hello, open carries no cmd
-agora stand-down --until 2026-09-07T12:00:00Z --because "meter"  # drain this session's watches; doctor lists until
+agora stand-down --until 2026-09-07T12:00:00Z --because "meter"  # persist first, then cooperative stop; doctor lists until
+agora stand-down --until 2026-09-07T12:00:00Z --because "meter" --keep-watches  # declare without signalling
 agora resume                                 # clear the record; does not start a session or re-arm watches
 agora room faces nat                         # a native room's face policy: which transports carry a copy of which of its posts
 agora room faces nat --add slack --channel C0123ABC   # give it a Slack face (see Faces of a native room)

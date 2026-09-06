@@ -7,8 +7,8 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { declareStandDown, readStandDown, clearStandDown } from "../src/stand-down.mjs";
-import { writeArmed } from "../src/session.mjs";
+import { clearStandDown, declareStandDown, readStandDown, watchStopPath } from "../src/stand-down.mjs";
+import { bootEpoch, pidAlive, readArmed, writeArmed } from "../src/session.mjs";
 
 const run = promisify(execFile);
 const BIN = fileURLToPath(new URL("../bin/agora.mjs", import.meta.url));
@@ -37,29 +37,33 @@ test("schema lists stand-down and resume", async () => {
   assert.ok(schema.verbs.resume);
 });
 
-test("stand-down writes the record, drains a live pid, and resume clears it", async (t) => {
+test("stand-down writes the record, drains a cooperative watch, and resume clears it", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "agora-stand-down-"));
   t.after(async () => { await rm(root, { recursive: true, force: true }); });
   const sessionDir = path.join(root, "sessions", "s1");
-  const dummy = spawn(process.execPath, ["-e", "setInterval(() => {}, 1e6)"], { stdio: "ignore", windowsHide: true });
+  const epoch = bootEpoch();
+  const stop = watchStopPath(sessionDir, "agora");
+  const watcher = path.join(root, "watcher.cjs");
+  await writeFile(watcher, "const fs=require('fs');const stop=process.argv[2];const epoch=Number(process.argv[3]);setInterval(()=>{try{const rec=JSON.parse(fs.readFileSync(stop,'utf8'));if(rec.bootEpoch===epoch)process.exit(0);}catch{}},40);\n");
+  const dummy = spawn(process.execPath, [watcher, stop, String(epoch)], { stdio: "ignore", windowsHide: true });
   t.after(() => { try { dummy.kill("SIGKILL"); } catch { /* gone */ } });
   assert.ok(dummy.pid);
   await writeArmed(sessionDir, "agora", {
     room: "agora", pid: dummy.pid, interval: 15, startedAt: new Date().toISOString(),
   });
+  const armed = await readArmed(sessionDir, "agora");
+  assert.ok(armed);
   const until = new Date(Date.now() + 60_000).toISOString();
   const rec = await declareStandDown({
     sessionDir, slug: "s1", bearer: "Grok-4.6/forge", until, because: "meter",
-    armed: [{ key: "agora", armed: { pid: dummy.pid, room: "agora" } }],
+    armed: [{ key: "agora", armed }], ackMs: 1500,
   });
   assert.equal(rec.because, "meter");
   assert.equal(rec.drained.length, 1);
   assert.equal(rec.drained[0].pid, dummy.pid);
   const onDisk = await readStandDown(sessionDir);
   assert.equal(onDisk?.because, "meter");
-  await new Promise((r) => setTimeout(r, 200));
-  try { process.kill(dummy.pid, 0); assert.fail("watch pid still alive"); }
-  catch { /* expected: drained */ }
+  assert.equal(pidAlive(dummy.pid), false);
   const cleared = await clearStandDown(sessionDir);
   assert.equal(cleared?.because, "meter");
   assert.equal(await readStandDown(sessionDir), undefined);
@@ -105,4 +109,65 @@ test("cli stand-down and resume round-trip", async (t) => {
   const cleared = JSON.parse(up.stdout.trim().split(/\r?\n/).at(-1) ?? "{}");
   assert.equal(cleared.cleared, true);
   await assert.rejects(readFile(path.join(root, "sessions", "s1", "stand-down.json")));
+});
+
+test("a watch that does not ack is refused, not drained, and the record already exists", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "agora-stand-down-noack-"));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const sessionDir = path.join(root, "sessions", "s1");
+  const dummy = spawn(process.execPath, ["-e", "setInterval(() => {}, 1e6)"], { stdio: "ignore", windowsHide: true });
+  t.after(() => { try { dummy.kill("SIGKILL"); } catch { /* gone */ } });
+  assert.ok(dummy.pid);
+  await writeArmed(sessionDir, "agora", {
+    room: "agora", pid: dummy.pid, interval: 15, startedAt: new Date().toISOString(),
+  });
+  const armed = await readArmed(sessionDir, "agora");
+  assert.ok(armed);
+  const rec = await declareStandDown({
+    sessionDir, slug: "s1", bearer: "x", until: new Date(Date.now() + 60_000).toISOString(), because: "meter",
+    armed: [{ key: "agora", armed }], ackMs: 200,
+  });
+  assert.equal(rec.drained.length, 0);
+  assert.equal(rec.refused.length, 1);
+  assert.equal(rec.refused[0].reason, "no-ack");
+  assert.equal(pidAlive(dummy.pid), true);
+  assert.equal((await readStandDown(sessionDir))?.refused[0].reason, "no-ack");
+});
+
+test("keep-watches declares without signalling", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "agora-stand-down-keep-"));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const sessionDir = path.join(root, "sessions", "s1");
+  const dummy = spawn(process.execPath, ["-e", "setInterval(() => {}, 1e6)"], { stdio: "ignore", windowsHide: true });
+  t.after(() => { try { dummy.kill("SIGKILL"); } catch { /* gone */ } });
+  assert.ok(dummy.pid);
+  await writeArmed(sessionDir, "agora", {
+    room: "agora", pid: dummy.pid, interval: 15, startedAt: new Date().toISOString(),
+  });
+  const armed = await readArmed(sessionDir, "agora");
+  assert.ok(armed);
+  const rec = await declareStandDown({
+    sessionDir, slug: "s1", bearer: "x", until: new Date(Date.now() + 60_000).toISOString(), because: "meter",
+    keepWatches: true, armed: [{ key: "agora", armed }],
+  });
+  assert.equal(rec.keepWatches, true);
+  assert.equal(rec.drained.length, 0);
+  assert.equal(pidAlive(dummy.pid), true);
+  await assert.rejects(readFile(watchStopPath(sessionDir, "agora")));
+});
+
+test("a record without bootEpoch is skipped, not signalled", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "agora-stand-down-unver-"));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const sessionDir = path.join(root, "sessions", "s1");
+  const dummy = spawn(process.execPath, ["-e", "setInterval(() => {}, 1e6)"], { stdio: "ignore", windowsHide: true });
+  t.after(() => { try { dummy.kill("SIGKILL"); } catch { /* gone */ } });
+  assert.ok(dummy.pid);
+  const rec = await declareStandDown({
+    sessionDir, slug: "s1", bearer: "x", until: new Date(Date.now() + 60_000).toISOString(), because: "meter",
+    armed: [{ key: "agora", armed: { room: "agora", pid: dummy.pid, interval: 15, startedAt: new Date().toISOString() } }],
+  });
+  assert.equal(rec.drained.length, 0);
+  assert.equal(rec.skipped[0].reason, "unverified");
+  assert.equal(pidAlive(dummy.pid), true);
 });
