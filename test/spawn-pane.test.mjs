@@ -3,11 +3,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { once } from "node:events";
+import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import net from "node:net";
 import path from "node:path";
-import { openPane, paneHelloProof, paneSockPath } from "../src/spawn-pane.mjs";
+import { ensurePaneAuthority, openPane, paneAlive, paneHelloProof, paneSockPath, reapPane, resolveBunBin } from "../src/spawn-pane.mjs";
 
 const NONCE = "ab".repeat(16);
 const CHALLENGE = "cd".repeat(16);
@@ -63,6 +64,32 @@ test("openPane proves hello with HMAC of the challenge under pane.nonce; open ca
   assert.equal(seen[1]?.type, "open");
   assert.equal(seen[1].spawnId, SPAWN_ID);
   assert.equal("cmd" in seen[1], false);
+});
+
+test("reapPane kills the recorded pid", async () => {
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore", windowsHide: true });
+  const pid = child.pid;
+  assert.equal(typeof pid, "number");
+  assert.equal(paneAlive(pid), true);
+  await reapPane(pid);
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline && paneAlive(pid)) await new Promise((r) => setTimeout(r, 50));
+  assert.equal(paneAlive(pid), false);
+});
+
+test("ensurePaneAuthority pid is gone after reapPane", {
+  skip: resolveBunBin() ? false : "no bun at BUN or ~/.bun/bin",
+}, async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "agora-pane-reap-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const pane = await ensurePaneAuthority(root);
+  assert.equal(typeof pane.pid, "number");
+  assert.equal(paneAlive(pane.pid), true);
+  t.after(() => reapPane(pane.pid));
+  await reapPane(pane.pid);
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline && paneAlive(pane.pid)) await new Promise((r) => setTimeout(r, 50));
+  assert.equal(paneAlive(pane.pid), false);
 });
 
 test("echoing bootEpoch is not a proven hello", () => {

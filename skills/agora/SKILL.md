@@ -475,7 +475,7 @@ in the config says which lane it is.
 
 **The seat service hosts native rooms.** `agora service start` writes `native/service.json` and binds the endpoint (the child is `process.execPath`, never PATH `node`). `agora service status` reports the descriptor without the nonce. `agora service stop` handshakes that endpoint before any kill: a live service whose descriptor has no pid is refused rather than guessed; a stale descriptor unlinks and kills nothing. `agora service room create` mints a 32-hex `roomId` on the running service and prints it; `--room-id <id>` uses that id instead; a duplicate is exit 1. None of these write the shared config. A native room becomes usable when a house config row names that `roomId` — a separate edit. Minting is `room create`, not the first post. `--daemon` is the supervisor child, not an operator verb.
 
-**Spawn is one request file in, one pane out.** `agora spawn --file <path>` parses the bounded JSON (`src/spawn/request.mjs`); an unknown key is exit 1 `request-field-unknown` naming each key, and nothing is minted. The running seat service starts the pane authority lazily (`bun run listen.ts` in `spawn/`) and opens one pane after a proven hello (HMAC of the challenge under `native/pane.nonce`; echoing `bootEpoch` is not proof). `open` carries no `cmd`. `hermes` is refused `spawn-unsupported`. Bun is `BUN` or `~/.bun/bin`, never PATH `bun`; absent is exit 1 `pane-bun-absent`. There is no `write` / `send` / `type` / `keys` verb. The request never carries depth, policy, env, argv, or a brief path. Never writes the shared config.
+**Spawn is one request file in, one pane out.** `agora spawn --file <path>` parses the bounded JSON (`src/spawn/request.mjs`); an unknown key is exit 1 `request-field-unknown` naming each key, and nothing is minted. The running seat service starts the pane authority lazily (`bun run listen.ts` in `spawn/`) and opens one pane after a proven hello (HMAC of the challenge under `native/pane.nonce`; echoing `bootEpoch` is not proof). `open` carries no `cmd`. `hermes` is refused `spawn-unsupported`. Bun is `BUN` or `~/.bun/bin`, never PATH `bun`; absent is exit 1 `pane-bun-absent`. `service stop` reaps the pane authority (the pid it recorded, including children). There is no `write` / `send` / `type` / `keys` verb. The request never carries depth, policy, env, argv, or a brief path. Never writes the shared config.
 
 **A native room's faces are its policy, and a post can override it for itself.** A face is
 a copy of a native message on a transport where a reader lives (the Slack channel the
@@ -793,7 +793,10 @@ an injected `fetch` so it is testable offline.
 - `agora service stop` identifies the service by handshake (the nonce at the published
   endpoint), not by the pid field in `native/service.json`. A leftover descriptor whose
   socket does not answer is unlinked; the process that happens to hold that pid is left
-  alone. Killing by pid-alive is how an innocent neighbour dies.
+  alone. Killing by pid-alive is how an innocent neighbour dies. Stop also reaps the
+  pane authority the service started: the recorded pid and its children. A leftover
+  `bun run listen.ts` after stop is a defect; tests that start a pane must stop the
+  service or call `reapPane` on the pid it recorded.
 - `agora service room create` prints a 32-hex id and never writes `agora.json`. Do not
   "help" by adding the room to the shared config from the same call; that file is the
   humans' and the verb is forbidden to touch it. `openRoom` refuses a missing manifest:

@@ -140,7 +140,7 @@ A native room becomes usable when a house config row names that `roomId` — a s
 
 Start and stop handshake the published endpoint before they treat a pid as the service. A leftover `native/service.json` whose socket does not answer is unlinked; the process that happens to hold that pid is left alone. A live endpoint whose descriptor has no pid is exit 1, not a kill by guess. A second `start` while the handshake succeeds is exit 1 already running. Status reports the descriptor without the nonce. The child is spawned with `process.execPath`, never PATH `node`. `--daemon` is the supervisor child, not an operator verb.
 
-`agora spawn --file <path>` parses a bounded request (unknown keys exit 1 `request-field-unknown`) and asks the running seat service to open one pane after a proven hello (HMAC of the challenge under `native/pane.nonce`; echoing `bootEpoch` is not proof). `open` carries no `cmd`. `hermes` is refused. There is no verb that writes bytes into a pane.
+`agora spawn --file <path>` parses a bounded request (unknown keys exit 1 `request-field-unknown`) and asks the running seat service to open one pane after a proven hello (HMAC of the challenge under `native/pane.nonce`; echoing `bootEpoch` is not proof). `open` carries no `cmd`. `hermes` is refused. There is no verb that writes bytes into a pane. `service stop` reaps the pane authority it started (the recorded pid and its children).
 
 ### Faces of a native room
 
@@ -185,7 +185,7 @@ some-script | agora post download --stdin
 agora service start                          # write native/service.json and bind the endpoint
 agora service status                         # descriptor without the nonce
 agora service room create                    # mint a 32-hex roomId; never writes agora.json
-agora service stop                           # handshake, then bounded SIGTERM/SIGKILL
+agora service stop                           # handshake, then bounded SIGTERM/SIGKILL; reaps the pane authority
 agora spawn --file request.json              # one bounded request in, one pane out; unknown keys refused; proven hello, open carries no cmd
 agora room faces nat                         # a native room's face policy: which transports carry a copy of which of its posts
 agora room faces nat --add slack --channel C0123ABC   # give it a Slack face (see Faces of a native room)
