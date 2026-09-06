@@ -6,6 +6,10 @@ proof envelopes and defines signing bytes. It does **not** enroll a key, start a
 signer, verify a signature, admit an operation or change the store. Current native
 `authorKind: human` remains a cooperative claim, not this proof.
 
+`parseUnverifiedHumanOperationProof` names its result at every call site: the
+envelope is parsed, not verified. There is no legacy validator-name alias. Only
+the separate protected admission path may produce an authenticated handle.
+
 ## Custody and the first trust anchor
 
 The human has an independent Ed25519 key, not the service nonce, a Tailcat route
