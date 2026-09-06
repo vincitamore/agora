@@ -1,6 +1,6 @@
 // @ts-check
 import { createHash } from 'node:crypto';
-import { PROTOCOL_LIMITS, ProtocolValidationError, parseCursor, readArray, readEnum, readRecord, readString, validateCursor, validateDigest, validateNativeId, validateText } from './common.mjs';
+import { PROTOCOL_LIMITS, ProtocolValidationError, parseCursor, readArray, readEnum, readInteger, readRecord, readString, validateCursor, validateDigest, validateNativeId, validateText } from './common.mjs';
 import { validateAttachmentReference } from './attachment.mjs';
 import { validateNativeCommitReceipt } from './receipt.mjs';
 
@@ -18,17 +18,21 @@ export function validateMessagePayload(value) {
 /** Identity comes from the admitted route. Lease/fence correlate an existing allocation.
  * @param {unknown} value */
 export function validateBoardPayload(value) {
-  const candidate = readRecord(value, ['action', 'subject'], ['leaseId', 'fence', 'because']);
-  const action = readEnum(candidate.action, 'action', ['claim', 'renew', 'release', 'contest']);
+  const candidate = readRecord(value, ['action', 'subject'], ['leaseId', 'fence', 'because', 'leaseMs']);
+  const action = readEnum(candidate.action, 'action', ['claim', 'renew', 'release', 'contest', 'break']);
   const extra = action === 'renew' || action === 'release' ? ['leaseId', 'fence'] : action === 'contest' ? ['because'] : [];
-  const v = readRecord(value, ['action', 'subject', ...extra]);
+  const optional = action === 'claim' || action === 'renew' ? ['leaseMs'] : [];
+  const v = readRecord(value, ['action', 'subject', ...extra], optional);
   const subject = readString(v.subject, 'subject', { min: 1, max: 256, controls: true, pattern: /^(work|human|answer|integration|verify|gap|spawn):.+$/ });
   if (action === 'renew' || action === 'release') {
     const fence = validateCursor(v.fence);
     if (parseCursor(fence).sequence === 0) throw new ProtocolValidationError('range', 'fence');
-    return { action, subject, leaseId: validateNativeId(v.leaseId), fence };
+    return { action, subject, leaseId: validateNativeId(v.leaseId), fence,
+      ...(Object.hasOwn(v, 'leaseMs') ? { leaseMs: readInteger(v.leaseMs, 'leaseMs', 1000, 604_800_000) } : {}) };
   }
   if (action === 'contest') return { action, subject, because: readString(v.because, 'because', { min: 1, max: 4096 }) };
+  if (action === 'claim' && Object.hasOwn(v, 'leaseMs'))
+    return { action, subject, leaseMs: readInteger(v.leaseMs, 'leaseMs', 1000, 604_800_000) };
   return { action, subject };
 }
 /** @param {unknown} value @returns {NativeOperationRequest} */

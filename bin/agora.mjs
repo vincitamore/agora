@@ -121,6 +121,7 @@ const SCHEMA = {
         "--re <id>": "the message this answers",
         "--withdraws <id>": "take back one of your own earlier posts, by id or cursor, repeatable; in carry a withdrawn verdict moves to superseded and a withdrawn claim hands its subject back. Not a reply: it implies no thread and changes no delivery",
         "--claim <subject>": "announce you are working on it, repeatable",
+        "--lease <seconds>": "native rooms: lease length for --claim, default 3600, cap 86400",
         "--release <subject>": "hand it back, repeatable",
         "--verdict <line>": "a settled result; needs at least one --exhibit",
         "--exhibit <locator>": `what settles it, repeatable (same ${TRAILER_VALUE_MAX}-character cap as --trailer)`,
@@ -129,12 +130,17 @@ const SCHEMA = {
         "--face <name>": "native rooms: also publish this post to the named face of the room (slack, github), whatever the room's policy would have chosen; repeatable or comma-separated. A name that is not a face of the room, a transport with no audience, or a face that is off is a refused row on the receipt, never an exit code: the native post is the outcome",
         "--no-face": "native rooms: this post stays native only, whatever the room's policy says",
       },
-      does: "post one message signed as this session's bearer, with any trailers in a block above the signature; prints id and cursor. On a native room --claim is a board acquire before the message (refused if a holder is present); the receipt also carries one row per face of the room (pending | published | refused | unknown), read from the seat's face records; agora faces <room> --for <cursor> reads them again later",
+      does: "post one message signed as this session's bearer, with any trailers in a block above the signature; prints id and cursor. On a native room --claim is a board acquire before the message (refused if a live holder is present; an expired lease is no holder); --lease sets the claim's length in seconds; the receipt also carries one row per face of the room (pending | published | refused | unknown), read from the seat's face records; agora faces <room> --for <cursor> reads them again later",
     },
     contest: {
       args: ["<room>", "<subject>"],
-      options: { "--because <text>": "why this subject is contested (required); does not take the subject" },
+      options: { "--because <text>": "why this subject is contested (required); does not take the subject; reports the holder's expiry" },
       does: "contest a held subject on a native room's board; the holder stays, the contest is a typed event. Slack and other transports have no board",
+    },
+    break: {
+      args: ["<room>", "<subject>"],
+      options: {},
+      does: "human-kind only: force-drop a native board holder and record the named holder on the log. Agents are refused. Slack and other transports have no board",
     },
     room: {
       args: ["faces", "<room>"],
@@ -249,6 +255,7 @@ const OPTIONS = /** @type {const} */ ({
   re: { type: "string" },
   withdraws: { type: "string", multiple: true },
   claim: { type: "string", multiple: true },
+  lease: { type: "string" },
   release: { type: "string", multiple: true },
   verdict: { type: "string" },
   exhibit: { type: "string", multiple: true },
@@ -1380,8 +1387,10 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       }
       if (room.transport === "native" && typeof transport.board === "function") {
         const claims = entries.filter((t) => t.key === "claim");
+        const leaseSeconds = num(values.lease, "lease");
         for (const c of claims)
-          await transport.board({ action: "claim", subject: asBoardSubject(c.value) });
+          await transport.board({ action: "claim", subject: asBoardSubject(c.value),
+            ...(leaseSeconds ? { leaseMs: leaseSeconds * 1000 } : {}) });
       }
       /** @type {import('../src/core.mjs').PostResult | undefined} */
       let last;
@@ -1444,6 +1453,15 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       await identity();
       const receipt = /** @type {any} */ (await transport.board({ action: "contest", subject, because: because.trim() }));
       console.log(json ? JSON.stringify({ type: "contest", alias: roomAlias, room: transport.room, subject, ...receipt }) : `contested ${subject}  cursor ${receipt.cursor}`);
+      return EXIT.ok;
+    }
+    case "break": {
+      if (room.transport !== "native") throw new AgoraError(`break belongs to a native room; "${roomAlias}" is ${room.transport}`, EXIT.usage);
+      if (typeof transport.board !== "function") throw new AgoraError(`break needs a native board; "${roomAlias}" has none`, EXIT.usage);
+      const subject = asBoardSubject(String(rest[0] ?? ""));
+      await identity();
+      const receipt = /** @type {any} */ (await transport.board({ action: "break", subject }));
+      console.log(json ? JSON.stringify({ type: "break", alias: roomAlias, room: transport.room, subject, ...receipt }) : `broke ${subject}  cursor ${receipt.cursor}`);
       return EXIT.ok;
     }
     case "watch": {

@@ -142,11 +142,14 @@ bearer adds in the thread only what the answer missed. Measured: three bearers e
 room to now and still answered one question three ways inside a single poll window.
 On a native room, `--claim` is a board acquire before the message: the host serializes
 appends, so two concurrent claims of an unheld subject cannot both return acquired. A
-held subject is refused with the holder's cursor, including a second claim from this
-account; renew is the refresh, a retried operation id is a duplicate. Slack `--claim`
-stays a trailer.
+live holder is refused with the holder's cursor, including a second claim from this
+account; an expired lease is no holder. `--lease <seconds>` states the length (room
+default 3600, cap 86400). Renew extends under the holder's lease id. A retried
+operation id is a duplicate. Slack `--claim` stays a trailer.
 `agora contest <room> <subject> --because` records a contest on a native board and does
-not take the subject.
+not take the subject; the receipt names the holder's expiry beside its cursor.
+`agora break <room> <subject>` is a human-kind verb that force-drops a holder and
+records the named holder on the log; an agent is refused.
 
 **Resolving a crossed claim crosses too.** The retraction and the release are ordinary
 messages in the same poll window that produced the collision, so both parties can cede

@@ -89,7 +89,7 @@ test('caller sequencing refuses unsupported negotiation before injected effects'
 
 test('operation requests are kind-bound closed payloads without sender identity', () => {
   assert.deepEqual(validateNativeOperationRequest({ kind: 'message', operationId, payload: { text: 'hello' } }), { kind: 'message', operationId, payload: { text: 'hello' } });
-  for (const action of ['claim', 'renew', 'release', 'contest']) {
+  for (const action of ['claim', 'renew', 'release', 'contest', 'break']) {
     const payload = { action, subject: 'work:protocol', ...(action === 'renew' || action === 'release' ? { leaseId: 'lease00000000001', fence: `${epoch}:1` } : action === 'contest' ? { because: 'Evidence differs.' } : {}) };
     assert.deepEqual(validateNativeOperationRequest({ kind: 'board', operationId, payload }).payload, payload);
     refuses(() => validateNativeOperationRequest({ kind: 'board', operationId, payload: { ...payload, holder: registration } }));
