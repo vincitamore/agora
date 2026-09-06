@@ -5,6 +5,10 @@ They do not start a service, enroll a principal, verify a file, accept a message
 or migrate a stored log. See [NATIVE-ROOMS.md](NATIVE-ROOMS.md) for service semantics
 and [DESIGN.md](DESIGN.md) for authority and presentation boundaries.
 
+The [human-key contract](HUMAN-AUTHORITY.md) adds inert enrollment candidates,
+operation-bound challenge/proof syntax and fixed signing bytes for break/compose.
+Its fixtures do not establish a deployed human-only boundary.
+
 ## Validation is one boundary, not the whole operation
 
 `validateX(unknown)` returns a fresh closed data object or throws
