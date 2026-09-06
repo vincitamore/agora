@@ -29,8 +29,13 @@ export function mintSpawnId() {
   return randomUUID().replaceAll("-", "");
 }
 
-function bunBin() {
-  return process.env.BUN || "bun";
+/** BUN if set and present, else ~/.bun/bin. PATH `bun` is not a resolution. */
+export function resolveBunBin() {
+  if (process.env.BUN) return existsSync(process.env.BUN) ? process.env.BUN : null;
+  const home = process.env.USERPROFILE ?? process.env.HOME ?? "";
+  const named = process.platform === "win32" ? "bun.exe" : "bun";
+  const pinned = path.join(home, ".bun", "bin", named);
+  return existsSync(pinned) ? pinned : null;
 }
 
 /**
@@ -89,7 +94,9 @@ export async function ensurePaneAuthority(stateRoot) {
   if (!existsSync(path.join(PANE_PACKAGE, "package.json"))) {
     throw new AgoraError(`pane-package-absent: ${PANE_PACKAGE} (bun install in spawn/)`, EXIT.error);
   }
-  const child = spawn(bunBin(), ["run", "listen.ts"], {
+  const bun = resolveBunBin();
+  if (!bun) throw new AgoraError("pane-bun-absent: no bun at BUN or ~/.bun/bin", EXIT.error);
+  const child = spawn(bun, ["run", "listen.ts"], {
     cwd: PANE_PACKAGE,
     env: { ...process.env, AGORA_STATE: stateRoot, AGORA_PANE_SOCK: sock },
     detached: true,
