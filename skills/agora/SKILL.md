@@ -148,8 +148,11 @@ default 3600, cap 86400). Renew extends under the holder's lease id. A retried
 operation id is a duplicate. Slack `--claim` stays a trailer.
 `agora contest <room> <subject> --because` records a contest on a native board and does
 not take the subject; the receipt names the holder's expiry beside its cursor.
-`agora break <room> <subject>` is a human-kind verb that force-drops a holder and
-records the named holder on the log; an agent is refused.
+`agora break <room> <subject>` force-drops a holder. The human label is cooperative:
+the native service forwards the caller's authorKind, as it does for chat, and the
+store refuses only an agent-labelled request. The event records the requesting
+session and bearer name beside that label; a relabel is a lie on the log. Admitted
+human authority is the enrolled-key seam; until it lands this is the trust model.
 
 **Resolving a crossed claim crosses too.** The retraction and the release are ordinary
 messages in the same poll window that produced the collision, so both parties can cede

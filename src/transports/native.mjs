@@ -85,7 +85,8 @@ export function nativeTransport(room, { actor, stateRoot, connect }) {
       try { c = await client(); }
       catch (e) { throw new AgoraError(`room-dark: ${e instanceof Error ? e.message : String(e)}; nothing was posted and no cursor was issued`); }
       const operationId = randomUUID().replaceAll("-", "");
-      return c.request("append", { roomId, operation: { kind: "board", operationId, payload, authorKind: actor.kind } });
+      return c.request("append", { roomId, operation: { kind: "board", operationId, payload,
+        authorKind: actor.kind, authorName: actor.name, session: process.env.AGORA_SESSION || "default" } });
     },
   };
 }
