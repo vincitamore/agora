@@ -49,6 +49,40 @@ test("two concurrent claims of an unheld subject: one acquired, one refused", as
   assert.equal(store.board().length, 1);
 });
 
+test("two concurrent claims from the same account: one acquired, one refused", async (t) => {
+  const { store } = await room(t);
+  const results = await Promise.allSettled([
+    store.append({ kind: "board", operationId: OP(1), payload: { action: "claim", subject: "work:same-seat" } }, { accountId: HOST }),
+    store.append({ kind: "board", operationId: OP(2), payload: { action: "claim", subject: "work:same-seat" } }, { accountId: HOST }),
+  ]);
+  const won = results.filter((r) => r.status === "fulfilled");
+  const lost = results.filter((r) => r.status === "rejected");
+  assert.equal(won.length, 1, "same-account concurrent claims must not both acquire");
+  assert.equal(lost.length, 1);
+  const acquired = /** @type {any} */ (/** @type {PromiseFulfilledResult<any>} */ (won[0]).value);
+  assert.equal(acquired.held, true);
+  assert.equal(acquired.duplicate, false);
+  assert.match(String(/** @type {PromiseRejectedResult} */ (lost[0]).reason.message), /is held at/);
+  assert.equal(store.board().length, 1);
+  assert.equal(store.board()[0].leaseId, acquired.leaseId);
+});
+
+test("a new claim from the holding account does not reacquire; renew is the refresh", async (t) => {
+  const { store } = await room(t);
+  const first = /** @type {any} */ (await store.append({ kind: "board", operationId: OP(1), payload: { action: "claim", subject: "work:renew" } }, { accountId: HOST }));
+  await assert.rejects(
+    store.append({ kind: "board", operationId: OP(2), payload: { action: "claim", subject: "work:renew" } }, { accountId: HOST }),
+    /is held at/,
+  );
+  assert.equal(store.board()[0].leaseId, first.leaseId);
+  const retry = /** @type {any} */ (await store.append({ kind: "board", operationId: OP(1), payload: { action: "claim", subject: "work:renew" } }, { accountId: HOST }));
+  assert.equal(retry.duplicate, true);
+  assert.equal(retry.cursor, first.cursor);
+  await store.append({ kind: "board", operationId: OP(3), payload: { action: "renew", subject: "work:renew", leaseId: first.leaseId, fence: first.fence } }, { accountId: HOST });
+  assert.equal(store.board()[0].leaseId, first.leaseId);
+  assert.notEqual(store.board()[0].cursor, first.cursor);
+});
+
 test("contest does not take the subject; release by the holder frees it", async (t) => {
   const { store } = await room(t);
   const claim = /** @type {any} */ (await store.append({ kind: "board", operationId: OP(1), payload: { action: "claim", subject: "work:contest" } }, { accountId: HOST }));
