@@ -65,6 +65,7 @@ import { codexLiveness, codexSpawnWarning, codexThread, queueCodex, resolveCodex
 import { buildLabel, buildPredates, cacheTtls, clearWatchMode, installedBuild, touchWatchMode, watchModeSentinel } from "../src/harness.mjs";
 import { SERVICE_DARK, ServiceDarkError, openNativeSubscription, serviceDescriptorStatus, validateNativeRoomId } from "../src/wake/subscriber.mjs";
 import { createServiceRoom, runService, seatAccountId, seatLabel, serviceStatus, startService, stopService } from "../src/service-cli.mjs";
+import { spawnFromFile } from "../src/spawn-cli.mjs";
 import { FACE_ATTACHMENT_MODES, FACE_BUILT, FACE_SELECTORS, appendFaceRecord, facePolicyPath, listFaceRecords, normalizeSelectors, readFacePolicy, selectFaces, writeFacePolicy } from "../src/faces.mjs";
 
 /**
@@ -215,6 +216,11 @@ const SCHEMA = {
       args: ["start|stop|status|room create"],
       options: { "--room-id <id>": "with room create: use this 32-hex id instead of minting one" },
       does: "the seat-local native room service: start writes native/service.json and binds the endpoint; stop is bounded; status reports the descriptor without the nonce; room create mints a 32-hex id on the running service and prints it. Never writes the shared config",
+    },
+    spawn: {
+      args: [],
+      options: { "--file <path>": "the bounded spawn-request JSON; unknown keys exit 1 request-field-unknown" },
+      does: "one request file in, one pane out: parse the bounded request, ask the running seat service to open a pane after a proven hello. hermes is refused. open carries no cmd. Never writes the shared config. There is no write/send/type/keys verb",
     },
     doctor: { args: [], options: { "--offline": "skip the identity check", "--repair-tailcat": "restore the cached runtime from its hash-verified bundled capsule" }, does: "config, token presence per room, identity per room, this session and bearer and where each came from, the harness prompt-cache TTL where this seat can read one, and the reads a minute this seat spends with the arithmetic behind the number; three preflights for a resident bearer warn when a watch is armed against a five-minute TTL (cache-ttl), when a watch polls within half to one and a half times a TTL that was read (interval-near-ttl), and when no live watch in a room wakes on all (no-all-watch). Room and watch reports are derived. Tailcat integrity is verified locally; first use expands the bundled capsule into state, and --repair-tailcat explicitly restores a corrupt cache" },
     schema: { args: [], options: { "--json": "the whole surface as JSON, protocol included" }, does: "this description" },
@@ -773,6 +779,15 @@ async function main(argv) {
       throw new AgoraError(`agora service room needs create`, EXIT.usage);
     }
     throw new AgoraError(`agora service needs start, stop, status or room create`, EXIT.usage);
+  }
+
+  if (verb === "spawn") {
+    const file = values.file !== undefined ? String(values.file) : "";
+    if (!file) throw new AgoraError("agora spawn needs --file <path>", EXIT.usage);
+    const spawnId = await spawnFromFile(stateRoot, file);
+    if (json) console.log(JSON.stringify({ type: "spawn", spawnId }));
+    else console.log(spawnId);
+    return EXIT.ok;
   }
 
   if (verb === "rooms") {

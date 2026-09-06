@@ -475,6 +475,8 @@ in the config says which lane it is.
 
 **The seat service hosts native rooms.** `agora service start` writes `native/service.json` and binds the endpoint (the child is `process.execPath`, never PATH `node`). `agora service status` reports the descriptor without the nonce. `agora service stop` handshakes that endpoint before any kill: a live service whose descriptor has no pid is refused rather than guessed; a stale descriptor unlinks and kills nothing. `agora service room create` mints a 32-hex `roomId` on the running service and prints it; `--room-id <id>` uses that id instead; a duplicate is exit 1. None of these write the shared config. A native room becomes usable when a house config row names that `roomId` — a separate edit. Minting is `room create`, not the first post. `--daemon` is the supervisor child, not an operator verb.
 
+**Spawn is one request file in, one pane out.** `agora spawn --file <path>` parses the bounded JSON (`src/spawn/request.mjs`); an unknown key is exit 1 `request-field-unknown` naming each key, and nothing is minted. The running seat service starts the pane authority lazily (`bun run listen.ts` in `spawn/`) and opens one pane after a proven hello (HMAC of the challenge under `native/pane.nonce`; echoing `bootEpoch` is not proof). `open` carries no `cmd`. `hermes` is refused `spawn-unsupported`. There is no `write` / `send` / `type` / `keys` verb. The request never carries depth, policy, env, argv, or a brief path. Never writes the shared config.
+
 **A native room's faces are its policy, and a post can override it for itself.** A face is
 a copy of a native message on a transport where a reader lives (the Slack channel the
 humans read from a phone; the GitHub issue a collaborator watches). `agora room faces <room>`
@@ -776,10 +778,12 @@ an injected `fetch` so it is testable offline.
   and `bin` trees you measured. Read the armed command line. Re-arm on an explicit path
   into the clone when that is the build you mean to dogfood. Stopping the harness task
   can leave the watch child alive; match the full command line before killing one pid.
-- Spawn admission is a JSON object parsed by `src/spawn/request.mjs` (no `agora spawn`
-  verb). The allowlist is the whole of what a caller may say; an unknown key is exit 1
-  `request-field-unknown` naming each key, and nothing is minted. The shape is
-  `test/fixtures/spawn/spawn-request.json`.
+- Spawn admission is a JSON object parsed by `src/spawn/request.mjs`. `agora spawn --file`
+  is the verb: one request in, one pane out. The allowlist is the whole of what a caller
+  may say; an unknown key is exit 1 `request-field-unknown` naming each key, and nothing
+  is minted. The shape is `test/fixtures/spawn/spawn-request.json`. The service proves
+  hello with HMAC of the challenge under `native/pane.nonce` before `open`; it never
+  echoes `bootEpoch`, and `open` carries no `cmd`.
 - The pane authority (`spawn/`) requires a proven hello before any execute-capable
   frame: HMAC-SHA256 of the hello challenge under a per-authority nonce that never
   rides the wire (it lives in the seat's private state). Echoing `bootEpoch` is not

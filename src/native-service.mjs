@@ -8,6 +8,8 @@ import { AgoraError } from "./core.mjs";
 import { NativeFrameDecoder, NATIVE_PROTOCOL, encodeNativeFrame, nativeHandshakeProof, parseNativeCursor,
   validateNativeEnvelope, validateNativeId, verifyNativeHandshakeProof } from "./native-protocol.mjs";
 import { NativeRoomStore } from "./native-store.mjs";
+import { parseSpawnRequest } from "./spawn/request.mjs";
+import { ensurePaneAuthority, mintSpawnId, openPane } from "./spawn-pane.mjs";
 
 const MAX_PENDING_WRITE = 2 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -349,6 +351,8 @@ export class NativeRoomService {
     this.sockets = new Set();
     /** @type {Map<net.Socket, Map<string, number>>} */
     this.subscriptions = new Map();
+    /** @type {number | undefined} */
+    this.panePid = undefined;
     this.running = false;
   }
 
@@ -497,6 +501,21 @@ export class NativeRoomService {
       });
       return;
     }
+    if (frame.type === "spawn") {
+      const request = parseSpawnRequest(frame.request);
+      if (request.harness === "hermes") throw new AgoraError("spawn-unsupported: hermes has no interactive initial-prompt mechanism");
+      const pane = await ensurePaneAuthority(this.root);
+      if (pane.pid) this.panePid = pane.pid;
+      const spawnId = mintSpawnId();
+      await openPane(pane.sock, spawnId, this.root);
+      sendFrame(socket, {
+        protocol: NATIVE_PROTOCOL,
+        type: "spawn-result",
+        requestId: frame.requestId,
+        spawnId,
+      });
+      return;
+    }
     const roomId = requiredString(frame.roomId, "room id");
     const store = await this.openRoom(roomId);
     if (frame.type === "status") {
@@ -561,6 +580,10 @@ export class NativeRoomService {
   async stop() {
     if (!this.server) return;
     this.running = false;
+    if (this.panePid) {
+      try { process.kill(this.panePid, "SIGTERM"); } catch { /* gone */ }
+      this.panePid = undefined;
+    }
     for (const socket of this.sockets) socket.destroy();
     this.sockets.clear(); this.subscriptions.clear();
     await Promise.allSettled([...this.roomActivities]);
