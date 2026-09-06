@@ -63,6 +63,7 @@ export function serviceDescriptorPath(stateRoot) {
  * @property {string} seatLabel
  * @property {number} [pid]
  * @property {string} [startedAt]
+ * @property {import("../harness.mjs").BuildIdentity} [build]
  */
 
 /**
@@ -97,7 +98,7 @@ export async function readServiceDescriptor(stateRoot) {
  * What `doctor` may say about the service without connecting: the descriptor's public fields and
  * whether the pid it names still answers. Never the nonce.
  * @param {string} stateRoot
- * @returns {Promise<{ descriptor: string, present: boolean, pid?: number, pidAlive?: boolean, bootEpoch?: string, accountId?: string, seatLabel?: string, startedAt?: string, endpoint?: string, error?: string }>}
+ * @returns {Promise<{ descriptor: string, present: boolean, pid?: number, pidAlive?: boolean, bootEpoch?: string, accountId?: string, seatLabel?: string, startedAt?: string, endpoint?: string, build?: import("../harness.mjs").BuildIdentity, error?: string }>}
  */
 export async function serviceDescriptorStatus(stateRoot) {
   const descriptor = serviceDescriptorPath(stateRoot);
@@ -108,6 +109,7 @@ export async function serviceDescriptorStatus(stateRoot) {
       ...(typeof d.pid === "number" ? { pid: d.pid, pidAlive: pidAlive(d.pid) } : {}),
       bootEpoch: d.bootEpoch, accountId: d.accountId, seatLabel: d.seatLabel,
       ...(d.startedAt ? { startedAt: d.startedAt } : {}), endpoint: d.path,
+      ...(d.build ? { build: d.build } : {}),
     };
   } catch (e) {
     return { descriptor, present: false, error: e instanceof Error ? e.message : String(e) };

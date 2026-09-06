@@ -323,7 +323,7 @@ function readHandshakeFrame(socket, timeoutMs, label) {
 }
 
 export class NativeRoomService {
-  /** @param {{ root: string, accountId: string, seatLabel: string, now?: () => Date, nonce?: string }} options */
+  /** @param {{ root: string, accountId: string, seatLabel: string, now?: () => Date, nonce?: string, build?: import("./harness.mjs").BuildIdentity }} options */
   constructor(options) {
     validateNativeId(options.accountId, "service account id");
     if (!options.seatLabel?.trim() || options.seatLabel.length > 120) throw new AgoraError("native service needs a bounded seat label");
@@ -335,6 +335,8 @@ export class NativeRoomService {
     validateNativeId(this.nonce, "service nonce");
     this.bootEpoch = randomUUID().replaceAll("-", "");
     this.startedAt = this.now().toISOString();
+    /** @type {import("./harness.mjs").BuildIdentity | undefined} */
+    this.build = options.build;
     this.nativeDirectory = path.join(this.root, "native");
     this.descriptorPath = path.join(this.nativeDirectory, "service.json");
     /** @type {string | null} */
@@ -381,7 +383,7 @@ export class NativeRoomService {
   descriptor() {
     return { protocol: NATIVE_PROTOCOL, path: this.endpointPath,
       nonce: this.nonce, pid: process.pid, bootEpoch: this.bootEpoch, accountId: this.accountId, seatLabel: this.seatLabel,
-      startedAt: this.startedAt };
+      startedAt: this.startedAt, ...(this.build ? { build: this.build } : {}) };
   }
 
   /** @param {{ roomId?: string, epoch?: string }} [options] */

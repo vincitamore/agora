@@ -1,0 +1,108 @@
+// @ts-check
+import test from "node:test";
+import assert from "node:assert/strict";
+import { spawn, execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { declareStandDown, readStandDown, clearStandDown } from "../src/stand-down.mjs";
+import { writeArmed } from "../src/session.mjs";
+
+const run = promisify(execFile);
+const BIN = fileURLToPath(new URL("../bin/agora.mjs", import.meta.url));
+const CLEARED = ["CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_PID", "GROK_SESSION_ID", "GROK_PID", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "HERMES_SESSION_ID", "AGORA_SESSION_PID", "AGORA_SESSION", "AGORA_ACTOR", "AGORA_CONFIG", "AGORA_STATE"];
+
+/** @param {string[]} args @param {Record<string, string>} env */
+async function agora(args, env) {
+  try {
+    const clean = { ...process.env };
+    for (const name of CLEARED) delete clean[name];
+    const child = run(process.execPath, [BIN, ...args], { env: { ...clean, ...env }, windowsHide: true });
+    child.child.stdin?.end();
+    const { stdout, stderr } = await child;
+    return { code: 0, stdout, stderr };
+  } catch (e) {
+    const err = /** @type {any} */ (e);
+    return { code: err.code, stdout: err.stdout ?? "", stderr: err.stderr ?? "" };
+  }
+}
+
+test("schema lists stand-down and resume", async () => {
+  const { code, stdout } = await agora(["schema", "--json"], {});
+  assert.equal(code, 0);
+  const schema = JSON.parse(stdout);
+  assert.ok(schema.verbs["stand-down"]);
+  assert.ok(schema.verbs.resume);
+});
+
+test("stand-down writes the record, drains a live pid, and resume clears it", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "agora-stand-down-"));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const sessionDir = path.join(root, "sessions", "s1");
+  const dummy = spawn(process.execPath, ["-e", "setInterval(() => {}, 1e6)"], { stdio: "ignore", windowsHide: true });
+  t.after(() => { try { dummy.kill("SIGKILL"); } catch { /* gone */ } });
+  assert.ok(dummy.pid);
+  await writeArmed(sessionDir, "agora", {
+    room: "agora", pid: dummy.pid, interval: 15, startedAt: new Date().toISOString(),
+  });
+  const until = new Date(Date.now() + 60_000).toISOString();
+  const rec = await declareStandDown({
+    sessionDir, slug: "s1", bearer: "Grok-4.6/forge", until, because: "meter",
+    armed: [{ key: "agora", armed: { pid: dummy.pid, room: "agora" } }],
+  });
+  assert.equal(rec.because, "meter");
+  assert.equal(rec.drained.length, 1);
+  assert.equal(rec.drained[0].pid, dummy.pid);
+  const onDisk = await readStandDown(sessionDir);
+  assert.equal(onDisk?.because, "meter");
+  await new Promise((r) => setTimeout(r, 200));
+  try { process.kill(dummy.pid, 0); assert.fail("watch pid still alive"); }
+  catch { /* expected: drained */ }
+  const cleared = await clearStandDown(sessionDir);
+  assert.equal(cleared?.because, "meter");
+  assert.equal(await readStandDown(sessionDir), undefined);
+});
+
+test("stand-down refuses a past until and a missing because", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "agora-stand-down-bad-"));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const sessionDir = path.join(root, "sessions", "s1");
+  await assert.rejects(
+    () => declareStandDown({ sessionDir, slug: "s1", bearer: "x", until: "not-a-date", because: "n" }),
+    /RFC 3339/,
+  );
+  await assert.rejects(
+    () => declareStandDown({ sessionDir, slug: "s1", bearer: "x", until: new Date(Date.now() - 1000).toISOString(), because: "n" }),
+    /future/,
+  );
+  await assert.rejects(
+    () => declareStandDown({ sessionDir, slug: "s1", bearer: "x", until: new Date(Date.now() + 60_000).toISOString(), because: "  " }),
+    /--because/,
+  );
+});
+
+test("cli stand-down and resume round-trip", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "agora-stand-down-cli-"));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const cfg = path.join(root, "agora.json");
+  await writeFile(cfg, JSON.stringify({ actor: { name: "Grok-4.6/forge", kind: "agent" }, rooms: { scratch: { transport: "local", path: path.join(root, "room.ndjson") } } }));
+  const env = { AGORA_STATE: root, AGORA_CONFIG: cfg, AGORA_SESSION: "s1", AGORA_ACTOR: "Grok-4.6/forge" };
+  const until = new Date(Date.now() + 120_000).toISOString();
+  const down = await agora(["stand-down", "--until", until, "--because", "meter", "--json"], env);
+  assert.equal(down.code, 0, down.stderr);
+  const line = JSON.parse(down.stdout.trim().split(/\r?\n/).at(-1) ?? "{}");
+  assert.equal(line.type, "stand-down");
+  assert.equal(line.because, "meter");
+  const onDisk = JSON.parse(await readFile(path.join(root, "sessions", "s1", "stand-down.json"), "utf8"));
+  assert.equal(onDisk.because, "meter");
+  const doctor = await agora(["doctor", "--offline", "--json"], env);
+  assert.equal(doctor.code, 0, doctor.stderr);
+  assert.match(doctor.stdout, /"type":"stand-down"/);
+  const up = await agora(["resume", "--json"], env);
+  assert.equal(up.code, 0, up.stderr);
+  const cleared = JSON.parse(up.stdout.trim().split(/\r?\n/).at(-1) ?? "{}");
+  assert.equal(cleared.cleared, true);
+  await assert.rejects(readFile(path.join(root, "sessions", "s1", "stand-down.json")));
+});
