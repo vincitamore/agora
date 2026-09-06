@@ -68,7 +68,7 @@ import { buildLabel, buildPredates, cacheTtls, clearWatchMode, installedBuild, t
 import { SERVICE_DARK, ServiceDarkError, openNativeSubscription, serviceDescriptorStatus, validateNativeRoomId } from "../src/wake/subscriber.mjs";
 import { createServiceRoom, runService, seatAccountId, seatLabel, serviceStatus, startService, stopService } from "../src/service-cli.mjs";
 import { spawnFromFile } from "../src/spawn-cli.mjs";
-import { ackWatchStop, clearStandDown, clearWatchStop, declareStandDown, listStandDowns, standDownRequested } from "../src/stand-down.mjs";
+import { clearStandDown, clearWatchStop, completeStandDownAck, declareStandDown, listStandDowns, standDownRequested } from "../src/stand-down.mjs";
 import { FACE_ATTACHMENT_MODES, FACE_BUILT, FACE_SELECTORS, appendFaceRecord, facePolicyPath, listFaceRecords, normalizeSelectors, readFacePolicy, selectFaces, writeFacePolicy } from "../src/faces.mjs";
 
 /**
@@ -1744,10 +1744,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
           threads,
           sweep,
           guard: async () => {
-            if (await standDownRequested(sdir, key, generation)) {
-              await ackWatchStop(sdir, key, generation);
-              return "stand-down";
-            }
+            if (await standDownRequested(sdir, key, generation)) return "stand-down";
             return codexGuard ? await codexGuard() : undefined;
           },
           onBatch: async (msgs, batch) => {
@@ -1795,6 +1792,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
             });
           },
         });
+        await completeStandDownAck(result, sdir, key, generation);
       } finally {
         subscription?.close();
         await removeArmed(sdir, key); // a thrown delivery must not leave the key registered
