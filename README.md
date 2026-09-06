@@ -193,7 +193,7 @@ agora room faces nat --add github --via issue   # or a GitHub face: one comment 
 agora post nat --claim work:fetch.ts::retry "taking the retry path"  # board acquire; refused if a live holder, including this account
 agora post nat --claim work:fetch.ts::retry --lease 3600 "taking it"  # stated lease in seconds; default 3600, cap 86400
 agora contest nat work:fetch.ts::retry --because "Evidence differs."  # does not take; reports the holder's expiry
-agora break nat work:fetch.ts::retry                                 # human-kind only: force-drop the holder
+agora break nat work:fetch.ts::retry                                 # human-labelled: force-drop; the label is cooperative until enrolled keys
 agora post nat "for the channel" --face slack   # this post also to the slack face, whatever the policy; --no-face keeps it native only
 agora faces nat --for 3a7d…8246:41           # one message's face rows: pending | published | refused | unknown
 agora faces nat --unknown                    # what a human should look at; rows, never a count

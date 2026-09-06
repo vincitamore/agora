@@ -470,7 +470,7 @@ export class NativeRoomStore {
    * from the same account (every local client on a seat shares this.accountId).
    * A retried operation id is a duplicate; renew extends the lease; an expired
    * holder is no holder. Break is a human-kind event that names and drops the holder.
-   * @param {{ kind: 'board', operationId: string, payload: unknown, authorKind?: string }} input
+   * @param {{ kind: 'board', operationId: string, payload: unknown, authorKind?: string, authorName?: string, session?: string }} input
    * @param {{ accountId: string }} authenticated
    */
   async #appendBoard(input, authenticated) {
@@ -497,6 +497,8 @@ export class NativeRoomStore {
     } else if (payload.action === "release" || payload.action === "renew") {
       if (!live || live.accountId !== authenticated.accountId || live.leaseId !== payload.leaseId)
         throw new AgoraError(`native board subject ${payload.subject} is not held by this account under that lease`);
+      if (live.fence !== payload.fence)
+        throw new AgoraError(`native board subject ${payload.subject} fence is ${live.fence}, not ${payload.fence}`);
     } else if (payload.action === "break") {
       if (input.authorKind !== "human")
         throw new AgoraError("native board break is a human verb");
@@ -516,7 +518,8 @@ export class NativeRoomStore {
       payloadDigest, previousDigest: this.records.at(-1)?.recordDigest ?? null,
       board: payload, boardId, cursor,
       ...(expiresAt ? { expiresAt, leaseMs } : {}),
-      ...(payload.action === "break" && stored ? { broken: { accountId: stored.accountId, cursor: stored.cursor, expiresAt: stored.expiresAt } } : {}) };
+      ...(payload.action === "break" && stored ? { broken: { accountId: stored.accountId, cursor: stored.cursor, expiresAt: stored.expiresAt },
+        actor: { name: input.authorName ?? "", kind: input.authorKind ?? "unknown", session: input.session ?? "default" } } : {}) };
     const record = { ...unsigned, recordDigest: nativeDigest(unsigned) };
     await this.#commit(record, key);
     this.#applyBoard(record);
@@ -526,7 +529,8 @@ export class NativeRoomStore {
       ...(payload.action === "claim" ? { held: true, leaseId: input.operationId, fence: cursor, expiresAt } : {}),
       ...(payload.action === "renew" ? { held: true, leaseId: payload.leaseId, fence: cursor, expiresAt } : {}),
       ...(payload.action === "contest" ? { held: Boolean(live), holder: holderView(stored) } : {}),
-      ...(payload.action === "break" ? { broken: true, holder: holderView(stored) } : {}) };
+      ...(payload.action === "break" ? { broken: true, holder: holderView(stored),
+        actor: { name: input.authorName ?? "", kind: input.authorKind ?? "unknown", session: input.session ?? "default" } } : {}) };
   }
 
   /** @param {string} subject */

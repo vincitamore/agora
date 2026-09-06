@@ -140,7 +140,7 @@ const SCHEMA = {
     break: {
       args: ["<room>", "<subject>"],
       options: {},
-      does: "human-kind only: force-drop a native board holder and record the named holder on the log. Agents are refused. Slack and other transports have no board",
+      does: "force-drop a native board holder. The human label is cooperative (the caller supplies authorKind; the store refuses an agent label; the event records session and bearer). Slack and other transports have no board",
     },
     room: {
       args: ["faces", "<room>"],

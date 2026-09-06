@@ -116,6 +116,19 @@ test("an expired lease is acquired by a second claimant; a renewed one is not", 
   assert.equal(store.board().find((h) => h.subject === "work:renew-ttl")?.accountId, HOST);
 });
 
+test("a stale fence after renew is refused with the current fence named", async (t) => {
+  const { store } = await room(t);
+  const claim = /** @type {any} */ (await store.append({ kind: "board", operationId: OP(1), payload: { action: "claim", subject: "work:fence" } }, { accountId: HOST }));
+  const renewed = /** @type {any} */ (await store.append({ kind: "board", operationId: OP(2), payload: { action: "renew", subject: "work:fence", leaseId: claim.leaseId, fence: claim.fence } }, { accountId: HOST }));
+  assert.notEqual(renewed.fence, claim.fence);
+  await assert.rejects(
+    store.append({ kind: "board", operationId: OP(3), payload: { action: "release", subject: "work:fence", leaseId: claim.leaseId, fence: claim.fence } }, { accountId: HOST }),
+    new RegExp(`fence is ${renewed.fence}`),
+  );
+  await store.append({ kind: "board", operationId: OP(4), payload: { action: "release", subject: "work:fence", leaseId: claim.leaseId, fence: renewed.fence } }, { accountId: HOST });
+  assert.equal(store.board().length, 0);
+});
+
 test("break by an agent is refused; a human-kind break frees the subject", async (t) => {
   const { store } = await room(t);
   await store.append({ kind: "board", operationId: OP(1), payload: { action: "claim", subject: "work:break" } }, { accountId: HOST });
@@ -128,9 +141,10 @@ test("break by an agent is refused; a human-kind break frees the subject", async
     /break is a human verb/,
   );
   assert.equal(store.board()[0].accountId, HOST);
-  const broken = /** @type {any} */ (await store.append({ kind: "board", operationId: OP(4), payload: { action: "break", subject: "work:break" }, authorKind: "human" }, { accountId: PEER }));
+  const broken = /** @type {any} */ (await store.append({ kind: "board", operationId: OP(4), payload: { action: "break", subject: "work:break" }, authorKind: "human", authorName: "Alex", session: "grok-test-session" }, { accountId: PEER }));
   assert.equal(broken.broken, true);
   assert.equal(broken.holder?.accountId, HOST);
+  assert.deepEqual(broken.actor, { name: "Alex", kind: "human", session: "grok-test-session" });
   assert.equal(store.board().length, 0);
   const taken = /** @type {any} */ (await store.append({ kind: "board", operationId: OP(5), payload: { action: "claim", subject: "work:break" } }, { accountId: PEER }));
   assert.equal(taken.held, true);
