@@ -92,7 +92,7 @@ test('precision finer than the unit is REFUSED, never rounded', () => {
   assert.throws(() => percentToBasisPoints(101), ProtocolValidationError);
 });
 
-test('a sparse frame cannot masquerade as a complete observation', () => {
+test('a sparse discriminator and an incomplete record shape are both refused', () => {
   assert.throws(() => validateCompleteObservation({ ...fullObservation, kind: 'sparse' }), ProtocolValidationError);
   // Nor by omitting the discriminator entirely.
   const { kind, ...withoutKind } = fullObservation;
@@ -190,9 +190,8 @@ test('SUPERSESSION: two different pools are never ordered against each other', (
 });
 
 // --- Regressions ------------------------------------------------------------------
-// Each of these covers a defect this module actually shipped with and had repaired. They
-// are kept as named tests rather than as a note, so the guard is inherited by whoever
-// changes this file next.
+// Each of these pins a boundary that is easy to get wrong, and is kept as a named test
+// rather than as a note so the guard is inherited by whoever changes this file next.
 
 test('REGRESSION R1: a near-integer or near-zero percentage is refused, not rounded', () => {
   // An epsilon tolerance returned 2100 and 0 for these, silently rounding exactly what

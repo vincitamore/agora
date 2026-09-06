@@ -63,10 +63,10 @@ exactly `2100`. `percentToBasisPoints` converts and **refuses** anything needing
 precision rather than rounding it, because a silently rounded quota is a wrong number that
 reads as a right one and nothing downstream can detect the difference.
 
-The test is that the value two-decimal rendering round-trips exactly. That refuses the
-near-integer case (`21.000000001`) and the near-zero case (`1e-9`) as well as the obvious
-`0.005`; an epsilon tolerance passes all three and rounds them, which is why the shape was
-wrong rather than the constant.
+The test is that the value's two-decimal rendering round-trips exactly. So `21`, `0.05`,
+`0.29`, `0` and `100` convert, while `0.005`, `21.000000001` and `1e-9` are refused: each of
+those needs precision the unit cannot carry, and rounding any of them would produce a plausible
+wrong number.
 
 A window reading is either available, carrying a `value` and a required `sense`
 (`used` or `remaining`), or unavailable, carrying a reason `code` and **no value at all**.
@@ -171,9 +171,9 @@ attestor comparison, and cutting the freshness clock comparison. They check the 
 unique before cutting, so a refactor that moves either line fails loudly instead of quietly
 passing. A guard nobody has watched fail is a guard nobody has tested.
 
-It also carries four **regressions** named for the defects they cover, each of which failed
-at an earlier head: a percentage tolerance that rounded what it promised to refuse; a window
-key that dropped the period, so two windows a provider really reports collided; a reading
-with no reset time reported as fresh indefinitely; and a seat binding whose attestation a
-caller could simply assert. Three were found independently by two reviewers and one by a
-third; their falsifiers are the tests, so the probe is inherited rather than the story.
+Four further tests pin the boundaries most easily got wrong: that a percentage needing more
+precision than the unit carries is refused rather than rounded; that two windows differing
+only by period or scope stay distinct and a snapshot may carry both; that a reading with no
+reset time is `unknown` rather than `fresh`; and that a claimed `enforced` attestation on a
+seat binding parses as a claim while granting nothing, since no consumer of that field exists
+here.
