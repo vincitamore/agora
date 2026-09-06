@@ -1,0 +1,140 @@
+# Usage contract: pools, windows and complete observations
+
+`src/protocol/usage.mjs` validates three records and provides one acceptance boundary. It
+is a syntax and boundary layer: it holds no state, opens no socket, reads no credential,
+and stores nothing. **A value that passes any validator here is well-formed. It is not
+thereby authorised, fresh, or true.**
+
+This is a library. No command reports usage yet, and nothing in this module collects a
+reading from a provider.
+
+## The three records
+
+### Pool principal
+
+A pool is the thing a provider bills: a subscription, a plan, an account with a limit. It
+is identified by `principalRef`, the provider's own stable, non-secret account identifier,
+alongside the `provider` name.
+
+A pool is **not** a participant identity. The account a participant uses to speak in a room
+says nothing about which subscription pays for its work, and treating one as the other is
+how a reported account becomes an assumed one. The record therefore carries no participant
+reference at all.
+
+`identity` is `unverified` or `provider-verified`, and `unverified` is the honest default.
+Nothing in this module promotes it: only a provider-authenticated read can, and that read
+happens elsewhere.
+
+### Seat binding
+
+A binding attaches one participant registration to one pool. **Many bindings map to one
+pool**, which is the point: several sessions may draw on one subscription, they read one
+number, and adding their numbers together invents capacity that does not exist.
+
+Each binding carries its own `attestation` and its own optional `evidenceRef`, because two
+participants on one pool can be bound on different grounds — one on a human's word, one on
+a provider read. The pool record carries neither, since neither is a property of the
+principal.
+
+### Window and complete observation
+
+A **window** is one limit the provider reports: a rolling period, a billing period, a
+credit balance. Its identity is the provider's `limitId` **together with its `unit`**. One
+limit id in two units is two windows and they are never compared, ordered or summed.
+
+Values are **bounded integers in the smallest step of their unit**. There is no floating
+point in this contract. `basis-points` is hundredths of a percent, so 21.0 percent is
+exactly `2100`. `percentToBasisPoints` converts and **refuses** anything needing finer
+precision rather than rounding it, because a silently rounded quota is a wrong number that
+reads as a right one and nothing downstream can detect the difference.
+
+A window reading is either available, carrying a `value` and a required `sense`
+(`used` or `remaining`), or unavailable, carrying a reason `code` and **no value at all**.
+An absent quota is not a quota of zero. Supplying a value beside `available: false` is
+refused rather than ignored.
+
+`sense` is required and never defaulted. "Used" and "remaining" are one number with
+opposite meanings.
+
+A **complete observation** is one full snapshot of one pool at one capture time, retaining
+every window the source represented. Its `kind` is `full` and only `full`. A sparse or
+partial frame cannot be validated as an observation, because a partial frame stored as a
+complete one has absent fields that later read as unknown or as zero. An adapter may use a
+sparse update as a bounded signal to refetch; it may never arrive here.
+
+## Provenance is two independent fields
+
+`source` says **who measured**: `provider`, `harness`, `human`, `estimate`.
+
+`attestation` says **whether the receiver could bind the reading**: `cooperative` or
+`enforced`.
+
+They are independent because they answer different questions, and collapsing them is how an
+estimate comes to be treated as an allowance. A caller may assert `human` or `estimate`
+about itself freely. Neither `provider` nor `harness` grants authority by being written
+down: a parsed record is syntax, and `enforced` is a conclusion only the acceptance boundary
+may reach.
+
+## The acceptance boundary
+
+```js
+acceptCompleteObservation(observation, expected, now)
+```
+
+`expected` and `now` are **separate arguments**, supplied by the caller from its own
+authenticated state and its own clock — never from the observation, never from a message.
+They are separate so that omitting either is a visible deletion at the call site rather
+than a quietly absent field.
+
+The boundary returns the observation with `attestation: 'enforced'` only when a `provider`
+or `harness` source carries an attestor equal to `expected.attestor`. Everything else is
+returned `cooperative`. A record that *claims* `enforced` without binding is refused
+outright rather than downgraded, because a caller asserting authority it does not have is a
+different event from a caller reporting honestly.
+
+**What a consuming service must supply, stated plainly because this module obtains none of
+it:** `expected.attestor` is the identity of the service that ran or authenticated the
+adapter, resolved from that service's own registration; `expected.poolId` is the pool the
+caller believes it asked about; `now` is the receiver's clock. This module does not fetch
+them, does not verify a signature, and cannot tell whether a supplied attestor is genuine.
+It checks that the observation binds to what an authenticated caller asserted. **The
+consuming service is not written yet.**
+
+Naming an attestor is not binding to one. Running in the same process as a producer is not
+binding either. The binding is the comparison against a separately supplied expectation,
+and the tests cut exactly that comparison to prove it is load-bearing.
+
+## Freshness and supersession
+
+`windowFreshness(reading, now)` returns `fresh`, `reset-due` or `unknown` from an explicit
+clock. It is pure: it never mutates, replaces or refills the stored reading.
+
+**`reset-due` is not a claim that the window refilled.** It says the reset time has passed
+and nothing fresh has replaced this value. Entering that state needs no network. Leaving it
+needs a new full snapshot.
+
+`supersedes(candidate, accepted)` returns `supersedes`, `stale` or `unordered`. A candidate
+supersedes only with a **strictly greater sequence inside the same producer generation**.
+The sequence is assigned by the producing adapter, never by the receiver on arrival: a
+receiver numbering by arrival hands a late reading the higher number, and the stale one
+wins.
+
+A different or unseen producer generation is **`unordered`**, never newer. An identifier
+nobody has admitted is not evidence of recency or of authority, and admitting a generation
+is a separate authenticated act that this module does not perform and does not record.
+
+## What this module is not
+
+It does not store observations, approve spending caps, allocate work against a budget,
+route a decision, schedule a wait, admit a producer, or render anything. Those are separate
+concerns with their own contracts. Nothing here should be read as evidence that they exist.
+
+## Tests
+
+`node --test test/protocol-usage.test.mjs`.
+
+The suite includes two **mutation controls** that load a copy of this module with one
+load-bearing line removed and assert the guarded behaviour is genuinely gone: cutting the
+attestor comparison, and cutting the freshness clock comparison. They check the anchor is
+unique before cutting, so a refactor that moves either line fails loudly instead of quietly
+passing. A guard nobody has watched fail is a guard nobody has tested.
