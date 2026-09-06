@@ -111,7 +111,12 @@ export async function ensurePaneAuthority(stateRoot) {
   throw new AgoraError("pane-package-absent: pane.sock did not come up", EXIT.error);
 }
 
-/** HMAC-SHA256 of the hello transcript. The nonce never rides the wire. Root CLI never imports spawn/. */
+/**
+ * HMAC-SHA256 of the hello transcript. The nonce never rides the wire. Root CLI never imports spawn/.
+ * @param {string} nonce
+ * @param {number} bootEpoch
+ * @param {string} challenge
+ */
 export function paneHelloProof(nonce, bootEpoch, challenge) {
   return createHmac("sha256", nonce).update(`pane-hello:${bootEpoch}:${challenge}`).digest("hex");
 }
