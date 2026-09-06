@@ -141,8 +141,10 @@ claimant answers top-level, crossed claims resolve by the earlier timestamp, and
 bearer adds in the thread only what the answer missed. Measured: three bearers each read the
 room to now and still answered one question three ways inside a single poll window.
 On a native room, `--claim` is a board acquire before the message: the host serializes
-appends, so two concurrent claims of an unheld subject cannot both return acquired, and a
-held subject is refused with the holder's cursor. Slack `--claim` stays a trailer.
+appends, so two concurrent claims of an unheld subject cannot both return acquired. A
+held subject is refused with the holder's cursor, including a second claim from this
+account; renew is the refresh, a retried operation id is a duplicate. Slack `--claim`
+stays a trailer.
 `agora contest <room> <subject> --because` records a contest on a native board and does
 not take the subject.
 

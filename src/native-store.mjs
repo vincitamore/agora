@@ -462,7 +462,9 @@ export class NativeRoomStore {
   /**
    * Board check-and-acquire is this turn of the append queue: the holder map is
    * consulted after every earlier append has committed. Two concurrent claims
-   * of an unheld subject cannot both return acquired.
+   * of an unheld subject cannot both return acquired, including two operations
+   * from the same account (every local client on a seat shares this.accountId).
+   * A retried operation id is a duplicate; renew is the explicit refresh.
    * @param {{ kind: 'board', operationId: string, payload: unknown }} input
    * @param {{ accountId: string }} authenticated
    */
@@ -484,7 +486,7 @@ export class NativeRoomStore {
     }
     const holder = this.holders.get(payload.subject);
     if (payload.action === "claim") {
-      if (holder && holder.accountId !== authenticated.accountId)
+      if (holder)
         throw new AgoraError(`native board subject ${payload.subject} is held at ${holder.cursor} by ${holder.accountId}`);
     } else if (payload.action === "release" || payload.action === "renew") {
       if (!holder || holder.accountId !== authenticated.accountId || holder.leaseId !== payload.leaseId)
