@@ -65,6 +65,14 @@ async function waitAck(sessionDir, key, generation, ms) {
   }
 }
 
+/** Ack only after watch() returned stand-down (flush already succeeded). A thrown delivery never acks.
+ * @param {{ reason?: string } | undefined} result @param {string} sessionDir @param {string} key @param {string} generation */
+export async function completeStandDownAck(result, sessionDir, key, generation) {
+  if (result?.reason !== "stand-down") return false;
+  await ackWatchStop(sessionDir, key, generation);
+  return true;
+}
+
 /** @param {string} sessionDir @param {string} key */
 export async function clearWatchStop(sessionDir, key) {
   await rm(watchStopPath(sessionDir, key), { force: true });
@@ -143,7 +151,7 @@ export async function declareStandDown(opts) {
 
   if (keepWatches) return rec;
 
-  const ackMs = opts.ackMs ?? 2000;
+  const ackMs = opts.ackMs ?? 30_000;
   for (const item of opts.armed ?? []) {
     const row = { key: item.key, pid: item.armed.pid, room: item.armed.room };
     const generation = item.armed.generation;

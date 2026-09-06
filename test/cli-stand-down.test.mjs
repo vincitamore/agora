@@ -7,8 +7,11 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { clearStandDown, declareStandDown, readStandDown, requestWatchStop, standDownRequested, watchAckPath, watchStopPath } from "../src/stand-down.mjs";
+import { clearStandDown, completeStandDownAck, declareStandDown, readStandDown, requestWatchStop, standDownRequested, watchAckPath, watchStopPath } from "../src/stand-down.mjs";
 import { pidAlive, readArmed, writeArmed } from "../src/session.mjs";
+import { watch } from "../src/watch.mjs";
+import { localTransport } from "../src/transports/local.mjs";
+import { actor, tmp } from "./helpers.mjs";
 
 const run = promisify(execFile);
 const BIN = fileURLToPath(new URL("../bin/agora.mjs", import.meta.url));
@@ -182,4 +185,52 @@ test("a replacement generation does not inherit an old stop request, and resume 
   assert.equal(await standDownRequested(sessionDir, "agora", "gen-new"), false);
   await clearStandDown(sessionDir);
   assert.equal(await standDownRequested(sessionDir, "agora", "gen-old"), false);
+});
+
+test("ack is not written when the real watch flush throws", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const tport = localTransport({ transport: "local", path: path.join(dir, "r.ndjson") }, { actor });
+    await tport.post("held");
+    const sessionDir = path.join(dir, "s");
+    const key = "r";
+    const generation = "gen-flush-fail";
+    let polls = 0;
+    await assert.rejects(
+      () => watch(tport, {
+        stateDir: sessionDir, key, mode: "stream", interval: 0.05, coalesceSeconds: 30, maxBatch: 8,
+        guard: () => { polls += 1; return polls >= 2 ? "stand-down" : undefined; },
+        onBatch: async () => { throw new Error("delivery-failed"); },
+        sleep: async () => {},
+      }),
+      /delivery-failed/,
+    );
+    await completeStandDownAck(undefined, sessionDir, key, generation);
+    await assert.rejects(readFile(watchAckPath(sessionDir, key)));
+  } finally {
+    await cleanup();
+  }
+});
+
+test("ack is written only after watch returns stand-down", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const tport = localTransport({ transport: "local", path: path.join(dir, "r.ndjson") }, { actor });
+    const sessionDir = path.join(dir, "s");
+    const key = "r";
+    const generation = "gen-flush-ok";
+    let polls = 0;
+    const result = await watch(tport, {
+      stateDir: sessionDir, key, mode: "stream", interval: 0.05,
+      guard: () => { polls += 1; return polls >= 2 ? "stand-down" : undefined; },
+      onBatch: () => {},
+      sleep: async () => {},
+    });
+    assert.equal(result.reason, "stand-down");
+    await completeStandDownAck(result, sessionDir, key, generation);
+    const ack = JSON.parse(await readFile(watchAckPath(sessionDir, key), "utf8"));
+    assert.equal(ack.generation, generation);
+  } finally {
+    await cleanup();
+  }
 });
