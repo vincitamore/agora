@@ -26,6 +26,7 @@ import {
   writeCursor,
 } from "../src/core.mjs";
 import { TRANSPORTS, createTransport, tokenSource } from "../src/transports/index.mjs";
+import { asBoardSubject } from "../src/board-subject.mjs";
 import { watch } from "../src/watch.mjs";
 import {
   ageHours,
@@ -128,7 +129,12 @@ const SCHEMA = {
         "--face <name>": "native rooms: also publish this post to the named face of the room (slack, github), whatever the room's policy would have chosen; repeatable or comma-separated. A name that is not a face of the room, a transport with no audience, or a face that is off is a refused row on the receipt, never an exit code: the native post is the outcome",
         "--no-face": "native rooms: this post stays native only, whatever the room's policy says",
       },
-      does: "post one message signed as this session's bearer, with any trailers in a block above the signature; prints id and cursor. On a native room the receipt also carries one row per face of the room (pending | published | refused | unknown), read from the seat's face records; agora faces <room> --for <cursor> reads them again later",
+      does: "post one message signed as this session's bearer, with any trailers in a block above the signature; prints id and cursor. On a native room --claim is a board acquire before the message (refused if a holder is present); the receipt also carries one row per face of the room (pending | published | refused | unknown), read from the seat's face records; agora faces <room> --for <cursor> reads them again later",
+    },
+    contest: {
+      args: ["<room>", "<subject>"],
+      options: { "--because <text>": "why this subject is contested (required); does not take the subject" },
+      does: "contest a held subject on a native room's board; the holder stays, the contest is a typed event. Slack and other transports have no board",
     },
     room: {
       args: ["faces", "<room>"],
@@ -1372,6 +1378,11 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
           return `${c}\n\n${block}`;
         });
       }
+      if (room.transport === "native" && typeof transport.board === "function") {
+        const claims = entries.filter((t) => t.key === "claim");
+        for (const c of claims)
+          await transport.board({ action: "claim", subject: asBoardSubject(c.value) });
+      }
       /** @type {import('../src/core.mjs').PostResult | undefined} */
       let last;
       /** @type {string[]} */
@@ -1422,6 +1433,17 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         return EXIT.ok;
       }
       console.log(json ? JSON.stringify({ ...r, alias: roomAlias, room: transport.room, thread, ...(ids.length > 1 ? { ids } : {}) }) : `posted ${ids.join(" ")}${r.url ? `  ${r.url}` : ""}  cursor ${r.cursor}`);
+      return EXIT.ok;
+    }
+    case "contest": {
+      if (room.transport !== "native") throw new AgoraError(`contest belongs to a native room; "${roomAlias}" is ${room.transport}`, EXIT.usage);
+      if (typeof transport.board !== "function") throw new AgoraError(`contest needs a native board; "${roomAlias}" has none`, EXIT.usage);
+      const subject = asBoardSubject(String(rest[0] ?? ""));
+      const because = values.because;
+      if (typeof because !== "string" || !because.trim()) throw new AgoraError("contest needs --because <text>", EXIT.usage);
+      await identity();
+      const receipt = /** @type {any} */ (await transport.board({ action: "contest", subject, because: because.trim() }));
+      console.log(json ? JSON.stringify({ type: "contest", alias: roomAlias, room: transport.room, subject, ...receipt }) : `contested ${subject}  cursor ${receipt.cursor}`);
       return EXIT.ok;
     }
     case "watch": {

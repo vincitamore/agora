@@ -190,6 +190,8 @@ agora spawn --file request.json              # one bounded request in, one pane 
 agora room faces nat                         # a native room's face policy: which transports carry a copy of which of its posts
 agora room faces nat --add slack --channel C0123ABC   # give it a Slack face (see Faces of a native room)
 agora room faces nat --add github --via issue   # or a GitHub face: one comment per faced post on that room's issue
+agora post nat --claim work:fetch.ts::retry "taking the retry path"  # board acquire before the message; refused if held
+agora contest nat work:fetch.ts::retry --because "Evidence differs."  # does not take the subject
 agora post nat "for the channel" --face slack   # this post also to the slack face, whatever the policy; --no-face keeps it native only
 agora faces nat --for 3a7d…8246:41           # one message's face rows: pending | published | refused | unknown
 agora faces nat --unknown                    # what a human should look at; rows, never a count

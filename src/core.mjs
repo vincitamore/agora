@@ -82,6 +82,7 @@ const execFileAsync = promisify(execFile);
  * @property {() => Promise<{ id: string, name: string }>} whoami
  * @property {(opts?: ReadOptions) => Promise<ReadResult>} read
  * @property {(text: string, opts?: PostOptions) => Promise<PostResult>} post
+ * @property {(payload: { action: string, subject: string, because?: string, leaseId?: string, fence?: string }) => Promise<unknown>} [board] native rooms: a typed board event, not a chat message
  * @property {(cursor: string) => string | undefined} [validateCursor] why this string is not a
  *   cursor here, or nothing. `cursor --set` asks before it writes, so a shape the transport can
  *   never read is refused at the boundary instead of throwing on every later read.

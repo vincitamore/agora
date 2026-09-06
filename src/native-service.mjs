@@ -558,10 +558,12 @@ export class NativeRoomService {
     if (frame.type === "append") {
       const operation = frame.operation;
       if (!operation || typeof operation !== "object" || Array.isArray(operation)) throw new AgoraError("native append needs an operation object");
-      const receipt = await store.append(/** @type {any} */ (operation), { accountId: this.accountId });
-      const message = store.read({ since: `${store.manifest.epoch}:${parseNativeCursor(receipt.cursor).sequence - 1}`, limit: 1 })[0];
+      const receipt = /** @type {any} */ (await store.append(/** @type {any} */ (operation), { accountId: this.accountId }));
       sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "append-ack", requestId: frame.requestId, roomId, ...receipt });
-      this.#broadcast(roomId, message);
+      if (receipt.kind !== "board") {
+        const message = store.read({ since: `${store.manifest.epoch}:${parseNativeCursor(receipt.cursor).sequence - 1}`, limit: 1 })[0];
+        if (message) this.#broadcast(roomId, message);
+      }
       return;
     }
     throw new AgoraError(`native service does not support request type ${JSON.stringify(frame.type)}`);
