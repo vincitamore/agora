@@ -98,7 +98,12 @@ export async function ensurePaneAuthority(stateRoot) {
   if (!bun) throw new AgoraError("pane-bun-absent: no bun at BUN or ~/.bun/bin", EXIT.error);
   const child = spawn(bun, ["run", "listen.ts"], {
     cwd: PANE_PACKAGE,
-    env: { ...process.env, AGORA_STATE: stateRoot, AGORA_PANE_SOCK: sock },
+    env: {
+      ...process.env,
+      AGORA_STATE: stateRoot,
+      AGORA_PANE_SOCK: sock,
+      AGORA_PANE_PARENT_PID: String(process.pid),
+    },
     stdio: "ignore",
     windowsHide: true,
   });
