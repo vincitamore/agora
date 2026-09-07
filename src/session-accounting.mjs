@@ -7,7 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { hasRoomState, listRecords } from './session.mjs';
 import { decodeSessionUsage } from './usage/session-sources.mjs';
 import {
-  ledgerKey, openSessionLedger, closeSessionLedger, readLedgerSnapshot, commitLedgerEvent,
+  ledgerKey, openSessionLedger, closeSessionLedger, readLedgerSnapshot, commitLedgerEvent, deriveTotals,
 } from './usage/session-ledger.mjs';
 
 export const USAGE_SESSIONS_INTERVAL_MAX_S = 60;
@@ -19,8 +19,8 @@ export const USAGE_SESSIONS_FOR_MAX_S = 3600;
 export const DEFAULT_LEDGER_MAX_BYTES = 6_000_000;
 export const DEFAULT_LEDGER_MAX_ENTRIES = 4096;
 
-/** @typedef {{ harness: string, sessionEpoch: string, sourceId: string }} SourceBinding */
-/** @typedef {{ member: string, slug: string, liveness: string, state: 'measured' | 'unsupported', reason?: string, key?: string, usage?: unknown, status?: string }} MemberRow */
+/** @typedef {{ harness: string, sessionEpoch: string }} SourceBinding */
+/** @typedef {{ member: string, slug: string, liveness: string, state: 'measured' | 'unsupported', reason?: string, usage?: unknown, status?: string, entryCount?: number, provisionalCount?: number }} MemberRow */
 
 /**
  * @param {unknown} value
@@ -32,40 +32,47 @@ export function readBinding(value) {
     throw err;
   }
   const rec = /** @type {Record<string, unknown>} */ (value);
-  const harness = rec.harness;
-  const sessionEpoch = rec.sessionEpoch;
-  const sourceId = rec.sourceId;
-  if (typeof harness !== 'string' || !harness || typeof sessionEpoch !== 'string' || !sessionEpoch || typeof sourceId !== 'string' || !sourceId) {
-    const err = Object.assign(new Error('binding requires harness, sessionEpoch, sourceId'), { code: 'session-accounting-binding-malformed' });
+  if ('sourceId' in rec) {
+    const err = Object.assign(
+      new Error('sourceId is not a binding field; bind harness and sessionEpoch'),
+      { code: 'session-accounting-binding-source-id' },
+    );
     throw err;
   }
-  if (harness.trim() === '' || sessionEpoch.trim() === '' || sourceId.trim() === '') {
-    const err = Object.assign(new Error('binding requires harness, sessionEpoch, sourceId'), { code: 'session-accounting-binding-malformed' });
+  const harness = rec.harness;
+  const sessionEpoch = rec.sessionEpoch;
+  if (typeof harness !== 'string' || !harness || typeof sessionEpoch !== 'string' || !sessionEpoch) {
+    const err = Object.assign(new Error('binding requires harness, sessionEpoch'), { code: 'session-accounting-binding-malformed' });
+    throw err;
+  }
+  if (harness.trim() === '' || sessionEpoch.trim() === '') {
+    const err = Object.assign(new Error('binding requires harness, sessionEpoch'), { code: 'session-accounting-binding-malformed' });
     throw err;
   }
   if ('pid' in rec || 'bootEpoch' in rec) {
     const err = Object.assign(new Error('pid and bootEpoch are not a source binding'), { code: 'session-accounting-binding-inferred' });
     throw err;
   }
-  return { harness, sessionEpoch, sourceId };
+  return { harness, sessionEpoch };
 }
 
 /**
- * Match on the binding triple only. sourceUnit is not assumed: Codex snapshots
- * and Amore aggregates are not requests.
+ * Match on harness + sessionEpoch. sourceId is not a binding field.
  * @param {Record<string, { status: string, usage?: unknown, identity?: unknown }>} entries
  * @param {SourceBinding} binding
  */
-export function findBoundEntry(entries, binding) {
+export function findBoundEntries(entries, binding) {
+  /** @type {Record<string, { status: string, usage?: unknown, identity?: unknown }>} */
+  const matched = {};
   for (const [key, entry] of Object.entries(entries)) {
     const id = entry.identity;
     if (!id || typeof id !== 'object' || Array.isArray(id)) continue;
     const rec = /** @type {Record<string, unknown>} */ (id);
-    if (rec.harness === binding.harness && rec.sessionEpoch === binding.sessionEpoch && rec.sourceId === binding.sourceId) {
-      return { key, entry };
+    if (rec.harness === binding.harness && rec.sessionEpoch === binding.sessionEpoch) {
+      matched[key] = entry;
     }
   }
-  return null;
+  return matched;
 }
 
 /**
@@ -222,14 +229,26 @@ export async function inventoryMembers(records, opts) {
       });
       continue;
     }
-    const found = findBoundEntry(opts.snapshot.entries, binding);
-    if (!found || !found.entry.usage || (found.entry.status !== 'confirmed' && found.entry.status !== 'provisional')) {
-      rows.push({ member, slug: r.slug, liveness: r.state, state: 'unsupported', reason: 'usage-unavailable', key: found?.key });
+    const matched = findBoundEntries(opts.snapshot.entries, binding);
+    const entryCount = Object.keys(matched).length;
+    if (entryCount === 0) {
+      rows.push({ member, slug: r.slug, liveness: r.state, state: 'unsupported', reason: 'no-ledger-entries' });
       continue;
     }
+    if (Object.values(matched).some((entry) => entry.status === 'conflict')) {
+      rows.push({ member, slug: r.slug, liveness: r.state, state: 'unsupported', reason: 'usage-unavailable' });
+      continue;
+    }
+    const totals = deriveTotals(/** @type {any} */ (matched));
+    const provisionalCount = totals.request.provisional.length
+      + totals.aggregate.provisional.length
+      + totals.snapshot.provisional.length;
     rows.push({
-      member, slug: r.slug, liveness: r.state, state: 'measured', key: found.key, usage: found.entry.usage,
-      status: found.entry.status,
+      member, slug: r.slug, liveness: r.state, state: 'measured',
+      usage: totals,
+      status: provisionalCount > 0 ? 'provisional' : 'confirmed',
+      entryCount,
+      provisionalCount,
     });
   }
   return rows;
@@ -240,9 +259,10 @@ export function publicRow(/** @type {MemberRow} */ row) {
   /** @type {Record<string, unknown>} */
   const out = { member: row.member, slug: row.slug, liveness: row.liveness, state: row.state };
   if (row.reason) out.reason = row.reason;
-  if (row.key) out.key = row.key;
   if (row.state === 'measured' && row.usage) out.usage = row.usage;
   if (row.state === 'measured' && row.status) out.status = row.status;
+  if (row.state === 'measured' && row.entryCount !== undefined) out.entryCount = row.entryCount;
+  if (row.state === 'measured' && row.provisionalCount !== undefined) out.provisionalCount = row.provisionalCount;
   return out;
 }
 

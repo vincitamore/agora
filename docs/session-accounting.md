@@ -9,11 +9,19 @@ a source identity from a PID or boot epoch.
 
 `agora usage-sessions [--room <cursor-key>] [--ledger-root <path>] [--ledger-max-bytes <n>] [--ledger-max-entries <n>] [--bind <file>] [--ingest <file>] [--json] [--follow] [--interval <s>] [--for <s>]`
 
-`--bind` is JSON `{ "<slug>": { "harness", "sessionEpoch", "sourceId" } }`. A member
-without a binding is `unsupported unknown-binding`, never measured-as-zero. A binding
-that includes `pid` or `bootEpoch` is refused. Whitespace-only binding fields are
-malformed. Lookup matches that triple on the stored identity; `sourceUnit` is not
-assumed, so a Codex snapshot or Amore aggregate still binds.
+`--bind` is JSON `{ "<slug>": { "harness", "sessionEpoch" } }`. `sourceId` is not a
+binding field and is refused with `session-accounting-binding-source-id` rather than
+silently ignored. A member without a binding is `unsupported unknown-binding`, never
+measured-as-zero. A binding that includes `pid` or `bootEpoch` is refused.
+Whitespace-only binding fields are malformed. Lookup matches harness + sessionEpoch
+on stored identities. A measured row is `deriveTotals` over every matching entry
+(the three buckets `request`, `aggregate`, `snapshot`; request-unit components
+summed once, overlap and provisional as the ledger defines), with `entryCount`
+and `provisionalCount` on the row. Confirmed request totals live at
+`usage.request.components`; a provisional entry is listed, not added into those
+components. An aggregate-unit contribution is never folded into `request`.
+Zero matching entries is `unsupported no-ledger-entries`, never a measured zero.
+A matching conflict entry makes the member `unsupported usage-unavailable`.
 
 `--ingest` is JSONL of original usage envelopes `{ harness, sessionEpoch, envelope, context? }`.
 Each line is decoded through `decodeSessionUsage` and committed. A decode that is
@@ -50,9 +58,11 @@ Live and gone sessions come from `listRecords`. If `--room` is set, only session
 state in that cursor key are listed (`hasRoomState`). Binding is independent of
 liveness: a live unbound member is still unsupported. A ledger entry is measured when
 its status is `confirmed` or `provisional` (E1b often leaves `finality: unknown`).
+The number on a measured row is the session aggregate, not one call.
 
 ## Output
 
-JSON: `{ type: "usage-sessions", members: [...] }`. A measured row carries the ledger
-usage object and `status` (`confirmed` or `provisional`, the ledger entry's own).
-An unsupported row carries a reason and no usage field. Missing is not zero.
+JSON: `{ type: "usage-sessions", members: [...] }`. A measured row carries
+`usage` as `{ request, aggregate, snapshot }` from `deriveTotals`, plus `status`,
+`entryCount` and `provisionalCount`. An unsupported row carries a reason and no
+usage field. Missing is not zero.
