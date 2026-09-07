@@ -354,6 +354,20 @@ const GAP = "(?:\\s|/\\*[\\s\\S]*?\\*/)*";
 // comment between keyword and specifier; the no-separation spelling is legal and never written,
 // and it falls on the frontier above rather than being mis-read.
 const GAP1 = "(?:\\s|/\\*[\\s\\S]*?\\*/)+";
+
+// TOLERANT gap, for DETECTION only: line comments included. Detection and resolution are
+// deliberately different jobs. Resolution must be strict, or prose runs through comment bodies to
+// a distant quote; detection must be loose, or a legal spelling the strict pattern cannot parse
+// leaves the population in silence -- which is the one direction this scanner may never take, and
+// which narrowing the resolver alone had just introduced for two spellings that used to resolve.
+// Anything detected and not resolved is reported with its line.
+const GAPT = "(?:\\s|/\\*[\\s\\S]*?\\*/|//[^\\n]*\\n)+";
+// A resolvable specifier follows either a real separator, or nothing at all when the quote is a
+// string quote. Zero-width before a BACKTICK stays prose: that is a keyword wrapped in backticks
+// for emphasis, whose closing mark would otherwise read as an opening quote.
+const RESOLVE_GAP = `(?:${GAP1}|(?=["']))`;
+// The detector accepts both, and line comments besides.
+const DETECT_GAP = `(?:${GAPT}(?=["'\`])|(?=["']))`;
 /** A quoted specifier, capturing the quote so a template can be told from a string. */
 /** A quoted specifier, capturing the quote so a template can be told from a string.
  *
@@ -364,7 +378,7 @@ const GAP1 = "(?:\\s|/\\*[\\s\\S]*?\\*/)+";
  * since decoding it is not this scanner's job.
  */
 const SPEC = "([\"'`])((?:(?!\\1)[^\\\\]|\\\\.)*)\\1";
-const FROM_SPEC = new RegExp(`\\bfrom${GAP1}${SPEC}`, "g");
+const FROM_SPEC = new RegExp(`\\bfrom${RESOLVE_GAP}${SPEC}`, "g");
 /** A side-effect import, detected on the KEYWORD alone.
  *
  * The statement prefix this used to carry was a formatting assumption, not a grammar fact: in
@@ -372,7 +386,7 @@ const FROM_SPEC = new RegExp(`\\bfrom${GAP1}${SPEC}`, "g");
  * legal load sitting after a closing brace on the same line was missed entirely. The prefix's
  * only work was keeping prose out, and the `from` detector — which never had one — shows the
  * scanner already tolerates that, over-inclusively and in the safe direction. */
-const BARE_IMPORT = new RegExp(`\\bimport${GAP1}${SPEC}`, "g");
+const BARE_IMPORT = new RegExp(`\\bimport${RESOLVE_GAP}${SPEC}`, "g");
 const DYNAMIC_CALL = new RegExp(`\\bimport${GAP}\\(`, "g");
 const DYNAMIC_SPEC = new RegExp(`\\bimport${GAP}\\(${GAP}${SPEC}${GAP}\\)`, "g");
 const REQUIRE_CALL = new RegExp(`(?<![.\\w])require${GAP}\\(`, "g");
@@ -523,21 +537,28 @@ export function importClosure(opts) {
     // quote-bearing filename did. So a site is DETECTED by its keyword, and a detected site whose
     // specifier does not parse is reported. Every load is then resolved, computed, or unknown, and
     // none can leave the population in silence.
+    // A site is DETECTED by its keyword; a site the strict resolver does not parse is reported with
+    // its line. Comparing the two by START INDEX is the whole mechanism: it is exactly "detected and
+    // not resolved", with no second opinion about why.
+    /** @type {Set<number>} */
+    const resolvedAt = new Set();
+    for (const pattern of [FROM_SPEC, BARE_IMPORT]) {
+      pattern.lastIndex = 0;
+      for (const m of source.matchAll(pattern)) resolvedAt.add(/** @type {number} */ (m.index));
+    }
     /** @param {RegExp} keyword */
     const unparsed = (keyword) => {
       keyword.lastIndex = 0;
       for (const site of source.matchAll(keyword)) {
-        const rest = source.slice(site.index + site[0].length);
-        const parsed = new RegExp(`^${SPEC}`).exec(rest);
-        if (parsed) continue;
+        if (resolvedAt.has(/** @type {number} */ (site.index))) continue;
         const line = source.slice(0, site.index).split(/\r?\n/).length;
-        incomplete(`${key} has a load at line ${line} whose specifier this scanner cannot parse; a detected load is never dropped, so the closure cannot be shown to cover it`);
+        incomplete(`${key} has a load at line ${line} the resolver cannot parse; a detected load is never dropped, so the closure cannot be shown to cover it`);
       }
     };
-    // Only where a quote actually follows the keyword: elsewhere `from` is ordinary prose, and a
-    // computed call is counted below rather than reported here.
-    unparsed(new RegExp(`\\bfrom${GAP1}(?=["'\`])`, "g"));
-    unparsed(new RegExp(`\\bimport${GAP1}(?=["'\`])`, "g"));
+    // Both keywords, with the tolerant detector. A site here that the strict resolver did not parse
+    // is the spelling that would otherwise have vanished.
+    unparsed(new RegExp(`\\bfrom${DETECT_GAP}`, "g"));
+    unparsed(new RegExp(`\\bimport${DETECT_GAP}`, "g"));
 
     /** @param {RegExp} pattern */
     const follow = (pattern) => {

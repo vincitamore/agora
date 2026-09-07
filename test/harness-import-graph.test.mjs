@@ -295,6 +295,52 @@ test("a static import is detected wherever it stands, not only after a line brea
   }
 });
 
+test("every spelling is resolved or reported; none is dropped, and prose trips nothing", async (t) => {
+  // The full table, because narrowing the resolver to keep prose out had quietly moved two legal
+  // spellings from RESOLVED to DROPPED — the one direction this scanner may never take. Detection
+  // and resolution are separate jobs now: detect tolerantly, resolve strictly, and report anything
+  // detected that the resolver did not parse. Rare is not the test; silent is.
+  const { root } = await repo(t);
+  await mkdir(path.join(root, "src"), { recursive: true });
+  await writeFile(path.join(root, "src", "loaded.mjs"), "\n");
+
+  /** @type {Array<[string, string, "resolved" | "reported"]>} */
+  const table = [
+    ["ordinary", 'import "./src/loaded.mjs";\n', "resolved"],
+    ["no separator at all", 'import"./src/loaded.mjs";\n', "resolved"],
+    ["block comment between", 'import /* why */ "./src/loaded.mjs";\n', "resolved"],
+    ["line comment between", 'import // why\n "./src/loaded.mjs";\n', "reported"],
+  ];
+  for (const [label, source, expected] of table) {
+    await writeFile(path.join(root, "entry.mjs"), source);
+    const c = importClosure({ entry: path.join(root, "entry.mjs"), root });
+    if (expected === "resolved") {
+      assert.equal(c.complete, true, `${label}: ${c.reason}`);
+      assert.ok(c.files.has("src/loaded.mjs"), `${label}: the load was not followed`);
+    } else {
+      assert.equal(c.complete, false, `${label}: a legal load was dropped in silence`);
+      assert.match(String(c.reason), /the resolver cannot parse/, label);
+    }
+    // The invariant across the whole table, and the one that matters: never resolved-away.
+    assert.ok(c.complete === false || c.files.has("src/loaded.mjs"),
+      `${label}: complete, and the module absent — the shape this unit exists to make impossible`);
+  }
+
+  // Prose must still trip nothing. A keyword wrapped in backticks is followed immediately by its
+  // closing mark, and a zero-width gap would read that mark as an opening quote.
+  await writeFile(path.join(root, "entry.mjs"),
+    '// a static `import` at the top of the entry\n// and a "quote" on a later line\n');
+  const prose = importClosure({ entry: path.join(root, "entry.mjs"), root });
+  assert.equal(prose.complete, true, `prose tripped the scanner: ${prose.reason}`);
+
+  // And the disclosed cost of the tolerant detector, pinned as intended rather than discovered from
+  // a red: prose naming a relative file that does not exist reports unknown. Safe direction.
+  await writeFile(path.join(root, "entry.mjs"), '// see import "./src/gone.mjs"\n');
+  const named = importClosure({ entry: path.join(root, "entry.mjs"), root });
+  assert.equal(named.complete, false, "the tolerant detector's disclosed cost has changed");
+  assert.match(String(named.reason), /does not resolve in this checkout/);
+});
+
 test("a detected load whose specifier will not parse is reported, not dropped", async (t) => {
   // Totality is anchored on the KEYWORD. Widening the specifier body closes one spelling; a load
   // whose specifier this scanner still cannot parse would vanish exactly as the quote-bearing
@@ -303,7 +349,7 @@ test("a detected load whose specifier will not parse is reported, not dropped", 
   await writeFile(path.join(root, "entry.mjs"), 'import "./unclosed.mjs\n');
   const unclosed = importClosure({ entry: path.join(root, "entry.mjs"), root });
   assert.equal(unclosed.complete, false, "a load with an unparseable specifier was dropped");
-  assert.match(String(unclosed.reason), /specifier this scanner cannot parse/);
+  assert.match(String(unclosed.reason), /the resolver cannot parse/);
 
   // The twin: an ordinary parseable load at the same keyword is resolved, not reported.
   await writeFile(path.join(root, "closed.mjs"), "\n");
