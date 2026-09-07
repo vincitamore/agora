@@ -41,15 +41,20 @@ refuses before the write; the previous snapshot remains.
 - A `streaming-partial` does not overwrite a confirmed final.
 - `sourceUnit` is identity: a snapshot is never added as if it were a request.
 
-`deriveTotals` sums only `confirmed` entries. Overlap is honoured on both sides:
+`deriveTotals` sums only `confirmed` entries. Every `provisional` entry it skipped
+is listed on the bucket as `{ key, components }` so the omission is visible; a
+consumer may sum those at its own risk. Overlap is honoured on both sides:
 `contained-in-parent` excludes that record; `contains-child` excludes the named
 `peerKey` when that key is a confirmed ledger entry (`parent-declared`). `unknown`
 is not `none`: it is excluded with reason `overlap-unknown`, never added. An orphan
 child whose named parent is absent is excluded with reason `parent-absent`. A
 `contains-child` whose `peerKey` matches no confirmed entry still sums the other
 records, and records `{ key: peerKey, reason: 'peer-absent' }` so the dropped
-claim is visible. Each excluded row is `{ key, reason }`. `reasoning-billed` is
-stored on the entry and is never folded into output.
+claim is visible. Each excluded row is `{ key, reason }`. A record whose overlap
+`peerKey` equals its own ledger key is stored as `conflict` with reason
+`self-overlap`. Two confirmed parents naming the same child still sum, exclude
+the child, and record `{ reason: 'parent-contradiction', keys }` on conflicts.
+`reasoning-billed` is stored on the entry and is never folded into output.
 
 ## Ingest position
 

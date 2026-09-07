@@ -124,8 +124,9 @@ function emptyTotals() {
   return {
     components: /** @type {Record<string, {state:string, value?:number, unit?:string, reason?:string}>} */ (Object.create(null)),
     excluded: /** @type {{ key: string, reason: string }[]} */ ([]),
-    conflicts: /** @type {string[]} */ ([]),
+    conflicts: /** @type {unknown[]} */ ([]),
     gaps: /** @type {unknown[]} */ ([]),
+    provisional: /** @type {{ key: string, components: ComponentSet['components'] }[]} */ ([]),
   };
 }
 
@@ -155,7 +156,9 @@ function overlapSkipReasons(entries) {
       skip.set(key, 'overlap-unknown');
     }
   }
-  for (const entry of Object.values(entries)) {
+  /** @type {Map<string, string[]>} */
+  const claimedBy = new Map();
+  for (const [key, entry] of Object.entries(entries)) {
     if (entry.status !== 'confirmed') continue;
     if (entry.usage.overlap?.relation !== 'contains-child') continue;
     const peer = entry.usage.overlap.peerKey;
@@ -165,11 +168,14 @@ function overlapSkipReasons(entries) {
     if (typeof peer !== 'string') continue;
     if (isConfirmedEntry(entries, peer)) {
       if (!skip.has(peer)) skip.set(peer, 'parent-declared');
+      const claimants = claimedBy.get(peer) ?? [];
+      claimants.push(key);
+      claimedBy.set(peer, claimants);
     } else {
       missingPeers.push({ key: peer, bucket });
     }
   }
-  return { skip, missingPeers };
+  return { skip, missingPeers, claimedBy };
 }
 
 /** @param {Record<string, StoredEntry>} entries */
@@ -178,8 +184,15 @@ export function deriveTotals(entries) {
   const aggregate = emptyTotals();
   const snapshot = emptyTotals();
   const buckets = { request, aggregate, snapshot };
-  const { skip, missingPeers } = overlapSkipReasons(entries);
+  const { skip, missingPeers, claimedBy } = overlapSkipReasons(entries);
   for (const [key, entry] of Object.entries(entries)) {
+    if (entry.status === 'provisional') {
+      const bucket = isSummableUnit(entry.identity) ? request
+        : entry.identity.sourceUnit === 'aggregate' ? aggregate
+          : snapshot;
+      bucket.provisional.push({ key, components: entry.usage.components });
+      continue;
+    }
     if (entry.status !== 'confirmed') {
       if (entry.status === 'conflict') request.conflicts.push(key);
       if (entry.status === 'gap') request.gaps.push({ key, reason: entry.reason ?? 'gap' });
@@ -199,6 +212,11 @@ export function deriveTotals(entries) {
     const excluded = buckets[miss.bucket].excluded;
     if (!excluded.some((row) => row.key === miss.key && row.reason === 'peer-absent')) {
       excluded.push({ key: miss.key, reason: 'peer-absent' });
+    }
+  }
+  for (const claimants of claimedBy.values()) {
+    if (claimants.length > 1) {
+      request.conflicts.push({ reason: 'parent-contradiction', keys: claimants });
     }
   }
   return { request, aggregate, snapshot };
@@ -428,6 +446,9 @@ export async function commitLedgerEvent(ledger, event) {
   if (event.reset !== undefined && typeof event.reset !== 'boolean') throw new ProtocolValidationError('type', 'reset');
   const key = ledgerKey(record.identity);
   const digest = fingerprintRecord(record.identity, record.usage);
+  const peerKey = record.usage.overlap?.peerKey;
+  const selfOverlap = (record.usage.overlap?.relation === 'contains-child' || record.usage.overlap?.relation === 'contained-in-parent')
+    && typeof peerKey === 'string' && peerKey === key;
   const prior = ledger.state.entries[key] ?? null;
   const result = reconcileRevision(prior, {
     identity: record.identity,
@@ -455,9 +476,9 @@ export async function commitLedgerEvent(ledger, event) {
   if (result.action === 'gap') {
     next.gaps = [...next.gaps, { kind: 'cumulative-decrease-without-reset', key, reason: result.reason }];
     next.entries[key] = { status: 'gap', reason: result.reason, identity: record.identity, usage: record.usage, digest };
-  } else if (result.action === 'conflict') {
+  } else if (result.action === 'conflict' || selfOverlap) {
     next.entries[key] = {
-      status: 'conflict', reason: result.reason, identity: record.identity, usage: record.usage, digest,
+      status: 'conflict', reason: selfOverlap ? 'self-overlap' : result.reason, identity: record.identity, usage: record.usage, digest,
     };
   } else {
     next.entries[key] = { status: result.status, identity: record.identity, usage: record.usage, digest };
@@ -473,7 +494,11 @@ export async function commitLedgerEvent(ledger, event) {
     throw new LedgerError('ledger-write-failed');
   }
   ledger.state = next;
-  return { action: result.action, status: result.status, key, digest, duplicate: false, reason: result.reason };
+  return {
+    action: selfOverlap ? 'conflict' : result.action,
+    status: selfOverlap ? 'conflict' : result.status,
+    key, digest, duplicate: false, reason: selfOverlap ? 'self-overlap' : result.reason,
+  };
 }
 
 /** @param {Awaited<ReturnType<typeof openSessionLedger>>} ledger */
