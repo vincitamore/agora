@@ -20,10 +20,22 @@ export const CLAUDE_LIMITS = Object.freeze({ timeoutMs: 15000, maxBytes: 1_048_5
 /** @typedef {(url: string, init?: RequestInit) => Promise<FetchResponse>} FetchFn */
 /** @typedef {(path?: string) => Promise<string>} CredentialFn */
 
+/** Discard a cancel() promise: attach a rejection handler, never await. */
+function swallowCancel(/** @type {unknown} */ result) {
+  Promise.resolve(result).then(() => {}, () => {});
+}
+
 /** @param {FetchResponse} response */
 function disposeBody(response) {
   try {
-    if (response.body && typeof response.body.cancel === 'function') void response.body.cancel();
+    if (response.body && typeof response.body.cancel === 'function') swallowCancel(response.body.cancel());
+  } catch { /* already gone */ }
+}
+
+/** @param {{ cancel?: () => unknown }} reader */
+function cancelReader(reader) {
+  try {
+    if (typeof reader.cancel === 'function') swallowCancel(reader.cancel());
   } catch { /* already gone */ }
 }
 
@@ -56,17 +68,17 @@ async function readBoundedBody(response, maxBytes, signal) {
   try {
     while (true) {
       if (signal.aborted) {
-        try { void reader.cancel(); } catch { /* already gone */ }
+        cancelReader(reader);
         return { ok: false, code: abortCode(signal) };
       }
       const chunk = await Promise.race([reader.read(), abortWait()]);
       if (signal.aborted) {
-        try { void reader.cancel(); } catch { /* already gone */ }
+        cancelReader(reader);
         return { ok: false, code: abortCode(signal) };
       }
       if (chunk.done) {
         if (signal.aborted) {
-          try { void reader.cancel(); } catch { /* already gone */ }
+          cancelReader(reader);
           return { ok: false, code: abortCode(signal) };
         }
         break;
@@ -74,7 +86,7 @@ async function readBoundedBody(response, maxBytes, signal) {
       if (chunk.value) {
         total += chunk.value.byteLength;
         if (total > maxBytes) {
-          try { void reader.cancel(); } catch { /* already gone */ }
+          cancelReader(reader);
           return { ok: false, code: CODE.oversized };
         }
         chunks.push(Buffer.from(chunk.value));
@@ -82,7 +94,7 @@ async function readBoundedBody(response, maxBytes, signal) {
     }
     return { ok: true, buf: chunks.length ? Buffer.concat(chunks) : Buffer.alloc(0) };
   } catch {
-    try { void reader.cancel(); } catch { /* already gone */ }
+    cancelReader(reader);
     return { ok: false, code: signal.aborted ? abortCode(signal) : CODE.provider };
   }
 }
