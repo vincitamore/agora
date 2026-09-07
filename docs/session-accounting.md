@@ -40,7 +40,7 @@ SIGINT cell is skipped there and owed to a POSIX runner.
 are refused before config load. Defaults: 6,000,000 bytes and 4096 entries, sized
 so the entry cap is reachable after retention. Pre-retention measurement (3903
 real envelopes): 1,999,116 bytes / 2059 entries ≈ 971 bytes/entry. Retention adds
-`observedAt` plus optional `model` and `sourceReportedCost` (~200 bytes). A
+`observedAt` plus optional `model` and every `sourceReported*` (~200 bytes). A
 `ledger-limit` refusal names which bound bound, how many entries are stored, and
 the ingest offset reached. Existing `agora usage` (pool quotas) is unchanged.
 

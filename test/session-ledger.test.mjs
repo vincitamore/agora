@@ -323,6 +323,50 @@ test('entry and byte limits refuse before writing', async () => {
   }
 });
 
+test('byte cap binds before the entry cap and the report names bytes', async () => {
+  const probeRoot = await mkdtemp(path.join(tmpdir(), 'agora-ledger-'));
+  const probe = await openSessionLedger({ root: probeRoot, limits: { maxBytes: 256_000, maxEntries: 64 } });
+  let twoBytes = 0;
+  try {
+    await commitLedgerEvent(probe, {
+      record: { identity: identity({ sourceId: 'req-1' }), observedAt: OBSERVED, usage: usage() },
+      ingest: ingest(1),
+    });
+    await commitLedgerEvent(probe, {
+      record: { identity: identity({ sourceId: 'req-2' }), observedAt: OBSERVED, usage: usage() },
+      ingest: ingest(2),
+    });
+    twoBytes = Buffer.byteLength(JSON.stringify(probe.state), 'utf8');
+  } finally {
+    await closeSessionLedger(probe);
+  }
+  // Entry cap 100 would admit many more; byte cap is just above two records.
+  const root = await mkdtemp(path.join(tmpdir(), 'agora-ledger-'));
+  const ledger = await openSessionLedger({ root, limits: { maxBytes: twoBytes + 80, maxEntries: 100 } });
+  try {
+    await commitLedgerEvent(ledger, {
+      record: { identity: identity({ sourceId: 'req-1' }), observedAt: OBSERVED, usage: usage() },
+      ingest: ingest(1),
+    });
+    await commitLedgerEvent(ledger, {
+      record: { identity: identity({ sourceId: 'req-2' }), observedAt: OBSERVED, usage: usage() },
+      ingest: ingest(2),
+    });
+    await assert.rejects(
+      () => commitLedgerEvent(ledger, {
+        record: { identity: identity({ sourceId: 'req-3' }), observedAt: OBSERVED, usage: usage() },
+        ingest: ingest(3),
+      }),
+      (/** @type {unknown} */ err) => err instanceof LedgerError && err.code === 'ledger-limit'
+        && /bytes; entries=2 offset=2/.test(/** @type {Error} */ (err).message),
+    );
+    assert.equal(Object.keys(readLedgerSnapshot(ledger).entries).length, 2);
+    assert.equal(readLedgerSnapshot(ledger).ingest?.offset, 2);
+  } finally {
+    await closeSessionLedger(ledger);
+  }
+});
+
 test('a cumulative-snapshot is not added as if it were a request', async () => {
   await withLedger(async (ledger) => {
     await commitLedgerEvent(ledger, {

@@ -59,7 +59,9 @@ export function readIngestPosition(value) {
 /**
  * @typedef {{
  *   identity: SourceIdentity, usage: ComponentSet, status: EntryStatus, digest: string, reason?: string,
- *   observedAt?: string, model?: string, sourceReportedCost?: ReturnType<typeof validateSourceReportedCost>,
+ *   observedAt?: string, model?: string,
+ *   sourceReportedCost?: ReturnType<typeof validateSourceReportedCost>,
+ *   [sourceReported: string]: unknown,
  * }} StoredEntry
  * @typedef {{ identity: SourceIdentity, usage: ComponentSet, digest: string, reset?: boolean, ingest?: ReturnType<typeof readIngestPosition>, priorIngest?: ReturnType<typeof readIngestPosition> | null }} Candidate
  */
@@ -125,11 +127,15 @@ function cumulativeDecreased(prior, next) {
 
 /** @param {SessionUsageRecord} record */
 function retainedFields(record) {
-  return {
-    observedAt: record.observedAt,
-    ...(Object.hasOwn(record, 'model') ? { model: record.model } : {}),
-    ...(Object.hasOwn(record, 'sourceReportedCost') ? { sourceReportedCost: record.sourceReportedCost } : {}),
-  };
+  /** @type {Record<string, unknown>} */
+  const extra = { observedAt: record.observedAt };
+  if (Object.hasOwn(record, 'model')) extra.model = record.model;
+  // Every sourceReported* the contract admitted, not a named list. A later
+  // optional (sourceReportedReasoning) must survive without a ledger edit.
+  for (const key of Object.keys(record)) {
+    if (key.startsWith('sourceReported')) extra[key] = record[/** @type {keyof SessionUsageRecord} */ (key)];
+  }
+  return extra;
 }
 
 function emptyTotals() {
@@ -385,8 +391,9 @@ function loadState(parsed) {
       try { readString(row.model, 'model', { min: 1, max: 128, controls: true }); }
       catch { throw new LedgerError('ledger-corrupt', 'entry'); }
     }
-    if (Object.hasOwn(row, 'sourceReportedCost')) {
-      try { validateSourceReportedCost(row.sourceReportedCost); }
+    for (const key of Object.keys(row)) {
+      if (!key.startsWith('sourceReported')) continue;
+      try { validateSourceReportedCost(row[key]); }
       catch { throw new LedgerError('ledger-corrupt', 'entry'); }
     }
   }

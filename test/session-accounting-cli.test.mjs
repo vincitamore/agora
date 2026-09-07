@@ -47,6 +47,17 @@ test('usage-sessions refuses a malformed ledger-max-bytes before loadConfig', as
   assert.doesNotMatch(r.stderr, /no config/);
 });
 
+test('usage-sessions refuses a malformed ledger-max-entries before loadConfig', async () => {
+  const missingConfig = path.join(tmpdir(), `agora-no-config-${process.pid}.json`);
+  const r = await run(
+    ['usage-sessions', '--json', '--ledger-root', 'x', '--ledger-max-entries', '0'],
+    { AGORA_CONFIG: missingConfig },
+  );
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /ledger-max-entries/);
+  assert.doesNotMatch(r.stderr, /no config/);
+});
+
 test('cli json lists measured and unsupported together and never prints a transcript', async () => {
   const stateRoot = await mkdtemp(path.join(tmpdir(), 'agora-st-'));
   const sess = path.join(stateRoot, 'sessions', 'sess-a');

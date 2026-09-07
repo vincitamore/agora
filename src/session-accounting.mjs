@@ -13,8 +13,8 @@ import {
 export const USAGE_SESSIONS_INTERVAL_MAX_S = 60;
 export const USAGE_SESSIONS_FOR_MAX_S = 3600;
 // Sized so maxEntries is reachable after E2a-pre retention. Pre-retention measurement
-// (Opus :1040): 1,999,116 bytes / 2059 entries ≈ 971 bytes/entry. Retention adds
-// observedAt plus optional model and sourceReportedCost (~200 bytes). 4096 * 1200
+// on 2059 real envelopes: 1,999,116 bytes ≈ 971 bytes/entry. Retention adds
+// observedAt plus optional model and every sourceReported* (~200 bytes). 4096 * 1200
 // = 4,915,200; default maxBytes 6_000_000 leaves headroom.
 export const DEFAULT_LEDGER_MAX_BYTES = 6_000_000;
 export const DEFAULT_LEDGER_MAX_ENTRIES = 4096;
