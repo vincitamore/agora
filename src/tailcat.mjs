@@ -40,14 +40,24 @@ export function decodeTransfer(text) {
   } catch { return null; }
 }
 
-/** @param {string} dir */
-export async function privateDirectory(dir) {
+/** The ancestor walk, hoisted so every caller gets it. A reader that only replicated the check on
+ * the directory ITSELF left a state root behind a symlinked ancestor refused on the create path and
+ * accepted on the read path: the same root, two answers, and the weaker one on the path whose whole
+ * purpose is to touch nothing.
+ * @param {string} dir */
+export async function assertPrivateAncestry(dir) {
   const absolute=path.resolve(dir);
   for(let current=absolute;;current=path.dirname(current)) {
     try {const st=await lstat(current);if(st.isSymbolicLink() || !st.isDirectory())throw new AgoraError('Transfer state traverses a linked or non-directory path. Select a private AGORA_STATE and retry.');}
     catch(e){if(/** @type {NodeJS.ErrnoException} */(e).code!=='ENOENT')throw e;}
     if(path.dirname(current)===current)break;
   }
+  return absolute;
+}
+
+/** @param {string} dir */
+export async function privateDirectory(dir) {
+  await assertPrivateAncestry(dir);
   await mkdir(dir,{recursive:true,mode:0o700});
   const st=await lstat(dir);
   if(!st.isDirectory() || st.isSymbolicLink()) throw new AgoraError('Transfer state must be a private directory, not a link. Select a private AGORA_STATE and retry.');
@@ -78,6 +88,9 @@ export async function localTransferIdentity(stateRoot,deps={}) {
   let dir;
   if(deps.create===false) {
     dir=home;
+    // The SAME ancestry check the create path runs, before anything else. Replicating only the
+    // check on the directory itself made this read weaker than the write it stands in for.
+    await assertPrivateAncestry(home);
     try {
       const st=await lstat(home);
       if(!st.isDirectory() || st.isSymbolicLink()) throw new AgoraError('Transfer state must be a private directory, not a link. Select a private AGORA_STATE and retry.');

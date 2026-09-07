@@ -6,7 +6,7 @@
 // those are T3's, on two real machines. Every cell that claims a refusal asserts the NAMED reason.
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { EventEmitter } from "node:events";
@@ -98,7 +98,7 @@ function fakeChild(options = {}) {
  * straight into that route's accept hook. Every dial makes a fresh loopback pair, which is what
  * makes the reconnect cells real rather than a reuse of one socket.
  * @param {import('node:test').TestContext} t
- * @param {{ secret?: string, descriptor?: any, key?: string }} [over]
+ * @param {{ secret?: string, descriptor?: any, key?: string, deadTransport?: boolean }} [over]
  */
 async function rig(t, over = {}) {
   const hostRoot = await mkdtemp(path.join(tmpdir(), "agora-t2-host-"));
@@ -196,6 +196,9 @@ async function rig(t, over = {}) {
             stdout.end(`${over.key ?? KEY}\n`);
             return child;
           }
+          // A transport child that ends because there is nothing to reach: the shape a dial takes
+          // against a route that is no longer open.
+          if (over.deadTransport) return fakeChild({ exit: 1, stdin: new PassThrough(), signal: owner?.signal });
           const wires = dial();
           clientStreams.push(wires);
           return fakeChild({ signal: owner?.signal, ...wires });
@@ -281,6 +284,43 @@ test("a connect never mints an identity: the refusal is named and no key is left
   assert.equal(calls.length, 1, "the seat identity was observed more than once");
   assert.equal(calls[0]?.create, false, "the caller did not ask the helper to refuse rather than mint");
   await assert.rejects(stat(keyPath), /ENOENT/);
+});
+
+test("the no-create read runs the SAME ancestry check as the create path, and still creates nothing", async (t) => {
+  // privateDirectory does two things: an ancestor walk refusing any symlinked or non-directory
+  // ancestor, and the check on the directory itself. Replicating only the second made this read
+  // weaker than the write it stands in for — the same state root refused on the create path and
+  // accepted here, with the weaker answer on the path whose whole purpose is to touch nothing.
+  const base = await mkdtemp(path.join(tmpdir(), "agora-t2-ancestry-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const real = path.join(base, "real");
+  await mkdir(real, { recursive: true });
+  let linked = true;
+  try { await symlink(real, path.join(base, "link"), "junction"); }
+  catch { linked = false; }
+  if (linked) {
+    await assert.rejects(localTransferIdentity(path.join(base, "link", "state"), { create: false }),
+      /traverses a linked or non-directory path/);
+    assert.deepEqual(await readdir(real), [], "the refused read created something behind the link");
+  } else {
+    t.diagnostic("this platform would not create a link, so the ancestry check is unmeasured here");
+  }
+
+  // The ordinary twin: an un-linked root is refused for ABSENCE, by its own name, not by ancestry.
+  await assert.rejects(localTransferIdentity(path.join(base, "real", "state"), { create: false }), /enrollment-absent/);
+});
+
+test("a transport that ends before the greeting fails fast AND by name", async (t) => {
+  // Measured rather than reasoned: a child that ends because there is nothing to reach fails the
+  // dial in milliseconds, while a child that stays connected with nothing answering costs the whole
+  // handshake timeout. The fast path was already there; what it could not do was say what happened,
+  // because the route layer's cancellation message describes its own bookkeeping.
+  const { room } = await rig(t, { deadTransport: true });
+  const started = Date.now();
+  await assert.rejects(room.client(), /member-channel-dark: the transport ended before the host greeted/);
+  const elapsed = Date.now() - started;
+  // The rig's handshake budget is 4000 ms; the point of the cell is that this does not wait for it.
+  assert.ok(elapsed < 2000, `a dead transport took ${elapsed} ms to report, which is the timeout path`);
 });
 
 // ------------------------------------------------------------ the handshake, against the real host

@@ -239,9 +239,13 @@ expectation is wrong in both directions and a reader who knows the secret was ro
 the wrong name:
 
 - **Closed.** `route close` tears down the *listener* as well as the secret, so nothing on the host
-  is left to refuse a handshake. Revocation reaches the remote as an **unreachable route**: the
-  member hello goes unanswered and the dial ends `member-channel-dark` on its timeout. A named end,
-  not a proof refusal.
+  is left to refuse a handshake. Revocation reaches the remote as an **unreachable route**, ending
+  `member-channel-dark` — a named end, not a proof refusal. How long that takes depends on what the
+  transport child can tell, and both cases are real: a child that ends because there is nothing to
+  reach fails the dial in **milliseconds**, and a child that stays connected with nothing answering
+  costs the **whole handshake timeout** (30 s by default). The second is a genuine state and not a
+  hang; there is nothing at this layer that can distinguish a silent peer from a slow one, and a
+  shorter timeout would only move the boundary.
 - **Closed and reopened.** A reopen mints a new grant and a new generation, and the remote is still
   holding the old descriptor. The transcript's **binding comparison fires before the proof**, so
   this ends `member-binding-mismatch` — the grant ids disagree, and the secret is never consulted.
