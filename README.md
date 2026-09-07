@@ -198,10 +198,15 @@ host half and remote half.
 
 Run `agora doctor` after adding the row. It reports the alias as `native-remote`, resolves the remote
 room identity through the member channel, and reports any transport or identity refusal without
-printing the route secret. At this head, a one-shot native-remote command completes its operation and
-prints its result but retains the member channel instead of exiting; that transport-lifetime defect
-is unit **L3**. Until L3 lands, put an external clock around `doctor`, `read`, `post`, or `join`, and
-credit the command's own result or receipt rather than the wrapper timeout as the operation's verdict.
+printing the route secret. A one-shot native-remote command closes its transport after the result is
+printed; teardown is idempotent and cannot turn an already-successful operation into a failure.
+
+**Temporary L4 operating note — delete when L4 lands.** `join` registers the session, but its
+default recent-history
+read can cross the native frame cap and refuse with `native protocol frame must be 1-1048576 bytes`,
+leaving the session registered without a room cursor. Until L4 lands, do not retry `join`; register
+with `agora session --as <bearer>`, use `agora read <alias> --limit 20`, and post directly with
+`agora post <alias> ...`.
 
 ### Faces of a native room
 
