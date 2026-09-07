@@ -307,7 +307,7 @@ test('omp cttl split is authoritative; unsplit cacheWrite is unknown-ttl, not 5m
   assertContract(record);
   assert.deepEqual(component(record, 'cache-write-5m'), knownCount(12));
   assert.deepEqual(component(record, 'cache-write-1h'), knownCount(8));
-  assert.deepEqual(component(record, 'uncached-input'), knownCount(30));
+  assert.deepEqual(component(record, 'uncached-input'), knownCount(80));
   assert.equal(Object.hasOwn(record.usage.components, 'cache-write-unknown-ttl'), false);
   assertNoRawKeys(record);
 
@@ -320,8 +320,21 @@ test('omp cttl split is authoritative; unsplit cacheWrite is unknown-ttl, not 5m
   assertContract(unsplit.records[0]);
   assertUnknown(component(unsplit.records[0], 'cache-write-5m'), 'ttl-split-absent');
   assert.deepEqual(component(unsplit.records[0], 'cache-write-unknown-ttl'), knownCount(20));
-  assert.deepEqual(component(unsplit.records[0], 'uncached-input'), knownCount(30));
+  assert.deepEqual(component(unsplit.records[0], 'uncached-input'), knownCount(80));
   assert.equal(Object.hasOwn(unsplit.records[0], 'sourceReportedCost'), false);
+});
+
+test('omp real-shaped cache larger than input still yields uncached as reported', () => {
+  // Numbers from a measured OMP session record: totalTokens 64742 = 142+600+64000+0.
+  const result = supported(decode('omp', ompEnvelope({
+    input: 142,
+    output: 600,
+    cacheRead: 64000,
+    cacheWrite: 0,
+  })));
+  assert.deepEqual(component(result.records[0], 'uncached-input'), knownCount(142));
+  assert.deepEqual(component(result.records[0], 'cached-input'), knownCount(64000));
+  assert.deepEqual(component(result.records[0], 'output'), knownCount(600));
 });
 
 test('omp integer cost.total is sourceReportedCost in the source unit; a float is invalid, never converted', () => {
