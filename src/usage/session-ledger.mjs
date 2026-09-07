@@ -123,10 +123,44 @@ function cumulativeDecreased(prior, next) {
 function emptyTotals() {
   return {
     components: /** @type {Record<string, {state:string, value?:number, unit?:string, reason?:string}>} */ (Object.create(null)),
-    excluded: /** @type {string[]} */ ([]),
+    excluded: /** @type {{ key: string, reason: string }[]} */ ([]),
     conflicts: /** @type {string[]} */ ([]),
     gaps: /** @type {unknown[]} */ ([]),
   };
+}
+
+/** @param {Record<string, StoredEntry>} entries @param {string | undefined} key */
+function isConfirmedEntry(entries, key) {
+  return typeof key === 'string' && entries[key]?.status === 'confirmed';
+}
+
+/**
+ * Own declarations first so a two-sided pair keeps the child's reason, then
+ * contains-child names a peer by ledger key. A stub peerKey that is not an
+ * entry key excludes nobody.
+ * @param {Record<string, StoredEntry>} entries
+ * @returns {Map<string, string>}
+ */
+function overlapSkipReasons(entries) {
+  /** @type {Map<string, string>} */
+  const skip = new Map();
+  for (const [key, entry] of Object.entries(entries)) {
+    if (entry.status !== 'confirmed') continue;
+    const relation = entry.usage.overlap?.relation;
+    const peer = entry.usage.overlap?.peerKey;
+    if (relation === 'contained-in-parent') {
+      skip.set(key, isConfirmedEntry(entries, peer) ? 'contained-in-parent' : 'parent-absent');
+    } else if (relation === 'unknown') {
+      skip.set(key, 'overlap-unknown');
+    }
+  }
+  for (const entry of Object.values(entries)) {
+    if (entry.status !== 'confirmed') continue;
+    if (entry.usage.overlap?.relation !== 'contains-child') continue;
+    const peer = entry.usage.overlap.peerKey;
+    if (isConfirmedEntry(entries, peer) && peer && !skip.has(peer)) skip.set(peer, 'parent-declared');
+  }
+  return skip;
 }
 
 /** @param {Record<string, StoredEntry>} entries */
@@ -134,23 +168,19 @@ export function deriveTotals(entries) {
   const request = emptyTotals();
   const aggregate = emptyTotals();
   const snapshot = emptyTotals();
-  /** @type {Set<string>} */
-  const skip = new Set();
+  const skip = overlapSkipReasons(entries);
   for (const [key, entry] of Object.entries(entries)) {
     if (entry.status !== 'confirmed') {
       if (entry.status === 'conflict') request.conflicts.push(key);
       if (entry.status === 'gap') request.gaps.push({ key, reason: entry.reason ?? 'gap' });
       continue;
     }
-    if (entry.usage.overlap?.relation === 'contained-in-parent') skip.add(key);
-  }
-  for (const [key, entry] of Object.entries(entries)) {
-    if (entry.status !== 'confirmed') continue;
     const bucket = isSummableUnit(entry.identity) ? request
       : entry.identity.sourceUnit === 'aggregate' ? aggregate
         : snapshot;
-    if (skip.has(key)) {
-      bucket.excluded.push(key);
+    const reason = skip.get(key);
+    if (reason) {
+      bucket.excluded.push({ key, reason });
       continue;
     }
     mergeComponents(bucket.components, entry.usage.components);

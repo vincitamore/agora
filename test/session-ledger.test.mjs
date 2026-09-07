@@ -179,7 +179,7 @@ test('parent and child aggregates are not summed', () => {
   };
   const totals = deriveTotals({ [parentKey]: parent, [childKey]: child });
   assert.equal(totals.aggregate.components.output.value, 90);
-  assert.deepEqual(totals.aggregate.excluded, [childKey]);
+  assert.deepEqual(totals.aggregate.excluded, [{ key: childKey, reason: 'contained-in-parent' }]);
 });
 
 test('reasoning is never added into output totals', () => {
@@ -416,4 +416,116 @@ test('a stored entry without identity is ledger-corrupt at open, not a late prot
     () => openSessionLedger({ root, limits: { maxBytes: 256_000, maxEntries: 64 } }),
     (/** @type {unknown} */ err) => err instanceof LedgerError && err.code === 'ledger-corrupt',
   );
+});
+
+/**
+ * @param {ReturnType<typeof identity>} id
+ * @param {Record<string, unknown>} [counters]
+ * @param {{ relation: 'none'|'unknown'|'contained-in-parent'|'contains-child', peerKey?: string }} [overlap]
+ */
+function confirmedEntry(id, counters = {}, overlap = undefined) {
+  return {
+    status: /** @type {const} */ ('confirmed'),
+    identity: id,
+    usage: usage(counters, overlap),
+    digest: 'd',
+  };
+}
+
+test('contains-child excludes the named ledger key and a stub peerKey excludes nobody', () => {
+  const parentId = identity({ sourceId: 'p' });
+  const childId = identity({ sourceId: 'c' });
+  const parentKey = ledgerKey(parentId);
+  const childKey = ledgerKey(childId);
+  const named = deriveTotals({
+    [parentKey]: confirmedEntry(parentId, { output: known(100) }, { relation: 'contains-child', peerKey: childKey }),
+    [childKey]: confirmedEntry(childId, { output: known(30) }),
+  });
+  assert.equal(named.request.components.output.value, 100);
+  assert.deepEqual(named.request.excluded, [{ key: childKey, reason: 'parent-declared' }]);
+
+  const stub = deriveTotals({
+    [parentKey]: confirmedEntry(parentId, { output: known(100) }, { relation: 'contains-child', peerKey: 'child-key' }),
+    [childKey]: confirmedEntry(childId, { output: known(30) }),
+  });
+  assert.equal(stub.request.components.output.value, 130);
+  assert.deepEqual(stub.request.excluded, []);
+});
+
+test('unknown overlap is excluded with a reason; absent overlap still sums', () => {
+  const knownId = identity({ sourceId: 'k' });
+  const unkId = identity({ sourceId: 'u' });
+  const knownKey = ledgerKey(knownId);
+  const unkKey = ledgerKey(unkId);
+  const unknownCase = deriveTotals({
+    [knownKey]: confirmedEntry(knownId, { output: known(100) }),
+    [unkKey]: confirmedEntry(unkId, { output: known(7) }, { relation: 'unknown' }),
+  });
+  assert.equal(unknownCase.request.components.output.value, 100);
+  assert.deepEqual(unknownCase.request.excluded, [{ key: unkKey, reason: 'overlap-unknown' }]);
+
+  const summed = deriveTotals({
+    [knownKey]: confirmedEntry(knownId, { output: known(100) }),
+    [unkKey]: confirmedEntry(unkId, { output: known(7) }),
+  });
+  assert.equal(summed.request.components.output.value, 107);
+  assert.deepEqual(summed.request.excluded, []);
+});
+
+test('orphan contained-in-parent is parent-absent; a present parent keeps the ordinary exclusion', () => {
+  const childId = identity({ sourceId: 'orphan' });
+  const childKey = ledgerKey(childId);
+  const orphan = deriveTotals({
+    [childKey]: confirmedEntry(childId, { output: known(30) }, { relation: 'contained-in-parent', peerKey: 'absent-parent' }),
+  });
+  assert.equal(Object.hasOwn(orphan.request.components, 'output'), false);
+  assert.deepEqual(orphan.request.excluded, [{ key: childKey, reason: 'parent-absent' }]);
+});
+
+test('commit path: named child excluded, unknown not summed, two-sided twin still 100', async () => {
+  await withLedger(async (ledger) => {
+    const parentId = identity({ sourceId: 'p' });
+    const childId = identity({ sourceId: 'c' });
+    const unkId = identity({ sourceId: 'u' });
+    const childKey = ledgerKey(childId);
+    const unkKey = ledgerKey(unkId);
+    await commitLedgerEvent(ledger, {
+      record: { identity: parentId, observedAt: OBSERVED, usage: usage({ output: known(100) }, { relation: 'contains-child', peerKey: childKey }) },
+      ingest: ingest(1),
+    });
+    await commitLedgerEvent(ledger, {
+      record: { identity: childId, observedAt: OBSERVED, usage: usage({ output: known(30) }) },
+      ingest: ingest(2),
+    });
+    await commitLedgerEvent(ledger, {
+      record: { identity: unkId, observedAt: OBSERVED, usage: usage({ output: known(7) }, { relation: 'unknown' }) },
+      ingest: ingest(3),
+    });
+    const totals = readLedgerSnapshot(ledger).totals.request;
+    assert.equal(totals.components.output.value, 100);
+    assert.deepEqual(totals.excluded, [
+      { key: childKey, reason: 'parent-declared' },
+      { key: unkKey, reason: 'overlap-unknown' },
+    ]);
+    assert.deepEqual(totals.conflicts, []);
+    assert.deepEqual(totals.gaps, []);
+  });
+
+  await withLedger(async (ledger) => {
+    const parentId = identity({ sourceId: 'p' });
+    const childId = identity({ sourceId: 'c' });
+    const parentKey = ledgerKey(parentId);
+    const childKey = ledgerKey(childId);
+    await commitLedgerEvent(ledger, {
+      record: { identity: parentId, observedAt: OBSERVED, usage: usage({ output: known(100) }, { relation: 'contains-child', peerKey: childKey }) },
+      ingest: ingest(1),
+    });
+    await commitLedgerEvent(ledger, {
+      record: { identity: childId, observedAt: OBSERVED, usage: usage({ output: known(30) }, { relation: 'contained-in-parent', peerKey: parentKey }) },
+      ingest: ingest(2),
+    });
+    const totals = readLedgerSnapshot(ledger).totals.request;
+    assert.equal(totals.components.output.value, 100);
+    assert.deepEqual(totals.excluded, [{ key: childKey, reason: 'contained-in-parent' }]);
+  });
 });
