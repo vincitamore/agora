@@ -576,3 +576,48 @@ test("close retains the handle while cleanup is pending, and reports it as closi
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(service.listRoutes().length, 0, "the entry outlived its resource closing");
 });
+
+// ------------------------------------------- the runtime a real Tailcat child is resolved with
+
+test("openRoute hands Tailcat a runtime the REAL resolver accepts", async (t) => {
+  // The gap this closes: every other route cell injects `spawn`, so the real binary resolver is
+  // never reached and the suite cannot see the arguments a real child would be resolved WITH.
+  // Faking the child is still right here (CI holds no relay) — so the fake captures the runtime,
+  // and the real resolver is then driven with it. No Tailcat process is started.
+  const { service } = await memberFixture(t);
+  /** @type {any} */ let handed;
+  await service.openRoute({
+    roomId: ROOM, publicNodeKey: KEY,
+    routeOptions: {
+      listen: async (/** @type {(socket: any) => void} */ _hook) => ({ port: 4242, close: async () => {} }),
+      spawn: async (/** @type {string[]} */ args, /** @type {any} */ runtime, /** @type {any} */ owner) => {
+        handed ??= runtime;
+        return fakeChild({ exit: args[0] === "parse" ? 0 : null, signal: owner?.signal });
+      },
+      address: async () => `tc${"a".repeat(48)}`,
+    },
+  });
+
+  assert.ok(handed, "openRoute never reached the spawn boundary");
+  assert.equal(typeof handed.stateRoot, "string", "the runtime carried no stateRoot");
+  assert.equal(handed.stateRoot, service.root, "the runtime's stateRoot is not this service's root");
+
+  const { resolveTailcatBinary } = await import("../src/tailcat-runtime.mjs");
+
+  // The discriminating half: the REAL resolver must accept what openRoute actually builds.
+  const resolved = await resolveTailcatBinary(handed);
+  assert.ok(resolved?.path, "the real resolver returned no binary for openRoute's runtime");
+  assert.ok(resolved.path.startsWith(service.root),
+    "the resolved binary is cached outside the service's own state root");
+
+  // And the cell is self-calibrating: the same real resolver must REJECT the pre-fix runtime,
+  // or this proves nothing about the fix. An empty runtime is what openRoute used to pass.
+  // The cast is deliberate and is itself the finding: tsc KNOWS stateRoot is required here, and
+  // the defect survived only because openRoute's `request.runtime` is untyped, so the empty object
+  // reached this call as `any`. Typing that parameter would make this class a build error.
+  await assert.rejects(resolveTailcatBinary(/** @type {any} */ ({})), (/** @type {any} */ e) => {
+    assert.match(String(e.message), /paths\[0\]|must be of type string/,
+      "the pre-fix runtime failed for some reason other than the missing stateRoot");
+    return true;
+  }, "an empty runtime resolved, so this cell cannot detect the defect it was written for");
+});

@@ -688,7 +688,14 @@ export class NativeRoomService {
     if (!this.routeOwner || this.routeOwner.signal.aborted) this.routeOwner = new AbortController();
     const owner = { serviceId: this.accountId, serviceBootId: this.bootEpoch, signal: this.routeOwner.signal };
     const resource = startMemberRoute({ binding, allowedNodeKey: publicNodeKey }, {
-      owner, runtime: request.runtime ?? {},
+      owner,
+      // The service's state root is REQUIRED, not decorative: resolveTailcatBinary gives every
+      // other option a default (platform, arch, vendorDir, override, overrideSha256) and reads
+      // `stateRoot` bare into cacheDirectory, whose first line is path.resolve(root). An empty
+      // runtime therefore throws a TypeError during Tailcat runtime startup, before any key is
+      // used and before any child exists -- which is what a route open reports as a startup
+      // refusal. The spread order lets a test override it and cannot drop it by accident.
+      runtime: { stateRoot: this.root, ...(request.runtime ?? {}) },
       acceptChannel: (accepted, stream, signal) => this.#acceptMember({ binding: accepted, secret }, stream, signal),
       ...(request.routeOptions ?? {}),
     });
