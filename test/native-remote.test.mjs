@@ -1007,3 +1007,94 @@ test("the typed hop catches an OMITTED root and not an undefined one, which is p
     (/** @type {any} */ e) => e instanceof AgoraError && /runtime lock is missing or invalid/.test(e.message),
     "the misleading-refusal path has changed; the comment above is now wrong");
 });
+
+// --------------------------------------- L7: a swallowed teardown must reach somebody
+
+test("a swallowed close failure is RECORDED, the verb is unaffected, and absence means clean", async (t) => {
+  const { room } = await rig(t);
+  const actor = /** @type {any} */ ({ name: "Opus/t2", kind: "agent" });
+
+  // The ordinary path first, because the value of the field is that it stays ABSENT: a counter
+  // reading 0 cannot distinguish "nothing failed" from "something failed and said nothing", which
+  // is the defect one layer up that this unit exists to not repeat.
+  const clean = nativeRemoteTransport(/** @type {any} */ ({ transport: "native-remote" }), { actor, remote: room });
+  await clean.whoami();
+  await clean.close?.();
+  assert.equal(clean.closeFailed, undefined, "a clean close reported a failure");
+
+  // Driven to 1, which is the requirement Opus/e2c put on the record before this head existed.
+  const angry = nativeRemoteTransport(/** @type {any} */ ({ transport: "native-remote" }), {
+    actor,
+    remote: /** @type {any} */ ({ binding: room.binding, close: async () => { throw new Error("teardown exploded"); } }),
+  });
+  await angry.close?.();
+  assert.match(String(angry.closeFailed), /teardown exploded/,
+    "a swallowed teardown failure reached nobody, which is the leak with no witness");
+
+  // Still never throws: this runs after the answer is printed, and failing the verb it followed
+  // would be worse than the leak it reports.
+  await assert.doesNotReject(() => /** @type {any} */ (angry).close());
+});
+
+test("cleanup-pending is named as ITSELF, not counted as a failure", async (t) => {
+  const { room } = await rig(t);
+  const actor = /** @type {any} */ ({ name: "Opus/t2", kind: "agent" });
+  const pending = Object.assign(new Error("Native route cleanup is pending; retain closed and the resource handle."),
+    { code: "AGORA_CLEANUP_PENDING", cleanupPending: true });
+  const t2 = nativeRemoteTransport(/** @type {any} */ ({ transport: "native-remote" }), {
+    actor, remote: /** @type {any} */ ({ binding: room.binding, close: async () => { throw pending; } }),
+  });
+  await t2.close?.();
+  // A documented state with its own 10 s budget. Reported, and reported as what it is: a surface
+  // that calls the expected case a failure teaches operators to ignore the surface, which is how
+  // the unexpected one gets missed.
+  assert.match(String(t2.closeFailed), /cleanup is still pending/);
+});
+
+test("rewording a refusal does not make it retryable: the CODE decides, not the prose", async () => {
+  // The defect this replaces: the terminal check ran a regex over the message, so the wording was
+  // load-bearing. A reworded refusal became retryable, got re-dialled five times — five Tailcat
+  // children told the same thing — and was then reported as darkness, replacing a precise cause
+  // with a false one.
+  for (const [label, error] of [
+    // The message deliberately does NOT contain the code. An earlier draft of this cell used
+    // "member-hello-refused: reworded detail", which a prose-keyed check matches just as well —
+    // a case that cannot discriminate, caught by mutation rather than by reading it.
+    ["a local refusal whose message no longer carries its name", Object.assign(new Error("the host greeted this seat with something unexpected"), { code: "member-hello-refused" })],
+    ["a host-answered refusal with no code, matched by its prefix", new AgoraError("member-request-refused: the host declined this request")],
+  ]) {
+    let dials = 0;
+    const room = scriptedRoom();
+    const sub = await openRemoteSubscription({ room, since: nativeCursor(EPOCH, 0), backoffMs: 5, maxReconnects: 5 });
+    room.client = async () => { dials += 1; throw error; };
+    room.socket.emit("close");
+    const deadline = Date.now() + 3000;
+    while (dials < 1 && Date.now() < deadline) await sub.wait(20);
+    await sub.wait(120);
+    assert.equal(dials, 1, `${label}: retried ${dials} time(s); a terminal answer must be re-dialled zero more times`);
+    await assert.rejects(sub.read(), /something unexpected|member-request-refused/, `${label}: the precise cause was replaced`);
+    sub.close();
+  }
+});
+
+test("a FAILING close still lets the process exit, which is the risk this surface introduces", async () => {
+  // Adding a report to a teardown path is exactly where an unsettled await gets introduced, and
+  // the failure would look like L3's original defect returning: every row printed, nothing exits.
+  // Asserts EXIT, not output, in a child whose only handle is the one the close releases.
+  const dir = await mkdtemp(path.join(tmpdir(), "agora-l7-"));
+  const probe = path.join(dir, "probe.mjs");
+  await writeFile(probe, `
+    import { nativeRemoteTransport } from ${JSON.stringify(new URL("../src/transports/native-remote.mjs", import.meta.url).href)};
+    const handle = setInterval(() => {}, 1000);
+    const transport = nativeRemoteTransport({ transport: "native-remote" }, {
+      actor: { name: "Opus/t2", kind: "agent" },
+      remote: { binding: { roomId: "r" }, close: async () => { clearInterval(handle); throw new Error("teardown exploded"); } },
+    });
+    await transport.close();
+    console.log(JSON.stringify({ recorded: transport.closeFailed }));
+  `);
+  const { stdout } = await promisify(execFile)(process.execPath, [probe], { timeout: 10000 });
+  assert.match(JSON.parse(stdout.trim()).recorded, /teardown exploded/,
+    "the child exited but recorded nothing, so the surface is not carrying the failure");
+  await rm(dir, { recursive: true, force: true });
+});
