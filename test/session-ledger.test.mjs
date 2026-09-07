@@ -1,0 +1,339 @@
+// @ts-check
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { validateNativeId } from '../src/protocol/common.mjs';
+import { ProtocolUsageError } from '../src/protocol/session-usage.mjs';
+import { validateSessionUsageRecord } from '../src/protocol/session-usage.mjs';
+import {
+  LedgerError, closeSessionLedger, commitLedgerEvent, deriveTotals, fingerprintRecord,
+  ledgerKey, openSessionLedger, readLedgerSnapshot, reconcileRevision,
+} from '../src/usage/session-ledger.mjs';
+
+const EPOCH = 'session-epoch-synthetic-01';
+const OBSERVED = '2026-09-07T09:00:00.000Z';
+/** @param {number} value */
+const known = (value) => ({ state: /** @type {const} */ ('known'), value, unit: /** @type {const} */ ('tokens') });
+/** @param {string} [reason] */
+const unknown = (reason = 'missing') => ({ state: /** @type {const} */ ('unknown'), reason });
+/** @param {string} [reason] */
+const na = (reason = 'source-excludes') => ({ state: /** @type {const} */ ('not-applicable'), reason });
+
+/** @param {{ sourceId: string } & Record<string, unknown>} extra */
+function identity(extra) {
+  return {
+    harness: 'codex',
+    sessionEpoch: EPOCH,
+    sourceUnit: /** @type {const} */ ('request'),
+    finality: /** @type {const} */ ('final'),
+    ...extra,
+  };
+}
+
+/**
+ * @param {Record<string, unknown>} [counters]
+ * @param {{ relation: 'none'|'unknown'|'contained-in-parent'|'contains-child', peerKey?: string }} [overlap]
+ */
+function usage(counters = {}, overlap = undefined) {
+  return {
+    components: {
+      'uncached-input': known(10),
+      'cached-input': known(0),
+      'cache-write-5m': known(0),
+      'cache-write-1h': unknown('no-1h-contract'),
+      'cache-write-unknown-ttl': unknown('no-unsplit-write'),
+      output: known(100),
+      'reasoning-billed': unknown('inclusion-unknown'),
+      tool: na('no-tool-charges'),
+      ...counters,
+    },
+    coverage: /** @type {const} */ ('complete'),
+    ...(overlap ? { overlap } : {}),
+  };
+}
+
+/** @param {number} offset @param {number} [generation] */
+function ingest(offset, generation = 1) {
+  return {
+    locator: 'synthetic-source-1',
+    sourceGeneration: generation,
+    offset,
+    fingerprint: `fp:${generation}:${offset}`,
+  };
+}
+
+/**
+ * @param {(ledger: Awaited<ReturnType<typeof openSessionLedger>>, root: string) => Promise<void>} fn
+ * @param {{ writeAtomic?: (file:string, text:string)=>Promise<void> }} [io]
+ */
+async function withLedger(fn, io) {
+  const root = await mkdtemp(path.join(tmpdir(), 'agora-ledger-'));
+  const ledger = await openSessionLedger({ root, limits: { maxBytes: 256_000, maxEntries: 64 }, io });
+  try { await fn(ledger, root); }
+  finally { if (!ledger.closed) await closeSessionLedger(ledger); }
+}
+
+test('ledgerKey is injective across colon-bearing identity fields and cannot pass as a native id', () => {
+  const a = ledgerKey(identity({ harness: 'a:b', sessionEpoch: 'c', sourceId: 'd' }));
+  const b = ledgerKey(identity({ harness: 'a', sessionEpoch: 'b:c', sourceId: 'd' }));
+  assert.notEqual(a, b);
+  assert.equal(a, 'src:3:a:b1:c1:d');
+  assert.equal(b, 'src:1:a3:b:c1:d');
+  assert.throws(() => validateNativeId(a), /protocol/);
+  const odd = ledgerKey(identity({ sourceId: 'turn/abc:not-a-native-id' }));
+  assert.ok(odd.includes('turn/abc:not-a-native-id'));
+});
+
+test('validateSessionUsageRecord refuses revision finality without an ordinal', () => {
+  assert.throws(
+    () => validateSessionUsageRecord({ identity: identity({ sourceId: 'r1', finality: 'revision' }), observedAt: OBSERVED, usage: usage() }),
+    ProtocolUsageError,
+  );
+});
+
+test('known zero, unknown, and not-applicable stay three states', () => {
+  const set = usage({ 'cache-write-5m': known(0), 'cache-write-1h': unknown('no-1h-contract'), tool: na('no-tool') });
+  assert.equal(set.components['cache-write-5m'].state, 'known');
+  assert.equal(set.components['cache-write-5m'].value, 0);
+  assert.equal(set.components['cache-write-1h'].state, 'unknown');
+  assert.equal(Object.hasOwn(set.components['cache-write-1h'], 'value'), false);
+  assert.equal(set.components.tool.state, 'not-applicable');
+});
+
+test('lowering-output revision 100 to 80 replaces under proven order', () => {
+  const firstId = identity({ sourceId: 'req-1', finality: 'final', revision: 1 });
+  const firstUsage = usage({ output: known(100) });
+  const accepted = { identity: firstId, usage: firstUsage, status: /** @type {const} */ ('confirmed'), digest: fingerprintRecord(firstId, firstUsage) };
+  const secondId = identity({ sourceId: 'req-1', finality: 'revision', revision: 2 });
+  const secondUsage = usage({ output: known(80) });
+  const result = reconcileRevision(accepted, { identity: secondId, usage: secondUsage, digest: fingerprintRecord(secondId, secondUsage) });
+  assert.equal(result.action, 'replace');
+  assert.equal(result.status, 'confirmed');
+});
+
+test('same-output later cache correction replaces cache components under proven order', () => {
+  const firstId = identity({ sourceId: 'req-1', finality: 'final', revision: 1 });
+  const firstUsage = usage({ output: known(100), 'cache-write-5m': known(0) });
+  const accepted = { identity: firstId, usage: firstUsage, status: /** @type {const} */ ('confirmed'), digest: fingerprintRecord(firstId, firstUsage) };
+  const secondId = identity({ sourceId: 'req-1', finality: 'revision', revision: 2 });
+  const secondUsage = usage({ output: known(100), 'cache-write-5m': known(40) });
+  const result = reconcileRevision(accepted, { identity: secondId, usage: secondUsage, digest: fingerprintRecord(secondId, secondUsage) });
+  assert.equal(result.action, 'replace');
+});
+
+test('ambiguous ordering is a conflict, not max-output and not last-arrival', () => {
+  const firstId = identity({ sourceId: 'req-1', finality: 'unknown' });
+  const firstUsage = usage({ output: known(100) });
+  const accepted = { identity: firstId, usage: firstUsage, status: /** @type {const} */ ('provisional'), digest: fingerprintRecord(firstId, firstUsage) };
+  const secondId = identity({ sourceId: 'req-1', finality: 'unknown' });
+  const secondUsage = usage({ output: known(80) });
+  const result = reconcileRevision(accepted, { identity: secondId, usage: secondUsage, digest: fingerprintRecord(secondId, secondUsage) });
+  assert.equal(result.action, 'conflict');
+  assert.equal(result.reason, 'ordering-unproven');
+  const orderedId = identity({ sourceId: 'req-1', finality: 'revision', revision: 2 });
+  const ordered = reconcileRevision(
+    { ...accepted, identity: identity({ sourceId: 'req-1', finality: 'final', revision: 1 }) },
+    { identity: orderedId, usage: secondUsage, digest: fingerprintRecord(orderedId, secondUsage) },
+  );
+  assert.equal(ordered.action, 'replace');
+});
+
+test('identical replay is duplicate, not a second charge', () => {
+  const id = identity({ sourceId: 'req-1' });
+  const u = usage();
+  const digest = fingerprintRecord(id, u);
+  const accepted = { identity: id, usage: u, status: /** @type {const} */ ('confirmed'), digest };
+  const result = reconcileRevision(accepted, { identity: id, usage: u, digest });
+  assert.equal(result.action, 'duplicate');
+});
+
+test('cumulative decrease without reset is a gap, not a negative charge', () => {
+  const snap = () => identity({ sourceId: 'cum-1', sourceUnit: 'cumulative-snapshot', finality: 'final' });
+  const firstUsage = usage({ output: known(100) });
+  const accepted = { identity: snap(), usage: firstUsage, status: /** @type {const} */ ('confirmed'), digest: fingerprintRecord(snap(), firstUsage) };
+  const secondUsage = usage({ output: known(40) });
+  const gap = reconcileRevision(accepted, { identity: snap(), usage: secondUsage, digest: fingerprintRecord(snap(), secondUsage) });
+  assert.equal(gap.action, 'gap');
+  const reset = reconcileRevision(accepted, { identity: snap(), usage: secondUsage, digest: fingerprintRecord(snap(), secondUsage), reset: true });
+  assert.equal(reset.action, 'reset');
+});
+
+test('parent and child aggregates are not summed', () => {
+  const parentId = identity({ sourceId: 'prompt-1', sourceUnit: 'aggregate' });
+  const childId = identity({ sourceId: 'prompt-1/model-a', sourceUnit: 'aggregate' });
+  const parentKey = ledgerKey(parentId);
+  const childKey = ledgerKey(childId);
+  const parent = {
+    status: /** @type {const} */ ('confirmed'),
+    identity: parentId,
+    usage: usage({ output: known(90) }, { relation: 'contains-child', peerKey: childKey }),
+    digest: 'p',
+  };
+  const child = {
+    status: /** @type {const} */ ('confirmed'),
+    identity: childId,
+    usage: usage({ output: known(90) }, { relation: 'contained-in-parent', peerKey: parentKey }),
+    digest: 'c',
+  };
+  const totals = deriveTotals({ [parentKey]: parent, [childKey]: child });
+  assert.equal(totals.aggregate.components.output.value, 90);
+  assert.deepEqual(totals.aggregate.excluded, [childKey]);
+});
+
+test('reasoning is never added into output totals', () => {
+  const id = identity({ sourceId: 'req-1' });
+  const key = ledgerKey(id);
+  const entry = {
+    status: /** @type {const} */ ('confirmed'),
+    identity: id,
+    usage: usage({ output: known(50), 'reasoning-billed': known(20) }),
+    digest: 'd',
+  };
+  const totals = deriveTotals({ [key]: entry });
+  assert.equal(totals.request.components.output.value, 50);
+  assert.equal(Object.hasOwn(totals.request.components, 'reasoning-billed'), false);
+});
+
+test('repeated commit, restart, and rotation keep one contribution', async () => {
+  await withLedger(async (ledger, root) => {
+    const rec = { identity: identity({ sourceId: 'req-1' }), observedAt: OBSERVED, usage: usage() };
+    const first = await commitLedgerEvent(ledger, { record: rec, ingest: ingest(1) });
+    assert.equal(first.action, 'accept');
+    const again = await commitLedgerEvent(ledger, { record: rec, ingest: ingest(1) });
+    assert.equal(again.duplicate, true);
+    await closeSessionLedger(ledger);
+    const reopened = await openSessionLedger({ root, limits: { maxBytes: 256_000, maxEntries: 64 } });
+    try {
+      const snap = readLedgerSnapshot(reopened);
+      assert.equal(Object.keys(snap.entries).length, 1);
+      assert.equal(snap.totals.request.components.output.value, 100);
+      const rotated = await commitLedgerEvent(reopened, { record: rec, ingest: ingest(0, 2) });
+      assert.equal(rotated.duplicate, true);
+    } finally {
+      await closeSessionLedger(reopened);
+    }
+  });
+});
+
+test('lowering revision persists as 80 after restart', async () => {
+  await withLedger(async (ledger) => {
+    await commitLedgerEvent(ledger, {
+      record: { identity: identity({ sourceId: 'req-1', finality: 'final', revision: 1 }), observedAt: OBSERVED, usage: usage({ output: known(100) }) },
+      ingest: ingest(1),
+    });
+    const replaced = await commitLedgerEvent(ledger, {
+      record: { identity: identity({ sourceId: 'req-1', finality: 'revision', revision: 2 }), observedAt: OBSERVED, usage: usage({ output: known(80) }) },
+      ingest: ingest(2),
+    });
+    assert.equal(replaced.action, 'replace');
+    assert.equal(readLedgerSnapshot(ledger).totals.request.components.output.value, 80);
+  });
+});
+
+test('atomic write failure leaves the prior contribution and offset', async () => {
+  await withLedger(async (ledger) => {
+    await commitLedgerEvent(ledger, {
+      record: { identity: identity({ sourceId: 'req-1' }), observedAt: OBSERVED, usage: usage() },
+      ingest: ingest(1),
+    });
+    ledger.io.writeAtomic = async () => { throw new Error('injected'); };
+    await assert.rejects(
+      () => commitLedgerEvent(ledger, {
+        record: { identity: identity({ sourceId: 'req-2' }), observedAt: OBSERVED, usage: usage({ output: known(7) }) },
+        ingest: ingest(2),
+      }),
+      (/** @type {unknown} */ err) => err instanceof LedgerError && err.code === 'ledger-write-failed',
+    );
+    const snap = readLedgerSnapshot(ledger);
+    assert.equal(Object.keys(snap.entries).length, 1);
+    assert.equal(snap.ingest && snap.ingest.offset, 1);
+    assert.equal(snap.totals.request.components.output.value, 100);
+  });
+});
+
+test('competing writers: second open is bounded busy and the first state remains', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'agora-ledger-'));
+  const first = await openSessionLedger({ root, limits: { maxBytes: 256_000, maxEntries: 64 } });
+  try {
+    await assert.rejects(
+      () => openSessionLedger({ root, limits: { maxBytes: 256_000, maxEntries: 64 } }),
+      (/** @type {unknown} */ err) => err instanceof LedgerError && err.code === 'ledger-busy',
+    );
+    await commitLedgerEvent(first, {
+      record: { identity: identity({ sourceId: 'req-1' }), observedAt: OBSERVED, usage: usage() },
+      ingest: ingest(1),
+    });
+    assert.equal(readLedgerSnapshot(first).totals.request.components.output.value, 100);
+  } finally {
+    await closeSessionLedger(first);
+  }
+});
+
+test('leftover temp file does not become state and open recovers the committed snapshot', async () => {
+  await withLedger(async (ledger, root) => {
+    await commitLedgerEvent(ledger, {
+      record: { identity: identity({ sourceId: 'req-1' }), observedAt: OBSERVED, usage: usage() },
+      ingest: ingest(1),
+    });
+    await writeFile(path.join(root, 'state.json.tmp-dead'), '{"version":1,"entries":{}}', 'utf8');
+    await closeSessionLedger(ledger);
+    const reopened = await openSessionLedger({ root, limits: { maxBytes: 256_000, maxEntries: 64 } });
+    try {
+      assert.equal(readLedgerSnapshot(reopened).totals.request.components.output.value, 100);
+    } finally {
+      await closeSessionLedger(reopened);
+    }
+  });
+});
+
+test('entry and byte limits refuse before writing', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'agora-ledger-'));
+  const ledger = await openSessionLedger({ root, limits: { maxBytes: 64_000, maxEntries: 1 } });
+  try {
+    await commitLedgerEvent(ledger, {
+      record: { identity: identity({ sourceId: 'req-1' }), observedAt: OBSERVED, usage: usage() },
+      ingest: ingest(1),
+    });
+    await assert.rejects(
+      () => commitLedgerEvent(ledger, {
+        record: { identity: identity({ sourceId: 'req-2' }), observedAt: OBSERVED, usage: usage() },
+        ingest: ingest(2),
+      }),
+      (/** @type {unknown} */ err) => err instanceof LedgerError && err.code === 'ledger-limit',
+    );
+    assert.equal(Object.keys(readLedgerSnapshot(ledger).entries).length, 1);
+  } finally {
+    await closeSessionLedger(ledger);
+  }
+  const tiny = await openSessionLedger({ root: await mkdtemp(path.join(tmpdir(), 'agora-ledger-')), limits: { maxBytes: 64, maxEntries: 64 } });
+  try {
+    await assert.rejects(
+      () => commitLedgerEvent(tiny, {
+        record: { identity: identity({ sourceId: 'req-1' }), observedAt: OBSERVED, usage: usage() },
+        ingest: ingest(1),
+      }),
+      (/** @type {unknown} */ err) => err instanceof LedgerError && err.code === 'ledger-limit',
+    );
+    assert.equal(readLedgerSnapshot(tiny).ingest, null);
+  } finally {
+    await closeSessionLedger(tiny);
+  }
+});
+
+test('a cumulative-snapshot is not added as if it were a request', async () => {
+  await withLedger(async (ledger) => {
+    await commitLedgerEvent(ledger, {
+      record: { identity: identity({ sourceId: 'req-1' }), observedAt: OBSERVED, usage: usage({ output: known(10) }) },
+      ingest: ingest(1),
+    });
+    await commitLedgerEvent(ledger, {
+      record: { identity: identity({ sourceId: 'cum-1', sourceUnit: 'cumulative-snapshot' }), observedAt: OBSERVED, usage: usage({ output: known(999) }) },
+      ingest: ingest(2),
+    });
+    const totals = readLedgerSnapshot(ledger).totals;
+    assert.equal(totals.request.components.output.value, 10);
+    assert.equal(totals.snapshot.components.output.value, 999);
+  });
+});
