@@ -265,6 +265,45 @@ test("a specifier whose filename contains the other quote is followed, not dropp
   assert.deepEqual([...plain.files].sort(), ["entry.mjs", "src/plain.mjs"]);
 });
 
+test("a detected load whose specifier will not parse is reported, not dropped", async (t) => {
+  // Totality is anchored on the KEYWORD. Widening the specifier body closes one spelling; a load
+  // whose specifier this scanner still cannot parse would vanish exactly as the quote-bearing
+  // filename did, so the site is detected first and a site that will not parse is unknown.
+  const { root } = await repo(t);
+  await writeFile(path.join(root, "entry.mjs"), 'import "./unclosed.mjs\n');
+  const unclosed = importClosure({ entry: path.join(root, "entry.mjs"), root });
+  assert.equal(unclosed.complete, false, "a load with an unparseable specifier was dropped");
+  assert.match(String(unclosed.reason), /specifier this scanner cannot parse/);
+
+  // The twin: an ordinary parseable load at the same keyword is resolved, not reported.
+  await writeFile(path.join(root, "closed.mjs"), "\n");
+  await writeFile(path.join(root, "entry.mjs"), 'import "./closed.mjs";\n');
+  const closed = importClosure({ entry: path.join(root, "entry.mjs"), root });
+  assert.equal(closed.complete, true, closed.reason);
+  assert.ok(closed.files.has("closed.mjs"));
+});
+
+test("the escaped and unescaped spellings of one file never disagree about inertness", async (t) => {
+  // Grace/advisor's pair: the same file, spelled with and without the escape. Both must be
+  // classified — resolved or unknown — and neither may come back inert while the other does not.
+  const { root, git } = await repo(t);
+  await mkdir(path.join(root, "src"), { recursive: true });
+  await writeFile(path.join(root, "src", "loaded.mjs"), "export const v = 1;\n");
+  const spellings = ['import "./src/loaded.mjs";\n', 'import "\\x2e/src/loaded.mjs";\n'];
+  /** @type {string[]} */
+  const states = [];
+  for (const spelling of spellings) {
+    await writeFile(path.join(root, "entry.mjs"), spelling);
+    const at = await commit({ git }, `spelling ${states.length}`);
+    await writeFile(path.join(root, "src", "loaded.mjs"), `export const v = ${states.length + 2};\n`);
+    const delta = await watchModuleDelta({ root, entry: path.join(root, "entry.mjs"), armedRoot: root, from: at, to: at });
+    states.push(delta.state);
+    await commit({ git }, `move ${states.length}`);
+  }
+  assert.deepEqual(states.filter((s) => s === "inert"), [],
+    `a spelling of the same load came back inert: ${JSON.stringify(states)}`);
+});
+
 test("a spelling the runtime decodes and this scanner does not is reported, never read as bare", async (t) => {
   // The engine loads a specifier whose leading dot is written as a JS escape; startsWith(".") sees
   // a backslash and files it under "a dependency", which is the silent skip in its last disguise.

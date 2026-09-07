@@ -488,6 +488,28 @@ export function importClosure(opts) {
     /** @type {string[]} */
     const escaped = [];
 
+    // TOTALITY IS ANCHORED ON THE KEYWORD, not on the specifier's shape. Widening the body to
+    // admit a legal spelling closes one instance; a load whose specifier this scanner still cannot
+    // parse — an unclosed quote, a shape nobody has thought of — would vanish exactly as the
+    // quote-bearing filename did. So a site is DETECTED by its keyword, and a detected site whose
+    // specifier does not parse is reported. Every load is then resolved, computed, or unknown, and
+    // none can leave the population in silence.
+    /** @param {RegExp} keyword */
+    const unparsed = (keyword) => {
+      keyword.lastIndex = 0;
+      for (const site of source.matchAll(keyword)) {
+        const rest = source.slice(site.index + site[0].length);
+        const parsed = new RegExp(`^${SPEC}`).exec(rest);
+        if (parsed) continue;
+        const line = source.slice(0, site.index).split(/\r?\n/).length;
+        incomplete(`${key} has a load at line ${line} whose specifier this scanner cannot parse; a detected load is never dropped, so the closure cannot be shown to cover it`);
+      }
+    };
+    // Only where a quote actually follows the keyword: elsewhere `from` is ordinary prose, and a
+    // computed call is counted below rather than reported here.
+    unparsed(new RegExp(`\\bfrom${GAP}(?=["'\`])`, "g"));
+    unparsed(new RegExp(`(?:^|[;\n])${GAP}import${GAP}(?=["'\`])`, "g"));
+
     /** @param {RegExp} pattern */
     const follow = (pattern) => {
       pattern.lastIndex = 0;
