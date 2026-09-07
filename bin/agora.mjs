@@ -863,6 +863,7 @@ async function main(argv) {
       poolId: values["pool-id"] !== undefined ? String(values["pool-id"]) : undefined,
       timeout: values.timeout !== undefined ? String(values.timeout) : undefined,
       json: Boolean(values.json),
+      ...(values["codex-bin"] !== undefined ? { codexPath: String(values["codex-bin"]) } : {}),
     });
     if (result.stdout) process.stdout.write(result.stdout);
     if (result.stderr) process.stderr.write(result.stderr);

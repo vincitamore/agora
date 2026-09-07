@@ -9,6 +9,8 @@ import { collectCodexUsage, CODEX_LIMITS } from './usage/codex.mjs';
 import { windowFreshness } from './protocol/usage.mjs';
 
 export const USAGE_TIMEOUT_MAX_MS = 60_000;
+/** Default producer identity. Must satisfy N1 validateNativeId (16..128 [A-Za-z0-9_-]). */
+export const USAGE_CLI_PRODUCER_ID = 'agora-usage-cli01';
 
 /** @typedef {{ status: string, code?: string, principal?: any, observation?: any }} UsageResult */
 
@@ -67,7 +69,7 @@ export function formatUsageResult(result, opts) {
  *           now?: () => Date,
  *           collect?: (opts: { poolId: string, producer: unknown, now: () => Date, timeoutMs?: number, signal?: AbortSignal, spawn?: any, resolveBinary?: any }) => Promise<UsageResult>,
  *           producer?: { producerId: string, generation: number, sequence: number },
- *           spawn?: any, resolveBinary?: any, signal?: AbortSignal }} options
+ *           spawn?: any, resolveBinary?: any, codexPath?: string, signal?: AbortSignal }} options
  * @returns {Promise<{ exit: number, stdout: string, stderr: string }>}
  */
 export async function runUsage(options) {
@@ -85,7 +87,7 @@ export async function runUsage(options) {
     return { exit: /** @type {any} */ (error).exit ?? 2, stdout: '', stderr: `${error instanceof Error ? error.message : String(error)}\n` };
   }
 
-  const producer = options.producer ?? { producerId: 'agora-usage-cli', generation: 1, sequence: 1 };
+  const producer = options.producer ?? { producerId: USAGE_CLI_PRODUCER_ID, generation: 1, sequence: 1 };
   const collect = options.collect ?? collectCodexUsage;
   let result;
   try {
@@ -93,6 +95,7 @@ export async function runUsage(options) {
       poolId, producer, now, timeoutMs, signal: options.signal,
       ...(options.spawn ? { spawn: options.spawn } : {}),
       ...(options.resolveBinary ? { resolveBinary: options.resolveBinary } : {}),
+      ...(options.codexPath ? { codexPath: options.codexPath } : {}),
     });
   } catch {
     return { exit: 1, stdout: '', stderr: '' };
