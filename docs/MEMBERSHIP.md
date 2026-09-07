@@ -140,7 +140,9 @@ pure cell because it is the property the other two rest on, not because a stale 
 `stop()` can report cleanup pending when the child is still being torn down; the registry entry
 then stays, reported by `route list` as `closing`, and its key digest is held until the resource's
 `closed` settles. A second `route open` for that digest is refused `route-already-open` with the
-closing state in its message (wait, rather than close again). If the resource never settles, the
+closing state in its message (wait, rather than close again); an open that arrives while another
+open for the same digest is still a reservation is refused with the opening state, for the same
+reason (at that instant `route close` would say `route-not-open`). If the resource never settles, the
 digest stays unopenable until the service restarts (a restart drops every route). That is safety
 over liveness: a route that is torn down while a new grant admits the same principal would be two
 listeners for one key, which is the orphan the reservation exists to prevent; a held key is visible
