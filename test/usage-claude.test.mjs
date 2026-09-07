@@ -104,7 +104,7 @@ test('null named windows are omitted, not zero', () => {
   assert.equal(readings[0].value, 0);
 });
 
-test('short resets_at converts; unparseable is omitted so freshness is unknown', () => {
+test('short resets_at converts; unparseable is unsupported-reset, not omitted', () => {
   assert.equal(resetsAtToIso('2026-09-07T00:40Z'), '2026-09-07T00:40:00.000Z');
   assert.equal(resetsAtToIso('not-a-date'), undefined);
   const absent = windowsFromUsage({ five_hour: { utilization: 1 } })[0];
@@ -172,6 +172,37 @@ test('public path maps usage+profile through collectClaudeUsage', async () => {
   if (result.status !== 'supported') return;
   assert.equal(result.observation.windows.length, 3);
   assert.equal(result.principal.principalRef, ORG);
+});
+
+test('unreadable resets_at through the collector is unsupported-reset; absent and null omit the field', async () => {
+  const through = async (/** @type {unknown} */ usage) => {
+    const fetch = fakeFetch((pathname) => {
+      if (pathname === '/api/oauth/usage') return jsonResponse(200, usage);
+      if (pathname === '/api/oauth/profile') return jsonResponse(200, profile);
+      assert.fail(`unexpected path ${pathname}`);
+    });
+    return collectClaudeUsage({ poolId: POOL, producer: PRODUCER, now: NOW, fetch, readCredential });
+  };
+  const soon = await through({ five_hour: { utilization: 21.0, resets_at: 'soon' } });
+  assert.equal(soon.status, 'supported');
+  if (soon.status !== 'supported') return;
+  assert.equal(soon.observation.windows[0].available, false);
+  if (soon.observation.windows[0].available !== false) return;
+  assert.equal(soon.observation.windows[0].code, 'unsupported-reset');
+
+  const absent = await through({ five_hour: { utilization: 21.0 } });
+  assert.equal(absent.status, 'supported');
+  if (absent.status !== 'supported') return;
+  assert.equal(absent.observation.windows[0].available, true);
+  assert.equal(Object.hasOwn(absent.observation.windows[0], 'resetsAt'), false);
+  assert.equal(windowFreshness(absent.observation.windows[0], '2026-09-07T00:20:00.000Z'), 'unknown');
+
+  const nul = await through({ five_hour: { utilization: 21.0, resets_at: null } });
+  assert.equal(nul.status, 'supported');
+  if (nul.status !== 'supported') return;
+  assert.equal(nul.observation.windows[0].available, true);
+  assert.equal(Object.hasOwn(nul.observation.windows[0], 'resetsAt'), false);
+  assert.equal(windowFreshness(nul.observation.windows[0], '2026-09-07T00:20:00.000Z'), 'unknown');
 });
 
 test('401 is unsupported-until-refresh and a later call rereads the credential', async () => {
