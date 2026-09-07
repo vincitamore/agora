@@ -224,6 +224,7 @@ agora service stop                           # handshake, then bounded SIGTERM/S
 agora spawn --file request.json              # one bounded request in, one pane out; unknown keys refused; proven hello, open carries no cmd
 agora usage --provider codex --pool-id <id> [--timeout <ms>] [--json]  # one cooperative Codex quota read; no room; unknown providers refuse; never prints credentials or provider bodies
 agora usage-sessions --ledger-root <path> [--bind <file>] [--ingest <file>] [--room <key>] [--json] [--follow]  # joined members with measured usage or explicit unsupported; missing is not zero
+agora economy shadow --ledger-root <dir> --rates <file> --billing-context <file> --envelope <file> --verification-cost <usd> --epsilon <n> --risk-budget <q> --as-of <iso> --observation-cutoff <iso> --split-at <iso> [--json]  # replay the ledger through pricing and the horizon; shadow only, nothing actuated; every absent input is a reason, never a zero (docs/shadow.md)
 agora stand-down --until 2026-09-07T12:00:00Z --because "meter"  # persist first, then cooperative stop; doctor lists until
 agora stand-down --until 2026-09-07T12:00:00Z --because "meter" --keep-watches  # declare without signalling
 agora resume                                 # clear the record; does not start a session or re-arm watches
