@@ -9,7 +9,12 @@ export const RATE_KEY_FIELDS = Object.freeze(/** @type {const} */ ([
 ]));
 
 export const PRICE_COLUMNS = Object.freeze(/** @type {const} */ ([
-  'publishedApi', 'providerReportedBill', 'subscriptionConsumption',
+  'publishedApi',
+]));
+
+/** Per-record observations. A tabulated usdPerMillion under either name is refused. */
+export const OBSERVED_COLUMNS = Object.freeze(/** @type {const} */ ([
+  'providerReportedBill', 'subscriptionConsumption',
 ]));
 
 export const RATE_QUALIFICATIONS = Object.freeze(/** @type {const} */ ([
@@ -43,8 +48,6 @@ export class RateError extends Error {
  *   qualification: 'qualified' | 'unqualified',
  *   illustrative?: boolean,
  *   publishedApi?: Record<string, { usdPerMillion: number }>,
- *   providerReportedBill?: Record<string, { usdPerMillion: number }>,
- *   subscriptionConsumption?: Record<string, { usdPerMillion: number }>,
  * }} RateRow
  */
 
@@ -95,6 +98,14 @@ function validateColumnMap(value, field) {
 
 /** @param {unknown} value */
 export function validateRateRow(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const rec = /** @type {Record<string, unknown>} */ (value);
+    for (const col of OBSERVED_COLUMNS) {
+      if (Object.hasOwn(rec, col)) {
+        throw new RateError('observed-column-not-a-rate', `${col} is a per-record observation, never a tabulated usdPerMillion`);
+      }
+    }
+  }
   const v = readRecord(value, [
     ...RATE_KEY_FIELDS, 'effective', 'contextBracketMin', 'contextBracketMax', 'source', 'retrieved', 'qualification',
   ], ['illustrative', ...PRICE_COLUMNS]);

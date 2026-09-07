@@ -187,3 +187,23 @@ test('malformed times and unknown-with-a-value are refused, not priced', () => {
   assert.throws(() => priceUsage(record(), table([row()]), { eventTime: 'nope', asOf: AS_OF }, knownBilling(), { state: 'known', tokens: 1 }), RateError);
   assert.throws(() => priceUsage(record(), table([row()]), TIMES, knownBilling(), { state: 'unknown', tokens: 1 }), RateError);
 });
+
+test('a row carrying subscriptionConsumption or providerReportedBill is refused at load', () => {
+  assert.throws(
+    () => table([row({ subscriptionConsumption: { output: { usdPerMillion: 5 } } })]),
+    (/** @type {any} */ err) => err instanceof RateError
+      && err.code === 'observed-column-not-a-rate'
+      && /subscriptionConsumption/.test(err.message)
+      && /per-record observation/.test(err.message),
+  );
+  assert.throws(
+    () => table([row({ providerReportedBill: { output: { usdPerMillion: 5 } } })]),
+    (/** @type {any} */ err) => err instanceof RateError
+      && err.code === 'observed-column-not-a-rate'
+      && /providerReportedBill/.test(err.message),
+  );
+  const ok = table([row()]);
+  assert.equal(ok.rows.length, 1);
+  assert.equal(Object.hasOwn(ok.rows[0], 'subscriptionConsumption'), false);
+  assert.equal(Object.hasOwn(ok.rows[0], 'providerReportedBill'), false);
+});
