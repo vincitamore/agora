@@ -529,3 +529,54 @@ test('commit path: named child excluded, unknown not summed, two-sided twin stil
     assert.deepEqual(totals.excluded, [{ key: childKey, reason: 'contained-in-parent' }]);
   });
 });
+
+test('a record whose peerKey is its own ledger key is self-overlap, not parent-declared', async () => {
+  await withLedger(async (ledger) => {
+    const id = identity({ sourceId: 'self' });
+    const key = ledgerKey(id);
+    const result = await commitLedgerEvent(ledger, {
+      record: { identity: id, observedAt: OBSERVED, usage: usage({ output: known(40) }, { relation: 'contains-child', peerKey: key }) },
+      ingest: ingest(1),
+    });
+    assert.equal(readLedgerSnapshot(ledger).entries[key].status, 'conflict');
+    assert.equal(readLedgerSnapshot(ledger).entries[key].reason, 'self-overlap');
+    assert.equal(Object.hasOwn(readLedgerSnapshot(ledger).totals.request.components, 'output'), false);
+    assert.equal(result.status, 'conflict');
+  });
+});
+
+test('two parents naming one child still sum and record parent-contradiction', () => {
+  const childId = identity({ sourceId: 'child' });
+  const aId = identity({ sourceId: 'parent-a' });
+  const bId = identity({ sourceId: 'parent-b' });
+  const childKey = ledgerKey(childId);
+  const aKey = ledgerKey(aId);
+  const bKey = ledgerKey(bId);
+  const totals = deriveTotals({
+    [aKey]: confirmedEntry(aId, { output: known(100) }, { relation: 'contains-child', peerKey: childKey }),
+    [bKey]: confirmedEntry(bId, { output: known(50) }, { relation: 'contains-child', peerKey: childKey }),
+    [childKey]: confirmedEntry(childId, { output: known(30) }),
+  });
+  assert.equal(totals.request.components.output.value, 150);
+  assert.deepEqual(totals.request.excluded, [{ key: childKey, reason: 'parent-declared' }]);
+  assert.deepEqual(totals.request.conflicts, [{ reason: 'parent-contradiction', keys: [aKey, bKey] }]);
+});
+
+test('provisional entries are listed and not summed; confirmed twins still sum', () => {
+  const aId = identity({ sourceId: 'a' });
+  const bId = identity({ sourceId: 'b' });
+  const aKey = ledgerKey(aId);
+  const bKey = ledgerKey(bId);
+  const a = confirmedEntry(aId, { output: known(10) });
+  const b = confirmedEntry(bId, { output: known(10) });
+  const provisional = deriveTotals({
+    [aKey]: { ...a, status: /** @type {const} */ ('provisional') },
+    [bKey]: { ...b, status: /** @type {const} */ ('provisional') },
+  });
+  assert.equal(Object.hasOwn(provisional.request.components, 'output'), false);
+  assert.equal(provisional.request.provisional.length, 2);
+  assert.deepEqual(provisional.request.provisional.map((row) => row.key).sort(), [aKey, bKey].sort());
+  const confirmed = deriveTotals({ [aKey]: a, [bKey]: b });
+  assert.equal(confirmed.request.components.output.value, 20);
+  assert.deepEqual(confirmed.request.provisional, []);
+});
