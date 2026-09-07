@@ -58,8 +58,10 @@ test('measured and unsupported members are shown together; missing is never zero
     });
     assert.equal(rows.length, 2);
     assert.equal(rows[0].state, 'measured');
+    assert.equal(rows[0].status, 'confirmed');
     assert.equal(/** @type {any} */ (rows[0].usage).components.output.value, 80);
     assert.equal(rows[1].state, 'unsupported');
+    assert.equal(rows[1].status, undefined);
     assert.equal(rows[1].reason, 'unknown-binding');
     const text = formatInventory(rows, {});
     assert.match(text, /measured/);
@@ -206,6 +208,8 @@ test('four harness envelopes ingest; a failed decode is not stored as overlap no
       },
     );
     assert.equal(rows.every((r) => r.state === 'measured'), true);
+    assert.equal(rows.every((r) => r.status === 'confirmed' || r.status === 'provisional'), true);
+    assert.equal(rows.some((r) => r.status === 'provisional'), true);
     assert.equal(/** @type {any} */ (rows[0].usage).components.output.value, 20);
     assert.equal(/** @type {any} */ (rows[1].usage).components.output.value, 7);
     assert.equal(/** @type {any} */ (rows[2].usage).components.output.value, 30);
@@ -237,4 +241,53 @@ test('replay ingest is a duplicate and a kill mid-commit leaves the prior contri
   } finally {
     await closeSessionLedger(ledger);
   }
+});
+
+test('ingest outcomes are counted; follow re-reads and tails past the persisted offset', async () => {
+  const stateRoot = await mkdtemp(path.join(tmpdir(), 'agora-st-'));
+  await mkdir(path.join(stateRoot, 'sessions'), { recursive: true });
+  const ledgerRoot = await mkdtemp(path.join(tmpdir(), 'agora-led-'));
+  const ingestPath = path.join(stateRoot, 'ingest.jsonl');
+  const good = claudeLine();
+  await writeFile(ingestPath, `${good}\nnot-json\n${JSON.stringify({ harness: 'other', sessionEpoch: EPOCH, envelope: {} })}\n`, 'utf8');
+  const first = await collectUsageSessions({
+    stateRoot, ledgerRoot, bindings: {}, ingestPath, ingestLocator: ingestPath,
+  });
+  assert.ok(first.ingest);
+  assert.equal(first.ingest.ingested, 1);
+  assert.equal(first.ingest.malformed, 1);
+  assert.equal(first.ingest.unsupported, 1);
+  assert.deepEqual(first.ingest.failedOffsets, [2, 3]);
+  const json = formatInventory(first.rows, { json: true, ingest: first.ingest });
+  assert.match(json, /"malformed":1/);
+  assert.match(json, /"unsupported":1/);
+
+  const omp = JSON.stringify({
+    harness: 'omp',
+    sessionEpoch: EPOCH,
+    envelope: {
+      timestamp: OBSERVED_ISO,
+      message: { id: 'msg_synthetic_omp_grow', model: 'gpt-5.4', usage: { input: 1, output: 2 } },
+    },
+  });
+  await writeFile(ingestPath, `${good}\n${omp}\n`, 'utf8');
+  const grown = await collectUsageSessions({
+    stateRoot, ledgerRoot, bindings: {}, ingestPath, ingestLocator: ingestPath,
+  });
+  assert.equal(grown.ingest?.ingested, 1);
+  assert.equal(grown.ingest?.duplicate, 0);
+  const { readLedgerSnapshot, openSessionLedger, closeSessionLedger: close } = await import('../src/usage/session-ledger.mjs');
+  const led = await openSessionLedger({ root: ledgerRoot, limits: { maxBytes: 256_000, maxEntries: 64 } });
+  try {
+    assert.equal(Object.keys(readLedgerSnapshot(led).entries).length, 2);
+    assert.equal(readLedgerSnapshot(led).ingest?.offset, 2);
+  } finally {
+    await close(led);
+  }
+
+  await writeFile(ingestPath, `${omp}\n`, 'utf8');
+  const shrunk = await collectUsageSessions({
+    stateRoot, ledgerRoot, bindings: {}, ingestPath, ingestLocator: ingestPath,
+  });
+  assert.equal(shrunk.ingest?.duplicate, 1);
 });
