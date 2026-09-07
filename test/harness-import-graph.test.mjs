@@ -241,6 +241,30 @@ test("the pinned digest still describes the file it names", () => {
   }
 });
 
+test("a specifier whose filename contains the other quote is followed, not dropped", async (t) => {
+  // A filename may legally contain a quote that is not the one delimiting it, and Node executes the
+  // import. A body class of [^"\'`] stops at the first such character and the whole statement is
+  // missed — a module dropped in silence, which is the one direction this scanner may never take.
+  const { root } = await repo(t);
+  await mkdir(path.join(root, "src"), { recursive: true });
+  await writeFile(path.join(root, "src", "it's.mjs"), "\n");
+  await writeFile(path.join(root, "src", 'say"hi.mjs'), "\n");
+  await writeFile(path.join(root, "entry.mjs"),
+    'import "./src/it\'s.mjs";\n' + "import './src/say\"hi.mjs';\n");
+  const quoted = importClosure({ entry: path.join(root, "entry.mjs"), root });
+  assert.equal(quoted.complete, true, quoted.reason);
+  assert.ok(quoted.files.has("src/it's.mjs"), "a single quote inside a double-quoted specifier dropped the module");
+  assert.ok(quoted.files.has('src/say"hi.mjs'), "a double quote inside a single-quoted specifier dropped the module");
+
+  // The literal twin: ordinary specifiers still resolve, so the widened body is not bought by
+  // matching more than it should.
+  await writeFile(path.join(root, "src", "plain.mjs"), "\n");
+  await writeFile(path.join(root, "entry.mjs"), 'import "./src/plain.mjs";\n');
+  const plain = importClosure({ entry: path.join(root, "entry.mjs"), root });
+  assert.equal(plain.complete, true, plain.reason);
+  assert.deepEqual([...plain.files].sort(), ["entry.mjs", "src/plain.mjs"]);
+});
+
 test("a spelling the runtime decodes and this scanner does not is reported, never read as bare", async (t) => {
   // The engine loads a specifier whose leading dot is written as a JS escape; startsWith(".") sees
   // a backslash and files it under "a dependency", which is the silent skip in its last disguise.
