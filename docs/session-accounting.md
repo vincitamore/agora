@@ -17,7 +17,11 @@ assumed, so a Codex snapshot or Amore aggregate still binds.
 
 `--ingest` is JSONL of original usage envelopes `{ harness, sessionEpoch, envelope, context? }`.
 Each line is decoded through `decodeSessionUsage` and committed. A decode that is
-not `supported` is not stored as overlap `none`.
+not `supported` is not stored as overlap `none`. `--follow` re-reads the file each
+poll and ingests only lines past the ledger's persisted position for that locator;
+a shrink opens a new source generation. Each snapshot reports ingest counts
+(`ingested`, `duplicate`, `unsupported`, `malformed`) and the offsets of failed
+lines: in the JSON object, and as one stderr line in text mode.
 
 `--follow` is the continuous mode: one snapshot per interval until `--for` or SIGINT.
 A one-shot report is not that mode. SIGINT/SIGTERM abort the owned controller; listeners
@@ -37,5 +41,5 @@ its status is `confirmed` or `provisional` (E1b often leaves `finality: unknown`
 ## Output
 
 JSON: `{ type: "usage-sessions", members: [...] }`. A measured row carries the ledger
-usage object. An unsupported row carries a reason and no usage field. Missing is not
-zero.
+usage object and `status` (`confirmed` or `provisional`, the ledger entry's own).
+An unsupported row carries a reason and no usage field. Missing is not zero.

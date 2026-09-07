@@ -130,6 +130,29 @@ test('cli ingest of four harness envelopes measures members and prints no raw ke
   assert.deepEqual(outputs, [4, 5, 6, 8]);
 });
 
+test('cli ingest reports failed lines instead of dropping them silently', async () => {
+  const stateRoot = await mkdtemp(path.join(tmpdir(), 'agora-st-'));
+  await mkdir(path.join(stateRoot, 'sessions'), { recursive: true });
+  const ingest = path.join(stateRoot, 'ingest.jsonl');
+  await writeFile(ingest, `${JSON.stringify({
+    harness: 'claude-code', sessionEpoch: 'session-epoch-synthetic-e1d-01',
+    envelope: { timestamp: '2026-09-07T10:00:00.000Z', message: { id: 'msg_synthetic_claude_01', model: 'claude-opus-4-6', usage: { input_tokens: 1, output_tokens: 1 } } },
+  })}\nnot-json\n${JSON.stringify({ harness: 'other', sessionEpoch: 'session-epoch-synthetic-e1d-01', envelope: {} })}\n`, 'utf8');
+  const ledgerRoot = await mkdtemp(path.join(tmpdir(), 'agora-led-'));
+  const cfg = path.join(stateRoot, 'agora.json');
+  await writeFile(cfg, JSON.stringify({ actor: { name: 'Test/cli', kind: 'agent' }, rooms: { house: { transport: 'local', path: 'house.ndjson' } } }), 'utf8');
+  const r = await run(
+    ['usage-sessions', '--json', '--ledger-root', ledgerRoot, '--ingest', ingest],
+    { AGORA_STATE: stateRoot, AGORA_CONFIG: cfg },
+  );
+  assert.equal(r.code, 0, r.stderr);
+  const body = JSON.parse(r.stdout);
+  assert.equal(body.ingest.ingested, 1);
+  assert.equal(body.ingest.malformed, 1);
+  assert.equal(body.ingest.unsupported, 1);
+  assert.deepEqual(body.ingest.failedOffsets, [2, 3]);
+});
+
 test('SIGINT cell is skipped on win32 where process.kill is TerminateProcess', { skip: process.platform === 'win32' }, async () => {
   const stateRoot = await mkdtemp(path.join(tmpdir(), 'agora-st-'));
   await mkdir(path.join(stateRoot, 'sessions'), { recursive: true });

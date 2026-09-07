@@ -13,7 +13,7 @@ export const USAGE_SESSIONS_INTERVAL_MAX_S = 60;
 export const USAGE_SESSIONS_FOR_MAX_S = 3600;
 
 /** @typedef {{ harness: string, sessionEpoch: string, sourceId: string }} SourceBinding */
-/** @typedef {{ member: string, slug: string, liveness: string, state: 'measured' | 'unsupported', reason?: string, key?: string, usage?: unknown }} MemberRow */
+/** @typedef {{ member: string, slug: string, liveness: string, state: 'measured' | 'unsupported', reason?: string, key?: string, usage?: unknown, status?: string }} MemberRow */
 
 /**
  * @param {unknown} value
@@ -89,39 +89,93 @@ export async function ingestEnvelope(ledger, item, ingest) {
 }
 
 /**
+ * Non-empty JSONL lines, numbered from 1. Tail past a persisted locator
+ * position; a shrink opens the next source generation from offset 1.
+ * @param {string} text
+ * @param {string} locator
+ * @param {{ locator: string, sourceGeneration: number, offset: number } | null} [lastIngest]
+ */
+export function selectIngestLines(text, locator, lastIngest = null) {
+  const raw = text.split(/\r?\n/).filter((line) => line.trim());
+  let generation = 1;
+  let start = 0;
+  if (lastIngest && lastIngest.locator === locator) {
+    if (raw.length < lastIngest.offset) {
+      generation = lastIngest.sourceGeneration + 1;
+      start = 0;
+    } else {
+      generation = lastIngest.sourceGeneration;
+      start = lastIngest.offset;
+    }
+  }
+  return {
+    generation,
+    items: raw.slice(start).map((line, i) => ({ offset: start + i + 1, line })),
+  };
+}
+
+/**
+ * @param {unknown[]} outcomes
+ */
+export function summarizeIngest(outcomes) {
+  const stats = { ingested: 0, duplicate: 0, unsupported: 0, malformed: 0, failedOffsets: /** @type {number[]} */ ([]) };
+  for (const raw of outcomes) {
+    const o = /** @type {{ status?: string, offset?: number, committed?: { action?: string }[] }} */ (raw);
+    if (o.status === 'ingested') {
+      const action = o.committed?.[0]?.action;
+      if (action === 'duplicate') stats.duplicate += 1;
+      else stats.ingested += 1;
+    } else if (o.status === 'unsupported') {
+      stats.unsupported += 1;
+      if (typeof o.offset === 'number') stats.failedOffsets.push(o.offset);
+    } else {
+      stats.malformed += 1;
+      if (typeof o.offset === 'number') stats.failedOffsets.push(o.offset);
+    }
+  }
+  return stats;
+}
+
+/**
+ * @param {Awaited<ReturnType<typeof openSessionLedger>>} ledger
+ * @param {{ offset: number, line: string }[]} items
+ * @param {string} locator
+ * @param {number} generation
+ */
+export async function ingestJsonlLines(ledger, items, locator, generation) {
+  /** @type {unknown[]} */
+  const outcomes = [];
+  for (const item of items) {
+    let parsed;
+    try { parsed = JSON.parse(item.line); }
+    catch {
+      outcomes.push({ status: 'error', code: 'session-accounting-ingest-malformed', offset: item.offset });
+      continue;
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      outcomes.push({ status: 'error', code: 'session-accounting-ingest-malformed', offset: item.offset });
+      continue;
+    }
+    const rec = /** @type {Record<string, unknown>} */ (parsed);
+    const outcome = await ingestEnvelope(ledger, rec, {
+      locator,
+      sourceGeneration: generation,
+      offset: item.offset,
+      fingerprint: typeof rec.fingerprint === 'string' && rec.fingerprint.trim() ? rec.fingerprint : `ingest:${generation}:${item.offset}`,
+    });
+    outcomes.push({ ...outcome, offset: item.offset });
+  }
+  return outcomes;
+}
+
+/**
  * @param {Awaited<ReturnType<typeof openSessionLedger>>} ledger
  * @param {string} text
  * @param {string} [locator]
  */
 export async function ingestJsonl(ledger, text, locator = 'ingest.jsonl') {
-  const lines = text.split(/\r?\n/);
-  let offset = 0;
-  /** @type {unknown[]} */
-  const outcomes = [];
-  for (const line of lines) {
-    if (!line.trim()) continue;
-    offset += 1;
-    let item;
-    try { item = JSON.parse(line); }
-    catch {
-      outcomes.push({ status: 'error', code: 'session-accounting-ingest-malformed', offset });
-      continue;
-    }
-    if (!item || typeof item !== 'object' || Array.isArray(item)) {
-      outcomes.push({ status: 'error', code: 'session-accounting-ingest-malformed', offset });
-      continue;
-    }
-    const rec = /** @type {Record<string, unknown>} */ (item);
-    const generation = rec.sourceGeneration;
-    const outcome = await ingestEnvelope(ledger, rec, {
-      locator,
-      sourceGeneration: typeof generation === 'number' && Number.isSafeInteger(generation) && generation >= 1 ? generation : 1,
-      offset,
-      fingerprint: typeof rec.fingerprint === 'string' && rec.fingerprint.trim() ? rec.fingerprint : `ingest:${offset}`,
-    });
-    outcomes.push({ ...outcome, offset });
-  }
-  return outcomes;
+  const planned = selectIngestLines(text, locator, null);
+  return ingestJsonlLines(ledger, planned.items, locator, planned.generation);
 }
 
 /**
@@ -154,7 +208,10 @@ export async function inventoryMembers(records, opts) {
       rows.push({ member, slug: r.slug, liveness: r.state, state: 'unsupported', reason: 'usage-unavailable', key: found?.key });
       continue;
     }
-    rows.push({ member, slug: r.slug, liveness: r.state, state: 'measured', key: found.key, usage: found.entry.usage });
+    rows.push({
+      member, slug: r.slug, liveness: r.state, state: 'measured', key: found.key, usage: found.entry.usage,
+      status: found.entry.status,
+    });
   }
   return rows;
 }
@@ -166,20 +223,32 @@ export function publicRow(/** @type {MemberRow} */ row) {
   if (row.reason) out.reason = row.reason;
   if (row.key) out.key = row.key;
   if (row.state === 'measured' && row.usage) out.usage = row.usage;
+  if (row.state === 'measured' && row.status) out.status = row.status;
   return out;
 }
 
 /**
  * @param {MemberRow[]} rows
- * @param {{ json?: boolean }} opts
+ * @param {{ json?: boolean, ingest?: ReturnType<typeof summarizeIngest> }} opts
  */
 export function formatInventory(rows, opts) {
-  if (opts.json) return `${JSON.stringify({ type: 'usage-sessions', members: rows.map(publicRow) })}\n`;
+  if (opts.json) {
+    /** @type {Record<string, unknown>} */
+    const body = { type: 'usage-sessions', members: rows.map(publicRow) };
+    if (opts.ingest) body.ingest = opts.ingest;
+    return `${JSON.stringify(body)}\n`;
+  }
   const lines = rows.map((row) => {
     if (row.state === 'unsupported') return `${row.member} ${row.slug} ${row.liveness} unsupported ${row.reason}`;
     return `${row.member} ${row.slug} ${row.liveness} measured`;
   });
   return `${lines.join('\n')}${lines.length ? '\n' : ''}`;
+}
+
+/** @param {ReturnType<typeof summarizeIngest>} ingest */
+export function formatIngestStderr(ingest) {
+  const failed = ingest.failedOffsets.length ? ` offsets=${ingest.failedOffsets.join(',')}` : '';
+  return `agora: ingest ingested=${ingest.ingested} duplicate=${ingest.duplicate} unsupported=${ingest.unsupported} malformed=${ingest.malformed}${failed}\n`;
 }
 
 /**
@@ -195,6 +264,7 @@ export function formatInventory(rows, opts) {
  *   signal?: AbortSignal,
  *   list?: typeof listRecords,
  *   ingestText?: string,
+ *   ingestPath?: string,
  *   ingestLocator?: string,
  * }} opts
  */
@@ -206,9 +276,26 @@ export async function collectUsageSessions(opts) {
   const records = await (opts.list ?? listRecords)(opts.stateRoot);
   const ledger = await openSessionLedger({ root: opts.ledgerRoot, limits: { maxBytes: 2_000_000, maxEntries: 4096 } });
   try {
-    if (opts.ingestText) await ingestJsonl(ledger, opts.ingestText, opts.ingestLocator ?? 'ingest.jsonl');
+    /** @type {ReturnType<typeof summarizeIngest> | undefined} */
+    let ingest;
+    let text = opts.ingestText;
+    const locator = opts.ingestLocator ?? opts.ingestPath ?? 'ingest.jsonl';
+    if (!text && opts.ingestPath) {
+      const { readFile } = await import('node:fs/promises');
+      text = await readFile(opts.ingestPath, 'utf8');
+    }
+    if (text !== undefined) {
+      const snapshotBefore = readLedgerSnapshot(ledger);
+      const last = snapshotBefore.ingest && snapshotBefore.ingest.locator === locator
+        ? { locator: snapshotBefore.ingest.locator, sourceGeneration: snapshotBefore.ingest.sourceGeneration, offset: snapshotBefore.ingest.offset }
+        : null;
+      const planned = selectIngestLines(text, locator, last);
+      const outcomes = await ingestJsonlLines(ledger, planned.items, locator, planned.generation);
+      ingest = summarizeIngest(outcomes);
+    }
     const snapshot = readLedgerSnapshot(ledger);
-    return inventoryMembers(records, { roomKey: opts.roomKey, bindings: opts.bindings, snapshot });
+    const rows = await inventoryMembers(records, { roomKey: opts.roomKey, bindings: opts.bindings, snapshot });
+    return { rows, ingest };
   } finally {
     await closeSessionLedger(ledger);
   }
@@ -217,14 +304,16 @@ export async function collectUsageSessions(opts) {
 /**
  * One-shot or follow. Follow emits a snapshot each interval until --for or abort.
  * A one-shot is not a continuous mode.
- * @param {Parameters<typeof collectUsageSessions>[0] & { json?: boolean, follow?: boolean, intervalMs?: number, forMs?: number, write?: (text: string) => void }} opts
+ * @param {Parameters<typeof collectUsageSessions>[0] & { json?: boolean, follow?: boolean, intervalMs?: number, forMs?: number, write?: (text: string) => void, writeErr?: (text: string) => void }} opts
  */
 export async function runUsageSessions(opts) {
   const write = opts.write ?? ((text) => { process.stdout.write(text); });
+  const writeErr = opts.writeErr ?? ((text) => { process.stderr.write(text); });
   const started = Date.now();
   const once = async () => {
-    const rows = await collectUsageSessions(opts);
-    write(formatInventory(rows, { json: opts.json }));
+    const { rows, ingest } = await collectUsageSessions(opts);
+    write(formatInventory(rows, { json: opts.json, ingest }));
+    if (ingest && !opts.json) writeErr(formatIngestStderr(ingest));
     return rows;
   };
   if (!opts.follow) return { rows: await once(), polls: 1 };
@@ -283,9 +372,8 @@ export async function runUsageSessionsCli(args) {
       return { exit: 2, stdout: '', stderr: 'agora: --bind is not readable JSON\n' };
     }
   }
-  let ingestText;
   if (args.ingestPath) {
-    try { ingestText = await readFile(args.ingestPath, 'utf8'); }
+    try { await readFile(args.ingestPath, 'utf8'); }
     catch { return { exit: 2, stdout: '', stderr: 'agora: --ingest is not readable\n' }; }
   }
   let intervalMs = 1000;
@@ -304,6 +392,7 @@ export async function runUsageSessionsCli(args) {
   }
   try {
     const chunks = /** @type {string[]} */ ([]);
+    const errChunks = /** @type {string[]} */ ([]);
     await runUsageSessions({
       stateRoot: args.stateRoot,
       ledgerRoot: args.ledgerRoot,
@@ -314,11 +403,12 @@ export async function runUsageSessionsCli(args) {
       intervalMs,
       forMs,
       signal: args.signal,
-      ingestText,
+      ingestPath: args.ingestPath,
       ingestLocator: args.ingestPath,
       write: (t) => { chunks.push(t); },
+      writeErr: (t) => { errChunks.push(t); },
     });
-    return { exit: 0, stdout: chunks.join(''), stderr: '' };
+    return { exit: 0, stdout: chunks.join(''), stderr: errChunks.join('') };
   } catch (error) {
     const code = /** @type {{ code?: string }} */ (error).code;
     if (code === 'session-accounting-cancelled') return { exit: 1, stdout: '', stderr: 'agora: usage-sessions cancelled\n' };
