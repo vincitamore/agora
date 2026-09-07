@@ -280,3 +280,90 @@ test('cleanup stops only the helper this call started, never a peer process', as
   assert.equal(children[0].killed, true);
   assert.equal(peer.killed, false, 'a process this collector did not start is never signalled');
 });
+
+// --- Integrator HOLD regressions (Astra, house :524), all through the PUBLIC path. --------
+// Four defects reproduced here before repair. Each pairs with its discriminating opposite, so
+// a fix that collapses the distinction (treating malformed as null, or supplied-empty as
+// absent) reddens the pair rather than passing both.
+
+/** A server that completes the handshake and then answers the read with `response`. */
+const serves = (/** @type {unknown} */ response) => (/** @type {any} */ msg, /** @type {any} */ reply) => {
+  if (msg.method === 'initialize') return reply({ id: msg.id, result: { ok: true } });
+  if (msg.method === 'account/rateLimits/read') return reply({ id: msg.id, result: response });
+};
+const collect = (/** @type {unknown} */ response) => collectCodexUsage({
+  poolId: POOL, producer: PRODUCER, now: NOW, spawn: fakeSpawn(serves(response)), resolveBinary, timeoutMs: 2000,
+});
+const snapOf = (/** @type {string} */ id, /** @type {unknown} */ primary, /** @type {unknown} */ secondary) =>
+  ({ limitId: id, limitName: id, primary, secondary, credits: null, individualLimit: null,
+     spendControlReached: null, planType: null, rateLimitReachedType: null });
+
+test('HOLD 1: a malformed window slot is represented as unavailable, never dropped', async () => {
+  const result = await collect({ accountId: 'a-1', rateLimits: null,
+    rateLimitsByLimitId: { codex: snapOf('codex', win(8, 10080, 1789269881), 'malformed') } });
+  assert.ok(result.status === 'supported', 'expected a supported reading');
+  assert.equal(result.observation.windows.length, 2, 'the malformed slot must still be represented');
+  const secondary = result.observation.windows.find((w) => w.window.scope === 'secondary');
+  assert.ok(secondary, 'the malformed secondary window is missing entirely');
+  assert.equal(secondary.available, false);
+  assert.equal(secondary.code, 'unsupported-shape');
+});
+
+test('HOLD 1 pair: a schema null slot is absent, which is NOT the malformed case', async () => {
+  const result = await collect({ accountId: 'a-1', rateLimits: null,
+    rateLimitsByLimitId: { codex: snapOf('codex', win(8, 10080, 1789269881), null) } });
+  assert.ok(result.status === 'supported');
+  // Exactly one window: null means the provider reports no window, and inventing an
+  // unavailable one there would be as wrong as dropping the malformed one above.
+  assert.equal(result.observation.windows.length, 1);
+  assert.equal(result.observation.windows[0].available, true);
+});
+
+test('HOLD 2: a supplied EMPTY map is authoritative and the legacy summary adds nothing', async () => {
+  const result = await collect({ accountId: 'a-1',
+    rateLimits: snapOf('codex', win(8, 10080, 1789269881), null), rateLimitsByLimitId: {} });
+  // The map asserts zero buckets. Falling back to legacy would invent a window the
+  // authoritative source says does not exist.
+  if (result.status === 'supported') return assert.fail('a supplied empty map must not yield legacy windows');
+  assert.equal(result.code, 'codex-no-quota-reported');
+});
+
+test('HOLD 2 pair: an ABSENT map does fall back to the legacy summary', async () => {
+  const result = await collect({ accountId: 'a-1',
+    rateLimits: snapOf('codex', win(8, 10080, 1789269881), null), rateLimitsByLimitId: null });
+  assert.ok(result.status === 'supported', 'an absent map must still read the legacy summary');
+  assert.equal(result.observation.windows.length, 1);
+});
+
+test('HOLD 2b: a supplied map that is not a record is malformed, not a legacy fallback', async () => {
+  const result = await collect({ accountId: 'a-1',
+    rateLimits: snapOf('codex', win(8, 10080, 1789269881), null), rateLimitsByLimitId: 'junk' });
+  if (result.status === 'supported') return assert.fail('a malformed authority must not be downgraded');
+  assert.equal(result.code, 'codex-quota-shape-unsupported');
+});
+
+test('HOLD 3: a fractional duration is reported unavailable, never truncated into identity', async () => {
+  const result = await collect({ accountId: 'a-1', rateLimits: null,
+    rateLimitsByLimitId: { codex: snapOf('codex', win(8, 300.9, 1789269881), null) } });
+  assert.ok(result.status === 'supported');
+  const only = result.observation.windows[0];
+  // 300.9 truncated to 300 would silently rename the window and could collide with a real
+  // 300-minute window from the same limit id.
+  assert.notEqual(only.window.durationMinutes, 300, 'the duration must not be truncated into shape');
+  assert.equal(only.window.durationMinutes, undefined);
+  assert.equal(only.available, false);
+  assert.equal(only.code, 'unsupported-duration');
+});
+
+test('HOLD 4: a reply to a request never issued is refused, not accepted as the reading', async () => {
+  // The server volunteers a result for the read id before the handshake completes, so the
+  // collector has not sent that request. Its id is ours to assign; this is a violation.
+  const injecting = (/** @type {any} */ msg, /** @type {any} */ reply) => {
+    if (msg.method === 'initialize') reply({ id: 2, result: { accountId: 'a-injected',
+      rateLimits: snapOf('codex', win(99, 10080, 1789269881), null), rateLimitsByLimitId: null } });
+  };
+  const result = await collectCodexUsage({ poolId: POOL, producer: PRODUCER, now: NOW,
+    spawn: fakeSpawn(injecting), resolveBinary, timeoutMs: 500 });
+  if (result.status === 'supported') return assert.fail('an unsolicited reply was accepted as a reading');
+  assert.equal(result.code, 'codex-protocol-error');
+});

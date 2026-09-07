@@ -62,10 +62,26 @@ export function resetsAtToIso(value) {
  * @param {string} limitId @param {'primary'|'secondary'} slot @param {unknown} window
  */
 export function windowReadingFrom(limitId, slot, window) {
-  if (!isRecord(window)) return undefined;
-  const identity = { limitId, unit: /** @type {const} */ ('basis-points'), scope: slot,
-    ...(typeof window.windowDurationMins === 'number' && Number.isFinite(window.windowDurationMins) && window.windowDurationMins >= 1
-      ? { durationMinutes: Math.trunc(window.windowDurationMins) } : {}) };
+  // A schema null (or an absent key) is the provider saying there is NO window in this slot.
+  // A value that is present but unreadable is a different fact: a window exists and cannot be
+  // expressed. Collapsing the two drops a represented window silently, so they diverge here.
+  if (window === null || window === undefined) return undefined;
+  const bare = { limitId, unit: /** @type {const} */ ('basis-points'), scope: slot };
+  if (!isRecord(window)) return { window: bare, available: /** @type {const} */ (false), code: 'unsupported-shape' };
+  // The duration is part of the window's IDENTITY, so it is never rounded into shape: a
+  // fractional or out-of-range duration would silently rename the window (300.9 -> 300) and
+  // could collide with a genuine 300-minute window. Absent stays absent; unexpressible is
+  // reported as unavailable with a reason.
+  const rawDuration = window.windowDurationMins;
+  /** @type {{durationMinutes?: number}} */
+  let duration = {};
+  if (rawDuration !== null && rawDuration !== undefined) {
+    if (typeof rawDuration !== 'number' || !Number.isInteger(rawDuration) || rawDuration < 1) {
+      return { window: bare, available: /** @type {const} */ (false), code: 'unsupported-duration' };
+    }
+    duration = { durationMinutes: rawDuration };
+  }
+  const identity = { ...bare, ...duration };
   let value;
   try {
     value = percentToBasisPoints(window.usedPercent);
@@ -116,7 +132,15 @@ export function normalizeRateLimitsResponse(response, context) {
   const accountId = response.accountId;
   if (typeof accountId !== 'string' || !accountId) return { status: 'unsupported', code: CODE.noIdentity };
 
-  const byLimitId = isRecord(response.rateLimitsByLimitId) ? response.rateLimitsByLimitId : undefined;
+  // ABSENT (null/undefined) and SUPPLIED are different claims. When the multi-bucket map is
+  // supplied it is authoritative and the legacy single-bucket summary adds nothing -- including
+  // when it is supplied EMPTY, which asserts zero buckets; falling back there would invent a
+  // window the authoritative source says does not exist. A supplied map that is not a record at
+  // all is malformed, and a malformed authority is never silently downgraded to the legacy view.
+  const rawMap = response.rateLimitsByLimitId;
+  const mapSupplied = rawMap !== null && rawMap !== undefined;
+  if (mapSupplied && !isRecord(rawMap)) return { status: 'error', code: CODE.badQuota };
+  const byLimitId = mapSupplied ? /** @type {Record<string, unknown>} */ (rawMap) : undefined;
   const readings = [];
   const covered = new Set();
   if (byLimitId) {
@@ -131,7 +155,7 @@ export function normalizeRateLimitsResponse(response, context) {
   if (isRecord(legacy)) {
     const legacyId = typeof legacy.limitId === 'string' && legacy.limitId ? legacy.limitId : 'codex';
     // Only when the authoritative map did not already carry this bucket.
-    if (!covered.has(legacyId)) readings.push(...windowsFromSnapshot(legacy, legacyId));
+    if (!mapSupplied && !covered.has(legacyId)) readings.push(...windowsFromSnapshot(legacy, legacyId));
   }
   if (readings.length === 0) return { status: 'unsupported', code: CODE.noQuota };
 
@@ -180,6 +204,11 @@ export async function requestRateLimits(options = {}) {
 
   return await new Promise((resolve) => {
     let settled = false, bytes = 0, buffer = '';
+    // The read id is not a key the server may use whenever it likes: it is OURS, and it is only
+    // in play once we have actually sent that request. Without this, a server that volunteers a
+    // result for id 2 before the handshake completes has its unsolicited payload accepted as the
+    // reading -- a request we never made, answered.
+    let requested = false;
     const nextId = (() => { let n = 0; return () => ++n; })();
     const initId = nextId(), readId = nextId();
     let initialised = false;
@@ -230,9 +259,14 @@ export async function requestRateLimits(options = {}) {
           // read. Omitting it leaves the server waiting and the request never completes.
           send({ method: 'initialized' });
           send({ id: readId, method: 'account/rateLimits/read' });
+          requested = true;
           continue;
         }
         if (frame.id === readId) {
+          // A reply to a request this collector has not issued is a protocol violation by
+          // definition, not a race: ids are assigned here. Refuse rather than ignore, so an
+          // injected reading can never be mistaken for a late but genuine one.
+          if (!requested) return finish({ ok: false, code: CODE.protocolError });
           if (isRecord(frame.error)) return finish({ ok: false, code: CODE.protocolError });
           return finish({ ok: true, result: frame.result });
         }

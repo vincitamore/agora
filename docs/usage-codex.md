@@ -55,6 +55,11 @@ sends `initialize`, waits for its reply, sends the `initialized` notification, t
 `account/rateLimits/read` and matches the reply by request id. A frame carrying a different
 id is ignored rather than accepted, so an unrelated notification cannot finish the request.
 
+Correlation is gated on protocol phase, not on the id alone. Request ids are assigned by the
+collector, so a reply bearing the read's id before that request was actually sent is answering a
+question nobody asked; it is refused as `codex-protocol-error` rather than ignored, so an
+injected payload can never be mistaken for a late but genuine reading.
+
 The binary is resolved through the repository's existing resolver rather than by name, so an
 npm shim, a vendored executable and an explicit override all work; a bare name on `PATH`
 resolves to the wrong thing on Windows.
@@ -70,12 +75,23 @@ single `limitId`. They are distinct windows, so the slot name becomes the observ
 
 - `usedPercent` is a decimal percent and converts to basis points. A value finer than a
   basis point is reported unavailable with a reason rather than rounded away.
-- `windowDurationMins` becomes `durationMinutes`; when it is null the field is absent, not
-  defaulted.
+- `windowDurationMins` becomes `durationMinutes`. A null is absent, not defaulted. A value that
+  is not a positive integer is **not** rounded into shape: the duration is part of the window's
+  identity, so truncating `300.9` to `300` would rename the window and could collide with a
+  genuine 300-minute window from the same limit. Such a window is reported unavailable with
+  `unsupported-duration`.
 - `resetsAt` is epoch seconds. When it is null the window's freshness is `unknown`, never
   `fresh` — a window with no reset metadata is not a window known to be current.
-- `rateLimitsByLimitId` is authoritative when present, and the legacy single-bucket summary
-  then adds no duplicate. When the map is absent the summary is used on its own.
+- `rateLimitsByLimitId` **absent** (null) and **supplied** are different claims. Supplied, it is
+  authoritative and the legacy single-bucket summary contributes nothing — including when it is
+  supplied empty, which asserts zero buckets; filling in from the summary there would invent a
+  window the authoritative source says does not exist. Absent, the summary is used on its own. A
+  map supplied as something other than an object is malformed, and a malformed authority is never
+  silently downgraded to the legacy view: that is `codex-quota-shape-unsupported`.
+- A window slot that is schema `null` means the provider reports **no** window there. A slot that
+  is present but unreadable means a window exists that cannot be expressed, which is a different
+  fact and is reported unavailable with `unsupported-shape` rather than dropped. Collapsing the
+  two would let a represented window vanish from a reading that still claims to be complete.
 
 ## When there is no reading
 
