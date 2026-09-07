@@ -101,3 +101,33 @@ test('CLI subprocess: schema lists usage', () => {
   assert.ok(schema.verbs.usage.options['--provider <name>']);
   assert.ok(schema.verbs.usage.options['--timeout <ms>']);
 });
+
+test('cut-wire: collect receives timeoutMs and now as separate arguments', async () => {
+  /** @type {Record<string, unknown>} */
+  let seen = {};
+  await runUsage({
+    provider: 'codex', poolId: POOL, timeout: '1234', json: true, now: NOW, producer: PRODUCER,
+    collect: async (opts) => {
+      seen = { hasNow: typeof opts.now === 'function', timeoutMs: opts.timeoutMs, keys: Object.keys(opts).sort() };
+      return { status: 'unsupported', code: 'codex-timeout' };
+    },
+  });
+  assert.equal(seen.hasNow, true);
+  assert.equal(seen.timeoutMs, 1234);
+  assert.equal(Array.isArray(seen.keys) && seen.keys.includes('now') && seen.keys.includes('timeoutMs'), true);
+});
+
+test('pre-aborted signal is forwarded to the collector', async () => {
+  const signal = AbortSignal.abort();
+  let seen;
+  const r = await runUsage({
+    provider: 'codex', poolId: POOL, now: NOW, producer: PRODUCER, signal,
+    collect: async (opts) => {
+      seen = opts.signal;
+      return { status: 'unsupported', code: 'codex-cancelled' };
+    },
+  });
+  assert.equal(seen, signal);
+  assert.equal(r.exit, 1);
+  assert.match(r.stdout, /codex-cancelled/);
+});
