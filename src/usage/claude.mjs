@@ -132,8 +132,8 @@ function isRecord(value) { return typeof value === 'object' && value !== null &&
 
 /**
  * Provider `resets_at` (measured as a short ISO like `2026-09-07T00:40Z`) to the contract's
- * exact `Date.toISOString()` form. Unparseable values are omitted so freshness is unknown,
- * never silently fresh.
+ * exact `Date.toISOString()` form. Absent or null is omitted so freshness is unknown.
+ * A present unparseable value is unsupported-reset, never treated as absent.
  * @param {unknown} value
  */
 export function resetsAtToIso(value) {

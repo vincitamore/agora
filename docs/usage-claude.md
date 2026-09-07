@@ -68,8 +68,9 @@ numeric window arithmetic.
 - A present malformed named window is retained as unavailable so a `full` snapshot does not
   silently drop a represented slot.
 - A null named window is omitted, not zero.
-- `resets_at` is converted to exact `Date.toISOString()`. Unparseable values are omitted, so
-  freshness is `unknown`, never `fresh`.
+- `resets_at` is converted to exact `Date.toISOString()`. Absent or null omits the field, so
+  freshness is `unknown`, never `fresh`. A present unparseable value is unavailable with
+  `unsupported-reset`; it is not reported as a window with no reset metadata.
 - `organization.uuid` is `principalRef`. Absence is identity-unavailable, never a path-derived
   principal. Names, email and account blocks never leave the process.
 
