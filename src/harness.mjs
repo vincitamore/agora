@@ -387,10 +387,28 @@ const FROM_SPEC = new RegExp(`\\bfrom${RESOLVE_GAP}${SPEC}`, "g");
  * only work was keeping prose out, and the `from` detector — which never had one — shows the
  * scanner already tolerates that, over-inclusively and in the safe direction. */
 const BARE_IMPORT = new RegExp(`\\bimport${RESOLVE_GAP}${SPEC}`, "g");
-const DYNAMIC_CALL = new RegExp(`\\bimport${GAP}\\(`, "g");
-const DYNAMIC_SPEC = new RegExp(`\\bimport${GAP}\\(${GAP}${SPEC}${GAP}\\)`, "g");
-const REQUIRE_CALL = new RegExp(`(?<![.\\w])require${GAP}\\(`, "g");
-const REQUIRE_SPEC = new RegExp(`(?<![.\\w])require${GAP}\\(${GAP}${SPEC}${GAP}\\)`, "g");
+// The gap between a call keyword and its PARENTHESIS, tolerant of line comments and of nothing at
+// all, since a call written with no gap at all is legal and common. r4 dropped line comments from
+// the static gap to keep prose out and took the call family with it, so a keyword on one line with
+// its parenthesis on the next, separated by a line comment, stopped being detected: valid,
+// executing, and inert. Same defect as the static hold, one family over.
+//
+// It is applied to the call and the specifier patterns ALIKE, a deliberate difference from the
+// static split and worth saying out loud. There, detection is tolerant, resolution strict, and the
+// difference reported by start index. Here that would report every genuinely computed call -- one
+// whose argument is an identifier is detected and never resolved by construction -- and destroy
+// the exemption arithmetic, which counts exactly those. The parenthesis is the anchor that makes
+// prose unlikely, the specifier inside it stays strictly parsed, and total-minus-literal stays
+// coherent because both sides share this gap. The invariant holds: resolved or counted, never
+// inert.
+//
+// This comment says none of that in the grammar it matches, because this file is on the graph it
+// walks -- the sixth time today that constraint has cost a red.
+const CALL_GAP = `(?:${GAPT})?`;
+const DYNAMIC_CALL = new RegExp(`\\bimport${CALL_GAP}\\(`, "g");
+const DYNAMIC_SPEC = new RegExp(`\\bimport${CALL_GAP}\\(${GAP}${SPEC}${GAP}\\)`, "g");
+const REQUIRE_CALL = new RegExp(`(?<![.\\w])require${CALL_GAP}\\(`, "g");
+const REQUIRE_SPEC = new RegExp(`(?<![.\\w])require${CALL_GAP}\\(${GAP}${SPEC}${GAP}\\)`, "g");
 /** Any string in the module that is shaped like a path into the repository, wherever it sits. */
 const RELATIVE_LITERAL = /["'`](\.{1,2}\/[^"'`]*)["'`]/g;
 
