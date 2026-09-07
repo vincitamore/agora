@@ -256,11 +256,12 @@ export async function completeMemberHandshake(input) {
  */
 export class RemoteRoom {
   /**
-   * @param {{ descriptor: any, secret: string, stateRoot: string, keyPath: string, timeoutMs?: number,
-   *  serviceId?: string, runtime?: any, channelOptions?: any }} input
+   * @param {{ descriptor: any, secret: string, stateRoot: string, keyPath: string, nodeKey: string,
+   *  timeoutMs?: number, serviceId?: string, runtime?: any, channelOptions?: any }} input
    */
   constructor(input) {
     this.descriptor = input.descriptor;
+    this.nodeKey = input.nodeKey;
     this.binding = input.descriptor.binding;
     this.secret = input.secret;
     this.stateRoot = input.stateRoot;
@@ -277,8 +278,12 @@ export class RemoteRoom {
     /** @type {Promise<{ client: NativeServiceClient, resource: any }> | undefined} */
     this.dialling = undefined;
     this.closed = false;
-    /** Reconnects observed on this room, for the watch's own reporting. */
-    this.reconnects = 0;
+    /** Channel DROPS observed on this room. Deliberately not called reconnects: it counts closes,
+     * and a close is not evidence that anything re-dialled. What proves a re-dial is the host
+     * receiving a second subscribe, which is what the reattach cell asserts. */
+    this.drops = 0;
+    /** Completed dials, incremented only after a handshake produced a live request client. */
+    this.dials = 0;
   }
 
   /** @returns {Promise<NativeServiceClient>} */
@@ -297,12 +302,11 @@ export class RemoteRoom {
       const resource = startMemberChannel({ descriptor: this.descriptor }, {
         owner: { serviceId: this.serviceId, serviceBootId: this.serviceBootId, signal: this.owner.signal },
         runtime: this.runtime,
-        assertDescriptor: (descriptor) => {
-          // The channel re-validates the descriptor it was handed. Both checks are ours and both
-          // are cheap; this one is the last point before a child is spawned.
-          if (descriptor.descriptorDigest !== this.descriptor.descriptorDigest)
-            throw new AgoraError("descriptor-not-ours: the channel was handed a descriptor this room did not resolve");
-        },
+        // The last named gate before a child is spawned, and it does real work: comparing the
+        // handed descriptor with the one this room resolved could never fail (the channel
+        // validates the object it was given), and a guard that cannot fire is worth less than no
+        // guard, because it reads as one. This re-checks the grant against THIS seat's key.
+        assertDescriptor: (descriptor) => { assertRemoteDescriptor(/** @type {any} */ (descriptor), { stateRoot: this.stateRoot, nodeKey: this.nodeKey }); },
         resolveClientKey: () => ({ keyPath: this.keyPath }),
         acceptChannel: (accepted, stream, signal) => {
           /** @type {(v?: unknown) => void} */ let resolveReady = () => {};
@@ -329,7 +333,8 @@ export class RemoteRoom {
       try { await resource.ready; }
       catch (error) { drop(); void resource.stop().catch(() => {}); throw error; }
       if (!client) { drop(); void resource.stop().catch(() => {}); throw new AgoraError("member-channel-dark: the channel reported ready without a request client"); }
-      client.socket.once("close", () => { this.reconnects += 1; drop(); void resource.stop().catch(() => {}); });
+      this.dials += 1;
+      client.socket.once("close", () => { this.drops += 1; drop(); void resource.stop().catch(() => {}); });
       return { client, resource };
     })();
     this.dialling = attempt;
@@ -360,7 +365,7 @@ export async function openRemoteRoom(input) {
   const seat = await resolveSeatIdentity(input.stateRoot, { identity: input.identity });
   assertRemoteDescriptor(descriptor, { stateRoot: input.stateRoot, nodeKey: seat.nodeKey });
   const secret = await readRouteSecret(input.stateRoot, descriptor.binding, descriptor.proofRef);
-  return new RemoteRoom({ descriptor, secret, stateRoot: input.stateRoot, keyPath: seat.keyPath,
+  return new RemoteRoom({ descriptor, secret, stateRoot: input.stateRoot, keyPath: seat.keyPath, nodeKey: seat.nodeKey,
     ...(input.timeoutMs ? { timeoutMs: input.timeoutMs } : {}),
     ...(input.runtime ? { runtime: input.runtime } : {}),
     ...(input.channelOptions ? { channelOptions: input.channelOptions } : {}) });

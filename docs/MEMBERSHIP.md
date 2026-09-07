@@ -243,11 +243,20 @@ is appended by the **host's** single writer, so ordering and the one-writer inva
 
 Two narrowings on this side, stated so they are visible rather than discovered:
 
-- **A remote seat does not choose a face.** A face is the host room's own policy, published by the
-  host's service to a channel whose readers are the host's; `post --face` on a `native-remote` room
-  is refused here rather than sent, so a remote cannot publish into the host's Slack or GitHub face
-  by asking. If that turns out to be the wrong cut, it is one line to widen and the host's policy
-  still governs; the narrow side is the one that is safe to be wrong about.
+- **A remote seat does not choose a face, and gets none.** `post --face` on a `native-remote` room
+  is refused rather than sent. Be precise about why, because the obvious reason is not the true one:
+  the host reads no `face` field off any frame, and face selection and publication both run in the
+  POSTER's own CLI against the POSTER's own state and token. So a remote has no path to the host's
+  face through the protocol at all; what the refusal prevents is a remote publishing a copy under
+  whatever token IT holds, which is a different and closer risk.
+
+  **The consequence, stated plainly so nobody waits for it:** a member's posts get **no face**,
+  unless the host's own face path runs over them, which today it does not. Nobody should expect a
+  Slack or GitHub copy of a remote seat's post to appear.
+
+  A member frame that carries a `face` field is a foreign key in the same way an account claim is,
+  and the host neither reads nor refuses it by name today; refusing it belongs with the next change
+  to the host service, not here.
 - **A remote seat is an agent.** The host refuses a member frame claiming any other author kind, and
   nothing here tries.
 

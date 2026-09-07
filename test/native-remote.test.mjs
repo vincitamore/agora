@@ -136,6 +136,9 @@ async function rig(t, over = {}) {
    * the only observable that discriminates a correct reattach from a full re-replay. */
   /** @type {string[]} */
   const subscribes = [];
+  /** Every Tailcat argv the remote asked for, so a cell can assert a refusal happened BEFORE one. */
+  /** @type {string[][]} */
+  const spawned = [];
   const dial = () => {
     const toHost = new PassThrough();
     const toClient = new PassThrough();
@@ -170,9 +173,11 @@ async function rig(t, over = {}) {
   // route, and the at-least-once cell is exactly about what the second one is offered.
   const makeRoom = () => {
     const made = new RemoteRoom({
-      descriptor: over.descriptor ?? opened.descriptor, secret, stateRoot: seatRoot, keyPath, timeoutMs: 4000,
+      descriptor: over.descriptor ?? opened.descriptor, secret, stateRoot: seatRoot, keyPath,
+      nodeKey: over.key ?? KEY, timeoutMs: 4000,
       channelOptions: {
         spawn: async (/** @type {string[]} */ args, /** @type {any} */ _r, /** @type {any} */ owner) => {
+          spawned.push(args);
           if (args[0] === "parse") return fakeChild({ exit: 0, signal: owner?.signal });
           if (args[1] === "printpub") {
             const stdout = new PassThrough();
@@ -190,7 +195,7 @@ async function rig(t, over = {}) {
     return made;
   };
   const room = makeRoom();
-  return { hostRoot, seatRoot, service, opened, secret, room, makeRoom, hostStreams, keyPath, gate, subscribes };
+  return { hostRoot, seatRoot, service, opened, secret, room, makeRoom, hostStreams, keyPath, gate, subscribes, spawned };
 }
 
 /** @param {string} root @param {any} descriptor */
@@ -362,6 +367,15 @@ test("frames arriving with the welcome are refused rather than stranded in the h
     /unsolicited frame/);
 });
 
+test("the dial's own gate fires: a route granted to another key is refused before any child is spawned", async (t) => {
+  // The channel's assertDescriptor callback is the last named gate before a Tailcat child exists.
+  // Comparing the handed descriptor with the one this room resolved could never fail, so the
+  // callback re-checks the grant against THIS seat's key, and this is the run in which it fails.
+  const { room, spawned } = await rig(t, { key: OTHER_KEY });
+  await assert.rejects(room.client(), /descriptor-not-ours/);
+  assert.deepEqual(spawned, [], "a Tailcat child was spawned for a route granted to another key");
+});
+
 // ------------------------------------------------------------ reconnect: at-least-once as the caller sees it
 
 /** @param {any} service @param {number} n @param {string} tag */
@@ -434,14 +448,15 @@ test("the tidy reconnect twin: nothing is lost across an in-process re-dial and 
   // Put the channel down, commit while it is down, and only then let the re-dial through: the
   // replay from the delivered floor is what has to carry them.
   gate.hold();
-  const reconnects = room.reconnects;
+  const dials = room.dials;
   (await room.client()).socket.destroy();
   const second = await commit(service, 2, "dd");
   await gate.release();
   const deadline = Date.now() + 8000;
   while (delivered.length < 4 && Date.now() < deadline) { await drain(); if (delivered.length < 4) await sub.wait(50); }
 
-  assert.ok(room.reconnects > reconnects, "the channel never re-dialled");
+  // dials, never drops: a close is not evidence that anything re-dialled.
+  assert.ok(room.dials > dials, "the channel never re-dialled");
   assert.deepEqual(delivered, [...first, ...second], "a message was lost across the tidy reconnect");
   assert.equal(new Set(delivered).size, 4, "the tidy reconnect produced a duplicate");
   for (let i = 1; i < cursors.length; i += 1)

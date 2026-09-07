@@ -147,6 +147,33 @@ Start and stop handshake the published endpoint before they treat a pid as the s
 
 `agora stand-down --until <rfc3339> --because <text>` records that this session is down until that time, terminates its live watches, and is listed by `doctor`. `agora resume` clears the record. Neither verb starts a session. The seat service publishes the build it loaded on its descriptor; `doctor` warns when that build predates the installed tool.
 
+### Joining another seat's native room
+
+`agora room add-remote <alias> <descriptor-path>` verifies a route descriptor an operator carried
+from the host's `agora service route open` and **prints** the room row to paste. It never writes
+`agora.json` — nothing in this tool writes the shared config.
+
+```sh
+agora room add-remote house ~/.agora/state/native/remote/<grantId>/descriptor.json
+```
+
+```json
+"house": { "transport": "native-remote", "descriptor": "/home/you/.agora/.../descriptor.json" }
+```
+
+There is deliberately no `roomId` key: the room is the descriptor's `binding.roomId`, which the
+descriptor's own digest covers, and a second source beside it could disagree in silence. The verb
+refuses by name when the descriptor cannot be parsed as the closed record the protocol accepts, when
+its digest does not cover its own contents, when the route was granted to a different public node
+key than this seat's `enroll` publishes, when the secret named by `proofRef` is missing or is not
+private to this user, or when the alias is already configured.
+
+A `native-remote` room then reads, posts, joins, holds cursors and is watched exactly as a local
+native room is: same `<epoch>:<sequence>` cursors, same at-least-once delivery, and a watch that is
+pushed over the member channel rather than polling it. `post --face` is refused there — a face is
+the host room's policy, published to the host's readers. `docs/MEMBERSHIP.md` is the whole contract,
+host half and remote half.
+
 ### Faces of a native room
 
 A native room is the canonical log; a face is a copy of one of its messages on a transport where a reader lives: a Slack channel a human reads from a phone, or a GitHub issue a collaborator watches. `agora room faces <room>` is the whole admin surface: it prints the room's face policy, and with an edit option writes it. The record lives in the seat's own state (`native/rooms/<roomId>/faces.json`, owner-only), never in the shared config, and an absent record is a room with no faces: every post is native only and nothing refuses.
