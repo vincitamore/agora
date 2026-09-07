@@ -263,7 +263,8 @@ export async function completeMemberHandshake(input) {
 export class RemoteRoom {
   /**
    * @param {{ descriptor: any, secret: string, stateRoot: string, keyPath: string, nodeKey: string,
-   *  timeoutMs?: number, serviceId?: string, runtime?: any, channelOptions?: any }} input
+   *  timeoutMs?: number, serviceId?: string,
+   *  runtime?: import("./tailcat-runtime.mjs").TailcatRuntimeOverrides, channelOptions?: any }} input
    */
   constructor(input) {
     this.descriptor = input.descriptor;
@@ -279,7 +280,11 @@ export class RemoteRoom {
     // reaches the resolver with nothing and dies inside the guardian, reporting a status with no
     // text. That is the same defect L1 fixed one file over, found here by taking its list to the
     // next unit rather than by anything this suite could see: a faked child never reaches a
-    // resolver. A caller's own runtime still wins on any key it sets.
+    // resolver. A caller's own runtime still wins on any key it sets, the root included; item 8
+    // types this hop, it does not narrow it. The annotation below is the whole unit: the field is
+    // the resolver's own option type, so an assembly that loses the root is a compile error at the
+    // site that made it rather than a textless guardian status on a live machine.
+    /** @type {import("./tailcat-runtime.mjs").TailcatRuntimeOptions} */
     this.runtime = { stateRoot: input.stateRoot, ...(input.runtime ?? {}) };
     this.channelOptions = input.channelOptions ?? {};
     // The remote has no seat service, so it owns its own channels: a per-process boot id fences
@@ -381,7 +386,8 @@ export class RemoteRoom {
  * Resolve everything a remote room needs from this seat's own state, in the order that produces the
  * most useful refusal first: the descriptor, then this seat's identity, then the grant's ownership,
  * then the secret.
- * @param {{ descriptorPath: string, stateRoot: string, timeoutMs?: number, runtime?: any,
+ * @param {{ descriptorPath: string, stateRoot: string, timeoutMs?: number,
+ *  runtime?: import("./tailcat-runtime.mjs").TailcatRuntimeOverrides,
  *  channelOptions?: any, identity?: typeof localTransferIdentity }} input
  */
 export async function openRemoteRoom(input) {

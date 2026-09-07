@@ -925,3 +925,43 @@ test("the handshake's dark refusal fires in a process holding NO other handle", 
     `the refusal arrived after ${seen.elapsed} ms, which is short of the bound it claims to enforce`);
   await rm(dir, { recursive: true, force: true });
 });
+
+test("the runtime hop is CHECKED: an assembly without a state root does not compile", async (t) => {
+  // This cell's real assertions are the three `@ts-expect-error` directives, and they are graded by
+  // `npm run check`, not by the runner: tsc fails when a directive stops being needed. So if anyone
+  // widens these hops back to `any`, this cell goes red for exactly the reason it exists — which is
+  // the one shape a runtime assertion cannot express, because the defect it guards produced NO bad
+  // value in this process. It killed a child on a live machine and returned a status with no text.
+  const { room, seatRoot } = await rig(t);
+
+  /** The exported option type is what makes the requirement sayable, so it is gated first: an
+   * assembly missing the state root is refused where it is WRITTEN.
+   * @type {import("../src/tailcat-runtime.mjs").TailcatRuntimeOptions} */
+  // @ts-expect-error a runtime without a state root is not a runtime the resolver can use.
+  const rootless = { vendorDir: "/tmp/vendor" };
+  void rootless;
+
+  // The field itself, which is the hop L2 fell through: this compiles only because `room.runtime`
+  // IS the resolver's option type. Widen it back to `any` and this line still passes, which is why
+  // the directives above and below carry the negative half.
+  void (() => resolveTailcatBinary(room.runtime));
+
+  // @ts-expect-error the constructor's overrides are the resolver's surface, so a key the resolver
+  // does not have is refused at the hop instead of travelling as a silent no-op.
+  // (the offending key rides the FIRST line: `@ts-expect-error` suppresses the next line only, so a
+  // call wrapped across three lines reports from a line the directive never covered.)
+  void (() => new RemoteRoom({ runtime: { notAResolverKey: 1 }, descriptor: room.descriptor,
+    secret: "x", stateRoot: seatRoot, keyPath: room.keyPath, nodeKey: KEY }));
+
+  // @ts-expect-error and the same hop on the resolver entry point callers actually use.
+  void (() => openRemoteRoom({ descriptorPath: "/nowhere", stateRoot: seatRoot, runtime: { notAResolverKey: 1 } }));
+
+  // The positive control, so the type is not merely refusing everything: the documented override
+  // still compiles AND still wins at runtime, which is the contract an earlier draft of this head
+  // broke by omitting `stateRoot` from the overrides type.
+  const explicit = new RemoteRoom({ descriptor: room.descriptor, secret: "x", stateRoot: seatRoot,
+    keyPath: room.keyPath, nodeKey: KEY, runtime: { stateRoot: "/elsewhere", vendorDir: "/tmp/vendor" } });
+  assert.equal(explicit.runtime.stateRoot, "/elsewhere");
+  assert.equal(explicit.runtime.vendorDir, "/tmp/vendor");
+  await explicit.close();
+});

@@ -65,8 +65,30 @@ async function cacheDirectory(root, pieces) {
 }
 
 /**
+ * Everything the resolver needs to find a verified Tailcat binary. Exported and NAMED because the
+ * rest of the tool referred to it as `Parameters<typeof resolveTailcatBinary>[0]`, which is exactly
+ * right and unreadable: a layer that cannot say the type's name types its own field `any` instead,
+ * and the requirement stops being checked at the site where the object is ASSEMBLED. `stateRoot` is
+ * required and is the whole point — a runtime without one reaches the resolver with nothing, fails
+ * inside a guardian child whose status carries no text, and reports a bundle problem that is not
+ * one.
+ * @typedef {{stateRoot:string, vendorDir?:string, platform?:string, arch?:string, override?:string, overrideSha256?:string, repair?:boolean}} TailcatRuntimeOptions
+ */
+
+/** What a CALLER may supply to a layer that owns a default state root: the resolver's options with
+ * `stateRoot` OPTIONAL, because the layer beneath fills it in and the caller may still override it.
+ *
+ * It was `Omit<..., 'stateRoot'>` for one compile: that forbids the override, and the checker
+ * immediately failed an existing cell that asserts the opposite on purpose ("a caller's own runtime
+ * still wins on any key it sets, so the fold is not an override"). The cell was right and the type
+ * was a stealth behaviour change wearing a type annotation — a head cut for types must not decide a
+ * contract question in passing. Narrowing this is a separate cut with its own reasoning; what this
+ * one owes is that the value crossing the hop is CHECKED, not that it is smaller.
+ * @typedef {Omit<TailcatRuntimeOptions, 'stateRoot'> & { stateRoot?: string }} TailcatRuntimeOverrides */
+
+/**
  * Resolve immediately before EVERY process launch. No network, no shell, no ambient binary.
- * @param {{stateRoot:string, vendorDir?:string, platform?:string, arch?:string, override?:string, overrideSha256?:string, repair?:boolean}} options
+ * @param {TailcatRuntimeOptions} options
  */
 export async function resolveTailcatBinary(options) {
   const target = tailcatTarget(options.platform ?? process.platform, options.arch ?? process.arch);
