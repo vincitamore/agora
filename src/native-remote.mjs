@@ -282,8 +282,10 @@ export class RemoteRoom {
     // next unit rather than by anything this suite could see: a faked child never reaches a
     // resolver. A caller's own runtime still wins on any key it sets, the root included; item 8
     // types this hop, it does not narrow it. The annotation below is the whole unit: the field is
-    // the resolver's own option type, so an assembly that loses the root is a compile error at the
-    // site that made it rather than a textless guardian status on a live machine.
+    // the resolver's own option type, so an assembly that OMITS the root is a compile error at the
+    // site that made it rather than a textless guardian status on a live machine. It is not a
+    // proof that the root is present — an explicit or inferred `undefined` still passes, for the
+    // reason and with the measurement written at `TailcatRuntimeOverrides`, and pinned by a cell.
     /** @type {import("./tailcat-runtime.mjs").TailcatRuntimeOptions} */
     this.runtime = { stateRoot: input.stateRoot, ...(input.runtime ?? {}) };
     this.channelOptions = input.channelOptions ?? {};

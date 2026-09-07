@@ -965,3 +965,31 @@ test("the runtime hop is CHECKED: an assembly without a state root does not comp
   assert.equal(explicit.runtime.vendorDir, "/tmp/vendor");
   await explicit.close();
 });
+
+test("the typed hop catches an OMITTED root and not an undefined one, which is pinned here on purpose", async () => {
+  // A known edge, kept where the next reader will meet it. Under this tsconfig (strict, no
+  // `exactOptionalPropertyTypes`) an optional property admits an explicit `undefined`, so the three
+  // lines below type-check while the third one is false at runtime. Found by Opus/e2c against my
+  // own unqualified claim that the annotation makes a rootless assembly a compile error.
+  //
+  // Deliberately DIRECTIVE-FREE: a `@ts-expect-error` here would assert the gap is closed and go
+  // red the moment it is, which reads as a passing gate for the wrong reason. These annotations
+  // instead become tsc errors if anyone enables `exactOptionalPropertyTypes` — so whoever closes
+  // the gap is sent to this cell and to the typedef's paragraph, and updates both.
+  /** @type {import("../src/tailcat-runtime.mjs").TailcatRuntimeOverrides} */
+  const sneaky = { stateRoot: undefined, vendorDir: "/tmp/vendor" };
+  /** @type {import("../src/tailcat-runtime.mjs").TailcatRuntimeOptions} */
+  const folded = { stateRoot: "/seat", ...sneaky };
+
+  assert.equal(folded.stateRoot, undefined,
+    "the gap has closed: an explicit undefined no longer survives the fold, so update the typedef's paragraph and delete this cell");
+  assert.equal(typeof folded.stateRoot, "undefined");
+  // The sharper half: the key EXISTS, so a defensive `in` or `hasOwn` guard passes while the value
+  // is missing. A runtime check against this hop has to test the value, never the key.
+  assert.equal(Object.hasOwn(folded, "stateRoot"), true);
+
+  // And the consequence, so the cell shows the cost rather than only the shape: this is what the
+  // resolver is handed, and it refuses — which is the backstop the type does not provide.
+  await assert.rejects(resolveTailcatBinary(folded), /./,
+    "a runtime with an undefined root resolved a binary anyway");
+});

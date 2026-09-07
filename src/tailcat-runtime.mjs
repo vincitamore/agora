@@ -84,6 +84,22 @@ async function cacheDirectory(root, pieces) {
  * was a stealth behaviour change wearing a type annotation — a head cut for types must not decide a
  * contract question in passing. Narrowing this is a separate cut with its own reasoning; what this
  * one owes is that the value crossing the hop is CHECKED, not that it is smaller.
+ *
+ * WHAT THIS TYPE CATCHES AND WHAT IT DOES NOT, because an unqualified guarantee is the failure this
+ * house has an article about. It catches an assembly that OMITS the root, at the site that wrote
+ * it. It does NOT catch an EXPLICIT `undefined` — under this tsconfig (strict, without
+ * `exactOptionalPropertyTypes`) `stateRoot?: string` admits one, so `{ stateRoot: undefined }`
+ * type-checks as these overrides, folds into a `TailcatRuntimeOptions` that also type-checks, and
+ * the checker then believes the folded `stateRoot` is a `string` while it is `undefined` at
+ * runtime. Measured: tsc exit 0, `typeof` not string, and `Object.hasOwn(folded,'stateRoot')` TRUE
+ * — so an `in` or `hasOwn` guard written against this is defeated too. The realistic shape is not a
+ * literal `undefined`, it is `runtime: { stateRoot: maybeUndefinedVar }`, which is ordinary code.
+ *
+ * Closing it means `--exactOptionalPropertyTypes` (96 errors repo-wide today, mostly in
+ * `bin/agora.mjs`) or a defaulting fold, and a defaulting fold is a behaviour change. Both are
+ * their own unit with their own argument; `test/native-remote.test.mjs` pins the gap with a cell so
+ * the next reader meets it as a known edge rather than on a live machine. Found by Opus/e2c reading
+ * item 8, against my own unqualified claim.
  * @typedef {Omit<TailcatRuntimeOptions, 'stateRoot'> & { stateRoot?: string }} TailcatRuntimeOverrides */
 
 /**
