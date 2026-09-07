@@ -116,6 +116,15 @@ Why carry it at all, in a module that prices nothing: a provider's own figure is
 independent check on a cost derived from token counts and a rate table, and the rate is the input
 most likely to be stale.
 
+## Source-reported reasoning
+
+Some sources report a reasoning figure of their own. `sourceReportedReasoning` is the same
+optional shape as `sourceReportedCost`: `known` carries an `amount` and a source-supplied
+`unit`; `unknown` / `invalid` / `not-applicable` carry no number. It is stored verbatim and
+never folded into `reasoning-billed`, `output`, or any other component. `reasoning-billed`
+stays unknown until a sourced mapping says the figure is included or excluded. Omitted means
+the source reported none; that is not the same as invalid.
+
 ## Blank is not a value
 
 Every string in this contract that must *say* something — `harness`, `sessionEpoch`, `sourceId`,
