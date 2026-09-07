@@ -50,6 +50,11 @@ test("stand-down writes the record, drains a cooperative watch, and resume clear
   const watcher = path.join(root, "watcher.cjs");
   await writeFile(watcher, "const fs=require('fs');const path=require('path');const stop=process.argv[2];const ack=process.argv[3];const gen=process.argv[4];setInterval(()=>{try{const rec=JSON.parse(fs.readFileSync(stop,'utf8'));if(rec.generation===gen){fs.mkdirSync(path.dirname(ack),{recursive:true});fs.writeFileSync(ack,JSON.stringify({generation:gen,at:new Date().toISOString()}));process.exit(0);}}catch{}},40);\n");
   const dummy = spawn(process.execPath, [watcher, stop, ack, generation], { stdio: "ignore", windowsHide: true });
+  // An ACK proves the flush completed; the OS may reap the process afterward.
+  const exited = new Promise((resolve, reject) => {
+    dummy.once("error", reject);
+    dummy.once("close", resolve);
+  });
   t.after(() => { try { dummy.kill("SIGKILL"); } catch { /* gone */ } });
   assert.ok(dummy.pid);
   await writeArmed(sessionDir, "agora", {
@@ -67,6 +72,17 @@ test("stand-down writes the record, drains a cooperative watch, and resume clear
   assert.equal(rec.drained[0].pid, dummy.pid);
   const onDisk = await readStandDown(sessionDir);
   assert.equal(onDisk?.because, "meter");
+  let exitTimer;
+  try {
+    await Promise.race([
+      exited,
+      new Promise((_, reject) => {
+        exitTimer = setTimeout(() => reject(new Error("cooperative watcher did not exit after ACK")), 2000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(exitTimer);
+  }
   assert.equal(pidAlive(dummy.pid), false);
   const cleared = await clearStandDown(sessionDir);
   assert.equal(cleared?.because, "meter");
