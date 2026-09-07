@@ -17,6 +17,13 @@ import { startMemberRoute } from "./tailcat-routes.mjs";
 import { parseSpawnRequest } from "./spawn/request.mjs";
 import { ensurePaneAuthority, mintSpawnId, openPane, reapPane } from "./spawn-pane.mjs";
 
+/** A refusal carries one stable code inward and one editable message outward. Keeping the
+ * code beside the error at the mint prevents a later wire encoder from recovering control flow
+ * from prose. @param {string} code @param {string} detail */
+function codedRefusal(code, detail) {
+  return Object.assign(new AgoraError(`${code}: ${detail}`), { code });
+}
+
 const MAX_PENDING_WRITE = 2 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 10_000;
 const ENDPOINT_PROBE_TIMEOUT_MS = 500;
@@ -543,7 +550,7 @@ export class NativeRoomService {
       // Board operations admitted through this protocol under the remote principal are allowed;
       // direct store or control access is not, so create-room and spawn are absent from the list.
       if (!memberMayRequest(frame.type))
-        throw new AgoraError(`member-request-refused: a member session may not request ${JSON.stringify(frame.type)}`);
+        throw codedRefusal("member-request-refused", `a member session may not request ${JSON.stringify(frame.type)}`);
       // Authorship is by BINDING, never by frame. validateNativeEnvelope admits arbitrary keys, so
       // an identity claim can ride any frame; it is refused by name here rather than silently
       // overwritten downstream, which would leave the guard with nothing observable to fire on.
@@ -551,7 +558,7 @@ export class NativeRoomService {
         /** @type {any} */ (frame.operation)?.accountId, /** @type {any} */ (frame.operation)?.authorId];
       for (const claim of claims)
         if (claim !== undefined && claim !== member.binding.accountId)
-          throw new AgoraError("member-actor-mismatch: this route admits one principal and the frame named another");
+          throw codedRefusal("member-actor-mismatch", "this route admits one principal and the frame named another");
       // A member session is authorKind agent BY CONSTRUCTION. The board's `break` is a human verb
       // that trusts this label, so a remote claiming human could break a local holder's lease.
       const operation = /** @type {any} */ (frame.operation);
@@ -560,7 +567,7 @@ export class NativeRoomService {
       // it silently -- the member's author kind would go unchecked for every element.
       if (operation && typeof operation === "object" && !Array.isArray(operation)) {
         if (operation.authorKind !== undefined && operation.authorKind !== "agent")
-          throw new AgoraError(`member-author-kind-refused: a member session is an agent; it may not claim ${JSON.stringify(operation.authorKind)}`);
+          throw codedRefusal("member-author-kind-refused", `a member session is an agent; it may not claim ${JSON.stringify(operation.authorKind)}`);
         // Absent is set rather than left to a downstream default: the board records an omitted
         // kind as "unknown", and "unknown" is not what a member is.
         if (operation.authorKind === undefined) operation.authorKind = "agent";
@@ -614,7 +621,7 @@ export class NativeRoomService {
     }
     const roomId = requiredString(frame.roomId, "room id");
     if (member && roomId !== member.binding.roomId)
-      throw new AgoraError("member-room-refused: a member session may only reach the room its route binds");
+      throw codedRefusal("member-room-refused", "a member session may only reach the room its route binds");
     const store = await this.openRoom(roomId);
     if (frame.type === "status") {
       sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "status-result", requestId: frame.requestId, status: store.status() });
@@ -660,11 +667,11 @@ export class NativeRoomService {
             // The one message that cannot cross is the one the caller would have received first,
             // which is the same end the page is taken from.
             const first = since ? messages[0] : messages.at(-1);
-            throw new AgoraError(`read-batch-refused: message ${first.cursor} alone encodes to `
+            throw codedRefusal("read-batch-refused", `message ${first.cursor} alone encodes to `
               + `${nativeFramePayloadBytes(envelope(1))} bytes and one native protocol frame holds `
               + `${NATIVE_FRAME_MAX}; this protocol cannot deliver it (no cursor advanced)`);
           }
-          throw new AgoraError(`read-batch-refused: ${messages.length} messages encode to ${bytes} bytes and `
+          throw codedRefusal("read-batch-refused", `${messages.length} messages encode to ${bytes} bytes and `
             + `one native protocol frame holds ${NATIVE_FRAME_MAX}; re-read with limit ${fits} or fewer `
             + `(no cursor advanced)`);
         }
@@ -688,7 +695,7 @@ export class NativeRoomService {
         const event = { protocol: NATIVE_PROTOCOL, type: "event", requestId: message.id, roomId, message };
         const size = nativeFramePayloadBytes(event);
         if (size > NATIVE_FRAME_MAX)
-          throw new AgoraError(`read-batch-refused: message ${message.cursor} alone encodes to ${size} bytes `
+          throw codedRefusal("read-batch-refused", `message ${message.cursor} alone encodes to ${size} bytes `
             + `and one native protocol frame holds ${NATIVE_FRAME_MAX}; this protocol cannot deliver it `
             + `(no cursor advanced)`);
         return encodeNativeFrame(event);
@@ -898,9 +905,12 @@ export class NativeRoomService {
     const serverTranscript = memberTranscript(route.binding, base);
     const fail = (/** @type {unknown} */ error, /** @type {string | undefined} */ id) => {
       const message = error instanceof Error ? error.message : "native member request failed";
+      const carried = /** @type {any} */ (error)?.code;
+      const code = typeof carried === "string" && /^[a-z][a-z0-9-]+$/.test(carried)
+        ? carried : greeted ? "member-request-refused" : "member-hello-refused";
       sendFrame(/** @type {any} */ (stream), { protocol: NATIVE_PROTOCOL, type: "error",
         requestId: id ?? randomUUID().replaceAll("-", ""),
-        reason: greeted ? "request-refused" : "member-hello-refused", message: message.slice(0, 500) });
+        reason: greeted ? "request-refused" : "member-hello-refused", code, message: message.slice(0, 500) });
     };
     if (!sendFrame(/** @type {any} */ (stream), { protocol: NATIVE_PROTOCOL, type: "member-server-hello",
       ...serverTranscript, proof: memberHandshakeProof(route.secret, MEMBER_PHASES.server, serverTranscript) })) {
@@ -919,19 +929,19 @@ export class NativeRoomService {
             // A member socket that speaks the LOCAL handshake is refused by name rather than
             // falling through to a path that would consult the nonce.
             if (frame.type === "client-hello")
-              throw new AgoraError("member-phase-refused: a member session speaks the member handshake, never the local one");
+              throw codedRefusal("member-phase-refused", "a member session speaks the member handshake, never the local one");
             if (frame.type !== "member-client-hello" || frame.requestId !== requestId
               || frame.bootEpoch !== this.bootEpoch || frame.serverChallenge !== serverChallenge)
-              throw new AgoraError("member-hello-refused: the client hello did not match this handshake");
+              throw codedRefusal("member-hello-refused", "the client hello did not match this handshake");
             const clientChallenge = requiredString(frame.clientChallenge, "client challenge");
             validateNativeId(clientChallenge, "client challenge");
             const transcript = { ...serverTranscript, clientChallenge };
             if (!verifyMemberHandshakeProof(frame.proof, route.secret, MEMBER_PHASES.client, transcript))
-              throw new AgoraError("member-proof-refused: the client did not prove the transcript under this route's secret");
+              throw codedRefusal("member-proof-refused", "the client did not prove the transcript under this route's secret");
             // The account is bound by the route, never taken from the frame. A frame that names a
             // different principal is refused here rather than reaching the store.
             if (frame.accountId !== undefined && frame.accountId !== route.binding.accountId)
-              throw new AgoraError("member-actor-mismatch: this route admits one principal and the frame named another");
+              throw codedRefusal("member-actor-mismatch", "this route admits one principal and the frame named another");
             greeted = true;
             sendFrame(/** @type {any} */ (stream), { protocol: NATIVE_PROTOCOL, type: "member-welcome",
               ...transcript, proof: memberHandshakeProof(route.secret, MEMBER_PHASES.welcome, transcript) });
@@ -939,7 +949,7 @@ export class NativeRoomService {
             return;
           }
           if (frame.accountId !== undefined && frame.accountId !== route.binding.accountId)
-            throw new AgoraError("member-actor-mismatch: this route admits one principal and the frame named another");
+            throw codedRefusal("member-actor-mismatch", "this route admits one principal and the frame named another");
           // A face choice is a foreign key on a member frame the way an account claim is. The host
           // reads no face off any frame (face selection and publication run in the poster's own
           // CLI against the poster's own state and token), so a member carrying one is refused
@@ -948,7 +958,7 @@ export class NativeRoomService {
           // transport puts it at the top level, and a hand-built frame could put it in the operation.
           const op = /** @type {any} */ (frame.operation);
           if (Object.hasOwn(frame, "face") || (op && typeof op === "object" && !Array.isArray(op) && Object.hasOwn(op, "face")))
-            throw new AgoraError("member-face-refused: the host reads no face off a member frame; a face is chosen and published by the poster's own CLI, never through a route");
+            throw codedRefusal("member-face-refused", "the host reads no face off a member frame; a face is chosen and published by the poster's own CLI, never through a route");
           await this.#dispatch(/** @type {any} */ (stream), frame, member);
         }).catch((error) => {
           const id = raw && typeof raw === "object" && "requestId" in raw && typeof raw.requestId === "string"
@@ -1104,7 +1114,18 @@ export class NativeServiceClient {
       const pending = typeof frame.requestId === "string" ? this.pending.get(frame.requestId) : undefined;
       if (!pending) continue;
       clearTimeout(pending.timer); this.pending.delete(frame.requestId);
-      if (frame.type === "error") pending.reject(new AgoraError(`${frame.reason ?? "request-refused"}: ${frame.message ?? "native service refused the request"}`));
+      if (frame.type === "error") {
+        const error = new AgoraError(`${frame.reason ?? "request-refused"}: ${frame.message ?? "native service refused the request"}`);
+        const wireCode = typeof frame.code === "string" && /^[a-z][a-z0-9-]+$/.test(frame.code) ? frame.code : undefined;
+        // A client may upgrade before its host. Pre-L8 frames have no `code`, but their leading
+        // name carried real discrimination (including route-not-open versus request-refused).
+        // Derive it only here at the frame boundary; callers and retry loops still see a code.
+        const oldPrefix = wireCode === undefined && typeof frame.message === "string"
+          ? /^([a-z][a-z-]+):/.exec(frame.message)?.[1] : undefined;
+        const code = wireCode ?? oldPrefix ?? frame.reason;
+        if (typeof code === "string") Object.assign(error, { code });
+        pending.reject(error);
+      }
       else pending.resolve(frame);
     }
   }

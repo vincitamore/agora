@@ -6,6 +6,7 @@ import { once } from "node:events";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import net from "node:net";
+import { Duplex, PassThrough } from "node:stream";
 import path from "node:path";
 import { NativeRoomService, NativeServiceClient, nativeServiceEndpoint } from "../src/native-service.mjs";
 import { NativeFrameDecoder, NATIVE_PROTOCOL, encodeNativeFrame, nativeHandshakeProof } from "../src/native-protocol.mjs";
@@ -78,6 +79,25 @@ async function fixture(t) {
   t.after(() => service.stop());
   return { root, service, endpoint };
 }
+
+test("an uncoded pre-L8 response keeps its non-member refusal name at the frame boundary", async () => {
+  const toServer = new PassThrough();
+  const toClient = new PassThrough();
+  const socket = Duplex.from({ readable: toClient, writable: toServer });
+  const client = new NativeServiceClient(/** @type {any} */ (socket), 2000);
+  const decoder = new NativeFrameDecoder();
+  const requestFrame = new Promise((resolve) => toServer.on("data", (bytes) => {
+    const frame = decoder.push(bytes)[0];
+    if (frame) resolve(frame);
+  }));
+  const requested = client.request("status");
+  const request = /** @type {any} */ (await requestFrame);
+  toClient.write(encodeNativeFrame({ protocol: NATIVE_PROTOCOL, type: "error", requestId: request.requestId,
+    reason: "request-refused", message: "route-not-open: this older host has no such route" }));
+  await assert.rejects(requested, error => /** @type {any} */(error).code === "route-not-open"
+    && /older host/.test(String(error)));
+  client.close();
+});
 
 test("one seat service fans a committed event to independent local subscribers", async (t) => {
   const { endpoint } = await fixture(t);

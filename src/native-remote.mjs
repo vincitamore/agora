@@ -48,6 +48,23 @@ function memberRefusal(code, detail) {
   return Object.assign(new AgoraError(`${code}: ${detail}`), { code });
 }
 
+/** Turn a host error frame into a typed refusal. The code is control data; the message is for the
+ * operator and may be reworded without changing retry behavior. An uncoded frame proves the peer
+ * predates L8, so its leading name is retained here as an explicit cross-version fallback. That
+ * compatibility read ends at the decoder: every downstream decision still receives a `code`.
+ * A frame with neither form is a malformed hello and stays terminal under that local code.
+ * @param {Record<string, any>} frame */
+function answeredMemberRefusal(frame) {
+  const message = typeof frame.message === "string" && frame.message
+    ? frame.message : "the host refused member admission without a message";
+  const wireCode = typeof frame.code === "string" && /^[a-z][a-z0-9-]+$/.test(frame.code)
+    && frame.code !== "member-channel-dark" ? frame.code : undefined;
+  const oldPrefix = wireCode === undefined ? /^([a-z][a-z-]+):/.exec(message)?.[1] : undefined;
+  const code = oldPrefix !== "member-channel-dark" ? wireCode ?? oldPrefix ?? "member-hello-refused" : "member-hello-refused";
+  const detail = message.startsWith(`${code}:`) ? message.slice(code.length + 1).trimStart() : message;
+  return memberRefusal(code, detail);
+}
+
 /** @param {unknown} value @param {string} label */
 function requiredString(value, label) {
   if (typeof value !== "string" || !value) throw new AgoraError(`native member handshake needs a ${label}`);
@@ -227,6 +244,7 @@ export async function completeMemberHandshake(input) {
   const reader = new HandshakeReader(input.stream, timeoutMs);
   try {
     const hello = await reader.next("member server hello");
+    if (hello.type === "error") throw answeredMemberRefusal(hello);
     if (hello.type === "server-hello")
       throw memberRefusal("member-phase-refused", "this is a member route and the host greeted with the local handshake; the seat nonce is not this channel's authentication");
     if (hello.type !== "member-server-hello")
@@ -248,6 +266,7 @@ export async function completeMemberHandshake(input) {
       throw memberRefusal("member-channel-dark", "the channel closed before this seat could authenticate");
 
     const welcome = await reader.next("member welcome");
+    if (welcome.type === "error") throw answeredMemberRefusal(welcome);
     if (welcome.type !== "member-welcome")
       throw memberRefusal("member-welcome-refused", `the host answered the client hello with ${JSON.stringify(welcome.type)}`);
     for (const [field, mine] of Object.entries(transcript))
@@ -536,26 +555,15 @@ export async function openRemoteSubscription(opts) {
    * refusals now carry `code` (see `memberRefusal`), and the message is built from it, so the two
    * cannot disagree. */
   const TERMINAL = new Set(["member-hello-refused", "member-welcome-refused", "member-host-proof-refused",
-    "member-phase-refused", "member-binding-mismatch", "member-actor-mismatch", "member-request-refused",
-    "member-room-refused", "member-author-kind-refused", "descriptor-not-ours", "descriptor-unreadable",
+    "member-proof-refused", "member-phase-refused", "member-binding-mismatch", "member-actor-mismatch",
+    "member-request-refused", "member-room-refused", "member-author-kind-refused", "member-face-refused",
+    "descriptor-not-ours", "descriptor-unreadable",
     "proof-ref-refused", "enrollment-absent", "route-not-open", "request-refused"]);
 
-  /** The code, or the prefix the far side's message carries.
-   *
-   * THE BOUNDARY, stated rather than left to a reader: refusals this seat MINTS carry a real
-   * `code`. Refusals the HOST answers arrive as text over the wire and do not yet — that is L8's
-   * host half ("an answered member refusal carries a CODE"). Until it lands, those are matched by
-   * the `name:` prefix their messages already have, which is narrower than the old substring
-   * regex (the detail can be reworded freely; only renaming the prefix changes anything) and is
-   * still prose. Deleting the fallback now would make every host-answered refusal RETRYABLE, which
-   * is this same defect inverted and worse. Delete it when the wire carries codes, not before.
+  /** L8 closes the temporary boundary L7 named: host answers now carry `code` on the wire and the
+   * request client preserves it, so there is no prose fallback left to silently become permanent.
    * @param {unknown} error */
-  const refusalCode = (error) => {
-    const code = /** @type {any} */ (error)?.code;
-    if (typeof code === "string") return code;
-    const message = error instanceof Error ? error.message : String(error);
-    return /^([a-z][a-z-]+):/.exec(message)?.[1];
-  };
+  const refusalCode = (error) => /** @type {any} */ (error)?.code;
 
   const reattach = async () => {
     // Re-subscribing from `drained` is what makes "nothing is lost" true: the host replays every
