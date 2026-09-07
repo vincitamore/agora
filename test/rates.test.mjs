@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  loadRateTable, priceUsage, bracketContains, RateError, RATE_KEY_FIELDS,
+  loadRateTable, priceUsage, selectRateRow, bracketContains, RateError, RATE_KEY_FIELDS,
 } from '../src/usage/rates.mjs';
 import { attributePool, PoolAttributionError } from '../src/usage/pool-attribution.mjs';
 
@@ -112,6 +112,27 @@ test('two rows for one key pick the latest effective not after asOf', () => {
   assert.equal(r.row?.effective, '2026-06-01T00:00:00.000Z');
   assert.equal(r.apiEquivalent.state, 'known');
   assert.equal(r.apiEquivalent.state === 'known' ? r.apiEquivalent.components.output.usd : null, (200 / 1_000_000) * 25);
+});
+
+test('duplicate overlapping rows at one effective timestamp are refused, but dated rows select later', () => {
+  const first = row({ publishedApi: { output: { usdPerMillion: 10 } } });
+  const duplicate = row({ publishedApi: { output: { usdPerMillion: 25 } } });
+  assert.throws(
+    () => table([first, duplicate]),
+    (error) => error instanceof RateError
+      && error.code === 'duplicate-rate-row'
+      && error.message.includes('provider=anthropic')
+      && error.message.includes('effective=2026-06-01T00:00:00.000Z'),
+  );
+
+  const later = row({
+    effective: '2026-07-01T00:00:00.000Z',
+    publishedApi: { output: { usdPerMillion: 25 } },
+  });
+  const loaded = table([first, later]);
+  const selected = selectRateRow(KEY, loaded, EVENT, AS_OF, 1000);
+  assert.equal(selected?.effective, '2026-07-01T00:00:00.000Z');
+  assert.equal(selected?.publishedApi?.output.usdPerMillion, 25);
 });
 
 test('a context bracket boundary is exact: the shared edge belongs to the later min', () => {
