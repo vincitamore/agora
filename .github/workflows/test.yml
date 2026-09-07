@@ -1,3 +1,4 @@
+# Run on local self-hosted Linux and Windows runners. macOS is suspended.
 name: test
 on:
   push:
@@ -13,8 +14,6 @@ jobs:
         include:
           - os: ubuntu-latest
             runner: [self-hosted, linux, house]
-          - os: macos-latest
-            runner: macos-latest
           - os: windows-latest
             runner: [self-hosted, windows, house]
     steps:
@@ -69,8 +68,6 @@ jobs:
         include:
           - os: ubuntu-latest
             runner: [self-hosted, linux, house]
-          - os: macos-latest
-            runner: macos-latest
           - os: windows-latest
             runner: [self-hosted, windows, house]
     defaults:
@@ -96,8 +93,6 @@ jobs:
         include:
           - os: ubuntu-latest
             runner: [self-hosted, linux, house]
-          - os: macos-latest
-            runner: macos-latest
           - os: windows-latest
             runner: [self-hosted, windows, house]
     defaults:
