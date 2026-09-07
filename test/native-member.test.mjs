@@ -321,17 +321,26 @@ test("a member append lands under the minted principal, and the host account is 
   assert.equal(posted.author.kind, "agent");
 });
 
-/** Fill the room until one read-result frame cannot hold it. Returns how many messages landed. */
-/** @param {any} service @param {number} [bytesEach] */
-async function fillPastTheFrameCap(service, bytesEach = 64 * 1024) {
+/** Fill the room until one read-result frame cannot hold it. Returns how many messages landed.
+ *
+ * Messages GROW: the newest are the largest. That is not decoration, it is the whole point. A
+ * uniform filler cannot tell a head from a tail, so a cell built on one credits a limit computed
+ * over the wrong end of the batch and stays green -- which is exactly what happened. The defect
+ * (the host measured the oldest N while `--limit N` returns the newest N) was invisible to a
+ * fixture of identical messages and surfaced on the first real room, whose messages differ in size.
+ * Growing sizes also put the heavy end where the store's default read takes its slice, so the
+ * over-estimate is in the direction that strands a caller.
+ * @param {any} service
+ */
+async function fillPastTheFrameCap(service) {
   const store = await service.openRoom(ROOM);
-  const body = "x".repeat(bytesEach);
   let written = 0;
-  // One over the cap, not ten: the cell must fail if the bound moves, and a batch far past it
-  // would still refuse under a much larger cap and stop testing this bound at all.
-  while (written * bytesEach <= NATIVE_FRAME_MAX) {
-    await store.append({ operationId: randomUUID().replaceAll("-", ""), authorName: "filler", text: body },
+  let bytes = 0;
+  while (bytes <= NATIVE_FRAME_MAX) {
+    const size = 4 * 1024 + written * 3 * 1024;
+    await store.append({ operationId: randomUUID().replaceAll("-", ""), authorName: "filler", text: "x".repeat(size) },
       { accountId: ACCOUNT });
+    bytes += size;
     written += 1;
   }
   return written;
@@ -385,6 +394,30 @@ test("a read past the frame cap is refused by its CONDITION, and the limit it na
   const over = await request({ type: "read", limit: named + 1 });
   assert.equal(over.type, "error", `limit ${named + 1} fit, so the refusal understated what the frame holds`);
   assert.match(over.message, /read-batch-refused/);
+});
+
+test("the limit the refusal names is a limit for the messages the CALLER will get, not the ones the host measured", async (t) => {
+  const { service, request } = await memberSession(t);
+  await fillPastTheFrameCap(service);
+
+  // With no cursor the store returns the NEWEST n (native-store.mjs slices `-limit`), so a fitting
+  // count computed over the head of the batch names a limit for different, and here smaller,
+  // messages. Measured live on 2026-09-07 before the fix: join was told 765, `--limit 765` refused
+  // and said 761. It converges, so no test that only asserts "a refusal happens" can see it; the
+  // assertion has to be that the named limit WORKS.
+  const refused = await request({ type: "read" });
+  assert.equal(refused.type, "error");
+  const named = Number(refused.message.match(/re-read with limit (\d+)/)?.[1]);
+  assert.ok(Number.isInteger(named) && named > 0, `no usable limit named: ${refused.message}`);
+
+  const ok = await request({ type: "read", limit: named });
+  assert.equal(ok.type, "read-result",
+    `the limit the refusal named refused in turn (${ok.message ?? ""}) — it was computed over a different end of the batch`);
+  assert.equal(ok.messages.length, named);
+
+  // And it is the boundary from the caller's end too, so the host is not merely being conservative.
+  const over = await request({ type: "read", limit: named + 1 });
+  assert.equal(over.type, "error", `limit ${named + 1} fit, so the named limit understates what a caller can ask for`);
 });
 
 test("a member read leaves the cursor where it was when the batch is refused", async (t) => {
