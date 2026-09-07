@@ -101,11 +101,19 @@ single `limitId`. They are distinct windows, so the slot name becomes the observ
   bucket, and at the legacy summary when that summary is the one being consumed.
 - Within a window, each field distinguishes **absent** from **unreadable** the same way. A null
   `resetsAt` means no reset metadata; anything else unreadable is `unsupported-reset`. A
+  `resetsAt` that is a number but cannot be converted to an instant (past the representable
+  date range) is `unsupported-reset` too: guarding the type is not guarding the value, and a
+  conversion that fails is a fault rather than an absence. A
   `usedPercent` that is not a number is `unsupported-percent-type`, one outside 0-100 is
   `unsupported-percent-range`, and one finer than a basis point is `unsupported-precision` --
   three faults that previously shared one code, which made the code a poor witness to its own
   cause. A snapshot's `limitId` may be null (the key it was filed under is then the identity),
-  but an unreadable one is refused rather than silently replaced by that key.
+  but an unreadable one is refused rather than silently replaced by that key -- and "unreadable"
+  is decided by the contract's own identity rule, not by a copy of it kept here, so the two
+  cannot drift apart. A duration is bounded where the contract bounds it (a safe integer), so an
+  absurd-but-integral value is a reported fault rather than an exception thrown during
+  validation. An `accountId` that is blank, or longer than the contract admits, is malformed:
+  whitespace satisfies the character rules and is still not an identity.
 - A window slot that is schema `null` means the provider reports **no** window there. A slot that
   is present but unreadable means a window exists that cannot be expressed, which is a different
   fact and is reported unavailable with `unsupported-shape` rather than dropped. Collapsing the

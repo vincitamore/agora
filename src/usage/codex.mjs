@@ -11,7 +11,7 @@
 // seat-service consumer must resolve an authenticated expected context and call
 // `acceptCompleteObservation` itself. That work is not done here and is not implied.
 import { spawn as nodeSpawn } from 'node:child_process';
-import { percentToBasisPoints, validateCompleteObservation, validatePoolPrincipal } from '../protocol/usage.mjs';
+import { percentToBasisPoints, validateCompleteObservation, validatePoolPrincipal, validateWindowIdentity } from '../protocol/usage.mjs';
 // Reuse the maintained resolver rather than looking for `codex` on PATH: on Windows the npm
 // shim is commonly on PATH without the native executable, and this already handles that, an
 // explicit path, and AGORA_CODEX_BIN. It is imported, not modified.
@@ -89,7 +89,10 @@ export function windowReadingFrom(limitId, slot, window) {
   /** @type {{durationMinutes?: number}} */
   let duration = {};
   if (rawDuration !== null && rawDuration !== undefined) {
-    if (typeof rawDuration !== 'number' || !Number.isInteger(rawDuration) || rawDuration < 1) {
+    // A2. `Number.isInteger` is true of 1e20, which the contract then refuses with a THROWN
+    // range error -- a fault escaping as an exception instead of a bounded code. Safe-integer is
+    // the boundary the contract actually enforces, so it is the boundary checked here.
+    if (typeof rawDuration !== 'number' || !Number.isSafeInteger(rawDuration) || rawDuration < 1) {
       return { window: bare, available: /** @type {const} */ (false), code: 'unsupported-duration' };
     }
     duration = { durationMinutes: rawDuration };
@@ -99,9 +102,20 @@ export function windowReadingFrom(limitId, slot, window) {
   // not a finite number is metadata the provider sent and this code cannot read. Reporting the
   // second as the first says the window has no reset time when the truth is that its reset time
   // was unintelligible -- the same absent/malformed collapse, at the field.
+  // A1. Guarding the TYPE is not guarding the VALUE. A finite number can still fail the epoch
+  // conversion (8640000000001, 1e20), and dropping that failure reported the window as one with
+  // no reset metadata -- the same absent/unreadable collapse, surviving inside its own repair.
   const rawReset = window.resetsAt;
-  if (rawReset !== null && rawReset !== undefined && (typeof rawReset !== 'number' || !Number.isFinite(rawReset))) {
-    return { window: identity, available: /** @type {const} */ (false), code: 'unsupported-reset' };
+  /** @type {string | undefined} */
+  let resetsAt;
+  if (rawReset !== null && rawReset !== undefined) {
+    if (typeof rawReset !== 'number' || !Number.isFinite(rawReset)) {
+      return { window: identity, available: /** @type {const} */ (false), code: 'unsupported-reset' };
+    }
+    resetsAt = resetsAtToIso(rawReset);
+    if (resetsAt === undefined) {
+      return { window: identity, available: /** @type {const} */ (false), code: 'unsupported-reset' };
+    }
   }
   // D4. These are three different faults and they had one code between them. A bounded code
   // that misdescribes its own cause is a small lie a consumer will later trust, so the type
@@ -121,7 +135,6 @@ export function windowReadingFrom(limitId, slot, window) {
     // basis point, which is refused rather than rounded.
     return { window: identity, available: /** @type {const} */ (false), code: 'unsupported-precision' };
   }
-  const resetsAt = resetsAtToIso(rawReset);
   return { window: identity, available: /** @type {const} */ (true), value, sense: /** @type {const} */ ('used'),
     ...(resetsAt ? { resetsAt } : {}) };
 }
@@ -137,7 +150,17 @@ function hasReadableLimitId(snapshot) {
   if (!isRecord(snapshot)) return false;
   const id = snapshot.limitId;
   if (id === null || id === undefined) return true;
-  return typeof id === 'string' && id.length > 0;
+  if (typeof id !== 'string' || id.length === 0) return false;
+  // A3. "Non-empty string" is not the contract's rule. A 300-character id and an all-whitespace
+  // one both satisfy it and both make the contract THROW later, turning a refusable input into
+  // an exception. Rather than restate the grammar here and let the copy drift from the original,
+  // ask the authority itself: a copy of a rule is a second rule.
+  try {
+    validateWindowIdentity({ limitId: id, unit: 'basis-points' });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -178,7 +201,10 @@ export function normalizeRateLimitsResponse(response, context) {
   // response this code cannot read, which is a fault and reported as one.
   const accountId = response.accountId;
   if (accountId === null || accountId === undefined) return { status: 'unsupported', code: CODE.noIdentity };
-  if (typeof accountId !== 'string' || accountId.length === 0) {
+  // A4. A blank identity is not an identity. The contract permits whitespace, so this is a
+  // judgment made here rather than inherited; and an id past the contract's cap must be refused
+  // with a code rather than thrown during validation.
+  if (typeof accountId !== 'string' || accountId.trim().length === 0 || accountId.length > 512) {
     return { status: 'error', code: CODE.badIdentity };
   }
 
