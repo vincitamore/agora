@@ -29,7 +29,7 @@ const CODE = Object.freeze({
   earlyExit: 'codex-early-exit', oversized: 'codex-output-oversized', badFrame: 'codex-malformed-frame',
   protocolError: 'codex-protocol-error', noIdentity: 'codex-account-identity-unavailable',
   noQuota: 'codex-no-quota-reported', badQuota: 'codex-quota-shape-unsupported',
-  transport: 'codex-transport-error',
+  transport: 'codex-transport-error', badIdentity: 'codex-account-identity-malformed',
 });
 
 /** @param {unknown} value @returns {value is Record<string, unknown>} */
@@ -95,18 +95,48 @@ export function windowReadingFrom(limitId, slot, window) {
     duration = { durationMinutes: rawDuration };
   }
   const identity = { ...bare, ...duration };
+  // D3. `resetsAt` is `number | null`: null is "no reset metadata", and anything else that is
+  // not a finite number is metadata the provider sent and this code cannot read. Reporting the
+  // second as the first says the window has no reset time when the truth is that its reset time
+  // was unintelligible -- the same absent/malformed collapse, at the field.
+  const rawReset = window.resetsAt;
+  if (rawReset !== null && rawReset !== undefined && (typeof rawReset !== 'number' || !Number.isFinite(rawReset))) {
+    return { window: identity, available: /** @type {const} */ (false), code: 'unsupported-reset' };
+  }
+  // D4. These are three different faults and they had one code between them. A bounded code
+  // that misdescribes its own cause is a small lie a consumer will later trust, so the type
+  // fault, the range fault and the genuine precision fault are now distinguished.
+  const rawPercent = window.usedPercent;
+  if (typeof rawPercent !== 'number' || !Number.isFinite(rawPercent)) {
+    return { window: identity, available: /** @type {const} */ (false), code: 'unsupported-percent-type' };
+  }
+  if (rawPercent < 0 || rawPercent > 100) {
+    return { window: identity, available: /** @type {const} */ (false), code: 'unsupported-percent-range' };
+  }
   let value;
   try {
-    value = percentToBasisPoints(window.usedPercent);
+    value = percentToBasisPoints(rawPercent);
   } catch {
-    // The provider reported a percentage this unit cannot carry exactly. Report the window
-    // as unavailable with a reason rather than dropping it or rounding it: the contract
-    // forbids silently discarding a represented window.
+    // What remains is the genuine case this code was named for: a percentage finer than a
+    // basis point, which is refused rather than rounded.
     return { window: identity, available: /** @type {const} */ (false), code: 'unsupported-precision' };
   }
-  const resetsAt = resetsAtToIso(window.resetsAt);
+  const resetsAt = resetsAtToIso(rawReset);
   return { window: identity, available: /** @type {const} */ (true), value, sense: /** @type {const} */ ('used'),
     ...(resetsAt ? { resetsAt } : {}) };
+}
+
+/**
+ * A snapshot's `limitId` is `string | null`. Null (or absent) means the provider reports no id
+ * of its own and the key it was filed under is the right identity. Anything ELSE present is an
+ * id this code cannot read, and quietly substituting the key would file the window under an
+ * identity the provider never reported -- the same identity rewriting refused for durations.
+ * @param {Record<string, unknown>} snapshot
+ */
+function hasReadableLimitId(snapshot) {
+  const id = snapshot.limitId;
+  if (id === null || id === undefined) return true;
+  return typeof id === 'string' && id.length > 0;
 }
 
 /**
@@ -142,8 +172,14 @@ export function windowsFromSnapshot(snapshot, fallbackLimitId) {
  */
 export function normalizeRateLimitsResponse(response, context) {
   if (!isRecord(response)) return { status: 'error', code: CODE.badQuota };
+  // D2. `accountId` is `string | null`. Null is "the backend supplied no identity", which is a
+  // fact about the account and reported as unsupported. A non-string, or an empty string, is a
+  // response this code cannot read, which is a fault and reported as one.
   const accountId = response.accountId;
-  if (typeof accountId !== 'string' || !accountId) return { status: 'unsupported', code: CODE.noIdentity };
+  if (accountId === null || accountId === undefined) return { status: 'unsupported', code: CODE.noIdentity };
+  if (typeof accountId !== 'string' || accountId.length === 0) {
+    return { status: 'error', code: CODE.badIdentity };
+  }
 
   // ABSENT (null/undefined) and SUPPLIED are different claims. When the multi-bucket map is
   // supplied it is authoritative and the legacy single-bucket summary adds nothing -- including
@@ -165,7 +201,9 @@ export function normalizeRateLimitsResponse(response, context) {
       // bucket is a false claim about its own completeness, so refuse rather than under-report.
       // This is the same collapse the window slots were repaired for, one level up: fixing the
       // inner level and leaving the outer one is exactly how it survived the first repair.
-      if (!isSnapshotShape(snapshot)) return { status: 'error', code: CODE.badQuota };
+      if (!isSnapshotShape(snapshot) || !hasReadableLimitId(snapshot)) {
+        return { status: 'error', code: CODE.badQuota };
+      }
       covered.add(typeof (/** @type {any} */ (snapshot)?.limitId) === 'string' && /** @type {any} */ (snapshot).limitId ? /** @type {any} */ (snapshot).limitId : key);
       readings.push(...windowsFromSnapshot(snapshot, key));
     }
@@ -173,7 +211,8 @@ export function normalizeRateLimitsResponse(response, context) {
   const legacy = response.rateLimits;
   // The same check at the level above the buckets: a legacy summary we are about to CONSUME
   // must be a snapshot, not merely an object.
-  if (!mapSupplied && legacy !== null && legacy !== undefined && !isSnapshotShape(legacy)) {
+  if (!mapSupplied && legacy !== null && legacy !== undefined
+      && (!isSnapshotShape(legacy) || !hasReadableLimitId(legacy))) {
     return { status: 'error', code: CODE.badQuota };
   }
   if (isRecord(legacy)) {

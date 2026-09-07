@@ -294,7 +294,7 @@ test('cleanup stops only the helper this call started, never a peer process', as
   assert.equal(peer.killed, false, 'a process this collector did not start is never signalled');
 });
 
-// --- Integrator HOLD regressions (Astra, house :524), all through the PUBLIC path. --------
+// --- Review regressions, all through the PUBLIC path. ------------------------------------
 // Four defects reproduced here before repair. Each pairs with its discriminating opposite, so
 // a fix that collapses the distinction (treating malformed as null, or supplied-empty as
 // absent) reddens the pair rather than passing both.
@@ -381,7 +381,7 @@ test('HOLD 4: a reply to a request never issued is refused, not accepted as the 
   assert.equal(result.code, 'codex-protocol-error');
 });
 
-// --- Second integrator HOLD (Astra :540): the outer collapse, and owned stream errors. -----
+// --- The outer collapse, and owned stream errors. ----------------------------------------
 
 test('HOLD 5: a malformed bucket in the authoritative map is refused, never quietly omitted', async () => {
   // The schema types every map value as a snapshot, so a non-record value is a bucket the
@@ -441,7 +441,7 @@ test('HOLD 6: an owned stream error is bounded and never crashes the caller', as
   assert.match(run.stdout, /RESULT unsupported codex-transport-error/);
 });
 
-// --- Third integrator HOLD (Astra :560): required shape, and the pre-abort spawn race. -----
+// --- Required snapshot shape, and the pre-abort spawn race. ------------------------------
 
 test('HOLD 7: record-ness is not snapshot shape; a bucket missing a required slot is refused', async () => {
   // {} is a perfectly good record and a malformed snapshot. A snapshot carrying `primary` but
@@ -490,4 +490,83 @@ test('HOLD 8: a pre-cancelled read spawns nothing and cannot crash the caller la
   assert.equal(run.status, 0, 'a pre-cancelled read must not crash the caller afterwards');
   assert.equal(/^\s*at .*:\d+:\d+/m.test(run.stderr || ''), false, 'a raw stack reached stderr');
   assert.match(run.stdout, /RESULT unsupported codex-cancelled/);
+});
+
+// --- The enumeration this module should have had after the FIRST collapse was found. -------
+// Four rounds of the same defect class were found one field or one level at a time, each after
+// a reader pointed at it. What finally found the rest was not resolving to be careful; it was
+// enumerating every consumed field against every shape a foreign source can send. This matrix
+// is that enumeration, kept so the class is closed mechanically rather than by anyone's care.
+//
+// The discipline it encodes: for each field, `null` and a valid value are LEGITIMATE and must
+// keep working, while a present-but-unreadable value must be reported as its own fault and
+// never silently folded into the null case.
+
+const M = (/** @type {Record<string, unknown>} */ over) => ({
+  limitId: 'codex', limitName: 'codex',
+  primary: { usedPercent: 8, windowDurationMins: 10080, resetsAt: 1789269881 },
+  secondary: null, credits: null, individualLimit: null,
+  spendControlReached: null, planType: null, rateLimitReachedType: null, ...over,
+});
+const withPrimary = (/** @type {Record<string, unknown>} */ over) =>
+  M({ primary: { usedPercent: 8, windowDurationMins: 10080, resetsAt: 1789269881, ...over } });
+
+/** @type {Array<[string, unknown, 'reads'|'window-fault'|'response-fault', string?]>} */
+const MATRIX = [
+  // field shape                        snapshot                      expectation        code
+  ['baseline valid',                    M({}),                        'reads'],
+  ['limitId null (absent)',             M({ limitId: null }),         'reads'],
+  ['limitId number (unreadable)',       M({ limitId: 7 }),            'response-fault', 'codex-quota-shape-unsupported'],
+  ['limitId empty string',              M({ limitId: '' }),           'response-fault', 'codex-quota-shape-unsupported'],
+  ['secondary null (absent)',           M({ secondary: null }),       'reads'],
+  ['secondary string (unreadable)',     M({ secondary: 'x' }),        'window-fault',   'unsupported-shape'],
+  ['duration null (absent)',            withPrimary({ windowDurationMins: null }),  'reads'],
+  ['duration fractional',               withPrimary({ windowDurationMins: 300.9 }), 'window-fault', 'unsupported-duration'],
+  ['duration zero',                     withPrimary({ windowDurationMins: 0 }),     'window-fault', 'unsupported-duration'],
+  ['duration string',                   withPrimary({ windowDurationMins: '300' }), 'window-fault', 'unsupported-duration'],
+  ['resetsAt null (absent)',            withPrimary({ resetsAt: null }),   'reads'],
+  ['resetsAt string (unreadable)',      withPrimary({ resetsAt: 'soon' }), 'window-fault', 'unsupported-reset'],
+  ['resetsAt NaN (unreadable)',         withPrimary({ resetsAt: NaN }),    'window-fault', 'unsupported-reset'],
+  ['usedPercent string',                withPrimary({ usedPercent: '8' }),  'window-fault', 'unsupported-percent-type'],
+  ['usedPercent null',                  withPrimary({ usedPercent: null }), 'window-fault', 'unsupported-percent-type'],
+  ['usedPercent negative',              withPrimary({ usedPercent: -5 }),   'window-fault', 'unsupported-percent-range'],
+  ['usedPercent above 100',             withPrimary({ usedPercent: 150 }),  'window-fault', 'unsupported-percent-range'],
+  ['usedPercent finer than a bp',       withPrimary({ usedPercent: 21.000000001 }), 'window-fault', 'unsupported-precision'],
+];
+
+for (const [label, snapshot, expectation, code] of MATRIX) {
+  test('matrix: ' + label, () => {
+    const result = normalizeRateLimitsResponse(
+      { accountId: 'a-1', rateLimits: null, rateLimitsByLimitId: { codex: snapshot } }, ctx);
+    if (expectation === 'response-fault') {
+      assert.notEqual(result.status, 'supported', label + ' must fault the whole response');
+      if (result.status !== 'supported') assert.equal(result.code, code, label);
+      return;
+    }
+    assert.ok(result.status === 'supported', label + ' must still produce a reading');
+    if (expectation === 'reads') {
+      assert.ok(result.observation.windows.every((w) => w.available), label + ' should read cleanly');
+      return;
+    }
+    // Locate the faulted window rather than assuming a slot order: a malformed SECONDARY
+    // leaves a perfectly good primary at index 0.
+    const only = result.observation.windows.find((w) => !w.available);
+    assert.ok(only, label + ' lost its faulted window entirely');
+    // A window fault is REPRESENTED and named; it is never dropped and never silently
+    // folded into the absent case.
+    assert.equal(only.available, false, label + ' should be an unavailable window');
+    assert.equal(only.code, code, label);
+  });
+}
+
+test('matrix: identity absent and identity unreadable are different faults', async () => {
+  const map = { codex: M({}) };
+  const absent = await collect({ accountId: null, rateLimits: null, rateLimitsByLimitId: map });
+  if (absent.status === 'supported') return assert.fail('a null accountId must not yield a principal');
+  assert.equal(absent.code, 'codex-account-identity-unavailable');
+  for (const bad of [12345, '']) {
+    const malformed = await collect({ accountId: bad, rateLimits: null, rateLimitsByLimitId: map });
+    if (malformed.status === 'supported') return assert.fail('a malformed accountId was accepted');
+    assert.equal(malformed.code, 'codex-account-identity-malformed');
+  }
 });
