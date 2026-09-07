@@ -7,6 +7,14 @@ import { resolveTailcatBinary } from './tailcat-runtime.mjs';
 import { AgoraError } from './core.mjs';
 import { prepareRuntimeLifetime, runtimeExpiryDelay, runtimeCancelled } from './tailcat-lifetime.mjs';
 
+const STDERR_TAIL_BYTES=512;
+
+/** @param {Buffer} previous @param {Buffer|string} chunk */
+function appendStderrTail(previous,chunk){
+  const next=Buffer.concat([previous,Buffer.isBuffer(chunk)?chunk:Buffer.from(chunk)]);
+  return next.length<=STDERR_TAIL_BYTES?next:next.subarray(next.length-STDERR_TAIL_BYTES);
+}
+
 /**
  * A guardian owns the actual child handle and kills it on IPC disconnect, including SIGKILL of
  * the offer worker. No saved PID is ever used to kill a process after a restart.
@@ -17,7 +25,10 @@ export async function spawnTailcat(args,options,owner) {
   const lifetime=prepareRuntimeLifetime(options,owner);
   const ownerSignal=owner?.signal;
   const launchOptions={...options,...(lifetime===undefined?{}:{lifetime})};
-  const guardian=spawn(process.execPath,[fileURLToPath(import.meta.url),'--guardian'],{stdio:['pipe','pipe','ignore','ipc'],windowsHide:true});
+  const guardian=spawn(process.execPath,[fileURLToPath(import.meta.url),'--guardian'],{stdio:['pipe','pipe','pipe','ipc'],windowsHide:true});
+  let stderrTail=Buffer.alloc(0);
+  guardian.stderr?.on('data',chunk=>{stderrTail=appendStderrTail(stderrTail,chunk);});
+  Object.defineProperty(guardian,'tailcatStderrTail',{enumerable:false,value:()=>stderrTail.toString('utf8')});
   // Keep ownership until rejected startup has actually terminated. The caller has no
   // handle yet and cannot join cleanup if rejection races the guardian's exit.
   // Node on Windows can omit ChildProcess.close after parent IPC disconnect.
@@ -25,6 +36,7 @@ export async function spawnTailcat(args,options,owner) {
   const terminated=Promise.all([
     new Promise(resolve=>{guardian.once('exit',()=>resolve(undefined));guardian.once('error',()=>resolve(undefined));}),
     guardian.stdout?finished(guardian.stdout,{cleanup:true}).catch(()=>{}):Promise.resolve(),
+    guardian.stderr?finished(guardian.stderr,{cleanup:true}).catch(()=>{}):Promise.resolve(),
   ]);
   let ready=false;
   /** @type {((reason:Error)=>void)|undefined} */ let rejectStartup;
@@ -96,7 +108,7 @@ if(process.argv[2]==='--guardian') {
       child.once('spawn',()=>report('started'));
       // `exit` precedes stdio drain. Exiting the guardian there truncates a valid HTTP response.
       child.once('close',code=>{process.exitCode=code??1;process.stdin.destroy();if(process.connected)process.disconnect();});
-      process.stdin.pipe(child.stdin);child.stdout.pipe(process.stdout);child.stderr.resume();
+      process.stdin.pipe(child.stdin);child.stdout.pipe(process.stdout);child.stderr.pipe(process.stderr);
       if(duration!==null)setTimeout(stop,duration).unref();
     } catch {report('failed');process.exitCode=1;stop();}
   });

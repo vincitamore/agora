@@ -16,7 +16,8 @@ import { validateRouteBinding, validateRouteDescriptor, publicNodeKeyDigest } fr
 /** Trusted local dependency surface. None of these functions may be supplied by a wire envelope.
  * @typedef {{owner:import('./tailcat-lifetime.mjs').RuntimeOwner,runtime:Parameters<typeof spawnTailcat>[1],
  * acceptChannel:(binding:Binding,stream:Duplex,signal:AbortSignal)=>Session|Promise<Session>,
- * startupTimeoutMs?:number,stopTimeoutMs?:number,maxChannels?:number,
+ * startupTimeoutMs?:number,stopTimeoutMs?:number,maxChannels?:number,commandTimeoutMs?:number,
+ * firstDialAttempts?:number,firstDialTimeoutMs?:number,firstDialBackoffMs?:number,
  * spawn?:typeof spawnTailcat,address?:typeof readTailcatAddress,
  * listen?:(accept:(socket:Duplex)=>void)=>Promise<Listener>}} Options */
 
@@ -28,6 +29,15 @@ function freeze(value) {
 function cancelled(){return Object.assign(Error('Native route stopped before readiness.'),{code:'AGORA_ROUTE_CANCELLED'});}
 /** @param {unknown} value @param {number} fallback */
 function duration(value,fallback){const n=value??fallback;if(typeof n!=='number'||!Number.isSafeInteger(n)||n<1||n>2147483647)throw Error('Invalid route bound.');return n;}
+/** @param {string[]} args */
+function commandVerb(args){return args.find(value=>value==='parse'||value==='printpub')??args[0]??'unknown';}
+/** @param {any} child */
+function stderrTail(child){
+  const text=typeof child?.tailcatStderrTail==='function'?child.tailcatStderrTail():'';
+  return typeof text==='string'?text.trim():'';
+}
+/** @param {string} text @param {string} tail */
+function withStderrTail(text,tail){return tail?`${text}; stderr tail: ${JSON.stringify(tail)}`:text;}
 
 /** One TCP listener per admitted member. Request bytes never select its binding.
  * The local machine remains in the cooperative trust profile; loopback is not OS-user isolation.
@@ -60,6 +70,11 @@ function resources(options){
   // Copy trusted runtime configuration before deferred startup. Callers cannot override lifetime.
   const runtime={...options.runtime,lifetime};delete runtime.deadline;
   const stopTimeout=duration(options.stopTimeoutMs,10000),maxChannels=duration(options.maxChannels,64);
+  const commandTimeoutMs=duration(options.commandTimeoutMs,5000);
+  const firstDialAttempts=duration(options.firstDialAttempts,3);
+  const firstDialTimeoutMs=duration(options.firstDialTimeoutMs,12000);
+  const firstDialBackoffMs=duration(options.firstDialBackoffMs,250);
+  if(firstDialAttempts>10)throw Error('Invalid first dial attempt bound.');
   const controller=new AbortController();
   /** @type {Set<Duplex>} */ const streams=new Set();
   /** @type {Set<Promise<unknown>>} */ const streamDisposals=new Set();
@@ -79,6 +94,8 @@ function resources(options){
   const check=()=>{if(signal.aborted)throw cancelled();};
   /** @template T @param {Promise<T>} p @returns {Promise<T>} */
   const race=p=>Promise.race([p,cancellation]);
+  /** @param {number} ms */
+  const wait=ms=>race(new Promise(resolve=>setTimeout(resolve,ms)));
   /** @param {{session:Session,stop?:Promise<unknown>}} entry */
   const stopSession=entry=>{if(!entry.stop){entry.stop=Promise.resolve().then(()=>entry.session.stop());void entry.stop.catch(error=>{if(!error?.cleanupPending)failures.push(error);});}};
   const dispose=()=>{
@@ -152,15 +169,30 @@ function resources(options){
     if(signal.aborted){child.stdout?.resume();if(child.connected)child.disconnect();}
     check();return {child,exited};
   };
+  /** @param {Promise<unknown>} exited */
+  const makeResident=exited=>{void exited.then(()=>stop(),()=>stop()).catch(()=>{});};
   /** Run upstream's actual parser/printpub through the same guardian, with bounded output.
    * @param {string[]} args */
   const command=async(args)=>{
     const {child,exited}=await spawn(args);
     if(!child.stdout)throw Error('Tailcat command output unavailable.');
-    const bytes=await race(boundedBytes(child.stdout,8192));const code=await race(exited);
-    if(code!==0)throw Error('Tailcat route/key validation failed.');return bytes.toString('utf8');
+    const verb=commandVerb(args);
+    /** @type {NodeJS.Timeout|undefined} */ let timer;
+    const timeout=new Promise(resolve=>{timer=setTimeout(()=>resolve({kind:'timeout'}),commandTimeoutMs);});
+    try{
+      const result=await race(Promise.race([
+        Promise.all([boundedBytes(child.stdout,8192),exited]).then(([bytes,code])=>({kind:'done',bytes,code})),timeout,
+      ]));
+      if(result.kind==='timeout'){
+        child.stdout.resume();if(child.connected)child.disconnect();
+        throw Error(withStderrTail(`tailcat-command-timeout: ${verb} did not exit within ${commandTimeoutMs} ms`,stderrTail(child)));
+      }
+      if(result.code!==0)throw Error(withStderrTail(`Tailcat route/key validation failed: ${verb} exited with code ${result.code}`,stderrTail(child)));
+      return result.bytes.toString('utf8');
+    }finally{if(timer)clearTimeout(timer);}
   };
-  const scope={closed,stop,check,race,signal,failures,spawn,command,accept,ownStream,
+  const scope={closed,stop,check,race,wait,signal,failures,spawn,makeResident,command,accept,ownStream,
+    firstDialAttempts,firstDialTimeoutMs,firstDialBackoffMs,
     startup:Promise.resolve(),
     /** @param {Listener} value */ ownListener(value){listener=value;if(signal.aborted)dispose();},
   };
@@ -205,9 +237,40 @@ export function startMemberChannel(request,options){
     // Upstream printpub appends exactly one LF. Never trim arbitrary invalid whitespace.
     const publicKey=printed.endsWith('\n')?printed.slice(0,-1):printed;
     if(publicNodeKeyDigest(publicKey)!==descriptor.binding.allowedKeyDigest)throw Error('Local enrolled private key does not match route binding.');
-    const {child}=await scope.spawn([`--key=${keyPath}`,descriptor.endpoint.address,String(descriptor.endpoint.port)],true);
-    if(!child.stdin||!child.stdout)throw Error('Native route pipes unavailable.');
-    const stream=Duplex.from({readable:child.stdout,writable:child.stdin});
-    await scope.accept(descriptor.binding,stream);scope.check();return freeze({binding:descriptor.binding});
+    const args=[`--key=${keyPath}`,descriptor.endpoint.address,String(descriptor.endpoint.port)];
+    /** @type {{attempt:number,reason:string,tail:string}|undefined} */ let lastFailure;
+    for(let attempt=1;attempt<=scope.firstDialAttempts;attempt++){
+      const {child,exited}=await scope.spawn(args);
+      if(!child.stdin||!child.stdout)throw Error('Native route pipes unavailable.');
+      const stream=Duplex.from({readable:child.stdout,writable:child.stdin});
+      const accepted=scope.accept(descriptor.binding,stream);
+      /** @type {NodeJS.Timeout|undefined} */ let timer;
+      const timeout=new Promise(resolve=>{timer=setTimeout(()=>resolve({kind:'timeout'}),scope.firstDialTimeoutMs);});
+      let outcome;
+      try{
+        outcome=await scope.race(Promise.race([
+          accepted.then(session=>({kind:'ready',session}),error=>({kind:'accept-error',error})),
+          exited.then(code=>({kind:'exit',code}),error=>({kind:'exit-error',error})),
+          timeout,
+        ]));
+      }finally{if(timer)clearTimeout(timer);}
+      if(outcome.kind==='ready'){
+        scope.makeResident(exited);scope.check();return freeze({binding:descriptor.binding});
+      }
+      const transportEnded=child.exitCode!==null||child.signalCode!==null;
+      stream.destroy();child.stdout.resume();if(child.connected)child.disconnect();
+      if(outcome.kind==='accept-error'&&!transportEnded)throw outcome.error;
+      if(outcome.kind==='exit-error')throw outcome.error;
+      const reason=outcome.kind==='timeout'?`attempt did not complete within ${scope.firstDialTimeoutMs} ms`:
+        outcome.kind==='accept-error'?'transport ended during member admission':`transport exited with code ${outcome.code}`;
+      lastFailure={attempt,reason,tail:stderrTail(child)};
+      if(attempt<scope.firstDialAttempts)await scope.wait(scope.firstDialBackoffMs*attempt);
+    }
+    const summary=`member-channel-startup-failed: first dial exhausted ${scope.firstDialAttempts} attempts; attempt ${lastFailure?.attempt??scope.firstDialAttempts} ${lastFailure?.reason??'failed'}`;
+    const failure=Error(withStderrTail(summary,lastFailure?.tail??''));
+    // Exhausting transport-only retries is still the route-cancellation condition that
+    // the native layer translates into its established member-channel-dark diagnosis.
+    /** @type {any} */ (failure).code='AGORA_ROUTE_CANCELLED';
+    throw failure;
   });
 }

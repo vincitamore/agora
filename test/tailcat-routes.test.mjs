@@ -7,14 +7,14 @@ import { PassThrough } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
 import path from 'node:path';
 import { connect } from 'node:net';
-import { mkdtemp,rm } from 'node:fs/promises';
+import { mkdtemp,readFile,writeFile,rm } from 'node:fs/promises';
 import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { startMemberRoute, startMemberChannel } from '../src/tailcat-routes.mjs';
 import { publicNodeKeyDigest } from '../src/protocol/route.mjs';
 import { spawnTailcat } from '../src/tailcat-process.mjs';
-import { resolveTailcatBinary } from '../src/tailcat-runtime.mjs';
+import { resolveTailcatBinary,sha256 } from '../src/tailcat-runtime.mjs';
 
 const publicKey=`nodekey:${'1'.repeat(64)}`;
 const ownerRef={serviceId:'service000000001',serviceBootId:'boot000000000001'};
@@ -25,12 +25,20 @@ function descriptor(){return {binding:binding(),protocol:'agora-native/1',endpoi
 function deferred(){let resolve=/** @type {(value:T)=>void} */(()=>{}),reject=/** @type {(error:unknown)=>void} */(()=>{});const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return {promise,resolve,reject};}
 /** @param {boolean} [automatic] */
 function session(automatic=true){const ended=deferred(),ready=deferred();let stopped=0;return {ready:ready.promise,closed:ended.promise,stop:async()=>{stopped++;if(automatic)ended.resolve(undefined);},admit:()=>ready.resolve(undefined),finish:()=>ended.resolve(undefined),stopped:()=>stopped};}
+/** @param {string} root */
+async function testRuntime(root){
+  const executable=process.platform==='win32'?process.execPath:path.join(root,'fixture-runtime');
+  if(process.platform!=='win32')await writeFile(executable,`#!/bin/sh\nexec '${process.execPath.replaceAll("'", "'\\''")}' "$@"\n`,{mode:0o700});
+  const options={stateRoot:root,override:executable,overrideSha256:sha256(await readFile(executable))};
+  await resolveTailcatBinary(options);return options;
+}
 function fixture(){
   const owner=new AbortController();
   /** @type {Array<{args:string[],options:any,owner:any}>} */ const calls=[];
   /** @type {Array<any>} */ const children=[];
   /** @type {((stream:PassThrough)=>void)|undefined} */ let accept;
   let listenerClosed=0,spawnBarrier=/** @type {Promise<void>|undefined} */(undefined),key=publicKey,parseExit=0;
+  let hangingVerb='',commandTail='',dialFailures=0,hangingDials=0,dialTail='',dialCount=0,dialSessionStops=0;
   /** @type {import('../src/tailcat-routes.mjs').Options} */ const options={
     owner:{...ownerRef,signal:owner.signal},runtime:{stateRoot:path.resolve('test-state')},startupTimeoutMs:1000,stopTimeoutMs:50,
     listen:async callback=>{accept=callback;return {port:4444,close:async()=>{listenerClosed++;}};},
@@ -39,10 +47,16 @@ function fixture(){
     spawn:async(args,configuration,liveOwner)=>{
       calls.push({args,options:configuration,owner:liveOwner});
       if(spawnBarrier)await spawnBarrier;
+      const verb=args.find(value=>value==='parse'||value==='printpub')??'';
+      const dial=args.length===3&&args[0].startsWith('--key=')&&args[1]===descriptor().endpoint.address;
+      if(dial)dialCount++;
+      const tail=dial&&(dialCount<=dialFailures||dialCount<=hangingDials)?dialTail:verb===hangingVerb?commandTail:'';
       const child=Object.assign(new EventEmitter(),{stdin:new PassThrough(),stdout:new PassThrough(),exitCode:/** @type {number|null} */(null),signalCode:/** @type {NodeJS.Signals|null} */(null),connected:true,
+        tailcatStderrTail(){return tail;},
         disconnect(){if(!child.connected)return;child.connected=false;child.exitCode=0;child.stdout.end();child.stdin.destroy();child.emit('exit',0,null);},
       });children.push(child);
-      if(args[0]==='parse'||args.includes('printpub'))setImmediate(()=>{child.stdout.end(args[0]==='parse'?'{}':`${key}\n`);child.exitCode=args[0]==='parse'?parseExit:0;child.connected=false;child.emit('exit',child.exitCode,null);});
+      if(verb&&verb!==hangingVerb)setImmediate(()=>{child.stdout.end(verb==='parse'?'{}':`${key}\n`);child.exitCode=verb==='parse'?parseExit:0;child.connected=false;child.emit('exit',child.exitCode,null);});
+      if(dial&&dialCount<=dialFailures)setImmediate(()=>{child.stdout.end();child.stdin.destroy();child.exitCode=1;child.connected=false;child.emit('exit',1,null);});
       return /** @type {Awaited<ReturnType<NonNullable<typeof options.spawn>>>} */(/** @type {unknown} */(child));
     },
   };
@@ -50,6 +64,17 @@ function fixture(){
     /** @param {Promise<void>} value */ blockSpawn(value){spawnBarrier=value;},
     /** @param {string} value */ key(value){key=value;},
     /** @param {number} value */ parseCode(value){parseExit=value;},
+    /** @param {string} verb @param {string} tail */ hangCommand(verb,tail){hangingVerb=verb;commandTail=tail;},
+    /** @param {number} count @param {string} tail */ failDials(count,tail){
+      dialFailures=count;dialTail=tail;
+      options.acceptChannel=async()=>{
+        if(dialCount<=Math.max(dialFailures,hangingDials)){const ready=deferred(),closed=deferred();return {ready:ready.promise,closed:closed.promise,stop:async()=>{dialSessionStops++;ready.reject(Error('transport ended'));closed.resolve(undefined);}};}
+        const s=session();s.admit();return s;
+      };
+    },
+    /** @param {number} count @param {string} tail */ hangDials(count,tail){hangingDials=count;this.failDials(0,tail);},
+    dialCount:()=>dialCount,
+    dialSessionStops:()=>dialSessionStops,
     outbound(){return {...options,assertDescriptor:async()=>{},resolveClientKey:async()=>({keyPath:path.resolve('local-enrolled.private.json')})};},
   };
 }
@@ -113,6 +138,56 @@ test('outbound actual parser and public-key result refuse before network channel
     const route=startMemberChannel({descriptor:descriptor()},f.outbound());await assert.rejects(route.ready);await route.closed;
     assert.equal(f.calls.some(x=>x.args.length===3&&x.args[1]==='a'.repeat(40)),false);
   }
+});
+
+test('clockless command child is stopped by a named verb timeout carrying its stderr tail',async()=>{
+  const f=fixture();f.hangCommand('parse','parser still waiting');f.options.commandTimeoutMs=15;
+  const route=startMemberChannel({descriptor:descriptor()},f.outbound());
+  await assert.rejects(route.ready,error=>{
+    assert.match(String(error),/tailcat-command-timeout: parse did not exit within 15 ms/);
+    assert.match(String(error),/parser still waiting/);return true;
+  });
+  await route.closed;assert.equal(f.children[0].connected,false);
+});
+
+test('first member dial retries two transport exits then admits without leaking failed children',async()=>{
+  const f=fixture();f.failDials(2,'tailcat Ping: context deadline exceeded');
+  const options=f.outbound();options.firstDialTimeoutMs=30;options.firstDialBackoffMs=1;
+  const route=startMemberChannel({descriptor:descriptor()},options);await route.ready;
+  assert.equal(f.dialCount(),3);
+  const dials=f.children.filter(child=>child.tailcatStderrTail().includes('Ping')||child===f.children.at(-1));
+  assert.equal(dials.length,3);assert.equal(dials[0].connected,false);assert.equal(dials[1].connected,false);assert.equal(f.dialSessionStops(),2);
+  await route.stop();assert.equal(dials[2].connected,false);
+});
+
+test('member dial retry exhaustion names startup failure and carries the final stderr tail',async()=>{
+  const f=fixture();f.failDials(3,'tailcat Ping: context deadline exceeded');
+  const options=f.outbound();options.firstDialTimeoutMs=30;options.firstDialBackoffMs=1;
+  const route=startMemberChannel({descriptor:descriptor()},options);
+  await assert.rejects(route.ready,error=>{
+    assert.match(String(error),/member-channel-startup-failed: first dial exhausted 3 attempts/);
+    assert.match(String(error),/tailcat Ping: context deadline exceeded/);return true;
+  });
+  await route.closed;assert.equal(f.dialCount(),3);assert.equal(f.dialSessionStops(),3);
+});
+
+test('each member dial attempt has its own clock when the child never exits',async()=>{
+  const f=fixture();f.hangDials(1,'dial remains open');
+  const options=f.outbound();options.firstDialAttempts=1;options.firstDialTimeoutMs=15;options.firstDialBackoffMs=1;
+  const started=Date.now(),route=startMemberChannel({descriptor:descriptor()},options);
+  await assert.rejects(route.ready,error=>{
+    assert.match(String(error),/member-channel-startup-failed/);
+    assert.match(String(error),/attempt did not complete within 15 ms/);return true;
+  });
+  await route.closed;assert.ok(Date.now()-started<250);assert.equal(f.children.at(-1).connected,false);assert.equal(f.dialSessionStops(),1);
+});
+
+test('loopback-only injected runtime guardian retains only the bounded tail of stderr',async t=>{
+  const root=await mkdtemp(path.join(os.tmpdir(),'agora-route-stderr-'));t.after(()=>rm(root,{recursive:true,force:true}));
+  const child=await spawnTailcat(['-e',`process.stderr.write('${'x'.repeat(600)}tailcat Ping: context deadline exceeded');process.exit(1)`],await testRuntime(root));
+  child.stdout?.resume();await new Promise(resolve=>child.once('close',resolve));
+  const tail=/** @type {any} */(child).tailcatStderrTail();
+  assert.ok(Buffer.byteLength(tail)<=512);assert.match(tail,/tailcat Ping: context deadline exceeded$/);
 });
 
 test('outbound uses local owner boot but remote binding; ready requires P1 admission',async()=>{
