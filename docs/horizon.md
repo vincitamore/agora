@@ -58,8 +58,17 @@ useful.
 
 ## Calibration and the drift stop
 
-The split at `opts.split.at` is by session **and** by time: a session enters the fit only if it
-was already over before the split, so nothing observed later informs a decision dated earlier.
+The split at `opts.split.at` must be strictly before `observationCutoff`; a split in the future of
+the observation is refused, because every session would land in the fit half and the "evaluation"
+would be on data the fit already saw.
+
+The partition is by session **and** by time, and it is subtler than "ended before the split". A
+session that *started* before the split was evidence available at the split, so it enters the fit
+— but truncated there, counting only the calls it had made by then, and marked censored if it ran
+on. Requiring sessions to have *ended* before the split instead puts every long-running session in
+the evaluation half by construction, biasing the fit toward short sessions and, when everything is
+still running, emptying it. Nothing after the split enters the fit's counts, so no later revision
+informs an earlier decision.
 
 `coverage` is the fraction of eval sessions whose actual fell inside the predicted p10..p90.
 A censored eval session can only falsify the lower end — its true total is at least what we saw —
@@ -70,6 +79,20 @@ shifted by more than `DRIFT_RATIO` between fit and eval) sets `horizonEligible: 
 measured reason. The drift stop is exercised by a cell that shifts a synthetic population and
 watches it fire, beside a twin with no shift that watches it stay quiet — a guard nobody has
 observed failing is a guard nobody has tested.
+
+## Nothing about stopping without an observed stop
+
+Every stopping quantity rests on having watched at least one session end. A fit of nothing but
+running sessions supports none of them, so `remainingCalls`, `pTerminate` and
+`immediateTerminationLossBound` are **absent** with `stoppingUnavailable` naming the reason, and
+`observedStops` reports the count. A computed `pTerminate` of 0 would read as "termination is
+impossible" when the truth is that no ending has ever been observed.
+
+Arrival cadence is unaffected: it is about gaps between calls, not endings.
+
+A quantile the survival curve never crosses is **open-ended**. It is omitted and named in
+`openEnded`, never filled in with the length of the array the curve happened to occupy — a number
+with no meaning that a consumer cannot distinguish from a real one.
 
 ## A declared plan is a feature, not a count
 
