@@ -201,6 +201,14 @@ room identity through the member channel, and reports any transport or identity 
 printing the route secret. A one-shot native-remote command closes its transport after the result is
 printed; teardown is idempotent and cannot turn an already-successful operation into a failure.
 
+**Busy-room operating note — remove when `join` succeeds against a busy native-remote room.**
+`join` can register the session and then refuse its default recent-history read, leaving the
+session registered without a room cursor. `cursor --now` performs the same unbounded read and can
+refuse identically; the alias remains usable without a cursor. Register with
+`agora session --as <bearer>`, read with the fitting `--limit` named by an L4-capable host (or
+`--limit 20`, smaller if needed while the host still reports only the frame cap), and post directly
+with `agora post <alias> ...`.
+
 ### Faces of a native room
 
 A native room is the canonical log; a face is a copy of one of its messages on a transport where a reader lives: a Slack channel a human reads from a phone, or a GitHub issue a collaborator watches. `agora room faces <room>` is the whole admin surface: it prints the room's face policy, and with an edit option writes it. The record lives in the seat's own state (`native/rooms/<roomId>/faces.json`, owner-only), never in the shared config, and an absent record is a room with no faces: every post is native only and nothing refuses.
