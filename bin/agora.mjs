@@ -68,6 +68,7 @@ import { buildLabel, buildPredates, cacheTtls, clearWatchMode, installedBuild, t
 import { SERVICE_DARK, ServiceDarkError, openNativeSubscription, serviceDescriptorStatus, validateNativeRoomId } from "../src/wake/subscriber.mjs";
 import { createServiceRoom, runService, seatAccountId, seatLabel, serviceStatus, startService, stopService } from "../src/service-cli.mjs";
 import { spawnFromFile } from "../src/spawn-cli.mjs";
+import { runUsage } from "../src/usage-cli.mjs";
 import { clearStandDown, clearWatchStop, completeStandDownAck, declareStandDown, listStandDowns, standDownRequested } from "../src/stand-down.mjs";
 import { FACE_ATTACHMENT_MODES, FACE_BUILT, FACE_SELECTORS, appendFaceRecord, facePolicyPath, listFaceRecords, normalizeSelectors, readFacePolicy, selectFaces, writeFacePolicy } from "../src/faces.mjs";
 
@@ -252,6 +253,16 @@ const SCHEMA = {
     },
     doctor: { args: [], options: { "--offline": "skip the identity check", "--repair-tailcat": "restore the cached runtime from its hash-verified bundled capsule" }, does: "config, token presence per room, identity per room, this session and bearer and where each came from, the harness prompt-cache TTL where this seat can read one, and the reads a minute this seat spends with the arithmetic behind the number; three preflights for a resident bearer warn when a watch is armed against a five-minute TTL (cache-ttl), when a watch polls within half to one and a half times a TTL that was read (interval-near-ttl), and when no live watch in a room wakes on all (no-all-watch). Room and watch reports are derived. Tailcat integrity is verified locally; first use expands the bundled capsule into state, and --repair-tailcat explicitly restores a corrupt cache" },
     schema: { args: [], options: { "--json": "the whole surface as JSON, protocol included" }, does: "this description" },
+    usage: {
+      args: [],
+      options: {
+        "--provider <name>": "meter provider; this cut is codex only",
+        "--pool-id <id>": "native pool id (16-128 [A-Za-z0-9_-])",
+        "--timeout <ms>": "bounded collector timeout in milliseconds, default 15000, max 60000",
+        "--json": "print the collector result only",
+      },
+      does: "one bounded cooperative usage read through the Codex collector. No room. Unknown providers refuse. Never prints credentials or provider bodies. The collector clock is injected, not --now",
+    },
   },
 };
 
@@ -334,6 +345,9 @@ const OPTIONS = /** @type {const} */ ({
   "room-id": { type: "string" },
   until: { type: "string" },
   "keep-watches": { type: "boolean", default: false },
+  provider: { type: "string" },
+  timeout: { type: "string" },
+  "pool-id": { type: "string" },
 });
 
 /**
@@ -841,6 +855,18 @@ async function main(argv) {
     else if (rec) console.log(`stand-down cleared (was until ${rec.until}). Re-arm watches from this live session; nothing started a session.`);
     else console.log("no stand-down record for this session");
     return EXIT.ok;
+  }
+
+  if (verb === "usage") {
+    const result = await runUsage({
+      provider: values.provider !== undefined ? String(values.provider) : undefined,
+      poolId: values["pool-id"] !== undefined ? String(values["pool-id"]) : undefined,
+      timeout: values.timeout !== undefined ? String(values.timeout) : undefined,
+      json: Boolean(values.json),
+    });
+    if (result.stdout) process.stdout.write(result.stdout);
+    if (result.stderr) process.stderr.write(result.stderr);
+    return result.exit;
   }
 
   if (verb === "rooms") {
