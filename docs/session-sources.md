@@ -89,8 +89,13 @@ contract overlap object in `context.overlap`.
 `sourceId` is opaque source text. It is checked for length and control
 characters only. It is never rewritten into native id grammar. A Codex
 cumulative watermark is not the source id and is not copied onto the record;
-the caller supplies the locator. Reported OMP `cost.total` and Amore
-`costUsdTicks` are dropped from the typed record.
+the caller supplies the locator.
+
+`sourceReportedCost` is optional on the record. OMP `cost.total` is stored as
+unit `omp-cost-total` when it is a safe nonnegative integer; Amore
+`costUsdTicks` is stored as unit `usd-ticks`. A non-integer amount is
+`invalid`, never converted. Claude Code and Codex omit the field: they
+reported none. A cost is not a token component and is never added to one.
 
 ## Four sources
 
