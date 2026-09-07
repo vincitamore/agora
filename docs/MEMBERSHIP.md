@@ -38,6 +38,13 @@ a request to the running service, the way `service room create` is. A service re
 route; `route list` reads the service's registry, never files on disk, so a route whose transport
 has gone is not reported as live.
 
+That makes a service restart a **batch operation, never a casual repair**. Announce it first: every
+local native watch ends `service-dark` when the service stops. After the new service is up, run
+`route open` again for every enrolled key, carry each fresh descriptor and secret to its remote
+seat, and re-add the remote room there — the old descriptor names a dead grant. Only then re-arm
+the local native watches. The service-up post is the boundary that tells every local consumer which
+boot it is joining and tells every remote operator that new route material exists.
+
 One live route per key digest per room. A second `open` for a digest that already has a live route
 is refused `route-already-open`; close it first, which mints a new grant on the next open.
 
@@ -232,6 +239,13 @@ evidence that enrolment had been attempted.
 The authoritative check is not that refusal: the channel runs `printpub` on the resolved key and
 refuses when its digest disagrees with `binding.allowedKeyDigest`.
 
+The seat state root crosses the same boundary as the key. Both places that assemble a Tailcat
+runtime — `RemoteRoom` and the host service's route-open path — type the result as
+`TailcatRuntimeOptions`, whose `stateRoot` is required. That catches an **omitted** root where the
+object is written; it does **not** catch an explicit `undefined` supplied through runtime overrides.
+Such a value can still erase the default and fail later in the binary resolver, so this is a typed
+assembly check, not runtime proof that the value exists.
+
 ## Delivery, and where a duplicate comes from
 
 Delivery is **at-least-once as the consumer sees it**. After a reconnect no message is lost, at most
@@ -259,11 +273,14 @@ the wrong name:
 - **Closed.** `route close` tears down the *listener* as well as the secret, so nothing on the host
   is left to refuse a handshake. Revocation reaches the remote as an **unreachable route**, ending
   `member-channel-dark` — a named end, not a proof refusal. How long that takes depends on what the
-  transport child can tell, and both cases are real: a child that ends because there is nothing to
-  reach fails the dial in **milliseconds**, and a child that stays connected with nothing answering
-  costs the **whole handshake timeout** (30 s by default). The second is a genuine state and not a
-  hang; there is nothing at this layer that can distinguish a silent peer from a slow one, and a
-  shorter timeout would only move the boundary.
+  transport child can tell. The fixture boundaries are both real: a local child that immediately
+  learns there is nothing to reach fails in **milliseconds**, while a connected child with no answer
+  costs the **whole handshake timeout** (30 s by default). A live relay adds a third path between
+  them: against a just-closed real route, the whole diagnostic took 10.8 s versus about 1.5 s while
+  healthy, spending roughly nine extra seconds in connect and rendezvous before the child ended.
+  That is a measurement of the command's delta, not proof that every one of those seconds belonged
+  to the dial. None of the three is a hang; this layer cannot distinguish a silent peer from a slow
+  or still-rendezvousing one, and a shorter timeout would only move the boundary.
 - **Closed and reopened.** A reopen mints a new grant and a new generation, and the remote is still
   holding the old descriptor. The transcript's **binding comparison fires before the proof**, so
   this ends `member-binding-mismatch` — the grant ids disagree, and the secret is never consulted.
