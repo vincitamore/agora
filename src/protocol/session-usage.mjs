@@ -139,8 +139,10 @@ export function validateSourceIdentity(value) {
     min: 1, max: SESSION_USAGE_LIMITS.sourceIdBytes, controls: true,
   });
   return {
-    harness: readString(v.harness, 'harness', { min: 1, max: SESSION_USAGE_LIMITS.harnessBytes }),
-    sessionEpoch: readString(v.sessionEpoch, 'sessionEpoch', { min: 1, max: 128 }),
+    // P6: all three key components refuse control characters, not just sourceId. A key
+    // component that may contain NUL or a newline is a key component that can be forged.
+    harness: readString(v.harness, 'harness', { min: 1, max: SESSION_USAGE_LIMITS.harnessBytes, controls: true }),
+    sessionEpoch: readString(v.sessionEpoch, 'sessionEpoch', { min: 1, max: 128, controls: true }),
     sourceId,
     sourceUnit: readEnum(v.sourceUnit, 'sourceUnit', SOURCE_UNITS),
     finality: readEnum(v.finality, 'finality', FINALITY),
@@ -254,7 +256,15 @@ export function validateSessionUsageRecord(value) {
 /** @param {unknown} value */
 export function validateMembershipCoverage(value) {
   const v = readRecord(value, ['members'], []);
-  return { members: readArray(v.members, 'members', 512, validateMemberCoverage) };
+  const members = readArray(v.members, 'members', 512, validateMemberCoverage);
+  // P3: one member, one state. An inventory carrying `seat-1 measured` and `seat-1 unsupported`
+  // hands a consumer both truths and no way to choose, which is worse than either.
+  const seen = new Set();
+  for (const m of members) {
+    if (seen.has(m.member)) throw new ProtocolUsageError('context', 'members');
+    seen.add(m.member);
+  }
+  return { members };
 }
 
 /**
@@ -268,7 +278,13 @@ export function validateMembershipCoverage(value) {
  */
 export function ledgerKey(identity) {
   const id = validateSourceIdentity(identity);
-  return `src:${id.harness}:${id.sessionEpoch}:${id.sourceId}`;
+  // LENGTH-PREFIXED, not delimiter-joined. The previous form joined on ':' over fields that may
+  // themselves contain ':', so harness 'a:b'/epoch 'c' and harness 'a'/epoch 'b:c' produced one
+  // key -- and because supersession compares keys, a record from one source could supersede
+  // another source's contribution. Escaping would only move the problem to the escape character;
+  // a length prefix is injective by construction, whatever the components contain.
+  const part = (/** @type {string} */ s) => `${s.length}:${s}`;
+  return `src:${part(id.harness)}${part(id.sessionEpoch)}${part(id.sourceId)}`;
 }
 
 /**
