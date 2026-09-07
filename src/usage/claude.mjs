@@ -16,8 +16,75 @@ import { percentToBasisPoints, validateCompleteObservation, validatePoolPrincipa
 export const CLAUDE_ORIGIN = 'https://api.anthropic.com';
 export const CLAUDE_LIMITS = Object.freeze({ timeoutMs: 15000, maxBytes: 1_048_576 });
 
-/** @typedef {(url: string, init?: RequestInit) => Promise<{status: number, arrayBuffer: () => Promise<ArrayBuffer>}>} FetchFn */
+/** @typedef {any} FetchResponse */
+/** @typedef {(url: string, init?: RequestInit) => Promise<FetchResponse>} FetchFn */
 /** @typedef {(path?: string) => Promise<string>} CredentialFn */
+
+/** @param {FetchResponse} response */
+async function disposeBody(response) {
+  try {
+    if (response.body && typeof response.body.cancel === 'function') await response.body.cancel();
+  } catch { /* already gone */ }
+}
+
+/**
+ * Incremental bounded body. Abort and size limits apply DURING the read, not after a full buffer.
+ * @param {FetchResponse} response @param {number} maxBytes @param {AbortSignal} signal
+ * @returns {Promise<{ok:true, buf: Buffer}|{ok:false, code:string}>}
+ */
+async function readBoundedBody(response, maxBytes, signal) {
+  if (signal.aborted) {
+    await disposeBody(response);
+    return { ok: false, code: abortCode(signal) };
+  }
+  const length = Number(response.headers?.get?.('content-length'));
+  if (Number.isFinite(length) && length > maxBytes) {
+    await disposeBody(response);
+    return { ok: false, code: CODE.oversized };
+  }
+  const reader = response.body && typeof response.body.getReader === 'function' ? response.body.getReader() : null;
+  if (reader) {
+    const chunks = [];
+    let total = 0;
+    try {
+      while (true) {
+        if (signal.aborted) {
+          try { await reader.cancel(); } catch { /* already gone */ }
+          return { ok: false, code: abortCode(signal) };
+        }
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          total += value.byteLength;
+          if (total > maxBytes) {
+            try { await reader.cancel(); } catch { /* already gone */ }
+            return { ok: false, code: CODE.oversized };
+          }
+          chunks.push(Buffer.from(value));
+        }
+      }
+      return { ok: true, buf: chunks.length ? Buffer.concat(chunks) : Buffer.alloc(0) };
+    } catch {
+      try { await reader.cancel(); } catch { /* already gone */ }
+      return { ok: false, code: signal.aborted ? abortCode(signal) : CODE.provider };
+    }
+  }
+  if (typeof response.arrayBuffer !== 'function') return { ok: false, code: CODE.badJson };
+  const abortPromise = new Promise((_, reject) => {
+    if (signal.aborted) reject(new Error('aborted'));
+    signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+  });
+  try {
+    const ab = await Promise.race([response.arrayBuffer(), abortPromise]);
+    if (signal.aborted) return { ok: false, code: abortCode(signal) };
+    const buf = Buffer.from(ab);
+    if (buf.byteLength > maxBytes) return { ok: false, code: CODE.oversized };
+    return { ok: true, buf };
+  } catch {
+    await disposeBody(response);
+    return { ok: false, code: signal.aborted ? abortCode(signal) : CODE.provider };
+  }
+}
 
 
 const NAMED_WINDOWS = Object.freeze([
@@ -44,6 +111,19 @@ const CODE = Object.freeze({
   noQuota: 'claude-no-quota-reported',
   badQuota: 'claude-quota-shape-unsupported',
 });
+
+const ALLOWED_CODES = new Set(Object.values(CODE));
+/** @param {unknown} value @param {string} fallback */
+function allowlistedCode(value, fallback) {
+  if (typeof value !== 'string') return fallback;
+  for (const code of ALLOWED_CODES) if (code === value) return value;
+  return fallback;
+}
+
+/** @param {AbortSignal} signal */
+function abortCode(signal) {
+  return signal.reason === 'timeout' ? CODE.timeout : CODE.cancelled;
+}
 
 /** @param {unknown} value @returns {value is Record<string, unknown>} */
 function isRecord(value) { return typeof value === 'object' && value !== null && !Array.isArray(value); }
@@ -204,13 +284,22 @@ async function getJson(options) {
     if (controller.signal.aborted) {
       return { ok: false, code: controller.signal.reason === 'timeout' ? CODE.timeout : CODE.cancelled };
     }
-    if (response.status >= 300 && response.status < 400) return { ok: false, code: CODE.redirect };
-    if (response.status === 401) return { ok: false, code: CODE.untilRefresh };
-    if (response.status !== 200) return { ok: false, code: CODE.provider };
-    const buf = Buffer.from(await response.arrayBuffer());
-    if (buf.byteLength > CLAUDE_LIMITS.maxBytes) return { ok: false, code: CODE.oversized };
+    if (response.status >= 300 && response.status < 400) {
+      await disposeBody(response);
+      return { ok: false, code: CODE.redirect };
+    }
+    if (response.status === 401) {
+      await disposeBody(response);
+      return { ok: false, code: CODE.untilRefresh };
+    }
+    if (response.status !== 200) {
+      await disposeBody(response);
+      return { ok: false, code: CODE.provider };
+    }
+    const body = await readBoundedBody(response, CLAUDE_LIMITS.maxBytes, controller.signal);
+    if (!body.ok) return body;
     try {
-      return { ok: true, body: JSON.parse(buf.toString('utf8')) };
+      return { ok: true, body: JSON.parse(body.buf.toString('utf8')) };
     } catch {
       return { ok: false, code: CODE.badJson };
     }
@@ -244,8 +333,8 @@ export async function collectClaudeUsage(options) {
   try {
     token = await readCredential(options.credentialPath);
   } catch (error) {
-    const code = error && typeof error === 'object' && 'code' in error ? String(/** @type {any} */ (error).code) : CODE.noCredential;
-    return { status: 'unsupported', code: code || CODE.noCredential };
+    const raw = error && typeof error === 'object' && 'code' in error ? /** @type {any} */ (error).code : undefined;
+    return { status: 'unsupported', code: allowlistedCode(raw, CODE.noCredential) };
   }
   if (typeof token !== 'string' || !token) return { status: 'unsupported', code: CODE.noCredential };
 
