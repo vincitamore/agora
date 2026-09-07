@@ -330,7 +330,18 @@ export class RemoteRoom {
         ...this.channelOptions,
       });
       try { await resource.ready; }
-      catch (error) { drop(); void resource.stop().catch(() => {}); throw error; }
+      catch (error) {
+        drop(); void resource.stop().catch(() => {});
+        // MEASURED, not assumed: a transport child that ends because there is nothing to reach
+        // fails the dial in milliseconds, while one that stays connected with no peer answering
+        // costs the whole handshake timeout. The fast path was already taken; what it could not do
+        // was say what had happened, because the route layer's cancellation message describes its
+        // own bookkeeping. A closing room keeps that message, since there the cancellation IS the
+        // cause.
+        if (!this.closed && /** @type {any} */ (error)?.code === "AGORA_ROUTE_CANCELLED")
+          throw new AgoraError(`member-channel-dark: the transport ended before the host greeted this seat, which is what a route that is no longer open looks like from here (${error instanceof Error ? error.message : String(error)})`);
+        throw error;
+      }
       if (!client) { drop(); void resource.stop().catch(() => {}); throw new AgoraError("member-channel-dark: the channel reported ready without a request client"); }
       this.dials += 1;
       client.socket.once("close", () => { this.drops += 1; drop(); void resource.stop().catch(() => {}); });
