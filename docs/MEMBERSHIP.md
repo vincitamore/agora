@@ -253,6 +253,16 @@ one duplicate is observed, a duplicate carries its **original** message id, and 
 never moves backwards. **The idempotence point is the message id, above the transport**: a consumer
 that must not surface a duplicate dedups on `id`.
 
+The host encodes a complete `read-result` before it sends anything. If that envelope exceeds
+`NATIVE_FRAME_MAX`, it refuses `read-batch-refused` and names the requested message count, encoded
+bytes, frame maximum, and largest fitting limit. Nothing partial is returned and no cursor advances.
+The named limit is computed over the same end of the store that the caller will receive: without a
+cursor, the newest suffix; after a cursor, the oldest prefix that follows it. The named limit succeeds
+on the first retry in either direction, while `limit + 1` refuses. If one message alone exceeds the
+frame, the refusal names that message's cursor instead; subscription replay applies the same single-
+message boundary. `join` and `cursor --now` do not page yet, so either can refuse on a busy remote
+room; until client paging exists, register with `session --as` and perform the limited read directly.
+
 Two different events are worth separating, because only one of them can produce a duplicate:
 
 - **An in-process re-dial.** The channel drops and is re-opened; the subscription re-subscribes from
