@@ -988,8 +988,22 @@ test("the typed hop catches an OMITTED root and not an undefined one, which is p
   // is missing. A runtime check against this hop has to test the value, never the key.
   assert.equal(Object.hasOwn(folded, "stateRoot"), true);
 
-  // And the consequence, so the cell shows the cost rather than only the shape: this is what the
-  // resolver is handed, and it refuses — which is the backstop the type does not provide.
-  await assert.rejects(resolveTailcatBinary(folded), /./,
-    "a runtime with an undefined root resolved a binary anyway");
+  // WHAT THE BACKSTOP ACTUALLY DOES, measured, because Opus/e2c asked that this cell not leave
+  // "the resolver refuses cleanly" behind as a property we have. It does not. With the root
+  // undefined it dies in `path.join` with a raw TypeError that names no state root, no Agora
+  // concept and no remedy:
+  await assert.rejects(resolveTailcatBinary({ stateRoot: folded.stateRoot }),
+    (/** @type {any} */ e) => e instanceof TypeError && /paths\[0\].*must be of type string/.test(e.message),
+    "the resolver's refusal for an undefined root has changed shape; re-read it before trusting the sentence above");
+
+  // And the sharper half, which is why this probe deliberately drops `vendorDir`. An earlier draft
+  // of this very cell passed `folded` whole, and the extra key made the resolver fail EARLIER, on
+  // the vendor lock, with a confident AgoraError telling the operator to "Pull the complete Agora
+  // checkout" — a clean-looking refusal for a cause that is not the defect. The cell went green for
+  // a reason unrelated to the root it claims to be about, which is the same complementary-mutation
+  // failure the reader used on my directives, arriving in my own assertion. Both shapes recorded so
+  // neither reads as a guarantee:
+  await assert.rejects(resolveTailcatBinary({ stateRoot: folded.stateRoot, vendorDir: "/tmp/vendor" }),
+    (/** @type {any} */ e) => e instanceof AgoraError && /runtime lock is missing or invalid/.test(e.message),
+    "the misleading-refusal path has changed; the comment above is now wrong");
 });
