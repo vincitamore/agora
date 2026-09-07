@@ -41,9 +41,13 @@ refuses before the write; the previous snapshot remains.
 - A `streaming-partial` does not overwrite a confirmed final.
 - `sourceUnit` is identity: a snapshot is never added as if it were a request.
 
-`deriveTotals` sums only `confirmed` entries. `coverage.overlap: contained-in-parent`
-excludes the child. `reasoning-billed` is stored on the entry and is never folded into
-output.
+`deriveTotals` sums only `confirmed` entries. Overlap is honoured on both sides:
+`contained-in-parent` excludes that record; `contains-child` excludes the named
+`peerKey` when that key is a confirmed ledger entry (`parent-declared`). `unknown`
+is not `none`: it is excluded with reason `overlap-unknown`, never added. An orphan
+child whose named parent is absent is excluded with reason `parent-absent`. Each
+excluded row is `{ key, reason }`. A `peerKey` that matches no entry excludes
+nobody. `reasoning-billed` is stored on the entry and is never folded into output.
 
 ## Ingest position
 
