@@ -83,12 +83,38 @@ test('excess precision is unavailable rather than rounded', () => {
   assert.equal(result.status, 'supported');
   if (result.status !== 'supported') return;
   assert.equal(result.observation.windows[0].available, false);
+  assert.equal(result.observation.windows[0].code, 'unsupported-precision');
 });
 
 test('missing organization uuid is identity-unavailable, no invented principal', () => {
   const result = normalizeUsageAndProfile(threeWindowUsage, { organization: {} }, ctx);
   assert.equal(result.status, 'unsupported');
   assert.equal(result.code, 'claude-account-identity-unavailable');
+});
+
+test('null uuid is identity-unavailable; a present blank or non-string is malformed', () => {
+  const absent = normalizeUsageAndProfile(threeWindowUsage, { organization: { uuid: null } }, ctx);
+  assert.equal(absent.status, 'unsupported');
+  assert.equal(absent.code, 'claude-account-identity-unavailable');
+  const blank = normalizeUsageAndProfile(threeWindowUsage, { organization: { uuid: '   ' } }, ctx);
+  assert.equal(blank.status, 'error');
+  assert.equal(blank.code, 'claude-account-identity-malformed');
+  const numbered = normalizeUsageAndProfile(threeWindowUsage, { organization: { uuid: 12345 } }, ctx);
+  assert.equal(numbered.status, 'error');
+  assert.equal(numbered.code, 'claude-account-identity-malformed');
+});
+
+test('a blank optional plan is omitted; a nonempty plan is kept', () => {
+  const blank = normalizeUsageAndProfile(threeWindowUsage, {
+    organization: { uuid: ORG, organization_type: '   ' },
+  }, ctx);
+  assert.equal(blank.status, 'supported');
+  if (blank.status !== 'supported') return;
+  assert.equal(Object.hasOwn(blank.principal, 'plan'), false);
+  const kept = normalizeUsageAndProfile(threeWindowUsage, profile, ctx);
+  assert.equal(kept.status, 'supported');
+  if (kept.status !== 'supported') return;
+  assert.equal(kept.principal.plan, 'claude_max');
 });
 
 test('same organization on two calls is the same principalRef', () => {
@@ -176,6 +202,45 @@ test('public path maps usage+profile through collectClaudeUsage', async () => {
   if (result.status !== 'supported') return;
   assert.equal(result.observation.windows.length, 3);
   assert.equal(result.principal.principalRef, ORG);
+});
+
+test('public path: blank uuid is malformed; number uuid is not absent; utilization codes split', async () => {
+  const through = async (/** @type {unknown} */ prof, /** @type {unknown} */ usage) => {
+    const fetch = fakeFetch((pathname) => {
+      if (pathname === '/api/oauth/usage') return jsonResponse(200, usage);
+      if (pathname === '/api/oauth/profile') return jsonResponse(200, prof);
+      assert.fail(`unexpected path ${pathname}`);
+    });
+    return collectClaudeUsage({ poolId: POOL, producer: PRODUCER, now: NOW, fetch, readCredential });
+  };
+  const blank = await through({ organization: { uuid: '   ', organization_type: 'claude_max' } }, threeWindowUsage);
+  assert.equal(blank.status, 'error');
+  assert.equal(blank.code, 'claude-account-identity-malformed');
+  const numbered = await through({ organization: { uuid: 12345, organization_type: 'claude_max' } }, threeWindowUsage);
+  assert.equal(numbered.status, 'error');
+  assert.equal(numbered.code, 'claude-account-identity-malformed');
+  const absent = await through({ organization: {} }, threeWindowUsage);
+  assert.equal(absent.status, 'unsupported');
+  assert.equal(absent.code, 'claude-account-identity-unavailable');
+
+  const plan = await through({ organization: { uuid: ORG, organization_type: '   ' } }, threeWindowUsage);
+  assert.equal(plan.status, 'supported');
+  if (plan.status !== 'supported') return;
+  assert.equal(Object.hasOwn(plan.principal, 'plan'), false);
+
+  const codes = [];
+  for (const utilization of ['8', 150, -5, 21.000000001]) {
+    const r = await through(profile, { five_hour: { utilization, resets_at: '2026-09-07T00:40Z' } });
+    assert.equal(r.status, 'supported');
+    if (r.status !== 'supported') return;
+    codes.push(r.observation.windows[0].code);
+  }
+  assert.deepEqual(codes, [
+    'unsupported-percent-type',
+    'unsupported-percent-range',
+    'unsupported-percent-range',
+    'unsupported-precision',
+  ]);
 });
 
 test('unreadable resets_at through the collector is unsupported-reset; absent and null omit the field', async () => {

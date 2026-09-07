@@ -124,6 +124,7 @@ const CODE = Object.freeze({
   noQuota: 'claude-no-quota-reported',
   badQuota: 'claude-quota-shape-unsupported',
   unstreamed: 'claude-body-unstreamed',
+  badIdentity: 'claude-account-identity-malformed',
 });
 
 const ALLOWED_CODES = new Set(Object.values(CODE));
@@ -165,9 +166,16 @@ export function windowReadingFrom(limitId, durationMinutes, window) {
     return { window: { limitId, unit: /** @type {const} */ ('basis-points'), durationMinutes }, available: /** @type {const} */ (false), code: 'malformed-window' };
   }
   const identity = { limitId, unit: /** @type {const} */ ('basis-points'), durationMinutes };
+  const rawPercent = window.utilization;
+  if (typeof rawPercent !== 'number' || !Number.isFinite(rawPercent)) {
+    return { window: identity, available: /** @type {const} */ (false), code: 'unsupported-percent-type' };
+  }
+  if (rawPercent < 0 || rawPercent > 100) {
+    return { window: identity, available: /** @type {const} */ (false), code: 'unsupported-percent-range' };
+  }
   let value;
   try {
-    value = percentToBasisPoints(window.utilization);
+    value = percentToBasisPoints(rawPercent);
   } catch {
     return { window: identity, available: /** @type {const} */ (false), code: 'unsupported-precision' };
   }
@@ -196,6 +204,14 @@ export function windowsFromUsage(usage) {
   return readings;
 }
 
+/** Optional plan/tier label: blank or oversize is omitted, never emitted as a valid plan. */
+function readableOptionalLabel(/** @type {unknown} */ value) {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 120) return undefined;
+  return value;
+}
+
 /**
  * @param {unknown} usage
  * @param {unknown} profile
@@ -205,18 +221,20 @@ export function windowsFromUsage(usage) {
 export function normalizeUsageAndProfile(usage, profile, context) {
   if (!isRecord(profile)) return { status: 'unsupported', code: CODE.noIdentity };
   const organization = isRecord(profile.organization) ? profile.organization : undefined;
-  const accountId = organization && typeof organization.uuid === 'string' ? organization.uuid : '';
-  if (!accountId) return { status: 'unsupported', code: CODE.noIdentity };
+  const rawId = organization && Object.hasOwn(organization, 'uuid') ? organization.uuid : undefined;
+  if (rawId === null || rawId === undefined) return { status: 'unsupported', code: CODE.noIdentity };
+  if (typeof rawId !== 'string' || rawId.trim().length === 0 || rawId.length > 512) {
+    return { status: 'error', code: CODE.badIdentity };
+  }
 
   const readings = windowsFromUsage(usage);
   if (readings.length === 0) return { status: 'unsupported', code: CODE.noQuota };
 
-  const plan = organization && typeof organization.organization_type === 'string' && organization.organization_type
-    ? organization.organization_type
-    : (organization && typeof organization.rate_limit_tier === 'string' ? organization.rate_limit_tier : undefined);
+  const plan = readableOptionalLabel(organization?.organization_type)
+    ?? readableOptionalLabel(organization?.rate_limit_tier);
 
   const principal = validatePoolPrincipal({
-    poolId: context.poolId, provider: 'claude', principalRef: accountId, identity: 'unverified',
+    poolId: context.poolId, provider: 'claude', principalRef: rawId, identity: 'unverified',
     ...(plan ? { plan } : {}),
   });
   const observation = validateCompleteObservation({
