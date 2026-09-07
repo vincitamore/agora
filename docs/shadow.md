@@ -30,7 +30,10 @@ future calls too.
 is named in the invocation. Illustrative rows price nothing here; the verb has no
 `--allow-illustrative`.
 
-`--billing-context` is `data/billing-contexts.json`: `version`, `retrieved`, and under `harnesses`
+`--billing-context` is a file of the `data/billing-contexts.example.json` shape, and you write your
+own for your seat (the example is one seat's record: a subscription Claude Code, a subscription
+Codex, an xAI Amore Build; a seat on the API prices against a different billing mode and must say
+so): `version`, `retrieved`, and under `harnesses`
 one entry per harness carrying `provider`, `endpoint`, `serviceTier`, `region`, `billingMode`, each
 `{ state: 'known', value, source }` or `{ state: 'unknown', reason }`. A known field without a
 source is refused. `modelRevision` is refused in the file: it is per record, read from the retained
@@ -54,7 +57,8 @@ Per request, the resident prompt is the sum of the input pools when every one is
 The writes are one measurement an adapter states in one of two forms, never both: the
 `cache-write-5m` + `cache-write-1h` split when the TTLs are known (Claude Code), or the single
 `cache-write-unknown-ttl` bucket when they are not (Codex); the sum takes whichever form the
-record carries, and a record carrying neither has unknown writes (`pool-absent:cache-write`).
+record carries; a record carrying neither has unknown writes (`pool-absent:cache-write`), and a
+record carrying both is refused (`pool-both-forms:cache-write`) rather than summed twice.
 Measured on this seat's real Claude records: every one carries the split and none carries the
 pooled bucket, so a literal five-pool rule would have left every real record unmeasured. A
 `not-applicable` pool contributes nothing; an `unknown` or `invalid` pool, or an absent
@@ -90,8 +94,9 @@ the risk budget, and envelope `E`:
   as ONE sequence against cold compaction; at non-negative rates it never beats it, and the log
   shows that rather than assuming it.
 - **ping**: continue plus `ceil(p50 gap / ttl) - 1` pings per remaining call, each a read of `P`, a
-  ping write, one output token and the rereads of the ping message on later calls. Orchestration
-  is unpriced and named. The ping's benefit (a warm rather than cold later read) rests on prefix
+  ping write, one output token and the rereads of the ping message on the horizon's remaining
+  calls; an unknown horizon leaves the ping unknown, never a total missing its rereads term.
+  Orchestration is unpriced and named. The ping's benefit (a warm rather than cold later read) rests on prefix
   reuse, which is unassessable, so it is reported as such rather than credited.
 
 Every cost is a state, never a bare number: `known`, `lower-bound` (with the unpriced tokens
@@ -110,7 +115,9 @@ the verb never passes it.
 
 Baselines per session: `neverCompact` is the observed priced spend of every request (unknown if any
 is unpriced, a lower bound if any is partial); `alwaysCompact` is `K` at every decision point;
-`periodicPing` is the observed spend plus `ceil(measured gap / ttl) - 1` pings per observed gap.
+`periodicPing` is the observed spend plus `ceil(measured gap / ttl) - 1` pings per observed gap,
+each ping's rereads counted over the session's OBSERVED remaining calls, never the horizon: a
+replay of the past has no forecast in it.
 Both counterfactuals say so in `basis`. Latency and completed-work quality are `unknown` on every
 trajectory and baseline, always.
 
