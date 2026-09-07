@@ -125,7 +125,7 @@ test("a proof minted under the LOCAL nonce does not validate on a member route",
   const transcript = memberTranscript(b, { bootEpoch: "f".repeat(32), requestId: "r".repeat(32), serverChallenge: "s".repeat(32) });
 
   // The phase is inside the HMAC, so the local nonce mints a WELL-FORMED proof under a member
-  // phase; it is the secret and the phase together that refuse it. This is the amendment-3 cell.
+  // phase; it is the secret and the phase together that refuse it.
   const forged = nativeHandshakeProof(nonce, /** @type {any} */ (MEMBER_PHASES.server), transcript);
   assert.match(forged, /^[a-f0-9]{64}$/, "the forgery must be well formed, or the cell proves nothing");
   assert.equal(verifyMemberHandshakeProof(forged, secret, MEMBER_PHASES.server, transcript), false);
@@ -308,7 +308,7 @@ test("a member append lands under the minted principal, and the host account is 
   assert.equal(welcome.type, "member-welcome", `handshake refused: ${welcome.message ?? ""}`);
 
   clientSide.write(encodeNativeFrame({ protocol: NATIVE_PROTOCOL, type: "append", requestId: "q".repeat(32),
-    roomId: ROOM, operation: { operationId: randomUUID().replaceAll("-", ""), authorName: "Opus/e2c", text: "from the laptop" } }));
+    roomId: ROOM, operation: { operationId: randomUUID().replaceAll("-", ""), authorName: "remote-bearer", text: "from the remote seat" } }));
   const ack = await collect(clientSide, (f) => (f.type === "append-ack" || f.type === "error" ? f : undefined));
   assert.equal(ack.type, "append-ack", `append refused: ${ack.message ?? ""}`);
 
@@ -516,4 +516,63 @@ test("route list has no argument to refuse, so it reaches config and says so", a
   const { code, stderr } = await agoraConfigless(["service", "route", "list"]);
   assert.equal(code, 1, `route list exited ${code}, not the error code`);
   assert.match(stderr, /no config at/);
+});
+
+// ---------------------------------------------------------- the registry race
+
+test("two CONCURRENT opens for one key: one route, one named refusal, no orphan listener", async (t) => {
+  const { service } = await memberFixture(t);
+  // Each socket's request chain is its own, so nothing serializes two route-open frames. A check
+  // that awaits before registering lets both pass and leaves a LIVE listener nobody can reach.
+  let opened = 0;
+  let closed = 0;
+  const routeOptions = {
+    listen: async (/** @type {(socket: any) => void} */ _hook) => {
+      opened += 1;
+      return { port: 4242, close: async () => { closed += 1; } };
+    },
+    spawn: async (/** @type {string[]} */ args, /** @type {any} */ _r, /** @type {any} */ owner) =>
+      fakeChild({ exit: args[0] === "parse" ? 0 : null, signal: owner?.signal }),
+    address: async () => `tc${"a".repeat(48)}`,
+  };
+  const both = await Promise.allSettled([
+    service.openRoute({ roomId: ROOM, publicNodeKey: KEY, routeOptions }),
+    service.openRoute({ roomId: ROOM, publicNodeKey: KEY, routeOptions }),
+  ]);
+  const won = both.filter((r) => r.status === "fulfilled");
+  const lost = both.filter((r) => r.status === "rejected");
+  assert.equal(won.length, 1, "both concurrent opens were admitted");
+  assert.equal(lost.length, 1, "neither open was refused");
+  assert.match(String(/** @type {PromiseRejectedResult} */ (lost[0]).reason.message), /route-already-open/);
+  assert.equal(service.listRoutes().length, 1);
+
+  // The registry can look right while a second listener is still up: the orphan is the defect,
+  // not the count. Exactly one listener was opened and none was abandoned.
+  assert.equal(opened - closed, 1, `listeners opened ${opened}, closed ${closed}: an orphan survived`);
+  assert.equal(service.listRoutes()[0].grantId, /** @type {any} */ (won[0]).value.descriptor.binding.grantId);
+  assert.equal(service.listRoutes()[0].state, "live");
+});
+
+test("close retains the handle while cleanup is pending, and reports it as closing", async (t) => {
+  const { service } = await memberFixture(t);
+  const { descriptor } = await openFakedRoute(service);
+  const key = `${ROOM}:${descriptor.binding.allowedKeyDigest}`;
+  const entry = /** @type {any} */ (service.routes.get(key));
+  let release = () => {};
+  // A stop() that rejects cleanup-pending: its own message says to retain the handle.
+  entry.resource.stop = async () => {
+    throw Object.assign(new Error("Native route cleanup is pending; retain closed and the resource handle."),
+      { code: "AGORA_CLEANUP_PENDING", cleanupPending: true });
+  };
+  entry.resource.closed = new Promise((resolve) => { release = () => resolve(undefined); });
+
+  await assert.rejects(service.closeRoute({ roomId: ROOM, publicNodeKey: KEY }), /cleanup is pending/);
+  const during = service.listRoutes();
+  assert.equal(during.length, 1, "the handle was dropped while its child was still being torn down");
+  assert.equal(during[0].state, "closing");
+
+  release();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(service.listRoutes().length, 0, "the entry outlived its resource closing");
 });

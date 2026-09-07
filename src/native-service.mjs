@@ -366,8 +366,12 @@ export class NativeRoomService {
     this.panePid = undefined;
     /** Admitted member routes, keyed roomId:allowedKeyDigest. The value owns the Tailcat
      * resource handle; a route is never identified by a stored pid.
-     * @type {Map<string, { binding: any, secret: string, proofRef: string, descriptor: any, resource: any, descriptorPath: string, openedAt: string }>} */
+     * @type {Map<string, { binding: any, secret: string, proofRef: string, descriptor: any, resource: any, descriptorPath: string, secretPath: string, state: 'live' | 'closing', openedAt: string }>} */
     this.routes = new Map();
+    /** Keys whose open is in flight. Held from the check until the entry is registered, so two
+     * concurrent opens for one key cannot both pass.
+     * @type {Set<string>} */
+    this.openingRoutes = new Set();
     /** Fences every route resource to this service's own lifetime.
      * @type {AbortController | undefined} */
     this.routeOwner = undefined;
@@ -664,14 +668,23 @@ export class NativeRoomService {
     const key = routeKey(roomId, allowedKeyDigest);
     // One live route per key digest: a second grant for a live digest would leave two secrets and
     // two generations for one principal, and `route close` naming the digest would name both.
-    if (this.routes.has(key))
+    //
+    // The check and the RESERVATION are one synchronous step, deliberately. Each socket's request
+    // chain is its own, so nothing serializes two route-open frames across sockets; a check that
+    // awaits before registering lets both callers pass, both start a listener and a Tailcat child,
+    // and the second registration replace the first -- leaving a LIVE route that still admits the
+    // key, is invisible to route list, and cannot be reached by route close. That is a live
+    // resource with no marker, which is why the reservation is taken here and not after the awaits.
+    if (this.routes.has(key) || this.openingRoutes.has(key))
       throw new AgoraError(`route-already-open: ${roomId} already admits this key; close it before opening a new grant`);
+    this.openingRoutes.add(key);
+    try {
     const binding = buildRouteBinding({
       hostAccountId: this.accountId, hostAuthority: this.accountId, roomId,
       roomEpoch: store.manifest.epoch, serviceBootId: this.bootEpoch, publicNodeKey,
     });
     const secret = mintRouteSecret();
-    const { proofRef } = await writeRouteSecret(this.root, binding, secret);
+    const { proofRef, file: secretPath } = await writeRouteSecret(this.root, binding, secret);
     if (!this.routeOwner || this.routeOwner.signal.aborted) this.routeOwner = new AbortController();
     const owner = { serviceId: this.accountId, serviceBootId: this.bootEpoch, signal: this.routeOwner.signal };
     const resource = startMemberRoute({ binding, allowedNodeKey: publicNodeKey }, {
@@ -688,14 +701,19 @@ export class NativeRoomService {
       await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
       await writeAtomic(file, descriptor);
       const entry = { binding, secret, proofRef, descriptor, resource, descriptorPath: file,
-        openedAt: this.now().toISOString() };
+        secretPath, state: /** @type {'live' | 'closing'} */ ("live"), openedAt: this.now().toISOString() };
       this.routes.set(key, entry);
-      return { descriptor, descriptorPath: file, secretRef: proofRef };
+      return { descriptor, descriptorPath: file, secretRef: proofRef, secretPath };
     } catch (error) {
       // A failed descriptor write must not leave a live listener nobody has a record of.
       try { await resource.stop(); } catch { /* the open is already failing; report its cause */ }
       await removeRouteSecret(this.root, binding);
       throw error;
+    }
+    } finally {
+      // Released on every path, including the refusals above: a reservation that outlives its
+      // attempt would refuse the operator's next honest open with route-already-open forever.
+      this.openingRoutes.delete(key);
     }
   }
 
@@ -705,7 +723,8 @@ export class NativeRoomService {
       roomId: route.binding.roomId, accountId: route.binding.accountId,
       allowedKeyDigest: route.binding.allowedKeyDigest, grantId: route.binding.grantId,
       routeGeneration: route.binding.routeGeneration, endpoint: route.descriptor.endpoint,
-      openedAt: route.openedAt, descriptorPath: route.descriptorPath,
+      state: route.state ?? "live",
+      openedAt: route.openedAt, descriptorPath: route.descriptorPath, secretPath: route.secretPath,
     }));
   }
 
@@ -722,12 +741,18 @@ export class NativeRoomService {
     const key = routeKey(roomId, digest);
     const route = this.routes.get(key);
     if (!route) throw new AgoraError(`route-not-open: ${roomId} admits no route for that key`);
-    this.routes.delete(key);
+    // Marked rather than deleted: AGORA_CLEANUP_PENDING's own message says to retain the handle,
+    // and dropping the entry first would leave a child still being torn down with nothing in the
+    // registry describing it. The entry stays, reported as closing, until closed settles.
+    route.state = "closing";
     let cleanupPending;
     // stop() can reject with AGORA_CLEANUP_PENDING; reporting a clean teardown we did not observe
     // is the failure this branch exists to refuse.
-    try { await route.resource.stop(); }
-    catch (error) { cleanupPending = error; }
+    try { await route.resource.stop(); this.routes.delete(key); }
+    catch (error) {
+      cleanupPending = error;
+      void Promise.resolve(route.resource.closed).catch(() => {}).finally(() => this.routes.delete(key));
+    }
     await removeRouteSecret(this.root, route.binding);
     await rm(route.descriptorPath, { force: true });
     if (cleanupPending) throw cleanupPending;
