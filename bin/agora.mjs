@@ -65,7 +65,7 @@ import { formatTrailers, matchesAddress, parseTrailers, TRAILER_VALUE_MAX, trail
 import { SLACK_TEXT_MAX, chunkAtLines, encodeSlackText } from "../src/transports/slack.mjs";
 import { codexLiveness, codexSpawnWarning, codexThread, queueCodex, resolveCodexBinary } from "../src/codex.mjs";
 import { codexServerURL, deliverCodexServer } from "../src/codex-server.mjs";
-import { buildLabel, buildPredates, cacheTtls, clearWatchMode, installedBuild, touchWatchMode, watchModeSentinel } from "../src/harness.mjs";
+import { buildLabel, buildPredates, cacheTtls, clearWatchMode, installedBuild, touchWatchMode, watchModeSentinel, watchModuleDelta } from "../src/harness.mjs";
 import { SERVICE_DARK, ServiceDarkError, openNativeSubscription, serviceDescriptorStatus, validateNativeRoomId } from "../src/wake/subscriber.mjs";
 import { assertRemoteDescriptor, openRemoteSubscription, readRemoteDescriptor, resolveSeatIdentity } from "../src/native-remote.mjs";
 import { readRouteSecret } from "../src/native-member.mjs";
@@ -804,10 +804,17 @@ async function main(argv) {
     return `${" ".repeat(4)}${rooms}${armed}`;
   }
 
-  /** A live resident holding older code is not a lapse: it needs an intentional re-arm. */
+  /**
+   * A live resident holding older code is not a lapse: it needs an intentional re-arm. But "older
+   * than installed" and "running code that moved" are different facts, and only the second is a
+   * reason to re-arm. So the sha comparison decides whether to look, and the import graph decides
+   * what to say: nothing this watch loads moved is a NOTE that states both facts and asks for
+   * nothing, and every unmeasurable case stays a warning, because a wrong "no re-arm owed" leaves a
+   * seat silently on stale code while a wrong "owed" costs one re-arm.
+   */
   /** @param {string} dir @param {string} slug */
   async function watchBuildWarnings(dir, slug) {
-    /** @type {Array<{ code: string, message: string }>} */
+    /** @type {Array<{ code: string, message: string, kind?: "note" }>} */
     const out = [];
     const scope = await sessionScope(dir);
     for (const item of scope.armed) {
@@ -816,10 +823,26 @@ async function main(argv) {
       const older = buildPredates(armed.build, build);
       if (older === false) continue;
       if (older === true) {
-        out.push({
-          code: "stale-watch-build",
-          message: `live watch pid ${armed.pid} for ${slug}/${item.key} loaded ${buildLabel(armed.build)}, older than installed ${buildLabel(build)}; re-arm it to dogfood the current build`,
-        });
+        const where = `live watch pid ${armed.pid} for ${slug}/${item.key} loaded ${buildLabel(armed.build)}, older than installed ${buildLabel(build)}`;
+        const delta = await watchModuleDelta({ root: projectRoot, entry: armed.entry ?? entryFile,
+          from: armed.build, to: build, ...(armed.root ? { armedRoot: armed.root } : {}) });
+        if (delta.state === "inert") {
+          out.push({
+            code: "stale-watch-build-inert", kind: "note",
+            message: `${where}, and none of the ${delta.scanned} file(s) that changed between those builds is on its import graph. Both facts hold: re-arming buys correctness nothing here, and this watch is not running the installed build, so it may not be reported as current.`,
+          });
+        } else if (delta.state === "unknown") {
+          out.push({
+            code: "stale-watch-build",
+            message: `${where}; re-arm it to dogfood the current build. Whether anything it loads moved could not be measured: ${delta.reason}`,
+          });
+        } else {
+          const named = delta.changed.slice(0, 3).join(", ");
+          out.push({
+            code: "stale-watch-build",
+            message: `${where}; re-arm it to dogfood the current build: ${delta.changed.length} of ${delta.scanned} changed file(s) are on its import graph (${named}${delta.changed.length > 3 ? ", and more" : ""}).`,
+          });
+        }
       } else if (!armed.build) {
         out.push({
           code: "unknown-watch-build",
@@ -886,8 +909,8 @@ async function main(argv) {
           console.log(await scopeLine(r.dir));
         }
         for (const warning of await watchBuildWarnings(r.dir, r.slug)) {
-          if (json) console.log(JSON.stringify({ type: "warning", ...warning }));
-          else console.log(`WARNING ${warning.message}`);
+          if (json) console.log(JSON.stringify({ type: warning.kind === "note" ? "note" : "warning", ...warning }));
+          else console.log(`${warning.kind === "note" ? "NOTE" : "WARNING"} ${warning.message}`);
         }
       }
       if (!rows.length && !json) console.log("no sessions have state here");
@@ -1231,8 +1254,9 @@ async function main(argv) {
       }
     }
     for (const w of warnings) {
-      if (json) console.log(JSON.stringify({ type: "warning", code: w.code, ...(w.alias ? { alias: w.alias } : {}), message: w.message }));
-      else if (w.code !== "fragile-path") console.log(`WARNING ${w.message}`);
+      const note = /** @type {any} */ (w).kind === "note";
+      if (json) console.log(JSON.stringify({ type: note ? "note" : "warning", code: w.code, ...(w.alias ? { alias: w.alias } : {}), message: w.message }));
+      else if (w.code !== "fragile-path") console.log(`${note ? "NOTE" : "WARNING"} ${w.message}`);
     }
     for (const [kind, r] of await pollRates(cfg, stateRoot)) {
       const rate = Math.round(r.rate * 10) / 10;
@@ -1866,6 +1890,11 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         pid: process.pid,
         generation,
         build,
+        // WHICH checkout this build identity came from. Without it the sha comparison silently
+        // assumes the arming process and the reading process measured the same tree, which is
+        // false for a watch armed as a bare `agora` that resolved to another copy on PATH.
+        root: projectRoot,
+        entry: entryFile,
         transport: room.transport,
         ...(subscription ? { subscriber: true } : {}),
         ...(harnessPid(cfg, process.env).pid !== undefined ? { harnessPid: harnessPid(cfg, process.env).pid } : {}),
