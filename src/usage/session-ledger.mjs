@@ -5,10 +5,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
-import { ProtocolValidationError, readInteger, readRecord, readString } from '../protocol/common.mjs';
+import { ProtocolValidationError, readInteger, readRecord, readString, readTimestamp } from '../protocol/common.mjs';
 import {
   isSummableUnit, ledgerKey, supersedesContribution, validateComponentSet,
-  validateSessionUsageRecord, validateSourceIdentity,
+  validateSessionUsageRecord, validateSourceIdentity, validateSourceReportedCost,
 } from '../protocol/session-usage.mjs';
 
 export { ledgerKey };
@@ -57,7 +57,10 @@ export function readIngestPosition(value) {
 }
 
 /**
- * @typedef {{ identity: SourceIdentity, usage: ComponentSet, status: EntryStatus, digest: string, reason?: string }} StoredEntry
+ * @typedef {{
+ *   identity: SourceIdentity, usage: ComponentSet, status: EntryStatus, digest: string, reason?: string,
+ *   observedAt?: string, model?: string, sourceReportedCost?: ReturnType<typeof validateSourceReportedCost>,
+ * }} StoredEntry
  * @typedef {{ identity: SourceIdentity, usage: ComponentSet, digest: string, reset?: boolean, ingest?: ReturnType<typeof readIngestPosition>, priorIngest?: ReturnType<typeof readIngestPosition> | null }} Candidate
  */
 
@@ -118,6 +121,15 @@ function cumulativeDecreased(prior, next) {
     if (typeof av === 'number' && typeof bv === 'number' && bv < av) return true;
   }
   return false;
+}
+
+/** @param {SessionUsageRecord} record */
+function retainedFields(record) {
+  return {
+    observedAt: record.observedAt,
+    ...(Object.hasOwn(record, 'model') ? { model: record.model } : {}),
+    ...(Object.hasOwn(record, 'sourceReportedCost') ? { sourceReportedCost: record.sourceReportedCost } : {}),
+  };
 }
 
 function emptyTotals() {
@@ -364,6 +376,19 @@ function loadState(parsed) {
     if (typeof row.status !== 'string' || !['confirmed', 'provisional', 'conflict', 'gap'].includes(row.status)) {
       throw new LedgerError('ledger-corrupt', 'entry');
     }
+    // Optional retained fields: present and valid, or absent. Never invented on old entries.
+    if (Object.hasOwn(row, 'observedAt')) {
+      try { readTimestamp(row.observedAt, 'observedAt'); }
+      catch { throw new LedgerError('ledger-corrupt', 'entry'); }
+    }
+    if (Object.hasOwn(row, 'model')) {
+      try { readString(row.model, 'model', { min: 1, max: 128, controls: true }); }
+      catch { throw new LedgerError('ledger-corrupt', 'entry'); }
+    }
+    if (Object.hasOwn(row, 'sourceReportedCost')) {
+      try { validateSourceReportedCost(row.sourceReportedCost); }
+      catch { throw new LedgerError('ledger-corrupt', 'entry'); }
+    }
   }
   return /** @type {ReturnType<typeof emptyState>} */ (parsed);
 }
@@ -460,9 +485,15 @@ export async function commitLedgerEvent(ledger, event) {
   });
   const next = structuredClone(ledger.state);
   applyIngest(next, ingest);
+  /** @param {'bytes'|'entries'} kind */
+  const limitError = (kind) => {
+    const entries = Object.keys(ledger.state.entries).length;
+    const offset = ledger.state.ingest ? ledger.state.ingest.offset : 0;
+    return new LedgerError('ledger-limit', `${kind}; entries=${entries} offset=${offset}`);
+  };
   if (result.action === 'duplicate' || result.action === 'ignore-partial') {
     const text = JSON.stringify(next);
-    if (Buffer.byteLength(text, 'utf8') > ledger.limits.maxBytes) throw new LedgerError('ledger-limit', 'bytes');
+    if (Buffer.byteLength(text, 'utf8') > ledger.limits.maxBytes) throw limitError('bytes');
     try {
       if (ledger.io.writeAtomic) await ledger.io.writeAtomic(ledger.statePath, text);
       else await writeDurableAtomic(ledger.statePath, text);
@@ -475,17 +506,18 @@ export async function commitLedgerEvent(ledger, event) {
   }
   if (result.action === 'gap') {
     next.gaps = [...next.gaps, { kind: 'cumulative-decrease-without-reset', key, reason: result.reason }];
-    next.entries[key] = { status: 'gap', reason: result.reason, identity: record.identity, usage: record.usage, digest };
+    next.entries[key] = { status: 'gap', reason: result.reason, identity: record.identity, usage: record.usage, digest, ...retainedFields(record) };
   } else if (result.action === 'conflict' || selfOverlap) {
     next.entries[key] = {
       status: 'conflict', reason: selfOverlap ? 'self-overlap' : result.reason, identity: record.identity, usage: record.usage, digest,
+      ...retainedFields(record),
     };
   } else {
-    next.entries[key] = { status: result.status, identity: record.identity, usage: record.usage, digest };
+    next.entries[key] = { status: result.status, identity: record.identity, usage: record.usage, digest, ...retainedFields(record) };
   }
-  if (Object.keys(next.entries).length > ledger.limits.maxEntries) throw new LedgerError('ledger-limit', 'entries');
+  if (Object.keys(next.entries).length > ledger.limits.maxEntries) throw limitError('entries');
   const text = JSON.stringify(next);
-  if (Buffer.byteLength(text, 'utf8') > ledger.limits.maxBytes) throw new LedgerError('ledger-limit', 'bytes');
+  if (Buffer.byteLength(text, 'utf8') > ledger.limits.maxBytes) throw limitError('bytes');
   try {
     if (ledger.io.writeAtomic) await ledger.io.writeAtomic(ledger.statePath, text);
     else await writeDurableAtomic(ledger.statePath, text);

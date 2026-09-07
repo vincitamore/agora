@@ -301,7 +301,8 @@ test('entry and byte limits refuse before writing', async () => {
         record: { identity: identity({ sourceId: 'req-2' }), observedAt: OBSERVED, usage: usage() },
         ingest: ingest(2),
       }),
-      (/** @type {unknown} */ err) => err instanceof LedgerError && err.code === 'ledger-limit',
+      (/** @type {unknown} */ err) => err instanceof LedgerError && err.code === 'ledger-limit'
+        && /entries; entries=1 offset=1/.test(/** @type {Error} */ (err).message),
     );
     assert.equal(Object.keys(readLedgerSnapshot(ledger).entries).length, 1);
   } finally {
@@ -579,4 +580,107 @@ test('provisional entries are listed and not summed; confirmed twins still sum',
   const confirmed = deriveTotals({ [aKey]: a, [bKey]: b });
   assert.equal(confirmed.request.components.output.value, 20);
   assert.deepEqual(confirmed.request.provisional, []);
+});
+
+test('observedAt, model and sourceReportedCost persist, survive replace and restart, and stay out of the digest', async () => {
+  await withLedger(async (ledger, root) => {
+    const id = identity({ sourceId: 'retain', revision: 1, finality: 'revision' });
+    const firstUsage = usage({ output: known(100) });
+    await commitLedgerEvent(ledger, {
+      record: {
+        identity: id, observedAt: OBSERVED, model: 'gpt-5.4',
+        usage: firstUsage,
+        sourceReportedCost: { state: 'known', amount: 42, unit: 'usd-ticks' },
+      },
+      ingest: ingest(1),
+    });
+    const stored = readLedgerSnapshot(ledger).entries[ledgerKey(id)];
+    assert.equal(stored.observedAt, OBSERVED);
+    assert.equal(stored.model, 'gpt-5.4');
+    assert.deepEqual(stored.sourceReportedCost, { state: 'known', amount: 42, unit: 'usd-ticks' });
+    assert.equal(stored.digest, fingerprintRecord(id, firstUsage));
+
+    await commitLedgerEvent(ledger, {
+      record: {
+        identity: { ...id, revision: 2 },
+        observedAt: '2026-09-07T10:00:00.000Z',
+        model: 'gpt-5.4-mini',
+        usage: usage({ output: known(80) }),
+        sourceReportedCost: { state: 'known', amount: 30, unit: 'usd-ticks' },
+      },
+      ingest: ingest(2),
+    });
+    const replaced = readLedgerSnapshot(ledger).entries[ledgerKey(id)];
+    assert.equal(replaced.observedAt, '2026-09-07T10:00:00.000Z');
+    assert.equal(replaced.model, 'gpt-5.4-mini');
+    assert.equal(replaced.sourceReportedCost?.amount, 30);
+    assert.equal(replaced.usage.components.output.value, 80);
+
+    await closeSessionLedger(ledger);
+    const reopened = await openSessionLedger({ root, limits: { maxBytes: 256_000, maxEntries: 64 } });
+    try {
+      const again = readLedgerSnapshot(reopened).entries[ledgerKey(id)];
+      assert.equal(again.observedAt, '2026-09-07T10:00:00.000Z');
+      assert.equal(again.model, 'gpt-5.4-mini');
+      assert.equal(again.sourceReportedCost?.unit, 'usd-ticks');
+    } finally {
+      await closeSessionLedger(reopened);
+    }
+  });
+});
+
+test('a cumulative reset replaces retained fields from the new record', async () => {
+  await withLedger(async (ledger) => {
+    const id = identity({ sourceId: 'snap', sourceUnit: 'cumulative-snapshot' });
+    await commitLedgerEvent(ledger, {
+      record: {
+        identity: id, observedAt: OBSERVED, model: 'old-model',
+        usage: usage({ output: known(100) }),
+        sourceReportedCost: { state: 'known', amount: 9, unit: 'usd-ticks' },
+      },
+      ingest: ingest(1),
+    });
+    await commitLedgerEvent(ledger, {
+      record: {
+        identity: id, observedAt: '2026-09-07T11:00:00.000Z', model: 'new-model',
+        usage: usage({ output: known(10) }),
+        sourceReportedCost: { state: 'known', amount: 1, unit: 'usd-ticks' },
+      },
+      ingest: ingest(2, 2),
+      reset: true,
+    });
+    const stored = readLedgerSnapshot(ledger).entries[ledgerKey(id)];
+    assert.equal(stored.observedAt, '2026-09-07T11:00:00.000Z');
+    assert.equal(stored.model, 'new-model');
+    assert.equal(stored.sourceReportedCost?.amount, 1);
+  });
+});
+
+test('an old entry without retained fields opens with those fields absent, never invented', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'agora-ledger-'));
+  const id = identity({ sourceId: 'legacy' });
+  const key = ledgerKey(id);
+  await writeFile(path.join(root, 'state.json'), JSON.stringify({
+    version: 1,
+    ledgerGeneration: 1,
+    ingest: null,
+    entries: {
+      [key]: {
+        status: 'confirmed',
+        identity: id,
+        usage: usage({ output: known(10) }),
+        digest: 'sha256:legacy',
+      },
+    },
+    gaps: [],
+  }), 'utf8');
+  const ledger = await openSessionLedger({ root, limits: { maxBytes: 256_000, maxEntries: 64 } });
+  try {
+    const entry = readLedgerSnapshot(ledger).entries[key];
+    assert.equal(Object.hasOwn(entry, 'observedAt'), false);
+    assert.equal(Object.hasOwn(entry, 'model'), false);
+    assert.equal(Object.hasOwn(entry, 'sourceReportedCost'), false);
+  } finally {
+    await closeSessionLedger(ledger);
+  }
 });

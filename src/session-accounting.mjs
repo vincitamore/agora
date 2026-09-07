@@ -12,6 +12,12 @@ import {
 
 export const USAGE_SESSIONS_INTERVAL_MAX_S = 60;
 export const USAGE_SESSIONS_FOR_MAX_S = 3600;
+// Sized so maxEntries is reachable after E2a-pre retention. Pre-retention measurement
+// (Opus :1040): 1,999,116 bytes / 2059 entries ≈ 971 bytes/entry. Retention adds
+// observedAt plus optional model and sourceReportedCost (~200 bytes). 4096 * 1200
+// = 4,915,200; default maxBytes 6_000_000 leaves headroom.
+export const DEFAULT_LEDGER_MAX_BYTES = 6_000_000;
+export const DEFAULT_LEDGER_MAX_ENTRIES = 4096;
 
 /** @typedef {{ harness: string, sessionEpoch: string, sourceId: string }} SourceBinding */
 /** @typedef {{ member: string, slug: string, liveness: string, state: 'measured' | 'unsupported', reason?: string, key?: string, usage?: unknown, status?: string }} MemberRow */
@@ -279,6 +285,8 @@ export function formatIngestStderr(ingest) {
  *   ingestText?: string,
  *   ingestPath?: string,
  *   ingestLocator?: string,
+ *   maxBytes?: number,
+ *   maxEntries?: number,
  * }} opts
  */
 export async function collectUsageSessions(opts) {
@@ -287,7 +295,13 @@ export async function collectUsageSessions(opts) {
     throw err;
   }
   const records = await (opts.list ?? listRecords)(opts.stateRoot);
-  const ledger = await openSessionLedger({ root: opts.ledgerRoot, limits: { maxBytes: 2_000_000, maxEntries: 4096 } });
+  const ledger = await openSessionLedger({
+    root: opts.ledgerRoot,
+    limits: {
+      maxBytes: opts.maxBytes ?? DEFAULT_LEDGER_MAX_BYTES,
+      maxEntries: opts.maxEntries ?? DEFAULT_LEDGER_MAX_ENTRIES,
+    },
+  });
   try {
     /** @type {ReturnType<typeof summarizeIngest> | undefined} */
     let ingest;
@@ -371,6 +385,8 @@ export async function runUsageSessions(opts) {
  *   ingestPath?: string,
  *   stateRoot: string,
  *   signal?: AbortSignal,
+ *   maxBytes?: number,
+ *   maxEntries?: number,
  * }} args
  */
 export async function runUsageSessionsCli(args) {
@@ -423,6 +439,8 @@ export async function runUsageSessionsCli(args) {
       signal: args.signal,
       ingestPath: args.ingestPath,
       ingestLocator: args.ingestPath,
+      maxBytes: args.maxBytes,
+      maxEntries: args.maxEntries,
       write: (t) => { chunks.push(t); },
       writeErr: (t) => { errChunks.push(t); },
     });

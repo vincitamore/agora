@@ -19,7 +19,13 @@ Under a caller-supplied `root`:
   unlinked and the open retried; a live pid is never stolen. Pid reuse is a residual: a
   recycled pid still looks live.
 - `state.json` — one JSON object: ledger generation, last ingest position, per-key entries,
-  gap records. Contribution and ingest position are the same write.
+  gap records. Contribution and ingest position are the same write. Each stored entry
+  retains `observedAt`, and `model` / `sourceReportedCost` when the record carried them.
+  `sourceReportedCost` keeps the source's stated unit. The digest is still identity+usage
+  only, so existing ledgers open; entries written before these fields simply omit them
+  and a reader must treat omission as absent, never invent a time, model or cost. A
+  later record with the same identity+usage and a different cost is a duplicate and
+  does not replace the stored cost.
 
 Nothing else. No raw provider bodies, no transcript text, no credentials.
 

@@ -271,6 +271,8 @@ const SCHEMA = {
       args: [],
       options: {
         "--ledger-root <path>": "E1c ledger directory (required for measured rows)",
+        "--ledger-max-bytes <n>": "ledger state.json cap in bytes, default 6000000",
+        "--ledger-max-entries <n>": "ledger entry cap, default 4096",
         "--bind <file>": "JSON object mapping session slug to {harness, sessionEpoch, sourceId}; pid and bootEpoch are refused",
         "--ingest <file>": "JSONL of original usage envelopes decoded through E1b and committed to the ledger before the inventory",
         "--room <key>": "only members with state in this cursor key",
@@ -369,6 +371,8 @@ const OPTIONS = /** @type {const} */ ({
   timeout: { type: "string" },
   "pool-id": { type: "string" },
   "ledger-root": { type: "string" },
+  "ledger-max-bytes": { type: "string" },
+  "ledger-max-entries": { type: "string" },
   bind: { type: "string" },
   ingest: { type: "string" },
   room: { type: "string" },
@@ -669,6 +673,15 @@ async function main(argv) {
     if (values["ledger-root"] === undefined) {
       throw new AgoraError("--ledger-root is required", EXIT.usage);
     }
+    /** @param {string} flag @param {unknown} raw */
+    const readLimit = (flag, raw) => {
+      if (raw === undefined) return undefined;
+      const s = String(raw);
+      if (!/^[0-9]+$/.test(s) || Number(s) < 1) throw new AgoraError(`${flag} must be a positive integer`, EXIT.usage);
+      return Number(s);
+    };
+    const maxBytes = readLimit("--ledger-max-bytes", values["ledger-max-bytes"]);
+    const maxEntries = readLimit("--ledger-max-entries", values["ledger-max-entries"]);
     const ac = new AbortController();
     const onStop = () => { try { ac.abort(); } catch { /* already aborted */ } };
     process.once("SIGINT", onStop);
@@ -686,6 +699,8 @@ async function main(argv) {
         interval: values.interval !== undefined ? String(values.interval) : undefined,
         forSeconds: values.for !== undefined ? String(values.for) : undefined,
         signal: ac.signal,
+        maxBytes,
+        maxEntries,
       });
       if (result.stdout) process.stdout.write(result.stdout);
       if (result.stderr) process.stderr.write(result.stderr);

@@ -7,7 +7,7 @@ a source identity from a PID or boot epoch.
 
 ## Verb
 
-`agora usage-sessions [--room <cursor-key>] [--ledger-root <path>] [--bind <file>] [--ingest <file>] [--json] [--follow] [--interval <s>] [--for <s>]`
+`agora usage-sessions [--room <cursor-key>] [--ledger-root <path>] [--ledger-max-bytes <n>] [--ledger-max-entries <n>] [--bind <file>] [--ingest <file>] [--json] [--follow] [--interval <s>] [--for <s>]`
 
 `--bind` is JSON `{ "<slug>": { "harness", "sessionEpoch", "sourceId" } }`. A member
 without a binding is `unsupported unknown-binding`, never measured-as-zero. A binding
@@ -35,8 +35,14 @@ A one-shot report is not that mode. SIGINT/SIGTERM abort the owned controller; l
 are removed in `finally`. On win32 `process.kill` is TerminateProcess, so the delivered
 SIGINT cell is skipped there and owed to a POSIX runner.
 
-`--ledger-root` is required for measured rows. Existing `agora usage` (pool quotas) is
-unchanged.
+`--ledger-root` is required for measured rows. `--ledger-max-bytes` and
+`--ledger-max-entries` are optional; malformed values (non-integer, zero, negative)
+are refused before config load. Defaults: 6,000,000 bytes and 4096 entries, sized
+so the entry cap is reachable after retention. Pre-retention measurement (3903
+real envelopes): 1,999,116 bytes / 2059 entries ≈ 971 bytes/entry. Retention adds
+`observedAt` plus optional `model` and `sourceReportedCost` (~200 bytes). A
+`ledger-limit` refusal names which bound bound, how many entries are stored, and
+the ingest offset reached. Existing `agora usage` (pool quotas) is unchanged.
 
 ## Membership
 
