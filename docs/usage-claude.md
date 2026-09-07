@@ -49,9 +49,10 @@ Lower-level exports: `normalizeUsageAndProfile`, `windowsFromUsage`, `windowRead
 
 `GET https://api.anthropic.com/api/oauth/usage` and `GET https://api.anthropic.com/api/oauth/profile`
 with the CLI's OAuth token and `anthropic-beta: oauth-2025-04-20`. Redirects are refused;
-Authorization is never forwarded to another host. Timeout and abort apply during body
-consumption, not only between requests. Bodies are read incrementally up to `CLAUDE_LIMITS.maxBytes`;
-a non-success path disposes the body. 401 is `claude-unsupported-until-refresh`;
+Authorization is never forwarded to another host. Timeout and abort apply during every `reader.read`, including the final `done` read,
+not only between requests. Bodies must be streams; a response without `getReader` is
+`claude-body-unstreamed` and `arrayBuffer` is never called. Stream bodies are read
+incrementally up to `CLAUDE_LIMITS.maxBytes`. Cancel is not awaited unbounded. 401 is `claude-unsupported-until-refresh`;
 the next call rereads the file so a harness refresh can restore service. Diagnostic codes
 are allowlisted; an exception's `code` is never copied into the result.
 
