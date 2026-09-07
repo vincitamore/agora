@@ -341,6 +341,50 @@ test("every spelling is resolved or reported; none is dropped, and prose trips n
   assert.match(String(named.reason), /does not resolve in this checkout/);
 });
 
+test("the CALL family is detected wherever its parenthesis stands, and its guard still holds", async (t) => {
+  // The sibling of the static hold, one family over: r4 dropped line comments from the gap to keep
+  // prose out and took the call detectors with it, so a dynamic import whose parenthesis sat after a
+  // line comment was not detected at all — valid, executing, and inert.
+  const { root } = await repo(t);
+  await mkdir(path.join(root, "src"), { recursive: true });
+  await writeFile(path.join(root, "src", "loaded.mjs"), "\n");
+
+  /** @type {Array<[string, string]>} */
+  const pair = [
+    ["paren on the keyword's line", 'await import("./src/loaded.mjs");\n'],
+    ["comment on the keyword's line", 'await import // why\n("./src/loaded.mjs");\n'],
+    ["require, paren on the line", 'const r = require("./src/loaded.mjs");\n'],
+    ["require, comment on the line", 'const r = require // why\n("./src/loaded.mjs");\n'],
+  ];
+  for (const [label, source] of pair) {
+    await writeFile(path.join(root, "entry.mjs"), source);
+    const c = importClosure({ entry: path.join(root, "entry.mjs"), root });
+    // Resolved or counted, never inert: the invariant the whole unit turns on.
+    assert.ok(c.complete === false || c.files.has("src/loaded.mjs"),
+      `${label}: complete, and the module absent`);
+    assert.equal(c.complete, true, `${label}: ${c.reason}`);
+    assert.ok(c.files.has("src/loaded.mjs"), `${label}: the call was not followed`);
+  }
+
+  // A genuinely computed call is still computed, so the exemption arithmetic is untouched by the
+  // wider gap — this is what an index-difference report would have destroyed.
+  await writeFile(path.join(root, "entry.mjs"), 'const n = "x";\nawait import(n);\n');
+  const computed = importClosure({ entry: path.join(root, "entry.mjs"), root });
+  assert.equal(computed.complete, false);
+  assert.match(String(computed.reason), /computed specifier/);
+
+  // And the require lookbehind survives on both patterns, or every method call named require and
+  // every identifier ending in it starts reporting.
+  for (const [label, source] of [
+    ["a method named require", 'foo.require("./src/loaded.mjs");\nimport "./src/loaded.mjs";\n'],
+    ["an identifier ending in require", 'myrequire("./src/loaded.mjs");\nimport "./src/loaded.mjs";\n'],
+  ]) {
+    await writeFile(path.join(root, "entry.mjs"), source);
+    const c = importClosure({ entry: path.join(root, "entry.mjs"), root });
+    assert.equal(c.complete, true, `${label} was reported as a load: ${c.reason}`);
+  }
+});
+
 test("a detected load whose specifier will not parse is reported, not dropped", async (t) => {
   // Totality is anchored on the KEYWORD. Widening the specifier body closes one spelling; a load
   // whose specifier this scanner still cannot parse would vanish exactly as the quote-bearing
