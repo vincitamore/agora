@@ -7,7 +7,8 @@ import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { ProtocolValidationError, readInteger, readRecord, readString } from '../protocol/common.mjs';
 import {
-  isSummableUnit, ledgerKey, supersedesContribution, validateSessionUsageRecord,
+  isSummableUnit, ledgerKey, supersedesContribution, validateComponentSet,
+  validateSessionUsageRecord, validateSourceIdentity,
 } from '../protocol/session-usage.mjs';
 
 export { ledgerKey };
@@ -242,6 +243,81 @@ function emptyState() {
   };
 }
 
+/** @param {number} pid */
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code = /** @type {NodeJS.ErrnoException} */ (error).code;
+    if (code === 'ESRCH') return false;
+    if (code === 'EPERM') return true;
+    return false;
+  }
+}
+
+/** @param {string} lockPath */
+async function acquireLock(lockPath) {
+  try {
+    return await open(lockPath, 'wx', 0o600);
+  } catch (error) {
+    if (/** @type {NodeJS.ErrnoException} */ (error).code !== 'EEXIST') throw error;
+    let text;
+    try { text = await readFile(lockPath, 'utf8'); }
+    catch { throw new LedgerError('ledger-busy'); }
+    const pid = Number.parseInt(text.trim(), 10);
+    if (!Number.isSafeInteger(pid) || pid <= 0 || pidAlive(pid)) throw new LedgerError('ledger-busy');
+    await rm(lockPath, { force: true });
+    try {
+      return await open(lockPath, 'wx', 0o600);
+    } catch (retry) {
+      if (/** @type {NodeJS.ErrnoException} */ (retry).code === 'EEXIST') throw new LedgerError('ledger-busy');
+      throw retry;
+    }
+  }
+}
+
+/** @param {unknown} parsed */
+function loadState(parsed) {
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new LedgerError('ledger-corrupt', 'state-shape');
+  const rec = /** @type {Record<string, unknown>} */ (parsed);
+  if (rec.version !== LEDGER_STATE_VERSION || typeof rec.entries !== 'object' || rec.entries === null || Array.isArray(rec.entries)) {
+    throw new LedgerError('ledger-corrupt', 'state-shape');
+  }
+  if (rec.ingest !== null && rec.ingest !== undefined) {
+    try { readIngestPosition(rec.ingest); }
+    catch { throw new LedgerError('ledger-corrupt', 'ingest'); }
+  }
+  for (const entry of Object.values(/** @type {Record<string, unknown>} */ (rec.entries))) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new LedgerError('ledger-corrupt', 'entry');
+    const row = /** @type {Record<string, unknown>} */ (entry);
+    try {
+      validateSourceIdentity(row.identity);
+      validateComponentSet(row.usage);
+    } catch {
+      throw new LedgerError('ledger-corrupt', 'entry');
+    }
+    if (typeof row.status !== 'string' || !['confirmed', 'provisional', 'conflict', 'gap'].includes(row.status)) {
+      throw new LedgerError('ledger-corrupt', 'entry');
+    }
+  }
+  return /** @type {ReturnType<typeof emptyState>} */ (parsed);
+}
+
+/**
+ * @param {ReturnType<typeof emptyState>} next
+ * @param {ReturnType<typeof readIngestPosition>} ingest
+ */
+function applyIngest(next, ingest) {
+  if (next.ingest && ingest.sourceGeneration === next.ingest.sourceGeneration && ingest.offset < next.ingest.offset) {
+    throw new LedgerError('ledger-ingest-rewind');
+  }
+  if (next.ingest && ingest.sourceGeneration === next.ingest.sourceGeneration && ingest.offset > next.ingest.offset + 1) {
+    next.gaps = [...next.gaps, { kind: 'offset-skip', from: next.ingest.offset, to: ingest.offset, locator: ingest.locator }];
+  }
+  next.ingest = ingest;
+}
+
 /**
  * @param {{ root:string, limits:{ maxBytes:number, maxEntries:number }, io?: { writeAtomic?: (file:string, text:string)=>Promise<void> } }} options
  */
@@ -257,9 +333,8 @@ export async function openSessionLedger(options) {
   const statePath = path.join(root, 'state.json');
   /** @type {import('node:fs/promises').FileHandle} */
   let lock;
-  try { lock = await open(lockPath, 'wx', 0o600); }
+  try { lock = await acquireLock(lockPath); }
   catch (error) {
-    if (/** @type {NodeJS.ErrnoException} */ (error).code === 'EEXIST') throw new LedgerError('ledger-busy');
     throw error;
   }
   try { await lock.writeFile(String(process.pid), 'utf8'); }
@@ -271,18 +346,16 @@ export async function openSessionLedger(options) {
   let state = emptyState();
   try {
     const raw = await readFile(statePath, 'utf8');
-    const parsed = JSON.parse(raw);
-    if (parsed.version !== LEDGER_STATE_VERSION || typeof parsed.entries !== 'object' || parsed.entries === null) {
-      throw new LedgerError('ledger-corrupt', 'state-shape');
-    }
-    state = parsed;
+    let parsed;
+    try { parsed = JSON.parse(raw); }
+    catch { throw new LedgerError('ledger-corrupt', 'json'); }
+    state = loadState(parsed);
   } catch (error) {
     const code = /** @type {NodeJS.ErrnoException} */ (error).code;
     if (code !== 'ENOENT') {
       await lock.close().catch(() => {});
       await rm(lockPath, { force: true }).catch(() => {});
       if (error instanceof LedgerError) throw error;
-      if (error instanceof SyntaxError) throw new LedgerError('ledger-corrupt', 'json');
       throw error;
     }
   }
@@ -318,14 +391,20 @@ export async function commitLedgerEvent(ledger, event) {
     ingest,
     priorIngest: ledger.state.ingest,
   });
-  if (result.action === 'duplicate' || result.action === 'ignore-partial') {
-    return { action: result.action, status: result.status, key, digest, duplicate: result.action === 'duplicate' };
-  }
   const next = structuredClone(ledger.state);
-  if (next.ingest && ingest.sourceGeneration === next.ingest.sourceGeneration && ingest.offset < next.ingest.offset) {
-    next.gaps = [...next.gaps, { kind: 'offset-rewind', from: next.ingest.offset, to: ingest.offset, locator: ingest.locator }];
-  } else if (next.ingest && ingest.sourceGeneration === next.ingest.sourceGeneration && ingest.offset > next.ingest.offset + 1) {
-    next.gaps = [...next.gaps, { kind: 'offset-skip', from: next.ingest.offset, to: ingest.offset, locator: ingest.locator }];
+  applyIngest(next, ingest);
+  if (result.action === 'duplicate' || result.action === 'ignore-partial') {
+    const text = JSON.stringify(next);
+    if (Buffer.byteLength(text, 'utf8') > ledger.limits.maxBytes) throw new LedgerError('ledger-limit', 'bytes');
+    try {
+      if (ledger.io.writeAtomic) await ledger.io.writeAtomic(ledger.statePath, text);
+      else await writeDurableAtomic(ledger.statePath, text);
+    } catch (error) {
+      if (error instanceof LedgerError) throw error;
+      throw new LedgerError('ledger-write-failed');
+    }
+    ledger.state = next;
+    return { action: result.action, status: result.status, key, digest, duplicate: result.action === 'duplicate' };
   }
   if (result.action === 'gap') {
     next.gaps = [...next.gaps, { kind: 'cumulative-decrease-without-reset', key, reason: result.reason }];
@@ -337,7 +416,6 @@ export async function commitLedgerEvent(ledger, event) {
   } else {
     next.entries[key] = { status: result.status, identity: record.identity, usage: record.usage, digest };
   }
-  next.ingest = ingest;
   if (Object.keys(next.entries).length > ledger.limits.maxEntries) throw new LedgerError('ledger-limit', 'entries');
   const text = JSON.stringify(next);
   if (Buffer.byteLength(text, 'utf8') > ledger.limits.maxBytes) throw new LedgerError('ledger-limit', 'bytes');
