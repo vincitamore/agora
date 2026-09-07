@@ -162,8 +162,16 @@ if [ "$service_loaded" = true ]; then
 fi
 
 if [ "$status" = true ]; then
-  printf '{"room":"%s","session":"%s","watcherPid":%s,"supervisorPid":%s,"alive":%s,"armingTimeoutSeconds":%s,"armed":"%s"}\n' \
-    "$(json_string "$room")" "$(json_string "$session_id")" "${pid:-null}" "${supervisor_pid:-null}" "$alive" "$arming_timeout" "$(json_string "$armed_path")"
+  # A watch that ended for a transport reason wrote one watch-ended line to its stdout log; when
+  # the armed pid is gone, that line is the reason, so --status carries it rather than leaving it
+  # in a log nobody opens.
+  ended=null
+  if [ "$alive" = false ] && [ -f "$log_prefix.stdout.log" ]; then
+    last_ended=$(grep '"type":"watch-ended"' "$log_prefix.stdout.log" 2>/dev/null | tail -n 1)
+    if [ -n "$last_ended" ]; then ended=$last_ended; fi
+  fi
+  printf '{"room":"%s","session":"%s","watcherPid":%s,"supervisorPid":%s,"alive":%s,"armingTimeoutSeconds":%s,"armed":"%s","ended":%s}\n' \
+    "$(json_string "$room")" "$(json_string "$session_id")" "${pid:-null}" "${supervisor_pid:-null}" "$alive" "$arming_timeout" "$(json_string "$armed_path")" "$ended"
   exit 0
 fi
 
