@@ -83,7 +83,14 @@ export function historiesFromLedger(entries, opts) {
     }
     // observedAt is the ledger's FIRST-observation time for this identity: a duplicate never
     // replaces retained fields, so re-ingesting the same source gives the same cadence.
-    h.events.push({ at: entry.observedAt, kind: opts.classify(entry) });
+    //
+    // A pre-retention entry has none. That makes ITS session unclassified -- the same treatment
+    // as any event the caller could not classify -- and never fails the call: one legacy row must
+    // not discard thirty good sessions alongside it.
+    const at = entry.observedAt;
+    h.events.push(isIso(at)
+      ? { at, kind: opts.classify(entry) }
+      : { at: null, kind: 'unknown', reason: 'observed-at-absent' });
   }
   return { histories: [...bySession.values()], skippedNonRequest };
 }
@@ -100,8 +107,12 @@ function normalizeHistory(h, cutoff) {
   /** @type {number[]} */
   const useful = [];
   for (const e of h.events) {
-    if (!isRecord(e) || !isIso(e.at)) throw new HorizonInputError('event-at-not-iso', h.sessionKey);
+    if (!isRecord(e)) throw new HorizonInputError('event-not-record', h.sessionKey);
+    // Classification first: an event nobody could classify contributes no time and needs none.
+    // Demanding the timestamp before reading the kind is what turned one untimed legacy row into
+    // a failure for every session in the call.
     if (e.kind === 'unknown') { unclassified = true; continue; }
+    if (!isIso(e.at)) throw new HorizonInputError('event-at-not-iso', h.sessionKey);
     if (e.kind === 'useful') useful.push(ms(e.at));
     else if (e.kind !== 'maintenance') throw new HorizonInputError('event-kind-unknown-value', h.sessionKey);
   }
@@ -115,6 +126,8 @@ function normalizeHistory(h, cutoff) {
     // endedAt absent means still running at the cutoff: right-censored, a LOWER bound.
     censored: h.endedAt === null || h.endedAt === undefined,
     endedAt: h.endedAt ?? cutoff,
+    callTimes: useful,
+    firstEventMs: useful.length ? useful[0] : null,
     gaps: useful.slice(1).map((t, i) => (t - useful[i]) / 1000),
   };
 }
@@ -159,7 +172,10 @@ function remainingQuantile(curve, k, q) {
   for (let m = 0; m < curve.length + 1; m++) {
     if (survivalAt(curve, k + m + 1) / base <= 1 - q) return m;
   }
-  return curve.length;
+  // NEVER curve.length. If the curve never crosses the threshold the quantile is open-ended, and
+  // returning the length of the array we happened to build is a number with no meaning that a
+  // consumer cannot tell from a real one.
+  return null;
 }
 
 /** @param {number[]} xs @param {number} q */
@@ -180,6 +196,11 @@ export function estimateHorizon(histories, opts) {
   if (!Array.isArray(histories)) throw new HorizonInputError('histories-not-array');
   if (!opts || !isIso(opts.observationCutoff)) throw new HorizonInputError('observationCutoff-required');
   if (!opts.split || !isIso(opts.split.at)) throw new HorizonInputError('split-at-required');
+  // A split in the future of the observation is not a split: every session would fall in the fit
+  // half by default, and the "evaluation" would be on data the fit already saw.
+  if (ms(opts.split.at) >= ms(opts.observationCutoff)) {
+    throw new HorizonInputError('split-at-not-before-cutoff', 'split.at');
+  }
 
   const minComparable = opts.minComparable ?? MIN_COMPARABLE;
   const cutoff = opts.observationCutoff;
@@ -194,10 +215,24 @@ export function estimateHorizon(histories, opts) {
     ? usable.filter((h) => h.harness === subject.harness && h.phase === subject.phase)
     : usable;
 
-  // Split by session AND by time. A session enters the fit only if it was already over before the
-  // split; nothing observed after the split can inform a decision dated before it.
-  const fit = comparable.filter((h) => ms(h.endedAt) <= splitMs);
-  const evalSet = comparable.filter((h) => ms(h.endedAt) > splitMs);
+  // Split by session AND by time, and this is subtler than "ended before the split".
+  //
+  // A session that STARTED before the split is evidence available at the split, so it belongs in
+  // the fit -- but only as much of it as had happened by then. It is truncated at the split and
+  // marked censored if it ran on, exactly as a session still running at the observation cutoff is
+  // censored there. Requiring the session to have ENDED before the split instead puts every
+  // long-running session in the evaluation half by construction, which silently biases the fit
+  // toward short sessions and, in the extreme, empties it.
+  //
+  // Nothing after the split enters the fit's counts, so no later revision informs a past decision.
+  const fit = comparable
+    .filter((h) => h.firstEventMs !== null && h.firstEventMs < splitMs)
+    .map((h) => ({
+      ...h,
+      calls: h.callTimes.filter((tms) => tms < splitMs).length,
+      censored: h.censored || ms(h.endedAt) > splitMs,
+    }));
+  const evalSet = comparable.filter((h) => h.firstEventMs !== null && h.firstEventMs >= splitMs);
 
   /** @type {any} */
   const base = {
@@ -220,9 +255,14 @@ export function estimateHorizon(histories, opts) {
 
   const curve = survivalCurve(fit);
   const k = subject ? subject.callsSoFar : 0;
+  // Every stopping quantity rests on having SEEN a session stop. A fit of nothing but running
+  // sessions supports none of them: pTerminate would compute to 0, which reads as "termination is
+  // impossible" when the truth is that we have never watched one end.
+  const observedStops = fit.filter((h) => !h.censored).length;
   const p10 = remainingQuantile(curve, k, 0.1);
   const p50 = remainingQuantile(curve, k, 0.5);
   const p90 = remainingQuantile(curve, k, 0.9);
+  const openEnded = [['p10', p10], ['p50', p50], ['p90', p90]].filter(([, v]) => v === null).map(([n]) => n);
 
   const sBase = survivalAt(curve, k);
   const pTerminate = sBase > 0 ? 1 - survivalAt(curve, k + 1) / sBase : 1;
@@ -232,17 +272,32 @@ export function estimateHorizon(histories, opts) {
   // Calibration on the eval half only.
   const predictionLog = [];
   let covered = 0;
+  let scored = 0;
+  let unscorable = 0;
   const residuals = [];
   for (const h of evalSet) {
     const predicted = { p10: remainingQuantile(curve, 0, 0.1), p50: remainingQuantile(curve, 0, 0.5), p90: remainingQuantile(curve, 0, 0.9) };
     const actual = h.calls;
+    // An open-ended bound cannot be scored: "did the actual fall inside an interval with no upper
+    // end" is not a question with an answer, and counting it as covered would inflate coverage
+    // exactly where the estimator knows least.
+    const lo = predicted.p10;
+    const hi = predicted.p90;
+    if (lo === null || (!h.censored && hi === null)) {
+      unscorable++;
+      predictionLog.push({ sessionKey: h.sessionKey, predicted, actual, censored: h.censored, inside: null, unscorable: 'open-ended-bound' });
+      continue;
+    }
     // A censored session only falsifies the LOWER end: its true total is at least what we saw.
-    const inside = h.censored ? actual >= predicted.p10 : actual >= predicted.p10 && actual <= predicted.p90;
+    const inside = h.censored ? actual >= lo : actual >= lo && actual <= /** @type {number} */ (hi);
+    scored++;
     if (inside) covered++;
-    residuals.push(actual - predicted.p50);
+    if (predicted.p50 !== null) residuals.push(actual - predicted.p50);
     predictionLog.push({ sessionKey: h.sessionKey, predicted, actual, censored: h.censored, inside });
   }
-  const coverage = evalSet.length ? covered / evalSet.length : null;
+  // Coverage is over what could actually be scored, and the unscorable count travels beside it so
+  // a high coverage over two sessions cannot masquerade as a calibrated fit.
+  const coverage = scored ? covered / scored : null;
   const undercovered = coverage !== null && coverage < NOMINAL_COVERAGE - COVERAGE_MARGIN;
 
   const medianFit = quantile(fit.map((h) => h.calls), 0.5) ?? 0;
@@ -259,20 +314,41 @@ export function estimateHorizon(histories, opts) {
     // A declared plan is a FEATURE, never a count: it is reported so a consumer can weigh it and
     // it moves nothing here. Otherwise a session talks itself into a horizon.
     declaredPlan: opts.declaredPlan ?? null,
-    remainingCalls: { p10, p50, p90, support: fit.length },
+    // With no observed stop, every stopping field is ABSENT with a reason rather than present
+    // and meaningless. Arrival cadence is unaffected: it is about gaps between calls, not endings.
+    ...(observedStops === 0
+      ? { stoppingUnavailable: 'no-observed-stop-in-fit: every fit session is right-censored' }
+      : {
+        ...(p10 === null && p50 === null && p90 === null
+          ? { remainingCallsUnavailable: 'open-ended: the survival curve never crosses any quantile' }
+          : {
+            remainingCalls: {
+              ...(p10 === null ? {} : { p10 }),
+              ...(p50 === null ? {} : { p50 }),
+              ...(p90 === null ? {} : { p90 }),
+              support: fit.length,
+              ...(openEnded.length ? { openEnded } : {}),
+            },
+          }),
+        pTerminate: { value: pTerminate, support: fit.length },
+        // Expressed in CALLS, not money: this unit prices nothing, and a loss bound denominated
+        // in dollars would smuggle a rate table in through the back door.
+        ...(p10 === null ? {} : {
+          immediateTerminationLossBound: {
+            value: (1 - pTerminate) * p10,
+            basis: 'useful-calls forgone if immediate termination is assumed and is wrong, bounded by the p10 remaining',
+          },
+        }),
+      }),
+    observedStops,
     nextArrivalSeconds: { p10: quantile(gaps, 0.1), p50: quantile(gaps, 0.5), p90: quantile(gaps, 0.9), support: gaps.length },
-    pTerminate: { value: pTerminate, support: fit.length },
-    // Expressed in CALLS, not money: this unit prices nothing, and a loss bound denominated in
-    // dollars would smuggle a rate table in through the back door.
-    immediateTerminationLossBound: {
-      value: (1 - pTerminate) * p10,
-      basis: 'useful-calls forgone if immediate termination is assumed and is wrong, bounded by the p10 remaining',
-    },
     calibration: {
       splitAt: opts.split.at,
       fitSessions: fit.length,
       evalSessions: evalSet.length,
       coverage,
+      scored,
+      unscorable,
       residualSummary: { p10: quantile(residuals, 0.1), p50: quantile(residuals, 0.5), p90: quantile(residuals, 0.9) },
       drift: { drifted, medianFit, medianEval, ratio: DRIFT_RATIO },
       undercovered,

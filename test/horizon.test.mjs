@@ -173,3 +173,97 @@ test('the cutoff is required, because censoring without one is not censoring', (
   const r = estimateHorizon([], { observationCutoff: CUTOFF, split: SPLIT, subject: SUBJECT });
   assert.equal(r.status, 'unknown');
 });
+
+// --- HOLD :1072 repairs -------------------------------------------------------------------------
+
+test('a split at or after the observation cutoff is refused', () => {
+  const many = cohort(MIN_COMPARABLE + 2, 3);
+  // Grace's exact reproduction: cutoff before the split. Previously accepted, and it emitted
+  // remainingCalls 5/5/5 -- which was curve.length, not a quantile of anything.
+  assert.throws(
+    () => estimateHorizon(many, { observationCutoff: iso(5000), split: { at: iso(9000) }, subject: SUBJECT }),
+    /split-at-not-before-cutoff/,
+  );
+  assert.throws(
+    () => estimateHorizon(many, { observationCutoff: iso(5000), split: { at: iso(5000) }, subject: SUBJECT }),
+    /split-at-not-before-cutoff/,
+  );
+  // The twin: a split genuinely before the cutoff is ordinary and still works.
+  const ok = estimateHorizon(many, { observationCutoff: CUTOFF, split: SPLIT, subject: SUBJECT });
+  assert.equal(ok.status, 'estimated');
+});
+
+test('a fit with NO observed stop emits no stopping numbers at all', () => {
+  // Every fit session still running. Nothing here supports a statement about ending.
+  const running = Array.from({ length: MIN_COMPARABLE }, (_, i) => session(`r${i}`, 3, { ended: false }));
+  const ev = Array.from({ length: 5 }, (_, i) => session(`e${i}`, 3, { startMin: 60000 }));
+  const r = estimateHorizon([...running, ...ev], { observationCutoff: CUTOFF, split: SPLIT, subject: SUBJECT });
+
+  assert.equal(r.status, 'estimated');
+  assert.equal(r.observedStops, 0);
+  assert.match(r.stoppingUnavailable, /no-observed-stop/);
+  // The point of the cell: no fabricated number survives anywhere.
+  assert.ok(!('remainingCalls' in r), 'no remainingCalls');
+  assert.ok(!('pTerminate' in r), 'no pTerminate -- 0 would read as "termination is impossible"');
+  assert.ok(!('immediateTerminationLossBound' in r), 'no loss bound');
+  // Cadence is unaffected: it is about gaps, not endings.
+  assert.equal(typeof r.nextArrivalSeconds.support, 'number');
+
+  // The twin: one session observed ending restores exactly these fields, and the numbers are
+  // quantiles rather than the length of an array.
+  const withStop = [...running.slice(1), session('stopped', 3), ...ev];
+  const r2 = estimateHorizon(withStop, { observationCutoff: CUTOFF, split: SPLIT, subject: SUBJECT });
+  assert.equal(r2.observedStops, 1);
+  assert.ok(!('stoppingUnavailable' in r2));
+  assert.equal(typeof r2.pTerminate.value, 'number');
+});
+
+test('an unreached quantile is named open-ended, never the curve length', () => {
+  // Mostly-censored fit with a single early stop: the low quantile resolves, the high one cannot.
+  const sample = [
+    ...Array.from({ length: MIN_COMPARABLE - 1 }, (_, i) => session(`c${i}`, 6, { ended: false })),
+    session('stop', 1),
+  ];
+  const ev = Array.from({ length: 5 }, (_, i) => session(`e${i}`, 6, { startMin: 60000 }));
+  const r = estimateHorizon([...sample, ...ev], { observationCutoff: CUTOFF, split: SPLIT, subject: SUBJECT });
+  assert.equal(r.observedStops, 1);
+  // The invariant, whichever shape it takes: nothing unresolved is filled in with a number.
+  if ('remainingCallsUnavailable' in r) {
+    assert.ok(!('remainingCalls' in r), 'the field is absent, not present and meaningless');
+    assert.match(r.remainingCallsUnavailable, /open-ended/);
+  } else {
+    const reported = r.remainingCalls;
+    const openEnded = reported.openEnded ?? [];
+    for (const key of ['p10', 'p50', 'p90']) {
+      assert.equal(key in reported, !openEnded.includes(key), `${key} is either reported or named open-ended`);
+    }
+    assert.ok(openEnded.length > 0, 'a mostly-censored fit leaves at least one quantile open-ended');
+  }
+});
+
+test('one pre-retention entry costs its own session, not the whole call', () => {
+  /** @param {string} epoch @param {string | null} at */
+  const entry = (epoch, at) => ({
+    identity: { harness: 'claude-code', sessionEpoch: epoch, sourceId: `s-${epoch}`, sourceUnit: 'request', finality: 'final' },
+    ...(at ? { observedAt: at } : {}),
+  });
+  const good = Array.from({ length: MIN_COMPARABLE }, (_, i) => entry(`g${i}`, iso(i)));
+  const legacy = entry('legacy', null);          // pre-retention: no observedAt at all
+  const { histories } = historiesFromLedger([...good, legacy], {
+    sessionKeyOf: (e) => e.identity.sessionEpoch,
+    classify: () => 'useful',
+    phaseOf: () => 'build',
+    endedAt: () => iso(90000),
+  });
+  const r = estimateHorizon(histories, { observationCutoff: CUTOFF, split: SPLIT, subject: SUBJECT });
+  assert.equal(r.status, 'estimated', 'the thirty good sessions still estimate');
+  assert.equal(r.unclassifiedSessions, 1, 'and the legacy one is excluded and counted');
+
+  // The twin: give the legacy entry a time and nothing is excluded.
+  const { histories: h2 } = historiesFromLedger([...good, entry('legacy', iso(1))], {
+    sessionKeyOf: (e) => e.identity.sessionEpoch, classify: () => 'useful',
+    phaseOf: () => 'build', endedAt: () => iso(90000),
+  });
+  const r2 = estimateHorizon(h2, { observationCutoff: CUTOFF, split: SPLIT, subject: SUBJECT });
+  assert.equal(r2.unclassifiedSessions, 0);
+});
