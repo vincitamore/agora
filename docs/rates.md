@@ -37,8 +37,11 @@ priceUsage(record, table, { eventTime, asOf }, billingContext, residentContext, 
   refused as a substitute. Unmeasured context leaves every component unpriced.
 - `eventTime` and `asOf` are separate. A row whose `effective` is after `asOf`
   does not apply. Two matching rows pick the latest effective not after `asOf`.
-- Returns `{ priced, unpriced, coverage, row }`. A missing rate puts tokens in
-  `unpriced` with a reason; it never returns a cost of 0 for that component.
+- Returns `{ apiEquivalent, reportedBill, subscriptionConsumption, unpriced, coverage, row }`.
+  `apiEquivalent` is from the dated `publishedApi` column. `reportedBill` is the
+  record's `sourceReportedCost` in its stated unit, or unknown. `subscriptionConsumption`
+  is unknown unless observed; it is never derived from list-price dollars. A missing
+  rate puts tokens in `unpriced` with a reason; it never returns a cost of 0.
 
 ## Pool attribution
 

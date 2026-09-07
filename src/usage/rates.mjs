@@ -71,6 +71,7 @@ export function validateRateKey(value) {
 }
 
 /** @param {unknown} value */
+/** @param {unknown} value @param {string} field */
 function validateColumnMap(value, field) {
   if (value === undefined) return undefined;
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -100,8 +101,13 @@ export function validateRateRow(value) {
   const min = readInteger(v.contextBracketMin, 'contextBracketMin', 0);
   const max = readInteger(v.contextBracketMax, 'contextBracketMax', 0);
   if (!(max > min)) throw new RateError('bracket-empty');
+  const keyFields = {
+    provider: v.provider, endpoint: v.endpoint, modelRevision: v.modelRevision,
+    serviceTier: v.serviceTier, region: v.region, billingMode: v.billingMode,
+  };
+  /** @type {RateRow} */
   const row = {
-    ...validateRateKey(v),
+    ...validateRateKey(keyFields),
     effective: readTimestamp(v.effective, 'effective'),
     contextBracketMin: min,
     contextBracketMax: max,
@@ -168,8 +174,8 @@ export function readBillingField(value, field) {
  */
 export function validateBillingContext(value) {
   const v = readRecord(value, [...RATE_KEY_FIELDS], ['version']);
-  /** @type {Record<string, { state: 'known', value: string } | { state: 'unknown' }>} */
-  const fields = {};
+  /** @type {Record<typeof RATE_KEY_FIELDS[number], { state: 'known', value: string } | { state: 'unknown' }>} */
+  const fields = /** @type {any} */ ({});
   for (const field of RATE_KEY_FIELDS) {
     fields[field] = readBillingField(v[field], field);
   }
@@ -256,8 +262,12 @@ function reportedBill(record) {
 export function priceUsage(recordValue, table, times, billingContextValue, residentContextValue, opts = {}) {
   const record = validateSessionUsageRecord(recordValue);
   if (!times || typeof times !== 'object') throw new RateError('times-required');
-  const eventTime = readTimestamp(times.eventTime, 'eventTime');
-  const asOf = readTimestamp(times.asOf, 'asOf');
+  let eventTime;
+  let asOf;
+  try { eventTime = readTimestamp(times.eventTime, 'eventTime'); }
+  catch { throw new RateError('event-time'); }
+  try { asOf = readTimestamp(times.asOf, 'asOf'); }
+  catch { throw new RateError('as-of'); }
   const billing = validateBillingContext(billingContextValue);
   const resident = validateResidentContext(residentContextValue);
   const bill = reportedBill(record);
