@@ -14,9 +14,10 @@ modules for one identity.
 
 Under a caller-supplied `root`:
 
-- `writer.lock` — exclusive create. A second `openSessionLedger` on the same root fails
-  with `ledger-busy`. The lock is not a shared service; a leftover lock from a dead process
-  is not stolen. The caller removes it only after proving the holder is gone.
+- `writer.lock` — exclusive create, holding the writer's pid. A second live `openSessionLedger`
+  on the same root fails with `ledger-busy`. A leftover lock whose pid is not alive is
+  unlinked and the open retried; a live pid is never stolen. Pid reuse is a residual: a
+  recycled pid still looks live.
 - `state.json` — one JSON object: ledger generation, last ingest position, per-key entries,
   gap records. Contribution and ingest position are the same write.
 
@@ -47,9 +48,18 @@ output.
 ## Ingest position
 
 Each commit carries `{ locator, sourceGeneration, offset, fingerprint }`. Rotation is a
-higher `sourceGeneration`. An offset skip or rewind is recorded as a gap and does not
-delete prior contributions. Replay of the same identity digest after rotation is still a
-duplicate.
+higher `sourceGeneration`. Duplicate and ignore-partial results still persist the ingest
+position: the contribution is unchanged, the cursor advances, so a later commit cannot
+invent an offset-skip and a restart cannot re-read consumed offsets.
+
+A same-generation offset **behind** the stored position is refused (`ledger-ingest-rewind`);
+the position does not move backwards. That is not a re-ingest window. An offset skip
+(jumping forward inside one generation) is recorded as a gap and the position moves to the
+new offset. A corrupt `state.json` (including an entry missing identity) fails `open` with
+`ledger-corrupt`, not a late protocol throw.
+
+Replay of the same identity digest after rotation is still a duplicate. Prior
+contributions are not deleted by a skip or a refused rewind.
 
 ## Crash and concurrency
 

@@ -337,3 +337,83 @@ test('a cumulative-snapshot is not added as if it were a request', async () => {
     assert.equal(totals.snapshot.components.output.value, 999);
   });
 });
+
+test('duplicate and ignore-partial still persist the ingest position; restart does not re-read it', async () => {
+  await withLedger(async (ledger, root) => {
+    const rec = { identity: identity({ sourceId: 'req-1' }), observedAt: OBSERVED, usage: usage() };
+    await commitLedgerEvent(ledger, { record: rec, ingest: ingest(1) });
+    const dup = await commitLedgerEvent(ledger, { record: rec, ingest: ingest(2) });
+    assert.equal(dup.action, 'duplicate');
+    assert.equal(readLedgerSnapshot(ledger).ingest?.offset, 2);
+    const next = await commitLedgerEvent(ledger, {
+      record: { identity: identity({ sourceId: 'req-2' }), observedAt: OBSERVED, usage: usage() },
+      ingest: ingest(3),
+    });
+    assert.equal(next.action, 'accept');
+    assert.equal(readLedgerSnapshot(ledger).gaps.filter((g) => /** @type {{kind?:string}} */ (g).kind === 'offset-skip').length, 0);
+    const ignored = await commitLedgerEvent(ledger, {
+      record: { identity: identity({ sourceId: 'req-2', finality: 'streaming-partial' }), observedAt: OBSERVED, usage: usage({ output: known(5) }) },
+      ingest: ingest(4),
+    });
+    assert.equal(ignored.action, 'ignore-partial');
+    assert.equal(readLedgerSnapshot(ledger).ingest?.offset, 4);
+    await closeSessionLedger(ledger);
+    const reopened = await openSessionLedger({ root, limits: { maxBytes: 256_000, maxEntries: 64 } });
+    try {
+      assert.equal(readLedgerSnapshot(reopened).ingest?.offset, 4);
+    } finally {
+      await closeSessionLedger(reopened);
+    }
+  });
+});
+
+test('same-generation offset rewind is refused and the stored position does not move', async () => {
+  await withLedger(async (ledger) => {
+    await commitLedgerEvent(ledger, {
+      record: { identity: identity({ sourceId: 'req-1' }), observedAt: OBSERVED, usage: usage() },
+      ingest: ingest(5),
+    });
+    await assert.rejects(
+      () => commitLedgerEvent(ledger, {
+        record: { identity: identity({ sourceId: 'req-2' }), observedAt: OBSERVED, usage: usage() },
+        ingest: ingest(3),
+      }),
+      (/** @type {unknown} */ err) => err instanceof LedgerError && err.code === 'ledger-ingest-rewind',
+    );
+    assert.equal(readLedgerSnapshot(ledger).ingest?.offset, 5);
+    assert.equal(Object.keys(readLedgerSnapshot(ledger).entries).length, 1);
+  });
+});
+
+test('a leftover lock from a dead pid is recovered; a live holder stays busy', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'agora-ledger-'));
+  await writeFile(path.join(root, 'writer.lock'), '999999999', 'utf8');
+  const recovered = await openSessionLedger({ root, limits: { maxBytes: 256_000, maxEntries: 64 } });
+  try {
+    await commitLedgerEvent(recovered, {
+      record: { identity: identity({ sourceId: 'req-1' }), observedAt: OBSERVED, usage: usage() },
+      ingest: ingest(1),
+    });
+    await assert.rejects(
+      () => openSessionLedger({ root, limits: { maxBytes: 256_000, maxEntries: 64 } }),
+      (/** @type {unknown} */ err) => err instanceof LedgerError && err.code === 'ledger-busy',
+    );
+  } finally {
+    await closeSessionLedger(recovered);
+  }
+});
+
+test('a stored entry without identity is ledger-corrupt at open, not a late protocol throw', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'agora-ledger-'));
+  await writeFile(path.join(root, 'state.json'), JSON.stringify({
+    version: 1,
+    ledgerGeneration: 1,
+    ingest: null,
+    entries: { 'src:1:h1:e5:req-1': { status: 'confirmed', usage: { components: {}, coverage: 'none' }, digest: 'sha256:x' } },
+    gaps: [],
+  }), 'utf8');
+  await assert.rejects(
+    () => openSessionLedger({ root, limits: { maxBytes: 256_000, maxEntries: 64 } }),
+    (/** @type {unknown} */ err) => err instanceof LedgerError && err.code === 'ledger-corrupt',
+  );
+});
