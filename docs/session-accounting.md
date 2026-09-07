@@ -65,4 +65,7 @@ The number on a measured row is the session aggregate, not one call.
 JSON: `{ type: "usage-sessions", members: [...] }`. A measured row carries
 `usage` as `{ request, aggregate, snapshot }` from `deriveTotals`, plus `status`,
 `entryCount` and `provisionalCount`. An unsupported row carries a reason and no
-usage field. Missing is not zero.
+usage field. Missing is not zero. Claude, OMP and Codex decode with
+`finality: unknown`, so their entries land provisional: `usage.request.components`
+is empty for those members and the session total sits in
+`usage.request.provisional`. Read both.
