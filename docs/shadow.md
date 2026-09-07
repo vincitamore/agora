@@ -5,6 +5,11 @@ shadow` is its verb. It replays an E1 ledger through E2a pricing (`priceUsage`) 
 horizon (`estimateHorizon`) and emits, for every decision point of every session, the competing
 trajectories with their costs, the three baselines, and why no action won.
 
+The implementation anchors for that summary are `src/economy/shadow.mjs:278-316` (input
+validation, session selection and request-only horizon histories), `src/economy/shadow.mjs:401-533`
+(decision rows and shadow-only gating), and `src/economy/shadow.mjs:536-581` (the three session
+baselines and top-level output).
+
 It calls no provider, actuates nothing, and every output carries `shadow: true` and
 `actuationAllowed: false`. `horizonEligible` is copied from the horizon per decision; nothing here
 recomputes it.
@@ -26,8 +31,9 @@ interpolated. `--verification-cost` is finite and non-negative; zero is admitted
 literal and is labelled `explicit-zero` on every line that rests on it, and it is charged at zero
 future calls too.
 
-`--rates` is an E2a table (`data/rates.json` shape). There is no default: the table priced against
-is named in the invocation. Illustrative rows price nothing here; the verb has no
+`--rates` is an E2a rate table in the shape accepted by `loadRateTable` and `priceUsage`
+(`src/usage/rates.mjs`, consumed by `src/economy/shadow.mjs:278-282`). There is no default: the
+table priced against is named in the invocation. Illustrative rows price nothing here; the verb has no
 `--allow-illustrative`.
 
 `--billing-context` is a file of the `data/billing-contexts.example.json` shape, and you write your
@@ -59,8 +65,9 @@ The writes are one measurement an adapter states in one of two forms, never both
 `cache-write-unknown-ttl` bucket when they are not (Codex); the sum takes whichever form the
 record carries; a record carrying neither has unknown writes (`pool-absent:cache-write`), and a
 record carrying both is refused (`pool-both-forms:cache-write`) rather than summed twice.
-Measured on this seat's real Claude records: every one carries the split and none carries the
-pooled bucket, so a literal five-pool rule would have left every real record unmeasured. A
+The shipped example records the Claude split in `data/billing-contexts.example.json:5-10`; the
+adapter accepts either write form and does not infer the absent one (`src/economy/shadow.mjs:142-175`).
+A literal five-pool rule would therefore leave a record using the split unmeasured. A
 `not-applicable` pool contributes nothing; an `unknown` or `invalid` pool, or an absent
 `uncached-input` / `cached-input`, leaves the context unknown and the request unpriced
 (`context-unmeasured`). Lifetime totals are never substituted.
@@ -169,6 +176,38 @@ Paths that would return a well-formed number instead of an error, each pinned by
 The omission twin, paths that discard input without a marker: a session with no request-unit
 entries and a session with an untimed entry are both listed with their marker (13, 14 in the
 suite), and `skippedNonRequest` reports what `historiesFromLedger` did not count.
+
+## Source map and E2 progression status
+
+This is a shadow-only report, not an authorization to act: the top-level and decision outputs set
+`shadow: true` and `actuationAllowed: false` (`src/economy/shadow.mjs:352-364`, `401-425`,
+`517-581`). The horizon supplies `status`, `horizonEligible`, `actuationReason`, quantiles,
+stopping fields, arrival quantiles and calibration; the replay copies those fields and adds only
+the split-leakage and assumption labels (`src/economy/horizon.mjs:237-253`, `333-395`,
+`src/economy/shadow.mjs:407-425`).
+
+The claims above are anchored as follows: billing-context validation and per-record model revision
+are `src/economy/shadow.mjs:54-108`, resident-context pooling is `src/economy/shadow.mjs:142-175`,
+request/session grouping is `src/economy/shadow.mjs:195-215`, and totals are
+`src/economy/shadow.mjs:225-232`. Envelope refusal and prefix-reuse intervals are
+`src/economy/baselines.mjs:60-78`, `119-137`; verification zero and cost-state propagation are
+`src/economy/baselines.mjs:194-218`, `242-249`. The horizon's minimum cohort, censoring,
+calibration and fail-closed eligibility are `src/economy/horizon.mjs:195-253`, `258-314`,
+`329-395`.
+
+The silent-number inventory is exercised by the cells in `test/shadow.test.mjs:353-470`; the
+Codex reset/provisional distinction is exercised at `test/shadow.test.mjs:300-329`; the CLI's
+config-less preflight, input failures and real-ledger replay are exercised at
+`test/shadow.test.mjs:571-668`. The example input shapes are
+`data/billing-contexts.example.json:1-34` and `data/shadow-envelope.example.json:1-6`.
+
+The E2 progression decision remains **open**. E2c deliberately reports shadow output and refuses
+to actuate; it does not decide whether an all-unknown real-data result is an acceptable E2 result
+or whether missing rates, resident-context measurements, horizon evidence, or prefix-reuse
+evidence must be collected first. That decision belongs to orchestration after reading this
+evidence, not to this docs pass. The implementation's fail-closed gates are
+`src/economy/shadow.mjs:426-450`, `510-516`; no prose here upgrades `shadow-only` to a deployment
+decision.
 
 ## Epsilon and the risk budget
 
