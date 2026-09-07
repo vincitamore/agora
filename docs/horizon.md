@@ -74,11 +74,31 @@ informs an earlier decision.
 A censored eval session can only falsify the lower end — its true total is at least what we saw —
 so it is scored against p10 alone.
 
-Undercoverage (below `NOMINAL_COVERAGE` by `COVERAGE_MARGIN`) or drift (a median call count
-shifted by more than `DRIFT_RATIO` between fit and eval) sets `horizonEligible: false` with the
-measured reason. The drift stop is exercised by a cell that shifts a synthetic population and
-watches it fire, beside a twin with no shift that watches it stay quiet — a guard nobody has
-observed failing is a guard nobody has tested.
+An eval session whose predicted bound is **open-ended** cannot be scored at all — "did the actual
+fall inside an interval with no upper end" has no answer — so it is counted in `unscorable` beside
+the coverage rather than treated as covered, which would inflate coverage exactly where the
+estimator knows least.
+
+### Drift compares the same quantity on both halves
+
+This is harder than it looks, and two natural comparisons are both wrong.
+
+**Raw call counts** fail because the fit half is truncated at the split while the eval half is
+counted whole. A perfectly stationary population — every session making twenty calls — reads as
+median 10 against median 20 and fires the stop on a process that never changed.
+
+**A raw median over a censored sample** fails for the reason the whole module exists: it treats
+"had made 3 so far" as "made 3", re-importing the under-count through the diagnostic.
+
+So both halves are summarised the same censoring-aware way: a Kaplan-Meier median over each
+half's own curve, reported as `medianFitKm` and `medianEvalKm`. When either half cannot place a
+median — too censored, too short — the comparison is `comparable: false` with a reason, and
+eligibility **fails closed**. An undetectable shift is not an absent one, and "cannot assess" is
+not "no drift".
+
+Undercoverage or a detected shift sets `horizonEligible: false` with the measured reason. The stop
+is exercised by cells that watch it fire on a real length shift and stay quiet on a stationary
+population — a guard nobody has observed failing is a guard nobody has tested.
 
 ## Nothing about stopping without an observed stop
 

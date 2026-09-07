@@ -300,12 +300,37 @@ export function estimateHorizon(histories, opts) {
   const coverage = scored ? covered / scored : null;
   const undercovered = coverage !== null && coverage < NOMINAL_COVERAGE - COVERAGE_MARGIN;
 
-  const medianFit = quantile(fit.map((h) => h.calls), 0.5) ?? 0;
-  const medianEval = quantile(evalSet.map((h) => h.calls), 0.5);
-  const drifted = medianEval !== null && medianFit > 0
-    && Math.abs(medianEval - medianFit) / medianFit > DRIFT_RATIO;
+  // Drift must compare the SAME QUANTITY on both halves, and two obvious comparisons do not.
+  //
+  // Raw call counts fail because fit sessions are truncated at the split while eval sessions are
+  // counted whole: a perfectly stationary process reads as median 10 against median 20 and fires
+  // the stop on nothing. A raw median over a sample containing censored sessions fails for the
+  // second reason -- it treats "had made 3 so far" as "made 3", which is the same under-count the
+  // estimator exists to avoid, arriving through the diagnostic instead.
+  //
+  // So both halves are summarised the SAME censoring-aware way: a Kaplan-Meier median over each
+  // half's own curve. When either half cannot reach its median -- too censored, too short -- the
+  // comparison is UNAVAILABLE rather than false. An undetectable shift is not an absent one, and
+  // eligibility fails closed on it.
+  const evalCurve = survivalCurve(evalSet);
+  // The median is the LARGEST count still reached by more than half, not the first count that
+  // falls below: a cohort that all ended at 4 has a median of 4, and reporting 5 would name a
+  // count nobody made.
+  /** @param {number[]} c */
+  const medianFromCurve = (c) => {
+    let last = null;
+    for (let n = 0; n < c.length; n++) if (c[n] > 0.5) last = n;
+    // null when the curve never falls below half: too censored to place a median.
+    return last !== null && last < c.length - 1 ? last : null;
+  };
+  const medianFit = medianFromCurve(curve);
+  const medianEval = medianFromCurve(evalCurve);
 
-  const horizonEligible = !undercovered && !drifted && coverage !== null;
+  const driftComparable = medianFit !== null && medianFit > 0 && medianEval !== null;
+  const drifted = driftComparable
+    && Math.abs(/** @type {number} */ (medianEval) - medianFit) / medianFit > DRIFT_RATIO;
+
+  const horizonEligible = !undercovered && driftComparable && !drifted && coverage !== null;
 
   return {
     status: 'estimated',
@@ -350,7 +375,20 @@ export function estimateHorizon(histories, opts) {
       scored,
       unscorable,
       residualSummary: { p10: quantile(residuals, 0.1), p50: quantile(residuals, 0.5), p90: quantile(residuals, 0.9) },
-      drift: { drifted, medianFit, medianEval, ratio: DRIFT_RATIO },
+      drift: {
+        drifted,
+        comparable: driftComparable,
+        ...(driftComparable ? {} : {
+          reason: medianFit === null
+            ? 'fit-median-unreachable: too censored to estimate a median call count'
+            : 'eval-median-unreachable: too censored or too short to estimate a median call count',
+        }),
+        // Both are Kaplan-Meier medians over each half's own curve, so censoring is handled the
+        // same way on both sides and neither is a raw average over partial observations.
+        medianFitKm: medianFit,
+        medianEvalKm: medianEval,
+        ratio: DRIFT_RATIO,
+      },
       undercovered,
     },
     predictionLog,

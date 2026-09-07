@@ -144,8 +144,12 @@ test('the drift stop FIRES on a synthetic shift, and stays quiet without one', (
   const shifted = estimateHorizon([...fit, ...evalShift], { observationCutoff: CUTOFF, split: SPLIT, subject: SUBJECT });
   assert.equal(shifted.calibration.drift.drifted, true, 'the stop fires on the shift');
   assert.equal(shifted.horizonEligible, false, 'and eligibility goes with it');
-  assert.equal(shifted.calibration.drift.medianFit, 4);
-  assert.equal(shifted.calibration.drift.medianEval, 16);
+  // Both halves summarised the same censoring-aware way, so the numbers are comparable.
+  assert.equal(shifted.calibration.drift.comparable, true);
+  assert.equal(shifted.calibration.drift.medianFitKm, 4);
+  assert.equal(shifted.calibration.drift.medianEvalKm, 16);
+  assert.equal(quiet.calibration.drift.medianFitKm, quiet.calibration.drift.medianEvalKm,
+    'the quiet twin agrees on both halves');
 });
 
 // --- Permission is granted, never computed --------------------------------------------------------
@@ -266,4 +270,31 @@ test('one pre-retention entry costs its own session, not the whole call', () => 
   });
   const r2 = estimateHorizon(h2, { observationCutoff: CUTOFF, split: SPLIT, subject: SUBJECT });
   assert.equal(r2.unclassifiedSessions, 0);
+});
+
+test('a STATIONARY population does not drift, even though the fit half is truncated', () => {
+  // Grok/experience's exhibit at :1081, kept as the regression. Every session makes 20 calls.
+  // Thirty start before the split and are truncated there; ten start after and are seen whole.
+  // Comparing raw counts read 10 against 20 and fired the stop on a process that never changed.
+  const before = Array.from({ length: MIN_COMPARABLE }, (_, i) => session(`b${i}`, 20, { startMin: 0, gapMin: 10 }));
+  const after = Array.from({ length: 10 }, (_, i) => session(`a${i}`, 20, { startMin: 60000, gapMin: 10 }));
+  const r = estimateHorizon([...before, ...after], {
+    observationCutoff: CUTOFF, split: { at: iso(100) }, subject: SUBJECT,
+  });
+
+  assert.equal(r.calibration.drift.drifted, false, 'a stationary process must not fire the stop');
+
+  // And it is honest about WHY rather than claiming calibration: with no fit session ending
+  // before the split there is no median to place, so the comparison is unavailable and
+  // eligibility fails closed. "Cannot assess" is not "no drift".
+  assert.equal(r.calibration.drift.comparable, false);
+  assert.match(r.calibration.drift.reason, /median-unreachable/);
+  assert.equal(r.horizonEligible, false, 'unassessable drift fails closed');
+
+  // The twin that must still fire: same shape, but the later half genuinely runs longer.
+  const longer = Array.from({ length: 10 }, (_, i) => session(`l${i}`, 60, { startMin: 60000, gapMin: 10 }));
+  const shifted = estimateHorizon([...before.map((s, i) => session(`s${i}`, 4, { startMin: 0 })), ...longer], {
+    observationCutoff: CUTOFF, split: SPLIT, subject: SUBJECT,
+  });
+  assert.equal(shifted.calibration.drift.drifted, true, 'a real length shift still fires');
 });
