@@ -99,6 +99,13 @@ single `limitId`. They are distinct windows, so the slot name becomes the observ
   snapshot, and a bucket carrying `primary` with no `secondary` **key** is missing a required
   field rather than reporting no window there. Required keys are checked at every represented
   bucket, and at the legacy summary when that summary is the one being consumed.
+- Within a window, each field distinguishes **absent** from **unreadable** the same way. A null
+  `resetsAt` means no reset metadata; anything else unreadable is `unsupported-reset`. A
+  `usedPercent` that is not a number is `unsupported-percent-type`, one outside 0-100 is
+  `unsupported-percent-range`, and one finer than a basis point is `unsupported-precision` --
+  three faults that previously shared one code, which made the code a poor witness to its own
+  cause. A snapshot's `limitId` may be null (the key it was filed under is then the identity),
+  but an unreadable one is refused rather than silently replaced by that key.
 - A window slot that is schema `null` means the provider reports **no** window there. A slot that
   is present but unreadable means a window exists that cannot be expressed, which is a different
   fact and is reported unavailable with `unsupported-shape` rather than dropped. Collapsing the
@@ -122,6 +129,7 @@ credential, a path or a command line.
 | `codex-no-quota-reported` | A reply with no usable window. |
 | `codex-quota-shape-unsupported` | A window, or a represented bucket, whose shape cannot be expressed. |
 | `codex-transport-error` | An owned stream failed (a broken pipe, for instance). |
+| `codex-account-identity-malformed` | An account id was present but unreadable, which is not the same as absent. |
 
 An absent CLI is `unsupported` rather than an error: a seat without Codex installed is a fact
 about the seat, not a fault. Identity is never invented — with no account id the collector
