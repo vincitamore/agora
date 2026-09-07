@@ -24,9 +24,11 @@ Under a caller-supplied `root`:
   contract admitted (`sourceReportedCost` now; later optionals without a ledger edit).
   Each keeps the source's stated unit. The digest is still identity+usage
   only, so existing ledgers open; entries written before these fields simply omit them
-  and a reader must treat omission as absent, never invent a time, model or cost. A
-  later record with the same identity+usage and a different cost is a duplicate and
-  does not replace the stored cost.
+  and a reader must treat omission as absent, never invent a time, model or cost.
+  Retained fields are those of the first accepted observation of an identity; a
+  duplicate never replaces them (not `observedAt`, not `model`, not any
+  `sourceReported*`). First-observation is the cadence anchor: when the call
+  happened, not when a later identical digest arrived.
 
 Nothing else. No raw provider bodies, no transcript text, no credentials.
 
