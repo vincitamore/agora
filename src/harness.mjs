@@ -302,6 +302,7 @@ export async function clearWatchMode(target, opts = {}) {
   await rm(target.sentinel, { force: true });
 }
 
+
 // ---------------------------------------------------------------------------------------------
 // Is a stale build one this watch would actually notice?
 //
@@ -311,43 +312,60 @@ export async function clearWatchMode(target, opts = {}) {
 // runs has changed, and one landing to a module the entry imports statically changes everything it
 // runs without touching the file the seat thought to look at.
 //
-// Two rules govern everything below.
+// Three rules govern everything below.
 //
 //   It is the IMPORT GRAPH, not the executed paths. A static `import` at the top of the entry
 //   loads its module on every invocation, so a watch that never calls a verb still has that verb's
 //   code resident. Asking what the process executes gives the wrong answer in the unsafe direction.
 //
 //   Every unknown WIDENS to owed; none narrows to inert. A wrong "no re-arm owed" leaves a seat
-//   silently running stale code and is discovered by a defect; a wrong "owed" costs one re-arm.
+//   silently running stale code and is found by a defect; a wrong "owed" costs one re-arm.
+//
+//   A reachable load either JOINS the closure or makes the closure incomplete. It is never
+//   silently skipped. Skipping is what turns the second rule into a lie: the set stays a subset,
+//   the flag stays true, and the answer comes back inert.
+//
+// Paths here are POSIX-shaped repository-relative keys on every platform, because the other half of
+// the comparison is git's output and git speaks POSIX. Storing platform separators and converting
+// at the comparison is how a Linux-green measurement fails on Windows.
 
-/** A dynamic import whose specifier is a literal is resolvable; any other is not. */
-const DYNAMIC_IMPORT = /\bimport\s*\(/g;
-const DYNAMIC_LITERAL = /\bimport\s*\(\s*["'`]([^"'`]+)["'`]\s*\)/g;
-const FROM_SPEC = /\bfrom\s*["']([^"']+)["']/g;
-const BARE_IMPORT = /(?:^|[;\n])\s*import\s*["']([^"']+)["']/g;
-/** A `require` minted by `createRequire` loads outside the ESM graph, so it gets the same treatment
- * as a dynamic import: a literal specifier resolves and joins the closure, a computed one makes the
- * closure a non-superset. A blanket "any createRequire is unmeasurable" was the first shape of this
- * rule and it was wrong in the way that matters: the entry uses exactly one, with a literal
- * specifier, to read package.json — so the rule would have made the real closure permanently
- * incomplete, the inert state unreachable, and the whole measurement a warning that always fires
- * while appearing to have been measured. */
-const REQUIRE_CALL = /(?<![.\w])require\s*\(/g;
-const REQUIRE_LITERAL = /(?<![.\w])require\s*\(\s*["'`]([^"'`]+)["'`]\s*\)/g;
+/** Whitespace or a comment, anywhere a specifier may legally be preceded by one. */
+const GAP = "(?:\\s|/\\*[\\s\\S]*?\\*/|//[^\\n]*\\n)*";
+/** A quoted specifier, capturing the quote so a template can be told from a string. */
+const SPEC = "([\"'`])([^\"'`]*)\\1";
+const FROM_SPEC = new RegExp(`\\bfrom${GAP}${SPEC}`, "g");
+const BARE_IMPORT = new RegExp(`(?:^|[;\\n])${GAP}import${GAP}${SPEC}`, "g");
+const DYNAMIC_CALL = new RegExp(`\\bimport${GAP}\\(`, "g");
+const DYNAMIC_SPEC = new RegExp(`\\bimport${GAP}\\(${GAP}${SPEC}${GAP}\\)`, "g");
+const REQUIRE_CALL = new RegExp(`(?<![.\\w])require${GAP}\\(`, "g");
+const REQUIRE_SPEC = new RegExp(`(?<![.\\w])require${GAP}\\(${GAP}${SPEC}${GAP}\\)`, "g");
+/** Any string in the module that is shaped like a path into the repository, wherever it sits. */
+const RELATIVE_LITERAL = /["'`](\.{1,2}\/[^"'`]*)["'`]/g;
+
+/** A template with an interpolation is not a literal: its actual specifier is computed at runtime
+ * and the spelling in the source names no file. Counting it as a literal both skips the module it
+ * really loads and hides the computed call that would have made the closure incomplete. */
+const interpolated = (/** @type {string} */ quote, /** @type {string} */ spec) => quote === "`" && spec.includes("${");
+
 /**
- * Computed loads that provably cannot name a repository file, listed one by one with the reason and
- * the exact count.
+ * Computed loads that provably cannot name a repository file, listed one by one with the reason.
  *
  * This is DATA a reader can audit, not a heuristic. It exists because the alternative is worse in a
- * specific way: the whole 53-file closure of the entry contains exactly one computed load, a chooser
+ * specific way: the whole closure of the entry contains exactly one computed load, a chooser
  * between the builtins `bun:sqlite` and `node:sqlite`, and treating it as a hole makes the real
  * closure permanently unmeasurable — so every watch reports "unknown", forever, safely, uselessly,
- * and while appearing to have been measured. That is the failure this unit exists to remove.
+ * and while appearing to have been measured.
  *
- * It fails CLOSED in both directions. A computed load in any file not listed here is a hole. A
- * SECOND computed load in a listed file exceeds its count and is a hole, so the exemption cannot
- * silently widen to cover a new one. And a listed file that no longer has that many is a stale
- * entry, which a cell catches rather than a reader having to notice.
+ * It is bound to its REASON, not only to a count. The count alone authorized any same-count
+ * substitution, including one whose variable names a repository module, which is a false inert with
+ * an exemption's signature on it. So an exemption also requires that the module hold no
+ * relative-looking string anywhere that is not already a resolved member of the closure: a chooser
+ * between builtins satisfies that, and a chooser that can name `./loaded.mjs` does not.
+ *
+ * It fails CLOSED in every direction. A computed load in an unlisted file is a hole. A SECOND one
+ * in a listed file exceeds its count and is a hole. A listed file that no longer carries that many
+ * is stale, and a cell catches it. A listed file that gains a relative literal outside its import
+ * positions loses the exemption on the spot.
  */
 export const COMPUTED_LOAD_EXEMPTIONS = Object.freeze({
   "src/native-service.mjs": Object.freeze({
@@ -356,9 +374,14 @@ export const COMPUTED_LOAD_EXEMPTIONS = Object.freeze({
   }),
 });
 
+/** @param {string} root @param {string} file */
+function repoKey(root, file) {
+  return path.relative(root, file).split(path.sep).join("/");
+}
+
 /**
- * Every repository file reachable from `entry` by a static import, plus whether that set can be
- * trusted to be complete.
+ * Every repository file reachable from `entry` by a load the scanner can resolve, plus whether that
+ * set can be trusted to be complete.
  *
  * Deliberately over-inclusive on what counts as a specifier (a path inside a comment or a string
  * would be followed): a superset keeps the answer on the safe side, and the only thing a false
@@ -369,66 +392,109 @@ export const COMPUTED_LOAD_EXEMPTIONS = Object.freeze({
  */
 export function importClosure(opts) {
   const read = opts.read ?? ((/** @type {string} */ file) => readFileSync(file, "utf8"));
-  const root = path.resolve(opts.root);
+  const root = realOrResolve(opts.root);
   const entry = path.resolve(opts.entry);
   /** @type {Set<string>} */
   const files = new Set();
   /** @type {string[]} */
   const queue = [entry];
+  /** @type {string[]} */
+  const caveats = [];
+  /** Exemptions to justify once the closure is closed. @type {Array<{ key: string, label: string, n: number, dir: string, source: string, why: string }>} */
+  const pending = [];
   let complete = true;
   /** @type {string | undefined} */
   let reason;
-  /** Computed loads that provably cannot name a repository file. See `RELATIVE_LITERAL`. */
-  /** @type {string[]} */
-  const caveats = [];
   const incomplete = (/** @type {string} */ why) => { if (complete) { complete = false; reason = why; } };
 
   while (queue.length) {
     const file = /** @type {string} */ (queue.shift());
-    const relative = path.relative(root, file);
-    if (relative.startsWith("..") || path.isAbsolute(relative)) {
-      // Outside the repository (a ../ module, a symlink out of the tree). Dropping it would make
-      // the closure a SUBSET, which is the one direction that can produce a false inert; no diff
-      // of this repo can speak for it, so the whole answer becomes unknown.
-      incomplete(`${file} is outside ${root}, so no diff of this repository can say whether it moved`);
+    // PHYSICAL containment, not lexical. An in-root symlink or junction pointing outside the
+    // repository resolves to a file no diff of this repository can speak for, and following it
+    // lexically records it as a member and leaves the flag true.
+    let real;
+    try { real = realpathSync(file); }
+    catch { incomplete(`${repoKey(root, file)} could not be resolved to a physical path, so whether this repository's diff covers it is unknown`); continue; }
+    const relative = repoKey(root, real);
+    if (relative.startsWith("../") || relative === ".." || path.isAbsolute(relative)) {
+      incomplete(`${repoKey(root, file)} resolves to ${real}, outside ${root}, so no diff of this repository can say whether it moved`);
       continue;
     }
     if (files.has(relative)) continue;
     /** @type {string} */
     let source;
-    try { source = read(file); }
+    try { source = read(real); }
     catch { incomplete(`${relative} could not be read, so its own imports are unknown`); continue; }
     files.add(relative);
 
-    // A load the static graph cannot resolve makes the whole closure a non-superset, which is the
-    // one thing that must never be reported as inert. A load it CAN resolve simply joins it.
-    // A computed specifier is a hole in the closure unless it is one of the counted, reasoned
-    // exemptions above. Exceeding the count is a hole, so a new computed load never hides behind an
-    // old exemption.
-    const key = relative.split(path.sep).join("/");
+    const key = relative;
     const exempt = /** @type {Record<string, { imports: number, requires: number, why: string }>} */
       (COMPUTED_LOAD_EXEMPTIONS)[key];
-    const computed = (/** @type {string} */ label, /** @type {RegExp} */ all, /** @type {RegExp} */ literal, /** @type {number} */ allowed) => {
-      const n = (source.match(all) ?? []).length - (source.match(literal) ?? []).length;
-      if (n <= 0) return;
-      if (n <= allowed) caveats.push(`${key}: ${n} ${label} with a computed specifier, exempt because ${/** @type {any} */ (exempt).why}`);
-      else incomplete(`${key} has ${n} ${label} with a computed specifier and only ${allowed} exempted; the closure cannot be shown to be a superset of what it loads`);
-    };
-    computed("dynamic import call(s)", DYNAMIC_IMPORT, DYNAMIC_LITERAL, exempt?.imports ?? 0);
-    computed("require call(s)", REQUIRE_CALL, REQUIRE_LITERAL, exempt?.requires ?? 0);
+    /** Specifiers this module names and the scanner could not resolve to a repository file. */
+    /** @type {string[]} */
+    const unresolved = [];
 
-    for (const pattern of [FROM_SPEC, BARE_IMPORT, DYNAMIC_LITERAL, REQUIRE_LITERAL]) {
+    /** @param {RegExp} pattern */
+    const follow = (pattern) => {
       pattern.lastIndex = 0;
       for (const match of source.matchAll(pattern)) {
-        const spec = match[1];
-        if (!spec || !spec.startsWith(".")) continue; // a builtin or a dependency, not in the repo
-        const resolved = path.resolve(path.dirname(file), spec);
-        if (existsSync(resolved)) queue.push(resolved);
+        const [, quote, spec] = match;
+        if (interpolated(quote, spec)) continue;           // counted as computed below
+        if (!spec.startsWith(".")) continue;               // a builtin or a dependency
+        const resolved = path.resolve(path.dirname(real), spec);
+        if (!existsSync(resolved)) { unresolved.push(spec); continue; }
+        queue.push(resolved);
       }
-    }
+    };
+    for (const pattern of [FROM_SPEC, BARE_IMPORT, DYNAMIC_SPEC, REQUIRE_SPEC]) follow(pattern);
+
+    // A relative specifier that names nothing on disk is not a non-event: the file may exist at the
+    // OTHER build, which is exactly the comparison being made. Skipping it silently is how the
+    // closure stays a subset while claiming to be complete.
+    for (const spec of unresolved)
+      incomplete(`${key} loads ${JSON.stringify(spec)}, which does not resolve in this checkout, so the closure cannot be shown to cover it`);
+
+    /** @param {string} label @param {RegExp} all @param {RegExp} spec @param {number} allowed */
+    const computed = (label, all, spec, allowed) => {
+      const total = (source.match(all) ?? []).length;
+      let literal = 0;
+      spec.lastIndex = 0;
+      for (const m of source.matchAll(spec)) if (!interpolated(m[1], m[2])) literal += 1;
+      const n = total - literal;
+      if (n <= 0) return;
+      if (n > allowed) {
+        incomplete(`${key} has ${n} ${label} with a computed specifier and only ${allowed} exempted; the closure cannot be shown to be a superset of what it loads`);
+        return;
+      }
+      // The exemption's REASON is checked at the END, not here: a module's own imports are still in
+      // the queue while it is being scanned, so its ordinary specifiers would all look like strays.
+      pending.push({ key, label, n, dir: path.dirname(real), source, why: /** @type {any} */ (exempt).why });
+    };
+    computed("dynamic import call(s)", DYNAMIC_CALL, DYNAMIC_SPEC, exempt?.imports ?? 0);
+    computed("require call(s)", REQUIRE_CALL, REQUIRE_SPEC, exempt?.requires ?? 0);
+  }
+  // The exemption's REASON, checked rather than recited, against the CLOSED set: a chooser that can
+  // name a repository path is not a chooser between builtins, whatever the count says. Its own
+  // ordinary imports are members by now, so what remains is a specifier the scanner never followed.
+  for (const item of pending) {
+    RELATIVE_LITERAL.lastIndex = 0;
+    const strays = [...new Set([...item.source.matchAll(RELATIVE_LITERAL)].map((m) => m[1]))]
+      .filter((s) => !files.has(repoKey(root, path.resolve(item.dir, s))));
+    if (strays.length)
+      incomplete(`${item.key} is exempted for ${item.n} ${item.label}, but names relative specifier(s) ${JSON.stringify(strays)} that are not closure members, so the exemption's reason no longer holds`);
+    else caveats.push(`${item.key}: ${item.n} ${item.label} with a computed specifier, exempt because ${item.why}`);
   }
   return { files, complete, ...(reason ? { reason } : {}), ...(caveats.length ? { caveats } : {}) };
 }
+
+/** @param {string} dir */
+function realOrResolve(dir) {
+  try { return realpathSync(dir); } catch { return path.resolve(dir); }
+}
+
+/** NUL-delimited, so a path with a space, a newline or a non-ASCII byte survives `core.quotepath`.
+ * @param {string} out */
+const nulFields = (out) => out.split("\0").filter((s) => s.length > 0);
 
 /**
  * @typedef {object} ModuleDelta
@@ -453,15 +519,14 @@ export async function watchModuleDelta(opts) {
   const root = path.resolve(opts.root);
   const unknown = (/** @type {string} */ reason) => ({ state: /** @type {const} */ ("unknown"), changed: [], reason });
 
-  // The record may name a DIFFERENT clone. Nothing in the shipped comparison checks this, and a
-  // diff of this tree is not evidence about another copy — a watch armed as a bare `agora` can be
-  // a global install entirely outside this checkout.
+  // The record may name a DIFFERENT clone. Nothing in the shipped comparison checked this, and a
+  // diff of this tree is not evidence about another copy — a watch armed as a bare `agora` can be a
+  // global install entirely outside this checkout.
   if (opts.armedRoot === undefined)
     return unknown("this watch recorded no root, so which checkout it loaded is unknown; re-arm it once to make module freshness measurable");
   // By realpath, not by string: a worktree path and the shared checkout are genuinely different
   // roots and rightly unknown, but a symlinked same root must not read as different.
-  const real = (/** @type {string} */ dir) => { try { return realpathSync(dir); } catch { return path.resolve(dir); } };
-  if (real(opts.armedRoot) !== real(root))
+  if (realOrResolve(opts.armedRoot) !== realOrResolve(root))
     return unknown(`this watch loaded ${opts.armedRoot}, not ${root}; a diff of this checkout says nothing about another copy`);
   if (!opts.from?.git || !opts.to.git)
     return unknown("one of the two builds is stamped by file time rather than by a commit, so there is no diff to take");
@@ -474,38 +539,52 @@ export async function watchModuleDelta(opts) {
   /** @type {string[]} */
   let changedFiles;
   try {
+    // -z, and renames off. Without -z git escapes a non-ASCII or space-bearing path into a quoted
+    // C string, which then matches no closure member and reports inert; with renames on, a moved
+    // file appears once under its new name and the old name never appears at all.
+    const result = await run("git", ["-C", root, "diff", "--name-only", "--no-renames", "-z", opts.from.git, opts.to.git],
+      { windowsHide: true, maxBuffer: 8 * 1024 * 1024 });
+    changedFiles = nulFields(String(result.stdout));
+  } catch (e) {
     // A non-zero exit is NOT an empty change list. Reading it as one is the exact shape that turns
     // a broken measurement into a confident "nothing moved".
-    const result = await run("git", ["-C", root, "diff", "--name-only", opts.from.git, opts.to.git],
-      { windowsHide: true, maxBuffer: 4 * 1024 * 1024 });
-    changedFiles = String(result.stdout).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  } catch (e) {
     return unknown(`the change between the two builds could not be read (${e instanceof Error ? e.message : String(e)})`);
   }
 
   // A sha diff cannot see an UNCOMMITTED edit, and a watch loaded the working tree at arm time
   // while this process reads the working tree now. On a trunk that is dirty for hours — the normal
   // case on a shared checkout — a peer's uncommitted change to a module on the closure is exactly
-  // the change a seat most needs to know about, and it is invisible to `git diff <sha> <sha>`.
+  // the change a seat most needs to know about.
   /** @type {string[]} */
   let dirtyFiles = [];
   try {
-    const status = await run("git", ["-C", root, "status", "--porcelain", "--untracked-files=all"],
-      { windowsHide: true, maxBuffer: 4 * 1024 * 1024 });
-    dirtyFiles = String(status.stdout).split(/\r?\n/).map((line) => line.slice(3).trim())
-      .filter(Boolean).map((line) => line.includes(" -> ") ? line.split(" -> ")[1] : line);
+    const status = await run("git", ["-C", root, "status", "--porcelain", "-z", "--untracked-files=all"],
+      { windowsHide: true, maxBuffer: 8 * 1024 * 1024 });
+    // In -z porcelain v1 each record is `XY <path>` NUL-terminated, and a rename or copy is
+    // followed by its ORIGIN as a second NUL-terminated field. Both names matter here: the old one
+    // is a module that has gone from where the watch loaded it.
+    const fields = nulFields(String(status.stdout));
+    for (let i = 0; i < fields.length; i += 1) {
+      const record = fields[i];
+      if (record.length < 4) continue;
+      dirtyFiles.push(record.slice(3));
+      if (record[0] === "R" || record[0] === "C" || record[1] === "R" || record[1] === "C") {
+        i += 1;
+        if (i < fields.length) dirtyFiles.push(fields[i]);
+      }
+    }
   } catch (e) {
     return unknown(`the working tree's state could not be read (${e instanceof Error ? e.message : String(e)}), and an uncommitted edit to a loaded module is invisible to a commit diff`);
   }
 
   const closure = importClosure({ entry: opts.entry, root, ...(opts.read ? { read: opts.read } : {}) });
-  const onGraph = (/** @type {string} */ file) => closure.files.has(file.split("/").join(path.sep)) || closure.files.has(file);
-  const changed = [...new Set([...changedFiles, ...dirtyFiles])].filter(onGraph);
-  const scanned = new Set([...changedFiles, ...dirtyFiles]).size;
+  const moved = [...new Set([...changedFiles, ...dirtyFiles])];
+  const changed = moved.filter((file) => closure.files.has(file));
+  const scanned = moved.length;
   if (!closure.complete && changed.length === 0)
     return { state: "unknown", changed: [], scanned,
       reason: `nothing on the measured import graph moved, but the graph is not provably complete: ${closure.reason}` };
   if (changed.length === 0) return { state: "inert", changed: [], scanned,
     ...(closure.caveats ? { caveats: closure.caveats } : {}) };
-  return { state: "owed", changed, scanned };
+  return { state: "owed", changed, scanned, ...(closure.caveats ? { caveats: closure.caveats } : {}) };
 }

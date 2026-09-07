@@ -142,6 +142,104 @@ test("the real entry: the census that catches a rule which quietly disables the 
     "the real closure's exempted loads do not match the exemption list");
 });
 
+test("a reachable load joins the closure or makes it unknown; it is never silently skipped", async (t) => {
+  const { root } = await repo(t);
+  await mkdir(path.join(root, "src"), { recursive: true });
+  await writeFile(path.join(root, "src", "loaded.mjs"), "\n");
+
+  // A comment sits where a specifier may legally be preceded by one. Missing it drops a real
+  // module and leaves the flag true, which is a subset calling itself complete.
+  await writeFile(path.join(root, "entry.mjs"), 'import /* valid comment */ "./src/loaded.mjs";\n');
+  const commented = importClosure({ entry: path.join(root, "entry.mjs"), root });
+  assert.equal(commented.complete, true, commented.reason);
+  assert.ok(commented.files.has("src/loaded.mjs"), "a commented side-effect import was dropped");
+
+  // The ordinary twin, so the tolerance is not bought by matching anything at all.
+  await writeFile(path.join(root, "entry.mjs"), 'import "./src/loaded.mjs";\n');
+  assert.ok(importClosure({ entry: path.join(root, "entry.mjs"), root }).files.has("src/loaded.mjs"));
+
+  // A template with an interpolation is COMPUTED: its spelling names no file, so counting it as a
+  // literal both skips the module it really loads and hides the call that should have made the
+  // closure incomplete.
+  await writeFile(path.join(root, "entry.mjs"), 'const n = "loaded";\nawait import(`./src/${n}.mjs`);\n');
+  const template = importClosure({ entry: path.join(root, "entry.mjs"), root });
+  assert.equal(template.complete, false, "an interpolated template was accepted as a literal");
+  assert.match(String(template.reason), /computed specifier/);
+
+  // Its twin: a template with NO interpolation is an ordinary literal and resolves.
+  await writeFile(path.join(root, "entry.mjs"), "await import(`./src/loaded.mjs`);\n");
+  const plain = importClosure({ entry: path.join(root, "entry.mjs"), root });
+  assert.equal(plain.complete, true, plain.reason);
+  assert.ok(plain.files.has("src/loaded.mjs"), "a non-interpolated template literal was not followed");
+
+  // A relative specifier that resolves to nothing HERE may resolve at the other build, which is the
+  // comparison being made; skipping it is how the closure stays a subset while claiming complete.
+  await writeFile(path.join(root, "entry.mjs"), 'import "./src/missing.mjs";\n');
+  const missing = importClosure({ entry: path.join(root, "entry.mjs"), root });
+  assert.equal(missing.complete, false, "an unresolvable relative load was skipped in silence");
+  assert.match(String(missing.reason), /does not resolve in this checkout/);
+});
+
+test("closure membership is physical, and its keys are POSIX on every platform", async (t) => {
+  const { root } = await repo(t);
+  await mkdir(path.join(root, "src", "deep"), { recursive: true });
+  await writeFile(path.join(root, "src", "deep", "loaded.mjs"), "\n");
+  await writeFile(path.join(root, "entry.mjs"), 'import "./src/deep/loaded.mjs";\n');
+  const inside = importClosure({ entry: path.join(root, "entry.mjs"), root });
+  assert.equal(inside.complete, true, inside.reason);
+  // The Windows half of this unit's first gate failed on exactly this: the closure stored
+  // backslash keys while the other side of every comparison is git, which speaks POSIX.
+  for (const key of inside.files) assert.ok(!key.includes("\\"), `closure key ${JSON.stringify(key)} is not POSIX`);
+  assert.ok(inside.files.has("src/deep/loaded.mjs"));
+
+  // An in-root link pointing OUT of the repository resolves to a file no diff of this repository
+  // can speak for. Lexical containment follows it and records it as a member; physical does not.
+  const external = await mkdtemp(path.join(tmpdir(), "agora-graph-out-"));
+  t.after(() => rm(external, { recursive: true, force: true }));
+  await writeFile(path.join(external, "loaded.mjs"), "\n");
+  let linked = true;
+  try { await symlink(external, path.join(root, "external"), "junction"); }
+  catch { linked = false; }
+  if (linked) {
+    await writeFile(path.join(root, "entry.mjs"), 'import "./external/loaded.mjs";\n');
+    const escaped = importClosure({ entry: path.join(root, "entry.mjs"), root });
+    assert.equal(escaped.complete, false, "an in-root link out of the repository was followed as a member");
+    assert.match(String(escaped.reason), /outside/);
+    // The twin: an in-root link to an in-root directory is an ordinary member, so the check is not
+    // bought by refusing every link.
+    await symlink(path.join(root, "src", "deep"), path.join(root, "alias"), "junction");
+    await writeFile(path.join(root, "entry.mjs"), 'import "./alias/loaded.mjs";\n');
+    const alias = importClosure({ entry: path.join(root, "entry.mjs"), root });
+    assert.equal(alias.complete, true, alias.reason);
+    assert.ok(alias.files.has("src/deep/loaded.mjs"), "a same-root alias did not resolve to its physical member");
+  } else {
+    t.diagnostic("this platform would not create a link, so physical member resolution is unmeasured here");
+  }
+});
+
+test("an exemption is bound to its reason, not to its count", async (t) => {
+  // The count alone authorised any same-count substitution, including a chooser whose variable
+  // names a repository module: a false inert with an exemption's signature on it. An exempt module
+  // may hold no relative specifier that is not already a closure member.
+  const { root } = await repo(t);
+  await mkdir(path.join(root, "src"), { recursive: true });
+  await writeFile(path.join(root, "src", "loaded.mjs"), "\n");
+  await writeFile(path.join(root, "entry.mjs"), 'import "./src/native-service.mjs";\n');
+  await writeFile(path.join(root, "src", "native-service.mjs"),
+    'const name = "./loaded.mjs";\nawait import(name);\n');
+  const substituted = importClosure({ entry: path.join(root, "entry.mjs"), root });
+  assert.equal(substituted.complete, false, "an exemption survived its reason ceasing to hold");
+  assert.match(String(substituted.reason), /the exemption's reason no longer holds/);
+
+  // The twin, and it is the real one: the product's own chooser names only builtins, so it keeps
+  // the exemption and the closure stays measurable.
+  await writeFile(path.join(root, "src", "native-service.mjs"),
+    'const name = process.versions.bun ? "bun:sqlite" : "node:sqlite";\nawait import(name);\n');
+  const builtins = importClosure({ entry: path.join(root, "entry.mjs"), root });
+  assert.equal(builtins.complete, true, builtins.reason);
+  assert.equal((builtins.caveats ?? []).length, 1);
+});
+
 // ------------------------------------------------------------------------ the measurement
 
 test("without a recorded root nothing can be claimed, and two roots are compared by realpath", async (t) => {
@@ -228,6 +326,74 @@ test("an uncommitted edit to a loaded module is owed, though no commit diff can 
   const owed = await watchModuleDelta(base);
   assert.equal(owed.state, "owed", "an uncommitted edit to a loaded module was reported as inert");
   assert.deepEqual(owed.changed, ["src/loaded.mjs"]);
+});
+
+test("git path identities survive: a quoted committed path, a dirty path with a space, a rename", async (t) => {
+  const { root, git } = await repo(t);
+  await git(["config", "core.quotepath", "true"]);
+  await mkdir(path.join(root, "src"), { recursive: true });
+  await writeFile(path.join(root, "src", "café.mjs"), "export const v = 1;\n");
+  await writeFile(path.join(root, "src", "space name.mjs"), "export const v = 1;\n");
+  await writeFile(path.join(root, "src", "moved.mjs"), "export const v = 1;\n");
+  await writeFile(path.join(root, "entry.mjs"),
+    'import "./src/café.mjs";\nimport "./src/space name.mjs";\nimport "./src/moved.mjs";\n');
+  const first = await commit({ git }, "one");
+
+  // Committed, non-ASCII, with core.quotepath on: without -z git escapes this into a quoted C
+  // string that matches no closure member, and the answer comes back inert.
+  await writeFile(path.join(root, "src", "café.mjs"), "export const v = 2;\n");
+  const second = await commit({ git }, "cafe");
+  const base = { root, entry: path.join(root, "entry.mjs"), armedRoot: root };
+  const accented = await watchModuleDelta({ ...base, from: first, to: second });
+  assert.equal(accented.state, "owed", `a quoted committed path was not matched: ${accented.reason}`);
+  assert.deepEqual(accented.changed, ["src/café.mjs"]);
+
+  // Dirty, with a space: the porcelain pathname keeps its quotes unless the output is NUL-delimited.
+  await writeFile(path.join(root, "src", "space name.mjs"), "export const v = 3;\n");
+  const spaced = await watchModuleDelta({ ...base, from: second, to: second });
+  assert.equal(spaced.state, "owed", `a dirty path with a space was not matched: ${spaced.reason}`);
+  assert.deepEqual(spaced.changed, ["src/space name.mjs"]);
+  await writeFile(path.join(root, "src", "space name.mjs"), "export const v = 1;\n");
+
+  // On the graph, a renamed module must not read as inert. It comes back UNKNOWN rather than owed,
+  // which is correct and worth pinning: the loaded module no longer resolves in this checkout, so
+  // the closure cannot be shown to cover it, and unknown is what widening is for.
+  await git(["mv", "src/moved.mjs", "src/renamed.mjs"]);
+  const renamed = await watchModuleDelta({ ...base, from: second, to: second });
+  assert.notEqual(renamed.state, "inert", "a loaded module renamed out from under the watch read as inert");
+  assert.match(String(renamed.reason ?? ""), /does not resolve in this checkout/);
+  await git(["mv", "src/renamed.mjs", "src/moved.mjs"]);
+});
+
+test("the rename record's ORIGIN is a name, and the parser reads it from real porcelain bytes", async (t) => {
+  // A count cannot see this defect: a parser that fails to consume the origin field still yields
+  // two entries, the second one mangled. Only the NAMES discriminate. So the bytes are captured
+  // from a real `git mv` in a real repository and replayed against a tree where the origin still
+  // exists — a fake I wrote would speak whatever dialect I already believe.
+  const source = await repo(t);
+  await mkdir(path.join(source.root, "src"), { recursive: true });
+  await writeFile(path.join(source.root, "src", "moved.mjs"), "export const v = 1;\n");
+  await commit(source, "one");
+  await source.git(["mv", "src/moved.mjs", "src/renamed.mjs"]);
+  const captured = String((await source.git(["status", "--porcelain", "-z", "--untracked-files=all"])).stdout);
+  assert.ok(captured.includes("src/moved.mjs"), "the captured porcelain carries no origin field to parse");
+
+  const { root, git } = await repo(t);
+  await mkdir(path.join(root, "src"), { recursive: true });
+  await writeFile(path.join(root, "src", "moved.mjs"), "export const v = 1;\n");
+  await writeFile(path.join(root, "entry.mjs"), 'import "./src/moved.mjs";\n');
+  const at = await commit({ git }, "one");
+
+  const replayed = await watchModuleDelta({
+    root, entry: path.join(root, "entry.mjs"), armedRoot: root, from: at, to: at,
+    run: /** @type {any} */ (async (/** @type {string} */ _bin, /** @type {string[]} */ args) => {
+      if (args.includes("status")) return { stdout: captured, stderr: "" };
+      return { stdout: "", stderr: "" };
+    }),
+  });
+  assert.deepEqual(replayed.changed, ["src/moved.mjs"],
+    `the rename's origin was lost or mangled: ${JSON.stringify(replayed.changed)}`);
+  assert.equal(replayed.state, "owed");
 });
 
 test("a commit that moves a loaded module is owed; one that moves only unloaded files is inert", async (t) => {
