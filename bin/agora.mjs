@@ -662,6 +662,15 @@ function envPrefix(session, bearer) {
  * @type {Set<() => Promise<void> | void>} */
 const openTransports = new Set();
 
+/** The same transports, kept so the drain can read what their `close()` recorded. Two sets rather
+ * than one because the closers are called through the transport to keep `this` its own, and a
+ * closure cannot be asked afterwards what it found.
+ * @type {Set<import("../src/core.mjs").Transport>} */
+const closeable = new Set();
+
+/** Reasons recorded by the closes the drain just ran, in registration order. */
+function* closeFailures() { for (const t of closeable) if (t.closeFailed) yield t.closeFailed; }
+
 /**
  * @typedef {{
  *   verb: string,
@@ -1198,6 +1207,10 @@ async function main(argv) {
           // Closed per room rather than at the end, so probing ten rooms never holds ten channels
           // open at once. `whoami` on a native-remote room dials a real one.
           await t?.close?.();
+          // Read AFTER the close and BEFORE the row is printed, which is the whole reason doctor
+          // can carry this at all: a one-shot verb's teardown normally happens with nowhere left to
+          // report to, and here there is somewhere.
+          if (t?.closeFailed) report.closeFailed = t.closeFailed;
         }
       }
       if (json) console.log(JSON.stringify(report));
@@ -1205,6 +1218,7 @@ async function main(argv) {
         console.log(`${alias.padEnd(16)} ${String(report.transport).padEnd(8)} token=${report.token}` + (report.identity ? `  as ${/** @type {any} */ (report.identity).name}` : "") + (report.error ? `  ERROR ${report.error}` : ""));
         if (report.note) console.log(`${"".padEnd(16)} note: ${report.note}`);
         if (report.warning) console.log(`${"".padEnd(16)} WARNING ${report.warning}`);
+        if (report.closeFailed) console.log(`${"".padEnd(16)} close: ${report.closeFailed}`);
       }
     }
     /** @type {{ type: string, thread: string | null, threadSource: string | null, binary: string | null, binaryError: string | null, sandbox: { CODEX_SANDBOX: string | null, CODEX_SANDBOX_NETWORK_DISABLED: string | null } }} */
@@ -1531,7 +1545,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
     session: session.slug,
     ...(materializeFiles ? { mediaDir: path.join(sdir, "media", roomAlias) } : {}),
   });
-  if (transport.close) openTransports.add(() => transport.close?.());
+  if (transport.close) { openTransports.add(() => transport.close?.()); closeable.add(transport); }
   const thread = values.thread;
   if (thread && !transport.threads) throw new AgoraError(`${transport.kind} rooms have no threads`, EXIT.usage);
   // Validation belongs at the caller boundaries only. An id typed here (or into --re) is a usage
@@ -2271,5 +2285,9 @@ if (isDirectRun()) main(process.argv.slice(2)).then(
   // After the exit code is settled and the output is written: releasing a channel must never
   // change what the verb reported, and a failure here is not the verb's failure.
   for (const close of openTransports) { try { await close(); } catch { /* nothing left to report to */ } }
+  // The one place a non-doctor verb can say a teardown failed: stderr, after the answer and the
+  // exit code, so a --json consumer's stdout is untouched and a verb that worked still reports as
+  // having worked. Silence here is the ordinary case and stays silent.
+  for (const failed of closeFailures()) console.error(redact(`agora: channel close failed: ${failed}`));
   openTransports.clear();
 });

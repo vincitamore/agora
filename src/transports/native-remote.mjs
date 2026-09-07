@@ -1,8 +1,22 @@
 // @ts-check
 import { randomUUID } from "node:crypto";
-import { AgoraError } from "../core.mjs";
+import { AgoraError, redact } from "../core.mjs";
 import { parseNativeCursor } from "../native-protocol.mjs";
 import { ServiceDarkError, nativeMessage } from "../wake/subscriber.mjs";
+
+/**
+ * One line an operator can act on, or nothing. Redacted, because a teardown error can carry a path
+ * or a token-shaped string and this one is printed on a path nobody is inspecting closely.
+ * The cleanup-pending case is named as ITSELF rather than as a failure: it is a documented state
+ * with its own 10 s budget, and counting it as a defect is how a real defect gets ignored.
+ * @param {unknown} error
+ */
+function describeCloseFailure(error) {
+  const message = redact(error instanceof Error ? error.message : String(error));
+  return /** @type {any} */ (error)?.cleanupPending
+    ? `channel cleanup is still pending (${message})`
+    : message;
+}
 
 /**
  * A native room hosted by ANOTHER seat, reached over a Tailcat member channel.
@@ -97,6 +111,24 @@ export function nativeRemoteTransport(room, { actor, remote, session }) {
   // which is what three of us read off the code before anyone stamped the output: the handshake
   // completes in about a second, every row prints, and then nothing ends. The room is closed here
   // rather than by each verb because a verb added later cannot forget what it never had to write.
-  transport.close = async () => { try { await remote.close(); } catch { /* the answer is already printed */ } };
+  // Never throws, and no longer discards. `close()` runs after the verb's answer is written, so a
+  // throw here would fail work that succeeded — but a swallowed teardown failure that reaches
+  // nobody is a leak with no witness, which is the note Opus/design left on L3. The failure is
+  // recorded and the CALLER decides where the operator is looking: `doctor` prints it in the
+  // room's row (it closes each transport before building that row), and every other verb gets one
+  // stderr line at the drain.
+  //
+  // `closeFailed` is a reason, not a count. A counter that reads 0 both when nothing failed and
+  // when something failed unreported is the silent default one layer up, so absence is the only
+  // thing that means "clean".
+  transport.close = async () => {
+    try {
+      await remote.close();
+      if (remote.closeFailure !== undefined) transport.closeFailed = describeCloseFailure(remote.closeFailure);
+    } catch (error) {
+      // The transport's own await failing is a second, distinct path from the room recording one.
+      transport.closeFailed = describeCloseFailure(error);
+    }
+  };
   return Object.assign(transport, { remote });
 }

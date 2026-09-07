@@ -32,6 +32,22 @@ import { ServiceDarkError, nativeMessage } from "./wake/subscriber.mjs";
 /** How long a handshake frame may take to arrive before the channel is called dark. */
 export const HANDSHAKE_TIMEOUT_MS = 30000;
 
+/** Mint a named refusal so the NAME IS A PROPERTY, not a substring of the prose.
+ *
+ * The reconnect loop has to decide whether a failure is terminal (the far side answered and said
+ * no) or transient (the channel dropped). It used to decide by running a regex over the message,
+ * which makes the wording load-bearing: reword a refusal and it silently becomes retryable, so a
+ * terminal answer is re-dialled five times — five Tailcat children told the same thing — and then
+ * reported as darkness, replacing a precise cause with a false one.
+ *
+ * Building the message FROM the code is what keeps them from disagreeing: there is no way to change
+ * the prefix without changing the code, and no way to reword the detail and affect the decision.
+ * @param {string} code @param {string} detail
+ */
+function memberRefusal(code, detail) {
+  return Object.assign(new AgoraError(`${code}: ${detail}`), { code });
+}
+
 /** @param {unknown} value @param {string} label */
 function requiredString(value, label) {
   if (typeof value !== "string" || !value) throw new AgoraError(`native member handshake needs a ${label}`);
@@ -81,7 +97,7 @@ class HandshakeReader {
     };
     this.onError = (/** @type {Error} */ error) => { this.failure = error; this.waiter?.(); };
     this.onClose = () => {
-      this.failure ??= new AgoraError("member-channel-dark: the host closed the channel during the handshake");
+      this.failure ??= memberRefusal("member-channel-dark", "the host closed the channel during the handshake");
       this.waiter?.();
     };
     stream.on("data", this.onData);
@@ -96,7 +112,7 @@ class HandshakeReader {
       if (this.failure !== undefined) throw this.failure;
       await new Promise((resolve) => {
         const timer = setTimeout(() => {
-          this.failure ??= new AgoraError(`member-channel-dark: the host's ${label} did not arrive within ${this.timeoutMs} ms`);
+          this.failure ??= memberRefusal("member-channel-dark", `the host's ${label} did not arrive within ${this.timeoutMs} ms`);
           done();
         }, this.timeoutMs);
         // NOT unref'd, and the difference is a whole diagnosis. This is the only timer that can
@@ -119,9 +135,9 @@ class HandshakeReader {
    * tick later. The caller attaches the client first and detaches after. */
   assertDrained() {
     if (this.queue.length)
-      throw new AgoraError(`member-hello-refused: the host sent ${this.queue.length} unsolicited frame(s) with its welcome`);
+      throw memberRefusal("member-hello-refused", `the host sent ${this.queue.length} unsolicited frame(s) with its welcome`);
     if (this.decoder.buffer.length)
-      throw new AgoraError(`member-hello-refused: ${this.decoder.buffer.length} byte(s) followed the welcome inside the handshake reader; the request client frames independently and cannot see them`);
+      throw memberRefusal("member-hello-refused", `${this.decoder.buffer.length} byte(s) followed the welcome inside the handshake reader; the request client frames independently and cannot see them`);
   }
 
   detach() {
@@ -143,12 +159,12 @@ export async function readRemoteDescriptor(file) {
   try { raw = await readFile(file, "utf8"); }
   catch (e) {
     const code = /** @type {NodeJS.ErrnoException} */ (e).code;
-    throw new AgoraError(`descriptor-unreadable: no route descriptor at ${file} (${code ?? String(e)}); the operator carries it by hand from the host's \`service route open\``);
+    throw memberRefusal("descriptor-unreadable", `no route descriptor at ${file} (${code ?? String(e)}); the operator carries it by hand from the host's \`service route open\``);
   }
   /** @type {unknown} */
   let parsed;
   try { parsed = JSON.parse(raw); }
-  catch { throw new AgoraError(`descriptor-unreadable: ${file} is not valid JSON`); }
+  catch { throw memberRefusal("descriptor-unreadable", `${file} is not valid JSON`); }
   return assertDescriptorDigest(parsed);
 }
 
@@ -185,7 +201,7 @@ export async function resolveSeatIdentity(stateRoot, deps = {}) {
 export function assertRemoteDescriptor(descriptor, seat) {
   const seatDigest = publicNodeKeyDigest(seat.nodeKey);
   if (descriptor.binding.allowedKeyDigest !== seatDigest)
-    throw new AgoraError("descriptor-not-ours: this route was opened for a different public node key; ask the host to `service route open --allow-key` with the key this seat's `enroll` prints");
+    throw memberRefusal("descriptor-not-ours", "this route was opened for a different public node key; ask the host to `service route open --allow-key` with the key this seat's `enroll` prints");
   // Equality against the binding's own canonical name, never containment: containment prevents
   // escape and permits SELECTION, and selecting which file gets HMAC'd is the whole attack.
   routeSecretPath(seat.stateRoot, descriptor.binding, descriptor.proofRef);
@@ -212,33 +228,33 @@ export async function completeMemberHandshake(input) {
   try {
     const hello = await reader.next("member server hello");
     if (hello.type === "server-hello")
-      throw new AgoraError("member-phase-refused: this is a member route and the host greeted with the local handshake; the seat nonce is not this channel's authentication");
+      throw memberRefusal("member-phase-refused", "this is a member route and the host greeted with the local handshake; the seat nonce is not this channel's authentication");
     if (hello.type !== "member-server-hello")
-      throw new AgoraError(`member-hello-refused: the host greeted with ${JSON.stringify(hello.type)}`);
+      throw memberRefusal("member-hello-refused", `the host greeted with ${JSON.stringify(hello.type)}`);
     const bootEpoch = validateNativeId(requiredString(hello.bootEpoch, "boot epoch"), "service boot epoch");
     const requestId = validateNativeId(requiredString(hello.requestId, "handshake request id"), "handshake request id");
     const serverChallenge = validateNativeId(requiredString(hello.serverChallenge, "server challenge"), "server challenge");
     const serverTranscript = memberTranscript(input.binding, { bootEpoch, requestId, serverChallenge });
     for (const [field, mine] of Object.entries(serverTranscript))
       if (hello[field] !== mine)
-        throw new AgoraError(`member-binding-mismatch: the host's ${field} is not the one this descriptor binds`);
+        throw memberRefusal("member-binding-mismatch", `the host's ${field} is not the one this descriptor binds`);
     if (!verifyMemberHandshakeProof(hello.proof, input.secret, MEMBER_PHASES.server, serverTranscript))
-      throw new AgoraError("member-host-proof-refused: the host did not prove this route's secret. The descriptor is reach; this proof is the authentication, and it failed");
+      throw memberRefusal("member-host-proof-refused", "the host did not prove this route's secret. The descriptor is reach; this proof is the authentication, and it failed");
 
     const clientChallenge = randomUUID().replaceAll("-", "");
     const transcript = { ...serverTranscript, clientChallenge };
     if (!writeFrame(input.stream, { protocol: NATIVE_PROTOCOL, type: "member-client-hello", ...transcript,
       proof: memberHandshakeProof(input.secret, MEMBER_PHASES.client, transcript) }))
-      throw new AgoraError("member-channel-dark: the channel closed before this seat could authenticate");
+      throw memberRefusal("member-channel-dark", "the channel closed before this seat could authenticate");
 
     const welcome = await reader.next("member welcome");
     if (welcome.type !== "member-welcome")
-      throw new AgoraError(`member-welcome-refused: the host answered the client hello with ${JSON.stringify(welcome.type)}`);
+      throw memberRefusal("member-welcome-refused", `the host answered the client hello with ${JSON.stringify(welcome.type)}`);
     for (const [field, mine] of Object.entries(transcript))
       if (welcome[field] !== mine)
-        throw new AgoraError(`member-welcome-refused: the welcome's ${field} does not echo the transcript this seat proved`);
+        throw memberRefusal("member-welcome-refused", `the welcome's ${field} does not echo the transcript this seat proved`);
     if (!verifyMemberHandshakeProof(welcome.proof, input.secret, MEMBER_PHASES.welcome, transcript))
-      throw new AgoraError("member-welcome-refused: the welcome did not prove the fresh transcript");
+      throw memberRefusal("member-welcome-refused", "the welcome did not prove the fresh transcript");
     reader.assertDrained();
     // The handover, in the one order that leaves no gap: the client's listener goes on while this
     // reader's is still attached, and only then does this one come off.
@@ -304,6 +320,10 @@ export class RemoteRoom {
     this.drops = 0;
     /** Completed dials, incremented only after a handshake produced a live request client. */
     this.dials = 0;
+    /** The teardown failure `close()` swallowed, if any. Undefined means no close has failed —
+     * deliberately not a count, so "none" and "one that reported nothing" cannot look alike.
+     * @type {unknown} */
+    this.closeFailure = undefined;
   }
 
   /** @returns {Promise<NativeServiceClient>} */
@@ -312,7 +332,7 @@ export class RemoteRoom {
   }
 
   #dial() {
-    if (this.closed) return Promise.reject(new AgoraError("member-channel-dark: this remote room was closed"));
+    if (this.closed) return Promise.reject(memberRefusal("member-channel-dark", "this remote room was closed"));
     if (this.dialling) return this.dialling;
     const drop = () => { if (this.dialling === attempt) this.dialling = undefined; };
     const attempt = (async () => {
@@ -360,10 +380,10 @@ export class RemoteRoom {
         // own bookkeeping. A closing room keeps that message, since there the cancellation IS the
         // cause.
         if (!this.closed && /** @type {any} */ (error)?.code === "AGORA_ROUTE_CANCELLED")
-          throw new AgoraError(`member-channel-dark: the transport ended before the host greeted this seat, which is what a route that is no longer open looks like from here (${error instanceof Error ? error.message : String(error)})`);
+          throw memberRefusal("member-channel-dark", `the transport ended before the host greeted this seat, which is what a route that is no longer open looks like from here (${error instanceof Error ? error.message : String(error)})`);
         throw error;
       }
-      if (!client) { drop(); void resource.stop().catch(() => {}); throw new AgoraError("member-channel-dark: the channel reported ready without a request client"); }
+      if (!client) { drop(); void resource.stop().catch(() => {}); throw memberRefusal("member-channel-dark", "the channel reported ready without a request client"); }
       this.dials += 1;
       client.socket.once("close", () => { this.drops += 1; drop(); void resource.stop().catch(() => {}); });
       return { client, resource };
@@ -373,14 +393,33 @@ export class RemoteRoom {
     return attempt;
   }
 
+  /**
+   * Close the channel. NEVER throws — a caller reaches this after its answer is printed, and a
+   * teardown that fails the verb it followed is worse than the leak it reports. But "never throws"
+   * used to mean "discards", in three places on this path, and a swallowed failure that reaches
+   * nobody is indistinguishable from a clean close. So the failure is RECORDED here and the
+   * decision about surfacing it belongs to the layer that knows where the operator is looking.
+   *
+   * `closeFailure` stays undefined on the ordinary path, so a reader can tell zero failures from an
+   * unreported one — which a bare counter cannot.
+   */
   async close() {
     this.closed = true;
     const attempt = this.dialling;
     this.dialling = undefined;
     this.owner?.abort();
     if (!attempt) return;
-    try { const { client, resource } = await attempt; client.close(); await resource.stop().catch(() => {}); }
-    catch { /* a dial that never completed has nothing to close */ }
+    try {
+      const { client, resource } = await attempt;
+      client.close();
+      // `stop()` rejects with AGORA_CLEANUP_PENDING when its 10 s budget elapses. That is a
+      // DOCUMENTED state with its own name, not a defect, and it is recorded as itself: a surface
+      // that counts the expected case as a failure teaches operators to ignore the surface, which
+      // is how the unexpected one gets missed.
+      await resource.stop();
+    } catch (error) {
+      this.closeFailure = error;
+    }
   }
 }
 
@@ -490,8 +529,33 @@ export async function openRemoteSubscription(opts) {
   };
 
   /** A refusal the far side named is a fact, not a flaky connection: retrying it five times spawns
-   * five Tailcat children to be told the same thing, and then reports the last one as darkness. */
-  const NAMED_REFUSAL = /(member-hello-refused|member-welcome-refused|member-host-proof-refused|member-phase-refused|member-binding-mismatch|member-actor-mismatch|member-request-refused|member-room-refused|member-author-kind-refused|descriptor-not-ours|descriptor-unreadable|proof-ref-refused|enrollment-absent|route-not-open|request-refused)/;
+   * five Tailcat children to be told the same thing, and then reports the last one as darkness.
+   *
+   * Keyed on the CODE, not the prose. The previous form ran a regex over the message, so the
+   * wording decided the control flow: reword a refusal and it silently became retryable. Local
+   * refusals now carry `code` (see `memberRefusal`), and the message is built from it, so the two
+   * cannot disagree. */
+  const TERMINAL = new Set(["member-hello-refused", "member-welcome-refused", "member-host-proof-refused",
+    "member-phase-refused", "member-binding-mismatch", "member-actor-mismatch", "member-request-refused",
+    "member-room-refused", "member-author-kind-refused", "descriptor-not-ours", "descriptor-unreadable",
+    "proof-ref-refused", "enrollment-absent", "route-not-open", "request-refused"]);
+
+  /** The code, or the prefix the far side's message carries.
+   *
+   * THE BOUNDARY, stated rather than left to a reader: refusals this seat MINTS carry a real
+   * `code`. Refusals the HOST answers arrive as text over the wire and do not yet — that is L8's
+   * host half ("an answered member refusal carries a CODE"). Until it lands, those are matched by
+   * the `name:` prefix their messages already have, which is narrower than the old substring
+   * regex (the detail can be reworded freely; only renaming the prefix changes anything) and is
+   * still prose. Deleting the fallback now would make every host-answered refusal RETRYABLE, which
+   * is this same defect inverted and worse. Delete it when the wire carries codes, not before.
+   * @param {unknown} error */
+  const refusalCode = (error) => {
+    const code = /** @type {any} */ (error)?.code;
+    if (typeof code === "string") return code;
+    const message = error instanceof Error ? error.message : String(error);
+    return /^([a-z][a-z-]+):/.exec(message)?.[1];
+  };
 
   const reattach = async () => {
     // Re-subscribing from `drained` is what makes "nothing is lost" true: the host replays every
@@ -513,7 +577,7 @@ export async function openRemoteSubscription(opts) {
         // ITSELF; retrying it four more times and then calling it "could not be re-dialled" would
         // replace a precise cause with a false one, which is worse than either alone.
         if (client && !client.socket.destroyed) return markFailed(error);
-        if (NAMED_REFUSAL.test(error instanceof Error ? error.message : String(error))) return markFailed(error);
+        if (TERMINAL.has(/** @type {string} */ (refusalCode(error)))) return markFailed(error);
         if (attempt + 1 >= maxReconnects)
           return markDark(`remote room ${roomId} could not be re-dialled after ${reconnects} attempt(s): ${error instanceof Error ? error.message : String(error)}`);
         await new Promise((resolve) => { const t = setTimeout(resolve, backoffMs * (attempt + 1)); t.unref?.(); });
