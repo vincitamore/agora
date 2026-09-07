@@ -8,6 +8,7 @@ import { spawnTailcat } from './tailcat-process.mjs';
 import { readTailcatAddress, boundedBytes } from './tailcat-http.mjs';
 import { prepareRuntimeLifetime } from './tailcat-lifetime.mjs';
 import { validateRouteBinding, validateRouteDescriptor, publicNodeKeyDigest } from './protocol/route.mjs';
+import { AgoraError } from './core.mjs';
 
 /** @typedef {import('./protocol/route.mjs').RouteBinding} Binding */
 /** @typedef {import('./protocol/route.mjs').RouteDescriptor} Descriptor */
@@ -31,6 +32,8 @@ function cancelled(){return Object.assign(Error('Native route stopped before rea
 function duration(value,fallback){const n=value??fallback;if(typeof n!=='number'||!Number.isSafeInteger(n)||n<1||n>2147483647)throw Error('Invalid route bound.');return n;}
 /** @param {string[]} args */
 function commandVerb(args){return args.find(value=>value==='parse'||value==='printpub')??args[0]??'unknown';}
+/** @param {unknown} error */
+function memberRefusal(error){return error instanceof AgoraError&&/^member-[a-z0-9-]+:/.test(error.message);}
 /** @param {any} child */
 function stderrTail(child){
   const text=typeof child?.tailcatStderrTail==='function'?child.tailcatStderrTail():'';
@@ -259,10 +262,10 @@ export function startMemberChannel(request,options){
       }
       const transportEnded=child.exitCode!==null||child.signalCode!==null;
       stream.destroy();child.stdout.resume();if(child.connected)child.disconnect();
-      if(outcome.kind==='accept-error'&&!transportEnded)throw outcome.error;
+      if(outcome.kind==='accept-error'&&(memberRefusal(outcome.error)||!transportEnded))throw outcome.error;
       if(outcome.kind==='exit-error')throw outcome.error;
       const reason=outcome.kind==='timeout'?`attempt did not complete within ${scope.firstDialTimeoutMs} ms`:
-        outcome.kind==='accept-error'?'transport ended during member admission':`transport exited with code ${outcome.code}`;
+        outcome.kind==='accept-error'?`transport ended during member admission: ${outcome.error instanceof Error?outcome.error.message:String(outcome.error)}`:`transport exited with code ${outcome.code}`;
       lastFailure={attempt,reason,tail:stderrTail(child)};
       if(attempt<scope.firstDialAttempts)await scope.wait(scope.firstDialBackoffMs*attempt);
     }

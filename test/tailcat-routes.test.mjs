@@ -15,6 +15,7 @@ import { startMemberRoute, startMemberChannel } from '../src/tailcat-routes.mjs'
 import { publicNodeKeyDigest } from '../src/protocol/route.mjs';
 import { spawnTailcat } from '../src/tailcat-process.mjs';
 import { resolveTailcatBinary,sha256 } from '../src/tailcat-runtime.mjs';
+import { AgoraError } from '../src/core.mjs';
 
 const publicKey=`nodekey:${'1'.repeat(64)}`;
 const ownerRef={serviceId:'service000000001',serviceBootId:'boot000000000001'};
@@ -73,6 +74,12 @@ function fixture(){
       };
     },
     /** @param {number} count @param {string} tail */ hangDials(count,tail){hangingDials=count;this.failDials(0,tail);},
+    /** @param {AgoraError} error */ refuseDial(error){
+      options.acceptChannel=async()=>{
+        const child=children.at(-1);child.exitCode=1;child.connected=false;child.stdout.end();child.stdin.destroy();setImmediate(()=>child.emit('exit',1,null));
+        return {ready:Promise.reject(error),closed:Promise.resolve(),stop:async()=>{dialSessionStops++;}};
+      };
+    },
     dialCount:()=>dialCount,
     dialSessionStops:()=>dialSessionStops,
     outbound(){return {...options,assertDescriptor:async()=>{},resolveClientKey:async()=>({keyPath:path.resolve('local-enrolled.private.json')})};},
@@ -158,6 +165,14 @@ test('first member dial retries two transport exits then admits without leaking 
   const dials=f.children.filter(child=>child.tailcatStderrTail().includes('Ping')||child===f.children.at(-1));
   assert.equal(dials.length,3);assert.equal(dials[0].connected,false);assert.equal(dials[1].connected,false);assert.equal(f.dialSessionStops(),2);
   await route.stop();assert.equal(dials[2].connected,false);
+});
+
+test('a named member refusal remains terminal when its transport ends in the same admission turn',async()=>{
+  const f=fixture();f.refuseDial(new AgoraError('member-hello-refused: host refused this hello'));
+  const options=f.outbound();options.firstDialTimeoutMs=30;options.firstDialBackoffMs=1;
+  const route=startMemberChannel({descriptor:descriptor()},options);
+  await assert.rejects(route.ready,/member-hello-refused: host refused this hello/);
+  await route.closed;assert.equal(f.dialCount(),1);assert.equal(f.dialSessionStops(),1);
 });
 
 test('member dial retry exhaustion names startup failure and carries the final stderr tail',async()=>{
