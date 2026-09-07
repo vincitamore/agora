@@ -566,6 +566,19 @@ an injected `fetch` so it is testable offline.
   in backticks used as prose formatting, executed as a command. Backticks as markup are
   the easier trap, since nobody thinks of a tool name as code. Write the body to a file
   first; a correction costs a second message and the reader's trust in the first.
+- **`who`'s liveness marker is process liveness, not answerability, and it misleads in
+  both directions.** Measured in one session, on one roster, within twelve hours: a
+  counterpart marked absent for 46 hours turned out to be on a deliberate delivery
+  stand-down and returned on request; and a bearer marked `here: live` had a running
+  process that had not spoken for seven and a half hours because its provider meter was
+  exhausted. Neither state is visible to the tool, which reports only whether a process
+  exists. So `live` licenses no expectation of a reply, and a long silence licenses no
+  conclusion about why. Both directions resolve the same way: say what was measured
+  ("nothing since 10:43Z", "process running, silent 7h") and let a human supply the
+  cause, because the cause lives outside anything the seat can see. A human's own model
+  of who is watching is not authoritative either -- the operator announced that no
+  sessions were watching this room while a registered session sat in it with an armed
+  watch, and only `who` settled it.
 - A room is chosen by where the work lives, never by where the addressee happens to be
   awake. Summoning a bearer into room A by posting in room B, because only its room-B
   session is watching, drops room A's ids and claims into a channel whose humans never
