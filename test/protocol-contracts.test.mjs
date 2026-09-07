@@ -66,7 +66,7 @@ test('valid body UTF-8 is preserved byte-for-byte and bounded before serializati
   for (const text of ['\ud800', '\udc00', '\ud800x', '\ud800\ud800', 'a'.repeat(PROTOCOL_LIMITS.textBytes + 1)]) refuses(() => validateText(text));
   // Text byte allowance is not encoded JSON-frame allowance: caller must retain the outer cap.
   const controls = validateText('\0'.repeat(PROTOCOL_LIMITS.textBytes));
-  assert.throws(() => encodeNativeFrame({ text: controls }));
+  assert.throws(() => encodeNativeFrame({ text: controls }), /native protocol frame must be 1-/);
 });
 
 test('source IDs preserve non-native names while rejecting controls and hostile object shapes', () => {

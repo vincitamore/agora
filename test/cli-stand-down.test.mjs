@@ -128,7 +128,7 @@ test("cli stand-down and resume round-trip", async (t) => {
   assert.equal(up.code, 0, up.stderr);
   const cleared = JSON.parse(up.stdout.trim().split(/\r?\n/).at(-1) ?? "{}");
   assert.equal(cleared.cleared, true);
-  await assert.rejects(readFile(path.join(root, "sessions", "s1", "stand-down.json")));
+  await assert.rejects(readFile(path.join(root, "sessions", "s1", "stand-down.json")), { code: "ENOENT" });
 });
 
 test("a watch that does not ack is refused, not drained, and the record already exists", async (t) => {
@@ -173,7 +173,7 @@ test("keep-watches declares without signalling", async (t) => {
   assert.equal(rec.keepWatches, true);
   assert.equal(rec.drained.length, 0);
   assert.equal(pidAlive(dummy.pid), true);
-  await assert.rejects(readFile(watchStopPath(sessionDir, "agora")));
+  await assert.rejects(readFile(watchStopPath(sessionDir, "agora")), { code: "ENOENT" });
 });
 
 test("a record without generation is skipped, not asked", async (t) => {
@@ -222,7 +222,7 @@ test("ack is not written when the real watch flush throws", async () => {
       /delivery-failed/,
     );
     await completeStandDownAck(undefined, sessionDir, key, generation);
-    await assert.rejects(readFile(watchAckPath(sessionDir, key)));
+    await assert.rejects(readFile(watchAckPath(sessionDir, key)), { code: "ENOENT" });
   } finally {
     await cleanup();
   }

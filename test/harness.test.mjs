@@ -95,7 +95,7 @@ test("touch writes only beside an existing transcript; clear removes it; absent 
     assert.equal(await touchWatchMode(target), "refreshed", "a refresh is not an announcement");
     assert.ok((await stat(target.sentinel)).isFile());
     await clearWatchMode(target);
-    await assert.rejects(stat(target.sentinel));
+    await assert.rejects(stat(target.sentinel), { code: "ENOENT" });
     await clearWatchMode(target);
     await clearWatchMode(null);
   } finally {
@@ -123,7 +123,7 @@ test("the sentinel has an owner: a short watch leaving does not un-suppress a re
     assert.ok((await stat(target.sentinel)).isFile(), "the short watch left the resident one's suppression alone");
     assert.equal(JSON.parse(await readFile(target.sentinel, "utf8")).pid, process.pid);
     await clearWatchMode(target);
-    await assert.rejects(stat(target.sentinel), "the owner clears it");
+    await assert.rejects(stat(target.sentinel), { code: "ENOENT" }, "the owner clears it");
 
     // an owner that is gone (killed without clearing) is not an owner: the next watch adopts the file
     await writeFile(target.sentinel, JSON.stringify({ pid: other, at: "2026-09-03T23:40:00.000Z" }), "utf8");
@@ -134,7 +134,7 @@ test("the sentinel has an owner: a short watch leaving does not un-suppress a re
     await writeFile(target.sentinel, "2026-09-03T23:40:00.000Z\n", "utf8");
     assert.deepEqual(await readWatchMode(target), { at: "2026-09-03T23:40:00.000Z" });
     await clearWatchMode(target);
-    await assert.rejects(stat(target.sentinel));
+    await assert.rejects(stat(target.sentinel), { code: "ENOENT" });
   } finally {
     await rm(home, { recursive: true, force: true });
   }
