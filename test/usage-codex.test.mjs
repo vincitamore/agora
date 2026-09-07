@@ -2,6 +2,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { collectCodexUsage, normalizeRateLimitsResponse, resetsAtToIso, windowsFromSnapshot } from '../src/usage/codex.mjs';
 import { windowKey, windowFreshness } from '../src/protocol/usage.mjs';
 
@@ -25,11 +29,17 @@ function fakeSpawn(/** @type {(msg: any, reply: (frame: object) => void, child: 
     /** @type {any} */ (child.stderr).resume = () => {};
     child.killed = false;
     child.kill = () => { child.killed = true; return true; };
-    child.stdin = { write: (/** @type {string} */ line) => {
+    // A real child's stdin is a STREAM, not a bare writer: it emits 'error' asynchronously.
+    // The first version of this fake was a plain object with a write method, which made an
+    // owned-stream error impossible to express and so silently exempted the collector from
+    // handling one. A double that cannot exhibit the failure cannot test the guard.
+    const stdin = /** @type {any} */ (new EventEmitter());
+    stdin.write = (/** @type {string} */ line) => {
       const msg = JSON.parse(line);
       queueMicrotask(() => script(msg, (/** @type {object} */ frame) => child.stdout.emit('data', `${JSON.stringify(frame)}\n`), child));
       return true;
-    } };
+    };
+    child.stdin = stdin;
     return child;
   };
 }
@@ -366,4 +376,64 @@ test('HOLD 4: a reply to a request never issued is refused, not accepted as the 
     spawn: fakeSpawn(injecting), resolveBinary, timeoutMs: 500 });
   if (result.status === 'supported') return assert.fail('an unsolicited reply was accepted as a reading');
   assert.equal(result.code, 'codex-protocol-error');
+});
+
+// --- Second integrator HOLD (Bruno :540): the outer collapse, and owned stream errors. -----
+
+test('HOLD 5: a malformed bucket in the authoritative map is refused, never quietly omitted', async () => {
+  // The schema types every map value as a snapshot, so a non-record value is a bucket the
+  // provider represents and this code cannot read. An observation declared `full` that omits
+  // it is a false claim about its own completeness.
+  for (const other of ['malformed', null, 7]) {
+    const result = await collect({ accountId: 'a-1', rateLimits: null,
+      rateLimitsByLimitId: { codex: snapOf('codex', win(8, 10080, 1789269881), null), other } });
+    if (result.status === 'supported') {
+      return assert.fail('a represented bucket (' + JSON.stringify(other) + ') vanished from a full reading');
+    }
+    assert.equal(result.code, 'codex-quota-shape-unsupported');
+  }
+});
+
+test('HOLD 5 pair: a map whose buckets are all readable still yields every bucket', async () => {
+  const result = await collect({ accountId: 'a-1', rateLimits: null, rateLimitsByLimitId: {
+    codex: snapOf('codex', win(8, 10080, 1789269881), null),
+    codex_bengalfox: snapOf('codex_bengalfox', win(0, 300, 1788744995), win(0, 10080, 1789077087)),
+  } });
+  assert.ok(result.status === 'supported', 'a wholly readable map must not be refused');
+  assert.equal(result.observation.windows.length, 3);
+});
+
+test('HOLD 6: an owned stream error is bounded and never crashes the caller', async () => {
+  // An uncaught 'error' event terminates the process, so this cannot be observed from inside
+  // the process it would kill. The probe runs isolated and the EXIT CODE is the finding.
+  const collector = new URL('../src/usage/codex.mjs', import.meta.url).href;
+  const probe = [
+    "import { EventEmitter } from 'node:events';",
+    "import { collectCodexUsage } from '" + collector + "';",
+    'const spawn = () => {',
+    '  const child = new EventEmitter();',
+    '  child.stdout = new EventEmitter(); child.stderr = new EventEmitter();',
+    '  child.stdout.setEncoding = () => {}; child.stderr.resume = () => {};',
+    '  child.killed = false; child.kill = () => { child.killed = true; return true; };',
+    '  const stdin = new EventEmitter();',
+    "  stdin.write = () => { queueMicrotask(() => stdin.emit('error', Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }))); return true; };",
+    '  child.stdin = stdin;',
+    '  return child;',
+    '};',
+    'const r = await collectCodexUsage({',
+    "  poolId: '" + POOL + "',",
+    "  producer: { producerId: '" + PRODUCER.producerId + "', generation: 1, sequence: 1 },",
+    "  now: () => new Date(), spawn, resolveBinary: async () => 'C:/synthetic/codex.exe', timeoutMs: 300,",
+    '});',
+    "console.log('RESULT ' + r.status + ' ' + (r.code || ''));",
+  ].join('\n');
+  const dir = mkdtempSync(join(tmpdir(), 'n2-stream-'));
+  const file = join(dir, 'probe.mjs');
+  writeFileSync(file, probe, 'utf8');
+  const run = spawnSync(process.execPath, [file], { encoding: 'utf8' });
+  assert.equal(run.status, 0, 'an async stream error must not terminate the calling process');
+  // The boundary is not only "no crash": a raw stack is provider-adjacent text this library
+  // promises never to emit.
+  assert.equal(/^\s*at .*:\d+:\d+/m.test(run.stderr || ''), false, 'a raw stack reached stderr');
+  assert.match(run.stdout, /RESULT unsupported codex-transport-error/);
 });
