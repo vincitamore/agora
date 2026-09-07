@@ -33,7 +33,12 @@ function duration(value,fallback){const n=value??fallback;if(typeof n!=='number'
 /** @param {string[]} args */
 function commandVerb(args){return args.find(value=>value==='parse'||value==='printpub')??args[0]??'unknown';}
 /** @param {unknown} error */
-function memberRefusal(error){return error instanceof AgoraError&&/^member-[a-z0-9-]+:/.test(error.message);}
+function memberRefusal(error){
+  const code=error instanceof AgoraError?/** @type {any} */(error).code:undefined;
+  // `member-channel-dark` is this seat's observation that no answer arrived, not a refusal from
+  // the host. It remains retryable even though L7 gives every local member error a code.
+  return typeof code==='string'&&code.startsWith('member-')&&code!=='member-channel-dark';
+}
 /** @param {any} child */
 function stderrTail(child){
   const text=typeof child?.tailcatStderrTail==='function'?child.tailcatStderrTail():'';
@@ -264,7 +269,7 @@ export function startMemberChannel(request,options){
       stream.destroy();child.stdout.resume();if(child.connected)child.disconnect();
       if(outcome.kind==='accept-error'&&(memberRefusal(outcome.error)||!transportEnded))throw outcome.error;
       if(outcome.kind==='exit-error')throw outcome.error;
-      const reason=outcome.kind==='timeout'?`attempt did not complete within ${scope.firstDialTimeoutMs} ms`:
+      const reason=outcome.kind==='timeout'?`member-channel-dark: the host's member hello or welcome did not arrive within ${scope.firstDialTimeoutMs} ms`:
         outcome.kind==='accept-error'?`transport ended during member admission: ${outcome.error instanceof Error?outcome.error.message:String(outcome.error)}`:`transport exited with code ${outcome.code}`;
       lastFailure={attempt,reason,tail:stderrTail(child)};
       if(attempt<scope.firstDialAttempts)await scope.wait(scope.firstDialBackoffMs*attempt);

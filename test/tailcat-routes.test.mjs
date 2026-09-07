@@ -168,11 +168,19 @@ test('first member dial retries two transport exits then admits without leaking 
 });
 
 test('a named member refusal remains terminal when its transport ends in the same admission turn',async()=>{
-  const f=fixture();f.refuseDial(new AgoraError('member-hello-refused: host refused this hello'));
+  const f=fixture();f.refuseDial(Object.assign(new AgoraError('the host rejected a deliberately reworded hello'),{code:'member-hello-refused'}));
   const options=f.outbound();options.firstDialTimeoutMs=30;options.firstDialBackoffMs=1;
   const route=startMemberChannel({descriptor:descriptor()},options);
-  await assert.rejects(route.ready,/member-hello-refused: host refused this hello/);
+  await assert.rejects(route.ready,error=>/** @type {any} */(error).code==='member-hello-refused'&&/deliberately reworded/.test(String(error)));
   await route.closed;assert.equal(f.dialCount(),1);assert.equal(f.dialSessionStops(),1);
+});
+
+test('member-channel-dark is an observation and retries even when the transport ends with it',async()=>{
+  const f=fixture();f.refuseDial(Object.assign(new AgoraError('the host did not answer this seat'),{code:'member-channel-dark'}));
+  const options=f.outbound();options.firstDialTimeoutMs=30;options.firstDialBackoffMs=1;
+  const route=startMemberChannel({descriptor:descriptor()},options);
+  await assert.rejects(route.ready,/member-channel-startup-failed: first dial exhausted 3 attempts/);
+  await route.closed;assert.equal(f.dialCount(),3);assert.equal(f.dialSessionStops(),3);
 });
 
 test('member dial retry exhaustion names startup failure and carries the final stderr tail',async()=>{
@@ -192,17 +200,18 @@ test('each member dial attempt has its own clock when the child never exits',asy
   const started=Date.now(),route=startMemberChannel({descriptor:descriptor()},options);
   await assert.rejects(route.ready,error=>{
     assert.match(String(error),/member-channel-startup-failed/);
-    assert.match(String(error),/attempt did not complete within 15 ms/);return true;
+    assert.match(String(error),/member-channel-dark: the host's member hello or welcome did not arrive within 15 ms/);return true;
   });
   await route.closed;assert.ok(Date.now()-started<250);assert.equal(f.children.at(-1).connected,false);assert.equal(f.dialSessionStops(),1);
 });
 
 test('loopback-only injected runtime guardian retains only the bounded tail of stderr',async t=>{
   const root=await mkdtemp(path.join(os.tmpdir(),'agora-route-stderr-'));t.after(()=>rm(root,{recursive:true,force:true}));
-  const child=await spawnTailcat(['-e',`process.stderr.write('${'x'.repeat(600)}tailcat Ping: context deadline exceeded');process.exit(1)`],await testRuntime(root));
+  const child=await spawnTailcat(['-e',`process.stderr.write('${'x'.repeat(600)} xoxb-secretsecret privkey:${'a'.repeat(64)} tailcat Ping: context deadline exceeded');process.exit(1)`],await testRuntime(root));
   child.stdout?.resume();await new Promise(resolve=>child.once('close',resolve));
   const tail=/** @type {any} */(child).tailcatStderrTail();
   assert.ok(Buffer.byteLength(tail)<=512);assert.match(tail,/tailcat Ping: context deadline exceeded$/);
+  assert.doesNotMatch(tail,/xoxb-secretsecret|privkey:/);assert.match(tail,/\[redacted\]/);
 });
 
 test('outbound uses local owner boot but remote binding; ready requires P1 admission',async()=>{

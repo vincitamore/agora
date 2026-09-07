@@ -401,6 +401,64 @@ test("a host that speaks the LOCAL handshake is refused by name, not fallen thro
   await assert.rejects(completeMemberHandshake({ stream, binding: b, secret, timeoutMs: 2000 }), /member-phase-refused/);
 });
 
+test("a host-answered admission refusal carries a code that survives rewording and channel close", async (t) => {
+  const { hostAccept, opened, secret } = await rig(t);
+  const toHost = new PassThrough();
+  const toClient = new PassThrough();
+  const hostSide = Duplex.from({ readable: toHost, writable: toClient });
+  hostSide.on("error", () => {});
+  const decoder = new NativeFrameDecoder();
+  /** @type {any[]} */ const frames = [];
+  toClient.on("data", (bytes) => frames.push(...decoder.push(bytes)));
+  hostAccept.fn?.(hostSide);
+  const deadline = Date.now() + 2000;
+  while (frames.length < 1 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  const hello = frames.shift();
+  assert.equal(hello?.type, "member-server-hello");
+  toHost.write(encodeNativeFrame({ protocol: NATIVE_PROTOCOL, type: "member-client-hello",
+    bootEpoch: hello.bootEpoch, requestId: hello.requestId, serverChallenge: hello.serverChallenge,
+    clientChallenge: "3".repeat(32), proof: "0".repeat(64) }));
+  while (frames.length < 1 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  const answered = frames.shift();
+  assert.equal(answered?.type, "error");
+  assert.equal(answered?.code, "member-proof-refused");
+
+  // The message is deliberately unrelated to the code. The receiver's control property survives
+  // this edit and the host ending the stream in the same admission turn.
+  const clientInput = new PassThrough();
+  const clientOutput = new PassThrough();
+  const clientStream = Duplex.from({ readable: clientInput, writable: clientOutput });
+  clientInput.write(encodeNativeFrame({ ...answered, message: "the host declined these credentials" }));
+  clientInput.end();
+  await assert.rejects(completeMemberHandshake({ stream: clientStream, binding: opened.descriptor.binding,
+    secret, timeoutMs: 2000 }), error => /** @type {any} */(error).code === "member-proof-refused"
+      && /declined these credentials/.test(String(error)));
+
+  // A newer seat can meet an older host. Its uncoded frame keeps the old named prefix only at the
+  // decoder, then becomes the same coded error every downstream classifier consumes.
+  const oldInput = new PassThrough();
+  const oldOutput = new PassThrough();
+  const oldStream = Duplex.from({ readable: oldInput, writable: oldOutput });
+  oldInput.write(encodeNativeFrame({ protocol: NATIVE_PROTOCOL, type: "error", reason: "member-hello-refused",
+    requestId: "4".repeat(32), message: "member-room-refused: this older host declined the room" }));
+  oldInput.end();
+  await assert.rejects(completeMemberHandshake({ stream: oldStream, binding: opened.descriptor.binding,
+    secret, timeoutMs: 2000 }), error => /** @type {any} */(error).code === "member-room-refused"
+      && /older host declined/.test(String(error)));
+
+  // The coded side is not restricted to member-* names: the host may answer with a terminal
+  // route-level code, and rewording its message must not collapse it into member-hello-refused.
+  const routeInput = new PassThrough();
+  const routeOutput = new PassThrough();
+  const routeStream = Duplex.from({ readable: routeInput, writable: routeOutput });
+  routeInput.write(encodeNativeFrame({ protocol: NATIVE_PROTOCOL, type: "error", code: "route-not-open",
+    reason: "request-refused", requestId: "5".repeat(32), message: "the host no longer has this route" }));
+  routeInput.end();
+  await assert.rejects(completeMemberHandshake({ stream: routeStream, binding: opened.descriptor.binding,
+    secret, timeoutMs: 2000 }), error => /** @type {any} */(error).code === "route-not-open"
+      && /no longer has this route/.test(String(error)));
+});
+
 test("a server hello proved under the wrong secret is refused as a proof failure, by name", async (t) => {
   const { room } = await rig(t, { secret: mintRouteSecret() });
   await assert.rejects(room.client(), /member-host-proof-refused/);
@@ -713,14 +771,14 @@ test("a NAMED refusal on a re-dial is not retried: one attempt, and it reports i
   const sub = await openRemoteSubscription({ room, since: nativeCursor(EPOCH, 0), backoffMs: 5, maxReconnects: 5 });
   // Revocation looks like this from the far side: the secret is gone on the host, so the hello is
   // refused by name. It is a fact, not a flaky connection.
-  room.client = async () => { dials += 1; throw new AgoraError("member-host-proof-refused: the host did not prove this route's secret"); };
+  room.client = async () => { dials += 1; throw Object.assign(new AgoraError("the host declined this route after its wording changed"), { code: "member-host-proof-refused" }); };
   room.socket.emit("close");
   const deadline = Date.now() + 4000;
   while (dials < 1 && Date.now() < deadline) await sub.wait(20);
   await sub.wait(120);
 
   assert.equal(dials, 1, `a named refusal was retried: ${dials} dial(s), each spawning a Tailcat child to be told the same thing`);
-  await assert.rejects(sub.read(), /member-host-proof-refused/);
+  await assert.rejects(sub.read(), /wording changed/);
   assert.equal(sub.dark(), undefined, "a named refusal was reported as darkness");
   sub.close();
 });
@@ -1061,7 +1119,7 @@ test("rewording a refusal does not make it retryable: the CODE decides, not the 
     // "member-hello-refused: reworded detail", which a prose-keyed check matches just as well —
     // a case that cannot discriminate, caught by mutation rather than by reading it.
     ["a local refusal whose message no longer carries its name", Object.assign(new Error("the host greeted this seat with something unexpected"), { code: "member-hello-refused" })],
-    ["a host-answered refusal with no code, matched by its prefix", new AgoraError("member-request-refused: the host declined this request")],
+    ["a host-answered refusal whose prose does not carry its name", Object.assign(new AgoraError("the host declined this request"), { code: "member-request-refused" })],
   ]) {
     let dials = 0;
     const room = scriptedRoom();
@@ -1072,7 +1130,7 @@ test("rewording a refusal does not make it retryable: the CODE decides, not the 
     while (dials < 1 && Date.now() < deadline) await sub.wait(20);
     await sub.wait(120);
     assert.equal(dials, 1, `${label}: retried ${dials} time(s); a terminal answer must be re-dialled zero more times`);
-    await assert.rejects(sub.read(), /something unexpected|member-request-refused/, `${label}: the precise cause was replaced`);
+    await assert.rejects(sub.read(), /something unexpected|declined this request/, `${label}: the precise cause was replaced`);
     sub.close();
   }
 });
