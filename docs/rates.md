@@ -18,10 +18,13 @@ nothing is priced until a qualified row is added. Each row carries:
   `unqualified`). An unqualified row never prices. An `illustrative: true` row
   prices nothing unless `allowIllustrative: true` is passed (tests only)
 
-Three columns stay separate: `publishedApi`, `providerReportedBill`,
-`subscriptionConsumption`. Each maps a usage component to `{ usdPerMillion }`.
-Omitted columns are unknown, not zero. Source-reported amounts on a usage record
-keep their stated unit and are not converted here.
+A rate row's only priced column is `publishedApi`, mapping a usage component to
+`{ usdPerMillion }`. Omitted components are unknown, not zero. A row that carries
+`providerReportedBill` or `subscriptionConsumption` is refused: those names are
+the other two columns of the *return*, per-record observations, never tabulated
+rates. Source-reported amounts on a usage record keep their stated unit and are
+not converted here. Fixed subscriptions do not become marginal dollar bills by
+multiplying tokens by a rate.
 
 ## `priceUsage`
 
@@ -39,9 +42,11 @@ priceUsage(record, table, { eventTime, asOf }, billingContext, residentContext, 
   does not apply. Two matching rows pick the latest effective not after `asOf`.
 - Returns `{ apiEquivalent, reportedBill, subscriptionConsumption, unpriced, coverage, row }`.
   `apiEquivalent` is from the dated `publishedApi` column. `reportedBill` is the
-  record's `sourceReportedCost` in its stated unit, or unknown. `subscriptionConsumption`
-  is unknown unless observed; it is never derived from list-price dollars. A missing
-  rate puts tokens in `unpriced` with a reason; it never returns a cost of 0.
+  record's `sourceReportedCost` in its stated unit, or unknown — never a
+  tabulated usdPerMillion. `subscriptionConsumption` is unknown unless observed
+  on the record; it is never derived from list-price dollars and never read from
+  a rate row. A missing rate puts tokens in `unpriced` with a reason; it never
+  returns a cost of 0.
 
 ## Pool attribution
 
