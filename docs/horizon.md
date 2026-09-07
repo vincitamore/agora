@@ -1,0 +1,86 @@
+# Horizon estimation
+
+How many more useful calls a session will make, when the next one arrives, and whether it has
+just ended — or `unknown` with a reason, which is the common answer and the important one.
+
+It estimates. It grants nothing: `actuationAllowed` is `false` on every output of this unit,
+reason `e2-shadow`, and a consumer copies it rather than recomputing it.
+
+## The two claims this module keeps apart
+
+`horizonEligible` says **the fit is calibrated**: coverage met its nominal band and no drift was
+detected. It is measured and can be true.
+
+`actuationAllowed` says **something may act on it**. It is granted, not computed, and in this cut
+it is always false. These were one field in the first draft of the seam, which is a mistake worth
+naming: a perfectly calibrated estimate in a shadow-only deployment is still not permission, and a
+field derived from calibration turns itself on the day the fit improves, with nobody deciding it.
+
+## What counts as a call
+
+One ledger entry with `sourceUnit: 'request'`. `historiesFromLedger` enforces it and reports
+`skippedNonRequest`.
+
+An `aggregate` already contains its children, and a `cumulative-snapshot` is a running total of a
+session rather than a unit of work. A single Codex `token_count` is one snapshot of a whole
+session; counted as a call it would inflate every cadence it touches.
+
+Event times are `observedAt` from the ledger, which is the **first** observation of an identity:
+a duplicate never replaces retained fields, so re-ingesting the same source yields the same
+cadence rather than drifting later with each replay.
+
+## Censoring, which is most of the difficulty
+
+`endedAt: null` means the session was still running at `observationCutoff`. It is **right-censored**:
+evidence that the total was *at least* what we saw, and not a completed short session.
+
+Treating a running session as complete is the standard way to under-estimate a horizon, and
+dropping it is only slightly better — the sessions still running are exactly the long ones. So the
+survival curve counts a censored session as at-risk up to what it reached and never as having
+stopped there. That is the whole reason a Kaplan-Meier estimator is here.
+
+A session that **ended** after one call is the opposite case and is kept: a real observation of
+zero-remaining, in the tail rather than discarded as noise.
+
+## When it refuses
+
+Below `MIN_COMPARABLE` (30) comparable sessions — same harness and phase — the result is
+`status: 'unknown'` with a reason and **no numbers at all**: no `remainingCalls`, no `pTerminate`,
+no `nextArrivalSeconds`.
+
+A quantile computed from four sessions is not a good number with wide error bars. It is a number
+the consumer cannot distinguish from a well-supported one, and every field carries its `support`
+count for the same reason.
+
+A session with any event the caller's predicate classified as `unknown` is excluded whole and
+counted in `unclassifiedSessions`. It never becomes a one-row cadence and never defaults to
+useful.
+
+## Calibration and the drift stop
+
+The split at `opts.split.at` is by session **and** by time: a session enters the fit only if it
+was already over before the split, so nothing observed later informs a decision dated earlier.
+
+`coverage` is the fraction of eval sessions whose actual fell inside the predicted p10..p90.
+A censored eval session can only falsify the lower end — its true total is at least what we saw —
+so it is scored against p10 alone.
+
+Undercoverage (below `NOMINAL_COVERAGE` by `COVERAGE_MARGIN`) or drift (a median call count
+shifted by more than `DRIFT_RATIO` between fit and eval) sets `horizonEligible: false` with the
+measured reason. The drift stop is exercised by a cell that shifts a synthetic population and
+watches it fire, beside a twin with no shift that watches it stay quiet — a guard nobody has
+observed failing is a guard nobody has tested.
+
+## A declared plan is a feature, not a count
+
+If a caller states it intends twenty more calls, that is reported as `declaredPlan` so a consumer
+can weigh it. It moves no quantile, no `pTerminate`, and cannot make an ineligible horizon
+eligible. Otherwise a session talks itself into a horizon it has no evidence for.
+
+## Loss is denominated in calls
+
+`immediateTerminationLossBound` is the expected useful calls forgone if immediate termination is
+assumed and that assumption is wrong, bounded by the p10 remaining.
+
+It is not money. This unit prices nothing, and a bound in dollars would smuggle a rate table in
+through a field nobody was reviewing as pricing.
