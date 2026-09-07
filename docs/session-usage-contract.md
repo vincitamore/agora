@@ -34,7 +34,9 @@ and nothing defaults: an out-of-range or non-integer value is refused, not round
 ## Identity
 
 `sourceId` is **opaque**. It is the source's own identifier, kept verbatim, checked only for
-length and control characters. It is never validated as a native id and never rewritten to become
+length and control characters. All three components of the identity — `harness`, `sessionEpoch`
+and `sourceId` — refuse control characters, not just the last: a key component that may contain a
+NUL or a newline is a key component that can be forged. It is never validated as a native id and never rewritten to become
 one, because a foreign identifier that happens to look native is still foreign, and one that does
 not is not thereby invalid. Unusable ids (empty, oversized, non-string, control characters) are
 refused rather than coerced into a shape that would fit.
@@ -42,6 +44,14 @@ refused rather than coerced into a shape that would fit.
 `ledgerKey(identity)` returns a local key in its own `src:` namespace, containing the source text
 so a row stays traceable. It contains separators that native-id grammar forbids, so a ledger key
 can never be mistaken for, compared against, or stored as a native identifier.
+
+The key is **length-prefixed, not delimiter-joined**, and this is load-bearing rather than
+cosmetic. The components may themselves contain the separator, so a plain join is not injective:
+harness `a:b` with epoch `c`, and harness `a` with epoch `b:c`, are different sources that a
+joined key cannot tell apart. Because `supersedesContribution` compares keys, a collision is not
+a cosmetic clash — it lets a record from one source supersede *another source's* measured
+contribution. Escaping the separator would only move the question to the escape character;
+a length prefix is injective whatever the components contain.
 
 ## What may be added together
 
@@ -90,6 +100,10 @@ facts and only the adapter saw which.
 
 Every member of the inventory is `measured` or `unsupported` **with a reason**. There is no third
 state; a member that is neither is a member nobody looked at.
+
+One member, one state: a repeated member name is refused. An inventory asserting both `measured`
+and `unsupported` for one member hands its consumer two truths and no way to choose, which is
+worse than either alone.
 
 ## Exports
 
