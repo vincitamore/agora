@@ -755,6 +755,9 @@ export function pidAlive(pid, kill) {
  * @property {number} [harnessPid]
  * @property {number} [bootEpoch] the boot this pid belongs to; a pid outlives nothing across a reboot
  * @property {import('./harness.mjs').BuildIdentity} [build] code this resident loaded when it armed
+ * @property {string} [root] the checkout that build identity was read from. A record without it
+ *   cannot say whether a diff of the reading process's tree is evidence about this watch at all.
+ * @property {string} [entry] the entry file whose import graph is what this watch actually loaded
  * @property {string} [transport] the room's transport when it armed
  * @property {boolean} [subscriber] true when this watch rides the seat service's push instead of
  *   polling; `doctor` lists it as a live watch and leaves it out of the poll arithmetic
