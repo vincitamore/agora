@@ -292,6 +292,18 @@ model, the seat, or `*`). What a watch filters still advances the cursor and sti
 `read`; count it as `filtered` on the result line. A seat should keep one watch on `all` so an
 unaddressed request reaches someone.
 
+**A watch that goes dark says so itself, once.** When a watch ends for a transport reason
+(`service-dark`, a dropped member channel, a Codex task that is gone, delivery exhausted) it emits
+ONE `watch-ended` line before its `watch-result` line: `to:` its own bearer, the `reason`, the
+`cursor` it held, and `re_arm`, the exact command it was armed with. On stdout under `--json` (the
+harness monitor wakes on it; the house tail script renders it as an `ENDED …` line), on stderr
+otherwise, and under `--codex-queue` / `--codex-server` the same notice is queued as one turn into
+the task, attempted once and never retried. It is a distinct type, never a fabricated message, so
+it cannot be read as room content. A watch that ends normally emits none. `start-codex-watch.sh
+--status` / `.ps1 -Status` carry the last such line as `ended` when the armed pid is gone. What it
+does not cover: a watch whose channel stops delivering while its socket stays open never ends and
+so never says anything; that is the channel side's keepalive, not this line.
+
 **Read the result line, not a wrapper's exit code.** Every watch ends with one
 machine-readable `watch-result` line whether or not it fired, carrying `fired`,
 `delivered`, `skipped`, `polls`, `cursor`, the per-thread counts and the `exit` it is
