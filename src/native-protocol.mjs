@@ -90,23 +90,27 @@ export function parseNativeCursor(cursor) {
 }
 
 /**
- * The stream is length-prefixed so a message body may contain any text without line parsing.
- * A declared length is checked before the payload is buffered further.
- * @param {unknown} value
- * @param {number} [maximum]
- */
-/**
  * The byte length `encodeNativeFrame` would refuse or accept, without allocating the frame.
  *
  * Exported so a caller that must decide how much of a result fits measures it the way the encoder
  * does. A second measurement written beside the encoder drifts the first time the envelope gains a
  * field, and it drifts silently: the caller believes it is under the bound and the encoder throws.
+ *
+ * Placed BEFORE the encoder's own doc comment rather than between it and its declaration: in a
+ * JSDoc-typed file the annotation binds by adjacency, so inserting a function into that gap
+ * silently untypes the function below it. Neither `node --check` nor the runner can see it.
  * @param {unknown} value
  */
 export function nativeFramePayloadBytes(value) {
   return Buffer.byteLength(JSON.stringify(value), "utf8");
 }
 
+/**
+ * The stream is length-prefixed so a message body may contain any text without line parsing.
+ * A declared length is checked before the payload is buffered further.
+ * @param {unknown} value
+ * @param {number} [maximum]
+ */
 export function encodeNativeFrame(value, maximum = NATIVE_FRAME_MAX) {
   const payload = Buffer.from(JSON.stringify(value), "utf8");
   if (!payload.length || payload.length > maximum) throw new AgoraError(`native protocol frame must be 1-${maximum} bytes`);
