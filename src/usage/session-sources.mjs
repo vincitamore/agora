@@ -242,6 +242,7 @@ function decodeOmp(envelope, sessionEpoch, harnessVersion, observedAt, context) 
       ? [writes.cacheWriteUnknownTtl]
       : [writes.cacheWrite5m, writes.cacheWrite1h],
     overlap: overlapFrom(context),
+    sourceReportedCost: readOmpReportedCost(usage),
   });
 }
 
@@ -333,6 +334,7 @@ function decodeAmore(envelope, sessionEpoch, harnessVersion, observedAt, context
       cacheWriteUnknownTtl: null,
       subtractWrites: [readCountField(entry, 'cacheCreationTokens')],
       overlap: overlapFrom(context),
+      sourceReportedCost: readSourceReportedCost(entry, 'costUsdTicks', 'usd-ticks'),
     }));
   }
   return records;
@@ -481,6 +483,33 @@ function overlapFrom(context) {
 }
 
 /**
+ * A source-reported cost is stored in the source's own unit. Absent is omitted,
+ * not unknown: the contract distinguishes "reported none" from "reported
+ * something unusable". Non-integer amounts are invalid, never converted.
+ * @param {Record<string, unknown>} record
+ * @param {string} field
+ * @param {string} unit
+ */
+function readSourceReportedCost(record, field, unit) {
+  if (!Object.hasOwn(record, field)) return undefined;
+  const value = record[field];
+  if (value === null) return { state: 'invalid', reason: `null:${field}` };
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || Object.is(value, -0) || value < 0) {
+    return { state: 'invalid', reason: `unusable:${field}` };
+  }
+  return { state: 'known', amount: value, unit };
+}
+
+/** @param {Record<string, unknown>} usage */
+function readOmpReportedCost(usage) {
+  if (!Object.hasOwn(usage, 'cost')) return undefined;
+  const cost = usage.cost;
+  if (cost === null) return { state: 'invalid', reason: 'null:cost' };
+  if (!isRecord(cost)) return { state: 'invalid', reason: 'type:cost' };
+  return readSourceReportedCost(cost, 'total', 'omp-cost-total');
+}
+
+/**
  * @param {{
  *   harness: string,
  *   harnessVersion: string | undefined,
@@ -498,6 +527,7 @@ function overlapFrom(context) {
  *   cacheWriteUnknownTtl: Counter | null,
  *   subtractWrites: Counter[],
  *   overlap: unknown,
+ *   sourceReportedCost?: { state: string, amount?: number, unit?: string, reason?: string },
  * }} parts
  */
 function makeRecord(parts) {
@@ -540,5 +570,6 @@ function makeRecord(parts) {
     },
   };
   if (parts.model !== undefined) record.model = parts.model;
+  if (parts.sourceReportedCost !== undefined) record.sourceReportedCost = parts.sourceReportedCost;
   return record;
 }

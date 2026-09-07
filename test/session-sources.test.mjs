@@ -291,6 +291,30 @@ test('omp cttl split is authoritative; unsplit cacheWrite is unknown-ttl, not 5m
   assertUnknown(component(unsplit.records[0], 'cache-write-5m'), 'ttl-split-absent');
   assert.deepEqual(component(unsplit.records[0], 'cache-write-unknown-ttl'), knownCount(20));
   assert.deepEqual(component(unsplit.records[0], 'uncached-input'), knownCount(30));
+  assert.equal(Object.hasOwn(unsplit.records[0], 'sourceReportedCost'), false);
+});
+
+test('omp integer cost.total is sourceReportedCost in the source unit; a float is invalid, never converted', () => {
+  const kept = supported(decode('omp', ompEnvelope({
+    input: 10,
+    output: 1,
+    cacheRead: 0,
+    cacheWrite: 0,
+    cost: { total: 42 },
+  })));
+  assertContract(kept.records[0]);
+  assert.deepEqual(kept.records[0].sourceReportedCost, { state: 'known', amount: 42, unit: 'omp-cost-total' });
+
+  const unusable = supported(decode('omp', ompEnvelope({
+    input: 10,
+    output: 1,
+    cacheRead: 0,
+    cacheWrite: 0,
+    cost: { total: 0.0123 },
+  })));
+  assertContract(unusable.records[0]);
+  assert.equal(unusable.records[0].sourceReportedCost?.state, 'invalid');
+  assert.equal(Object.hasOwn(unusable.records[0].sourceReportedCost ?? {}, 'amount'), false);
 });
 
 test('codex requires caller sourceId and treats 1h write as unknown, never known zero', () => {
@@ -350,6 +374,17 @@ test('amore emits one aggregate record per model and does not invent requests', 
   assert.deepEqual(component(first, 'uncached-input'), knownCount(60));
   assert.deepEqual(component(first, 'output'), knownCount(30));
   assert.equal(result.records.every((r) => r.identity.sourceUnit !== 'request'), true);
+  assert.equal(Object.hasOwn(first, 'sourceReportedCost'), false);
+});
+
+test('amore costUsdTicks is kept as usd-ticks and is never converted to dollars', () => {
+  const result = supported(decode('amore-build', amoreEnvelope({
+    'grok-4.6': { inputTokens: 10, outputTokens: 2, cachedReadTokens: 0, cacheCreationTokens: 0, costUsdTicks: 1_250_000_000 },
+  })));
+  const record = result.records[0];
+  assertContract(record);
+  assert.deepEqual(record.sourceReportedCost, { state: 'known', amount: 1_250_000_000, unit: 'usd-ticks' });
+  assert.notEqual(record.sourceReportedCost?.amount, 0.125);
 });
 
 test('amore missing prompt_id is identity-missing; empty modelUsage is unsupported', () => {
