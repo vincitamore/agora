@@ -5,7 +5,9 @@ import { githubTransport } from "./github.mjs";
 import { githubEventsTransport } from "./github-events.mjs";
 import { slackTransport } from "./slack.mjs";
 import { nativeTransport } from "./native.mjs";
-import { stateDir } from "../core.mjs";
+import { nativeRemoteTransport } from "./native-remote.mjs";
+import { openRemoteRoom } from "../native-remote.mjs";
+import { resolvePath, stateDir } from "../core.mjs";
 
 /** GITHUB_TOKEN / GH_TOKEN, the same pair tokenSource reports as "env" for github rooms. */
 function githubEnvToken() {
@@ -19,6 +21,7 @@ export const TRANSPORTS = Object.freeze({
   "github-events": { needsToken: true, describe: "a read-only feed of a repo's, an org's, or a user's activity; events are messages; cursor = event id; narrow it with events and refs" },
   slack: { needsToken: true, describe: "one channel; threads are Slack threads; bot token" },
   native: { needsToken: false, describe: "a room hosted by this seat's native service; cursor = <epoch>:<sequence>; a watch subscribes to the service instead of polling" },
+  "native-remote": { needsToken: false, describe: "a native room hosted by ANOTHER seat, reached over a Tailcat member channel named by a route descriptor; cursor = <epoch>:<sequence>; a watch subscribes over the channel instead of polling" },
 });
 
 /**
@@ -51,6 +54,17 @@ export async function createTransport(alias, room, cfg, deps = {}) {
     }
     case "native":
       return nativeTransport(room, { actor: cfg.actor, stateRoot: stateDir(cfg), session: deps.session });
+    case "native-remote": {
+      // Resolving the room reads three files off this seat's own state (the descriptor, the
+      // enrolled identity, the route secret) and dials nothing, so building the transport stays
+      // offline and a missing or foreign descriptor is a named refusal here rather than a spawn
+      // failure later. The room id comes from the descriptor's binding; there is no roomId key.
+      const descriptor = /** @type {any} */ (room).descriptor;
+      if (typeof descriptor !== "string" || !descriptor)
+        throw new AgoraError(`room "${alias}": a native-remote room needs a descriptor (the path to the route descriptor the operator carried from the host)`);
+      const remote = await openRemoteRoom({ descriptorPath: resolvePath(descriptor), stateRoot: stateDir(cfg) });
+      return nativeRemoteTransport(room, { actor: cfg.actor, remote, session: deps.session });
+    }
     default:
       throw new AgoraError(`room "${alias}": unknown transport "${room.transport}" (have: ${Object.keys(TRANSPORTS).join(", ")})`);
   }
@@ -61,7 +75,7 @@ export async function createTransport(alias, room, cfg, deps = {}) {
  * @param {import('../core.mjs').RoomConfig} room
  */
 export async function tokenSource(room) {
-  if (room.transport === "local" || room.transport === "native") return "none";
+  if (room.transport === "local" || room.transport === "native" || room.transport === "native-remote") return "none";
   const { source } = await resolveToken(room);
   if (source !== "missing") return source;
   if (room.transport === "github" || room.transport === "github-events") {
