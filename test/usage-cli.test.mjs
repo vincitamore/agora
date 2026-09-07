@@ -1,0 +1,103 @@
+// @ts-check
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+import { parseTimeoutMs, formatUsageResult, runUsage } from '../src/usage-cli.mjs';
+import { windowKey } from '../src/protocol/usage.mjs';
+
+const POOL = 'pool_synthetic_01';
+const PRODUCER = { producerId: 'producer_synthetic_0001', generation: 1, sequence: 1 };
+const NOW = () => new Date('2026-09-07T04:10:00.000Z');
+const bin = fileURLToPath(new URL('../bin/agora.mjs', import.meta.url));
+
+const supported = {
+  status: 'supported',
+  principal: { poolId: POOL, provider: 'codex', principalRef: 'acct-1', identity: 'unverified' },
+  observation: {
+    kind: 'full', poolId: POOL, capturedAt: '2026-09-07T04:10:00.000Z',
+    source: 'harness', attestation: 'cooperative',
+    producer: PRODUCER,
+    windows: [
+      { window: { limitId: 'codex', unit: 'basis-points', scope: 'primary', durationMinutes: 10080 }, available: true, value: 800, sense: 'used', resetsAt: '2026-09-13T03:24:41.000Z' },
+      { window: { limitId: 'codex_bengalfox', unit: 'basis-points', scope: 'primary', durationMinutes: 300 }, available: true, value: 0, sense: 'used', resetsAt: '2026-09-06T14:56:35.000Z' },
+      { window: { limitId: 'codex_bengalfox', unit: 'basis-points', scope: 'secondary', durationMinutes: 10080 }, available: true, value: 0, sense: 'used', resetsAt: '2026-09-10T11:11:27.000Z' },
+    ],
+  },
+};
+
+test('parseTimeoutMs refuses non-integer and over-cap', () => {
+  assert.equal(parseTimeoutMs(undefined, 15000), 15000);
+  assert.equal(parseTimeoutMs('20', 15000), 20);
+  assert.throws(() => parseTimeoutMs('20.5', 15000));
+  assert.throws(() => parseTimeoutMs('0', 15000));
+  assert.throws(() => parseTimeoutMs('60001', 15000));
+});
+
+test('unsupported provider is a usage error, not a zero quota', async () => {
+  const r = await runUsage({ provider: 'claude', poolId: POOL, now: NOW, collect: async () => supported });
+  assert.equal(r.exit, 2);
+  assert.match(r.stderr, /unsupported --provider/);
+  assert.equal(r.stdout, '');
+});
+
+test('missing provider and pool-id are usage errors', async () => {
+  const a = await runUsage({ poolId: POOL, now: NOW, collect: async () => supported });
+  assert.equal(a.exit, 2);
+  const b = await runUsage({ provider: 'codex', now: NOW, collect: async () => supported });
+  assert.equal(b.exit, 2);
+});
+
+test('JSON stdout is the result only and keeps two slots under one limit id', async () => {
+  let seenNow, seenTimeout;
+  const r = await runUsage({
+    provider: 'codex', poolId: POOL, timeout: '1500', json: true, now: NOW, producer: PRODUCER,
+    collect: async (opts) => {
+      seenNow = opts.now;
+      seenTimeout = opts.timeoutMs;
+      return supported;
+    },
+  });
+  assert.equal(r.exit, 0);
+  assert.equal(typeof seenNow, 'function');
+  assert.equal(seenNow().toISOString(), NOW().toISOString());
+  assert.equal(seenTimeout, 1500);
+  const parsed = JSON.parse(r.stdout);
+  assert.equal(parsed.status, 'supported');
+  assert.equal(parsed.observation.windows.length, 3);
+  const keys = parsed.observation.windows.map((w) => windowKey(w.window));
+  assert.equal(new Set(keys).size, 3);
+  assert.equal(r.stdout.includes('Authorization'), false);
+});
+
+test('text names original limitId, scope, used sense and labelled percent', async () => {
+  const r = await runUsage({ provider: 'codex', poolId: POOL, now: NOW, producer: PRODUCER, collect: async () => supported });
+  assert.equal(r.exit, 0);
+  assert.match(r.stdout, /codex\/primary 10080m used 800 basis-points \(8\.00%\)/);
+  assert.match(r.stdout, /codex_bengalfox\/primary 300m/);
+  assert.match(r.stdout, /freshness reset-due/);
+});
+
+test('collector unsupported becomes exit 1 with the bounded code', async () => {
+  const r = await runUsage({
+    provider: 'codex', poolId: POOL, now: NOW, json: true, producer: PRODUCER,
+    collect: async () => ({ status: 'unsupported', code: 'codex-account-identity-unavailable' }),
+  });
+  assert.equal(r.exit, 1);
+  assert.equal(JSON.parse(r.stdout).code, 'codex-account-identity-unavailable');
+});
+
+test('CLI subprocess: unknown provider is usage exit 2', () => {
+  const run = spawnSync(process.execPath, [bin, 'usage', '--provider', 'nope', '--pool-id', POOL], { encoding: 'utf8' });
+  assert.equal(run.status, 2);
+});
+
+test('CLI subprocess: schema lists usage', () => {
+  const run = spawnSync(process.execPath, [bin, 'schema', '--json'], { encoding: 'utf8' });
+  assert.equal(run.status, 0);
+  const schema = JSON.parse(run.stdout);
+  assert.ok(schema.verbs.usage);
+  assert.ok(schema.verbs.usage.options['--provider <name>']);
+  assert.ok(schema.verbs.usage.options['--timeout <ms>']);
+});
