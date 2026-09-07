@@ -5,7 +5,7 @@
 import { createInterface } from 'node:readline';
 
 const reply = {
-  accountId: 'account-synthetic-0001',
+  accountId: process.env.FAKE_CODEX_ACCOUNT_ID || 'account-synthetic-0001',
   rateLimits: null,
   rateLimitsByLimitId: {
     codex: {

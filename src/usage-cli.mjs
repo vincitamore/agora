@@ -15,6 +15,20 @@ export const USAGE_CLI_PRODUCER_ID = 'agora-usage-cli01';
 /** @typedef {{ status: string, code?: string, principal?: any, observation?: any }} UsageResult */
 
 /**
+ * Serialize only the contract fields. Extra keys on a collector result (including
+ * strings that resemble credentials) are not part of the public output.
+ * @param {UsageResult} result
+ */
+function publicUsageResult(result) {
+  /** @type {Record<string, unknown>} */
+  const out = { status: result.status };
+  if (result.code !== undefined) out.code = result.code;
+  if (result.principal !== undefined) out.principal = result.principal;
+  if (result.observation !== undefined) out.observation = result.observation;
+  return out;
+}
+
+/**
  * @param {string | undefined} raw
  * @param {number} fallback
  */
@@ -39,7 +53,7 @@ export function parseTimeoutMs(raw, fallback) {
  * @param {{ json?: boolean, now: () => Date }} opts
  */
 export function formatUsageResult(result, opts) {
-  if (opts.json) return `${JSON.stringify(result)}\n`;
+  if (opts.json) return `${JSON.stringify(publicUsageResult(result))}\n`;
   if (result.status !== 'supported') {
     return `unsupported ${result.code ?? 'unknown'}\n`;
   }
@@ -102,8 +116,6 @@ export async function runUsage(options) {
   }
 
   const stdout = formatUsageResult(result, { json: Boolean(options.json), now });
-  const secrets = ['Authorization', 'Bearer ', 'accessToken', 'SYNTHETIC_PRIVATE'];
-  if (secrets.some((s) => stdout.includes(s))) return { exit: 1, stdout: '', stderr: '' };
   const exit = result.status === 'supported' ? 0 : 1;
   return { exit, stdout, stderr: '' };
 }

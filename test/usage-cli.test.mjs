@@ -168,42 +168,89 @@ test('default producer identity satisfies the observation contract without an ov
   });
 });
 
-test('CLI subprocess: real collector, default producer, synthetic helper', () => {
+/**
+ * Public CLI against the real collector and default producer.
+ * @param {{ accountId?: string }} [opts]
+ */
+function spawnUsageCli(opts = {}) {
   const dir = mkdtempSync(path.join(tmpdir(), 'agora-n3-usage-'));
+  writeFileSync(path.join(dir, 'agora.json'), JSON.stringify({
+    actor: { name: 'n3', kind: 'agent' },
+    rooms: { down: { transport: 'local', path: path.join(dir, 'down.ndjson') } },
+  }));
+  writeFileSync(path.join(dir, 'down.ndjson'), '');
+  writeFileSync(path.join(dir, 'package.json'), '{"type":"module"}\n');
+  const helperSrc = fileURLToPath(new URL('./fixtures/usage/fake-codex-app-server.mjs', import.meta.url));
+  writeFileSync(path.join(dir, 'app-server.js'), readFileSync(helperSrc));
+  const env = { ...process.env };
+  for (const name of [
+    'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_PID',
+    'GROK_SESSION_ID', 'GROK_PID', 'CODEX_THREAD_ID', 'CODEX_SESSION_ID',
+    'HERMES_SESSION_ID', 'AGORA_SESSION_PID', 'AGORA_SESSION', 'AGORA_ACTOR',
+    'AGORA_CONFIG', 'AGORA_STATE', 'AGORA_CODEX_BIN', 'FAKE_CODEX_ACCOUNT_ID',
+  ]) delete env[name];
+  env.AGORA_CONFIG = path.join(dir, 'agora.json');
+  env.AGORA_STATE = path.join(dir, 'state');
+  env.AGORA_SESSION = 'n3-usage-cli';
+  if (opts.accountId) env.FAKE_CODEX_ACCOUNT_ID = opts.accountId;
   try {
-    writeFileSync(path.join(dir, 'agora.json'), JSON.stringify({
-      actor: { name: 'n3', kind: 'agent' },
-      rooms: { down: { transport: 'local', path: path.join(dir, 'down.ndjson') } },
-    }));
-    writeFileSync(path.join(dir, 'down.ndjson'), '');
-    writeFileSync(path.join(dir, 'package.json'), '{"type":"module"}\n');
-    const helperSrc = fileURLToPath(new URL('./fixtures/usage/fake-codex-app-server.mjs', import.meta.url));
-    writeFileSync(path.join(dir, 'app-server.js'), readFileSync(helperSrc));
-    const env = { ...process.env };
-    for (const name of [
-      'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_PID',
-      'GROK_SESSION_ID', 'GROK_PID', 'CODEX_THREAD_ID', 'CODEX_SESSION_ID',
-      'HERMES_SESSION_ID', 'AGORA_SESSION_PID', 'AGORA_SESSION', 'AGORA_ACTOR',
-      'AGORA_CONFIG', 'AGORA_STATE', 'AGORA_CODEX_BIN',
-    ]) delete env[name];
-    env.AGORA_CONFIG = path.join(dir, 'agora.json');
-    env.AGORA_STATE = path.join(dir, 'state');
-    env.AGORA_SESSION = 'n3-usage-cli';
-    const run = spawnSync(process.execPath, [
+    return spawnSync(process.execPath, [
       bin, 'usage', '--provider', 'codex', '--pool-id', 'pool_synthetic_codex_001',
       '--json', '--timeout', '8000', '--codex-bin', process.execPath,
     ], { encoding: 'utf8', cwd: dir, env, windowsHide: true, timeout: 15000 });
-    assert.equal(run.status, 0, `stderr=${run.stderr}\nstdout=${run.stdout}`);
-    const parsed = JSON.parse(run.stdout);
-    assert.equal(parsed.status, 'supported');
-    assert.equal(parsed.observation.producer.producerId, USAGE_CLI_PRODUCER_ID);
-    assert.ok(parsed.observation.producer.producerId.length >= 16);
-    const primary = parsed.observation.windows.find((/** @type {{ window: { limitId: string, scope?: string } }} */ w) =>
-      w.window.limitId === 'codex' && w.window.scope === 'primary');
-    assert.ok(primary && primary.available);
-    assert.equal(primary.value, 800);
-    assert.equal(run.stdout.includes('Authorization'), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+test('CLI subprocess: real collector, default producer, synthetic helper', () => {
+  const run = spawnUsageCli();
+  assert.equal(run.status, 0, `stderr=${run.stderr}\nstdout=${run.stdout}`);
+  const parsed = JSON.parse(run.stdout);
+  assert.equal(parsed.status, 'supported');
+  assert.equal(parsed.principal.principalRef, 'account-synthetic-0001');
+  assert.equal(parsed.observation.producer.producerId, USAGE_CLI_PRODUCER_ID);
+  assert.ok(parsed.observation.producer.producerId.length >= 16);
+  const primary = parsed.observation.windows.find((/** @type {{ window: { limitId: string, scope?: string } }} */ w) =>
+    w.window.limitId === 'codex' && w.window.scope === 'primary');
+  assert.ok(primary && primary.available);
+  assert.equal(primary.value, 800);
+});
+
+test('CLI subprocess: a valid principalRef that contains a former keyword still succeeds', () => {
+  const control = spawnUsageCli({ accountId: 'account-synthetic-0001' });
+  assert.equal(control.status, 0, control.stderr + control.stdout);
+  assert.equal(JSON.parse(control.stdout).status, 'supported');
+  for (const accountId of ['account-Authorization-001', 'SYNTHETIC_PRIVATE_ACCOUNT_001', 'accessToken-holder-01']) {
+    const run = spawnUsageCli({ accountId });
+    assert.equal(run.status, 0, `${accountId} stderr=${run.stderr}\nstdout=${run.stdout}`);
+    assert.notEqual(run.stdout.length, 0);
+    assert.notEqual((run.stderr ?? '').length === 0 && run.status !== 0, true);
+    const parsed = JSON.parse(run.stdout);
+    assert.equal(parsed.status, 'supported', accountId);
+    assert.equal(parsed.principal.principalRef, accountId);
+    assert.equal(parsed.observation.producer.producerId, USAGE_CLI_PRODUCER_ID);
+  }
+});
+
+test('extra keys on a collector result are not serialized, and an error still prints its code', async () => {
+  const r = await runUsage({
+    provider: 'codex', poolId: POOL, now: NOW, json: true, producer: PRODUCER,
+    collect: async () => (/** @type {any} */ ({
+      status: 'unsupported',
+      code: 'codex-timeout',
+      Authorization: 'Bearer secret',
+      accessToken: 'leaked',
+      SYNTHETIC_PRIVATE: 'no',
+    })),
+  });
+  assert.equal(r.exit, 1);
+  assert.match(r.stdout, /codex-timeout/);
+  assert.notEqual(r.stdout.length, 0);
+  const parsed = JSON.parse(r.stdout);
+  assert.equal(parsed.code, 'codex-timeout');
+  assert.equal(Object.hasOwn(parsed, 'Authorization'), false);
+  assert.equal(Object.hasOwn(parsed, 'accessToken'), false);
+  assert.equal(r.stdout.includes('Bearer secret'), false);
+  assert.equal(r.stdout.includes('leaked'), false);
 });
