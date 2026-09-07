@@ -523,6 +523,9 @@ export class NativeRoomService {
       // A member session is authorKind agent BY CONSTRUCTION. The board's `break` is a human verb
       // that trusts this label, so a remote claiming human could break a local holder's lease.
       const operation = /** @type {any} */ (frame.operation);
+      // This skips arrays, which is safe ONLY because the append handler below rejects a
+      // non-object operation outright. If append ever accepts a batch, this guard stops covering
+      // it silently -- the member's author kind would go unchecked for every element.
       if (operation && typeof operation === "object" && !Array.isArray(operation)) {
         if (operation.authorKind !== undefined && operation.authorKind !== "agent")
           throw new AgoraError(`member-author-kind-refused: a member session is an agent; it may not claim ${JSON.stringify(operation.authorKind)}`);

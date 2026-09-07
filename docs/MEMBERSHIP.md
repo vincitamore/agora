@@ -87,6 +87,12 @@ revision and the minted principal. It deliberately excludes the seat label and t
 account id — the remote reads both from a local service descriptor it does not have, so binding a
 proof to them would bind it to values the far side cannot reproduce.
 
+Two different things stop two different replays, and it is worth separating them. The **binding**
+fields are constant for a route's lifetime, so they prevent replay onto *another* route, epoch or
+generation — and alone they would permit replay onto the *same* route. Same-route replay is stopped
+by the **server challenge**, minted per connection, carried into the transcript, and covered by the
+client's proof. Phase separation stops a server proof being reflected back as a client one.
+
 A `proofRef` is compared for **equality** with the canonical name derived from the binding the host
 already holds. Containment ("does the resolved path stay under our root?") answers a different
 question: it prevents escape and permits **selection**, and selecting which file the host reads and

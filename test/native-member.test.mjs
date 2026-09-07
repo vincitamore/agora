@@ -336,20 +336,41 @@ test("a member frame naming another principal is refused by name", async (t) => 
   assert.match(refusal.message, /member-actor-mismatch/);
 });
 
-test("a member claiming human is refused, so it cannot break a local board holder", async (t) => {
+test("a member claiming human is refused, and the local board holder SURVIVES", async (t) => {
   const { service } = await memberFixture(t);
+  const store = await service.openRoom(ROOM);
+
+  // A real local holder, taken through the local path. Without this the cell proves the guard
+  // fires and never proves what it protects, and the verb it defends deletes a lease
+  // (native-store.mjs: `break` requires authorKind human, then holders.delete(subject)).
+  const claimed = /** @type {any} */ (await store.append(
+    { kind: "board", operationId: randomUUID().replaceAll("-", ""), payload: { action: "claim", subject: "work:unit-1" } },
+    { accountId: ACCOUNT }));
+  assert.equal(claimed.held, true, "the fixture failed to establish a local holder");
+  const before = store.board().find((/** @type {any} */ h) => h.subject === "work:unit-1");
+  assert.ok(before, "no holder to protect");
+  assert.equal(before.accountId, ACCOUNT);
+
   const { descriptor, accept } = await openFakedRoute(service);
   const secret = await readRouteSecret(service.root, descriptor.binding, descriptor.proofRef);
   const { hostSide, clientSide } = loopback();
   accept(hostSide);
   assert.equal((await greet(clientSide, secret)).type, "member-welcome");
 
-  // native-store's board `break` is a human verb that trusts this client-supplied label.
+  // The attack: `break` is a human verb that trusts a client-supplied label.
   clientSide.write(encodeNativeFrame({ protocol: NATIVE_PROTOCOL, type: "append", requestId: "y".repeat(32),
     roomId: ROOM, operation: { kind: "board", operationId: randomUUID().replaceAll("-", ""),
-      authorKind: "human", authorName: "the operator", payload: { action: "break", subject: "unit-1" } } }));
+      authorKind: "human", authorName: "the operator", payload: { action: "break", subject: "work:unit-1" } } }));
   const refusal = await collect(clientSide, (f) => (f.type === "error" ? f : undefined));
   assert.match(refusal.message, /member-author-kind-refused/);
+
+  // The consequence, which is the half that was missing: the lease is still held, by the same
+  // account, under the same lease id. A refusal that still deleted the holder would pass the
+  // assertion above and fail this one.
+  const after = store.board().find((/** @type {any} */ h) => h.subject === "work:unit-1");
+  assert.ok(after, "the local holder was deleted despite the refusal");
+  assert.equal(after.accountId, ACCOUNT);
+  assert.equal(after.leaseId, before.leaseId, "the lease was replaced rather than preserved");
 });
 
 test("a member session cannot reach the control surface or another room", async (t) => {
@@ -392,7 +413,11 @@ test("one live route per key digest, and a second open is refused by name", asyn
   const first = await openFakedRoute(service);
   await assert.rejects(openFakedRoute(service), /route-already-open/);
   assert.equal(service.listRoutes().length, 1);
-  assert.equal(service.listRoutes()[0].accountId, first.descriptor.binding.accountId);
+  // grantId, not accountId: accountId is a pure function of the public key, so with both opens
+  // using ONE key that assertion holds whether the first route survived or was silently replaced
+  // by a second grant. The property actually at stake is that the FIRST route is still live.
+  assert.equal(service.listRoutes()[0].grantId, first.descriptor.binding.grantId,
+    "the refused second open replaced the live route instead of leaving it alone");
   // A different key is a different principal and is admitted alongside.
   await openFakedRoute(service, OTHER_KEY);
   assert.equal(service.listRoutes().length, 2);
