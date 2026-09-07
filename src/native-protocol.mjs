@@ -33,7 +33,7 @@ export function nativeDigest(value) {
   return `sha256:${createHash("sha256").update(canonicalJson(value)).digest("hex")}`;
 }
 
-const HANDSHAKE_PHASES = new Set(["server", "client", "welcome"]);
+const HANDSHAKE_PHASES = new Set(["server", "client", "welcome", "member-server", "member-client", "member-welcome"]);
 
 /**
  * Proves possession of the seat-local service secret without putting that

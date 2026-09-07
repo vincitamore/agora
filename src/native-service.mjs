@@ -8,6 +8,11 @@ import { AgoraError } from "./core.mjs";
 import { NativeFrameDecoder, NATIVE_PROTOCOL, encodeNativeFrame, nativeHandshakeProof, parseNativeCursor,
   validateNativeEnvelope, validateNativeId, verifyNativeHandshakeProof } from "./native-protocol.mjs";
 import { NativeRoomStore } from "./native-store.mjs";
+import { MEMBER_PHASES, buildRouteBinding, buildRouteDescriptor, memberHandshakeProof, memberMayRequest,
+  memberTranscript, mintRouteSecret, removeRouteSecret, routeKey, validatePublicNodeKey,
+  verifyMemberHandshakeProof, writeRouteSecret } from "./native-member.mjs";
+import { publicNodeKeyDigest } from "./protocol/route.mjs";
+import { startMemberRoute } from "./tailcat-routes.mjs";
 import { parseSpawnRequest } from "./spawn/request.mjs";
 import { ensurePaneAuthority, mintSpawnId, openPane, reapPane } from "./spawn-pane.mjs";
 
@@ -163,7 +168,9 @@ async function writeAtomic(file, value) {
   } finally { await rm(temp, { force: true }); }
 }
 
-/** @param {net.Socket} socket @param {unknown} value */
+/** Duck-typed on purpose: a member route hands over a Duplex over the Tailcat child's stdio, and
+ * every property this uses (destroyed, writable, writableLength, write, destroy) is on both.
+ * @param {net.Socket | import("node:stream").Duplex} socket @param {unknown} value */
 function sendFrame(socket, value) {
   const frame = encodeNativeFrame(value);
   if (socket.destroyed || !socket.writable || socket.writableLength + frame.length > MAX_PENDING_WRITE) {
@@ -351,10 +358,19 @@ export class NativeRoomService {
     this.roomActivities = new Set();
     /** @type {Set<net.Socket>} */
     this.sockets = new Set();
-    /** @type {Map<net.Socket, Map<string, number>>} */
+    /** A member route's stream subscribes like any other client, so this is keyed on both
+     * shapes; #broadcast writes through sendFrame, which is duck-typed for the same reason.
+     * @type {Map<net.Socket | import("node:stream").Duplex, Map<string, number>>} */
     this.subscriptions = new Map();
     /** @type {number | undefined} */
     this.panePid = undefined;
+    /** Admitted member routes, keyed roomId:allowedKeyDigest. The value owns the Tailcat
+     * resource handle; a route is never identified by a stored pid.
+     * @type {Map<string, { binding: any, secret: string, proofRef: string, descriptor: any, resource: any, descriptorPath: string, openedAt: string }>} */
+    this.routes = new Map();
+    /** Fences every route resource to this service's own lifetime.
+     * @type {AbortController | undefined} */
+    this.routeOwner = undefined;
     this.running = false;
   }
 
@@ -488,7 +504,33 @@ export class NativeRoomService {
   }
 
   /** @param {net.Socket} socket @param {Record<string, unknown>} frame */
-  async #dispatch(socket, frame) {
+  /** @param {net.Socket | import("node:stream").Duplex} socket @param {any} frame
+   * @param {{ binding: any } | undefined} [member] the admitted member route, when this stream is one */
+  async #dispatch(socket, frame, member) {
+    if (member) {
+      // Board operations admitted through this protocol under the remote principal are allowed;
+      // direct store or control access is not, so create-room and spawn are absent from the list.
+      if (!memberMayRequest(frame.type))
+        throw new AgoraError(`member-request-refused: a member session may not request ${JSON.stringify(frame.type)}`);
+      // Authorship is by BINDING, never by frame. validateNativeEnvelope admits arbitrary keys, so
+      // an identity claim can ride any frame; it is refused by name here rather than silently
+      // overwritten downstream, which would leave the guard with nothing observable to fire on.
+      const claims = [frame.accountId, frame.authorId,
+        /** @type {any} */ (frame.operation)?.accountId, /** @type {any} */ (frame.operation)?.authorId];
+      for (const claim of claims)
+        if (claim !== undefined && claim !== member.binding.accountId)
+          throw new AgoraError("member-actor-mismatch: this route admits one principal and the frame named another");
+      // A member session is authorKind agent BY CONSTRUCTION. The board's `break` is a human verb
+      // that trusts this label, so a remote claiming human could break a local holder's lease.
+      const operation = /** @type {any} */ (frame.operation);
+      if (operation && typeof operation === "object" && !Array.isArray(operation)) {
+        if (operation.authorKind !== undefined && operation.authorKind !== "agent")
+          throw new AgoraError(`member-author-kind-refused: a member session is an agent; it may not claim ${JSON.stringify(operation.authorKind)}`);
+        // Absent is set rather than left to a downstream default: the board records an omitted
+        // kind as "unknown", and "unknown" is not what a member is.
+        if (operation.authorKind === undefined) operation.authorKind = "agent";
+      }
+    }
     if (frame.type === "create-room") {
       const requested = frame.roomId === undefined || frame.roomId === null || frame.roomId === ""
         ? undefined
@@ -501,6 +543,23 @@ export class NativeRoomService {
         roomId: status.roomId,
         epoch: status.epoch,
       });
+      return;
+    }
+    if (frame.type === "route-open") {
+      const result = await this.openRoute({ roomId: requiredString(frame.roomId, "room id"),
+        publicNodeKey: requiredString(frame.publicNodeKey, "member public node key") });
+      sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "route-open-result", requestId: frame.requestId, ...result });
+      return;
+    }
+    if (frame.type === "route-list") {
+      sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "route-list-result", requestId: frame.requestId,
+        routes: this.listRoutes() });
+      return;
+    }
+    if (frame.type === "route-close") {
+      const result = await this.closeRoute({ roomId: requiredString(frame.roomId, "room id"),
+        publicNodeKey: requiredString(frame.publicNodeKey, "member public node key") });
+      sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "route-close-result", requestId: frame.requestId, ...result });
       return;
     }
     if (frame.type === "spawn") {
@@ -519,6 +578,8 @@ export class NativeRoomService {
       return;
     }
     const roomId = requiredString(frame.roomId, "room id");
+    if (member && roomId !== member.binding.roomId)
+      throw new AgoraError("member-room-refused: a member session may only reach the room its route binds");
     const store = await this.openRoom(roomId);
     if (frame.type === "status") {
       sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "status-result", requestId: frame.requestId, status: store.status() });
@@ -560,7 +621,10 @@ export class NativeRoomService {
     if (frame.type === "append") {
       const operation = frame.operation;
       if (!operation || typeof operation !== "object" || Array.isArray(operation)) throw new AgoraError("native append needs an operation object");
-      const receipt = /** @type {any} */ (await store.append(/** @type {any} */ (operation), { accountId: this.accountId }));
+      // The store stamps author.id and derives the message id from this account id, so a member's
+      // posts carry its own minted principal rather than the host's.
+      const receipt = /** @type {any} */ (await store.append(/** @type {any} */ (operation),
+        { accountId: member ? member.binding.accountId : this.accountId }));
       sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "append-ack", requestId: frame.requestId, roomId, ...receipt });
       if (receipt.kind !== "board") {
         const message = store.read({ since: `${store.manifest.epoch}:${parseNativeCursor(receipt.cursor).sequence - 1}`, limit: 1 })[0];
@@ -581,9 +645,196 @@ export class NativeRoomService {
     }
   }
 
+  /**
+   * Open a member route. The SERVICE process owns it: `startMemberRoute` fences its resources to
+   * the owner's AbortSignal and requires the owner's serviceBootId, so a route started by a CLI's
+   * own process would die with that process. `route open` is therefore a request to the running
+   * service, the way `spawn` is, never a listener the verb starts for itself.
+   * @param {{ roomId: string, publicNodeKey: string, runtime?: any, routeOptions?: any }} request
+   */
+  async openRoute(request) {
+    if (!this.running) throw new AgoraError("native service is dark; start it explicitly before opening a route");
+    const publicNodeKey = validatePublicNodeKey(request.publicNodeKey);
+    const allowedKeyDigest = publicNodeKeyDigest(publicNodeKey);
+    const roomId = requiredString(request.roomId, "room id");
+    const store = await this.openRoom(roomId);
+    const key = routeKey(roomId, allowedKeyDigest);
+    // One live route per key digest: a second grant for a live digest would leave two secrets and
+    // two generations for one principal, and `route close` naming the digest would name both.
+    if (this.routes.has(key))
+      throw new AgoraError(`route-already-open: ${roomId} already admits this key; close it before opening a new grant`);
+    const binding = buildRouteBinding({
+      hostAccountId: this.accountId, hostAuthority: this.accountId, roomId,
+      roomEpoch: store.manifest.epoch, serviceBootId: this.bootEpoch, publicNodeKey,
+    });
+    const secret = mintRouteSecret();
+    const { proofRef } = await writeRouteSecret(this.root, binding, secret);
+    if (!this.routeOwner || this.routeOwner.signal.aborted) this.routeOwner = new AbortController();
+    const owner = { serviceId: this.accountId, serviceBootId: this.bootEpoch, signal: this.routeOwner.signal };
+    const resource = startMemberRoute({ binding, allowedNodeKey: publicNodeKey }, {
+      owner, runtime: request.runtime ?? {},
+      acceptChannel: (accepted, stream, signal) => this.#acceptMember({ binding: accepted, secret }, stream, signal),
+      ...(request.routeOptions ?? {}),
+    });
+    let published;
+    try {
+      published = /** @type {any} */ (await resource.ready);
+      const descriptor = buildRouteDescriptor({ binding, endpoint: published.endpoint, proofRef,
+        issuedAt: this.now().toISOString() });
+      const file = path.join(this.nativeDirectory, "routes", binding.grantId, "descriptor.json");
+      await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+      await writeAtomic(file, descriptor);
+      const entry = { binding, secret, proofRef, descriptor, resource, descriptorPath: file,
+        openedAt: this.now().toISOString() };
+      this.routes.set(key, entry);
+      return { descriptor, descriptorPath: file, secretRef: proofRef };
+    } catch (error) {
+      // A failed descriptor write must not leave a live listener nobody has a record of.
+      try { await resource.stop(); } catch { /* the open is already failing; report its cause */ }
+      await removeRouteSecret(this.root, binding);
+      throw error;
+    }
+  }
+
+  /** Live routes, read from the service's own registry rather than from files on disk. */
+  listRoutes() {
+    return [...this.routes.values()].map((route) => ({
+      roomId: route.binding.roomId, accountId: route.binding.accountId,
+      allowedKeyDigest: route.binding.allowedKeyDigest, grantId: route.binding.grantId,
+      routeGeneration: route.binding.routeGeneration, endpoint: route.descriptor.endpoint,
+      openedAt: route.openedAt, descriptorPath: route.descriptorPath,
+    }));
+  }
+
+  /**
+   * Close is REVOCATION. Nothing runs on the remote, so its copy of the secret simply goes stale
+   * and fails the proof by name; a reopen mints a new generation whose descriptor and secret
+   * travel by the operator's hand.
+   * @param {{ roomId: string, publicNodeKey?: string, allowedKeyDigest?: string }} request
+   */
+  async closeRoute(request) {
+    const roomId = requiredString(request.roomId, "room id");
+    const digest = request.allowedKeyDigest
+      ?? publicNodeKeyDigest(validatePublicNodeKey(request.publicNodeKey));
+    const key = routeKey(roomId, digest);
+    const route = this.routes.get(key);
+    if (!route) throw new AgoraError(`route-not-open: ${roomId} admits no route for that key`);
+    this.routes.delete(key);
+    let cleanupPending;
+    // stop() can reject with AGORA_CLEANUP_PENDING; reporting a clean teardown we did not observe
+    // is the failure this branch exists to refuse.
+    try { await route.resource.stop(); }
+    catch (error) { cleanupPending = error; }
+    await removeRouteSecret(this.root, route.binding);
+    await rm(route.descriptorPath, { force: true });
+    if (cleanupPending) throw cleanupPending;
+    return { roomId, grantId: route.binding.grantId, routeGeneration: route.binding.routeGeneration,
+      accountId: route.binding.accountId, revoked: true };
+  }
+
+  /**
+   * Admit one Tailcat-authenticated member stream.
+   *
+   * This is deliberately NOT `#accept`. That path sends a server-hello proved with the seat-local
+   * service nonce on every socket it is given (see `#accept`), and the nonce must never leave this
+   * machine. A member stream is proved under the route's own secret, with the member phases, over a
+   * transcript widened by the binding, and it never observes the nonce at all.
+   *
+   * @param {{ binding: any, secret: string }} route
+   * @param {import("node:stream").Duplex} stream
+   * @param {AbortSignal} signal
+   * @returns {{ ready: Promise<unknown>, closed: Promise<unknown>, stop: () => Promise<unknown> }}
+   */
+  #acceptMember(route, stream, signal) {
+    const decoder = new NativeFrameDecoder();
+    let greeted = false;
+    let chain = Promise.resolve();
+    const requestId = randomUUID().replaceAll("-", "");
+    const serverChallenge = randomUUID().replaceAll("-", "");
+    const member = { binding: route.binding };
+    this.subscriptions.set(/** @type {any} */ (stream), new Map());
+    /** @type {(v?: unknown) => void} */ let resolveReady = () => {};
+    /** @type {(e: unknown) => void} */ let rejectReady = () => {};
+    const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+    void ready.catch(() => {});
+    const closed = new Promise((resolve) => {
+      if (stream.destroyed) resolve(undefined); else stream.once("close", () => resolve(undefined));
+    });
+
+    const base = { bootEpoch: this.bootEpoch, requestId, serverChallenge,
+      accountId: this.accountId, seatLabel: this.seatLabel };
+    const serverTranscript = memberTranscript(route.binding, base);
+    const fail = (/** @type {unknown} */ error, /** @type {string | undefined} */ id) => {
+      const message = error instanceof Error ? error.message : "native member request failed";
+      sendFrame(/** @type {any} */ (stream), { protocol: NATIVE_PROTOCOL, type: "error",
+        requestId: id ?? randomUUID().replaceAll("-", ""),
+        reason: greeted ? "request-refused" : "member-hello-refused", message: message.slice(0, 500) });
+    };
+    if (!sendFrame(/** @type {any} */ (stream), { protocol: NATIVE_PROTOCOL, type: "member-server-hello",
+      ...serverTranscript, proof: memberHandshakeProof(route.secret, MEMBER_PHASES.server, serverTranscript) })) {
+      rejectReady(new AgoraError("member stream closed before the host could greet it"));
+      return { ready, closed, stop: async () => { stream.destroy(); } };
+    }
+
+    stream.on("data", (bytes) => {
+      let frames;
+      try { frames = decoder.push(bytes); }
+      catch (error) { fail(error, undefined); stream.destroy(); return; }
+      for (const raw of frames) {
+        chain = chain.then(async () => {
+          const frame = validateNativeEnvelope(raw);
+          if (!greeted) {
+            // A member socket that speaks the LOCAL handshake is refused by name rather than
+            // falling through to a path that would consult the nonce.
+            if (frame.type === "client-hello")
+              throw new AgoraError("member-phase-refused: a member session speaks the member handshake, never the local one");
+            if (frame.type !== "member-client-hello" || frame.requestId !== requestId
+              || frame.bootEpoch !== this.bootEpoch || frame.serverChallenge !== serverChallenge)
+              throw new AgoraError("member-hello-refused: the client hello did not match this handshake");
+            const clientChallenge = requiredString(frame.clientChallenge, "client challenge");
+            validateNativeId(clientChallenge, "client challenge");
+            const transcript = { ...serverTranscript, clientChallenge };
+            if (!verifyMemberHandshakeProof(frame.proof, route.secret, MEMBER_PHASES.client, transcript))
+              throw new AgoraError("member-proof-refused: the client did not prove the transcript under this route's secret");
+            // The account is bound by the route, never taken from the frame. A frame that names a
+            // different principal is refused here rather than reaching the store.
+            if (frame.accountId !== undefined && frame.accountId !== route.binding.accountId)
+              throw new AgoraError("member-actor-mismatch: this route admits one principal and the frame named another");
+            greeted = true;
+            sendFrame(/** @type {any} */ (stream), { protocol: NATIVE_PROTOCOL, type: "member-welcome",
+              ...transcript, proof: memberHandshakeProof(route.secret, MEMBER_PHASES.welcome, transcript) });
+            resolveReady(undefined);
+            return;
+          }
+          if (frame.accountId !== undefined && frame.accountId !== route.binding.accountId)
+            throw new AgoraError("member-actor-mismatch: this route admits one principal and the frame named another");
+          await this.#dispatch(/** @type {any} */ (stream), frame, member);
+        }).catch((error) => {
+          const id = raw && typeof raw === "object" && "requestId" in raw && typeof raw.requestId === "string"
+            ? raw.requestId : undefined;
+          fail(error, id);
+          // Give the named refusal a tick to leave the wire. The route's own accept() destroys
+          // this stream as soon as ready rejects, and a refusal the far side never receives is
+          // indistinguishable from a hang.
+          if (!greeted) setImmediate(() => { rejectReady(error); stream.end(); });
+        });
+      }
+    });
+    stream.on("close", () => { this.subscriptions.delete(/** @type {any} */ (stream)); });
+    stream.on("error", () => {});
+    if (signal.aborted) stream.destroy();
+    return { ready, closed, stop: async () => { stream.destroy(); await closed; } };
+  }
+
   async stop() {
     if (!this.server) return;
     this.running = false;
+    for (const route of this.routes.values()) {
+      try { await route.resource.stop(); } catch { /* reported by closeRoute; stop() is best-effort */ }
+    }
+    this.routes.clear();
+    this.routeOwner?.abort();
+    this.routeOwner = undefined;
     if (this.panePid) {
       await reapPane(this.panePid);
       this.panePid = undefined;
