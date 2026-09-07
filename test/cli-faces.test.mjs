@@ -217,7 +217,7 @@ test("room faces: the verb shape is generic (transport as a value), a non-native
   // the verb table and the option surface are on the machine-readable schema
   r = await agora(["schema", "--json"], env);
   const schema = JSON.parse(r.stdout);
-  assert.deepEqual(schema.verbs.room.args, ["faces", "<room>"]);
+  assert.deepEqual(schema.verbs.room.args, ["faces <room> | add-remote <alias> <descriptor-path>"]);
   assert.deepEqual(schema.verbs.faces.args, ["<room>"]);
   assert.ok("--for <cursor|id>" in schema.verbs.faces.options && "--unknown" in schema.verbs.faces.options);
   assert.ok("--face <name>" in schema.verbs.post.options && "--no-face" in schema.verbs.post.options);
