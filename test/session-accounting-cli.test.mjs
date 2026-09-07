@@ -58,6 +58,35 @@ test('usage-sessions refuses a malformed ledger-max-entries before loadConfig', 
   assert.doesNotMatch(r.stderr, /no config/);
 });
 
+test('cli bind carrying sourceId is unsupported with the named reason, never a measured call', async () => {
+  const stateRoot = await mkdtemp(path.join(tmpdir(), 'agora-st-'));
+  const sess = path.join(stateRoot, 'sessions', 'sess-a');
+  await mkdir(sess, { recursive: true });
+  await writeFile(path.join(sess, 'house.cursor'), '0', 'utf8');
+  await writeFile(path.join(sess, 'session.json'), JSON.stringify({
+    bearer: 'Codex/a', pid: process.pid, lastSeen: new Date().toISOString(),
+  }), 'utf8');
+  const ledgerRoot = await mkdtemp(path.join(tmpdir(), 'agora-led-'));
+  const ledger = await openSessionLedger({ root: ledgerRoot, limits: { maxBytes: 256_000, maxEntries: 64 } });
+  await closeSessionLedger(ledger);
+  const bind = path.join(stateRoot, 'bind.json');
+  await writeFile(bind, JSON.stringify({
+    'sess-a': { harness: 'codex', sessionEpoch: 'epoch-1', sourceId: 'req-a' },
+  }), 'utf8');
+  const cfg = path.join(stateRoot, 'agora.json');
+  await writeFile(cfg, JSON.stringify({ actor: { name: 'Test/cli', kind: 'agent' }, rooms: { house: { transport: 'local', path: 'house.ndjson' } } }), 'utf8');
+  const r = await run(
+    ['usage-sessions', '--json', '--ledger-root', ledgerRoot, '--bind', bind, '--room', 'house'],
+    { AGORA_STATE: stateRoot, AGORA_CONFIG: cfg },
+  );
+  assert.equal(r.code, 0, r.stderr);
+  const body = JSON.parse(r.stdout);
+  assert.equal(body.members.length, 1);
+  assert.equal(body.members[0].state, 'unsupported');
+  assert.equal(body.members[0].reason, 'session-accounting-binding-source-id');
+  assert.equal(Object.hasOwn(body.members[0], 'usage'), false);
+});
+
 test('cli json lists measured and unsupported together and never prints a transcript', async () => {
   const stateRoot = await mkdtemp(path.join(tmpdir(), 'agora-st-'));
   const sess = path.join(stateRoot, 'sessions', 'sess-a');
@@ -78,7 +107,7 @@ test('cli json lists measured and unsupported together and never prints a transc
   });
   await closeSessionLedger(ledger);
   const bind = path.join(stateRoot, 'bind.json');
-  await writeFile(bind, JSON.stringify({ 'sess-a': { harness: 'codex', sessionEpoch: 'epoch-1', sourceId: 'req-a' } }), 'utf8');
+  await writeFile(bind, JSON.stringify({ 'sess-a': { harness: 'codex', sessionEpoch: 'epoch-1' } }), 'utf8');
   const cfg = path.join(stateRoot, 'agora.json');
   await writeFile(cfg, JSON.stringify({ actor: { name: 'Test/cli', kind: 'agent' }, rooms: { house: { transport: 'local', path: 'house.ndjson' } } }), 'utf8');
   const r = await run(
@@ -90,7 +119,9 @@ test('cli json lists measured and unsupported together and never prints a transc
   assert.equal(body.type, 'usage-sessions');
   assert.equal(body.members.length, 1);
   assert.equal(body.members[0].state, 'measured');
-  assert.equal(body.members[0].usage.components.output.value, 80);
+  assert.equal(body.members[0].usage.request.components.output.value, 80);
+  assert.equal(body.members[0].entryCount, 1);
+  assert.equal(body.members[0].provisionalCount, 0);
   assert.doesNotMatch(r.stdout, /transcript|Authorization|Bearer /);
 });
 
@@ -113,7 +144,7 @@ test('cli ingest of four harness envelopes measures members and prints no raw ke
     await writeFile(path.join(sess, 'session.json'), JSON.stringify({
       bearer: m.slug, pid: process.pid, lastSeen: new Date().toISOString(),
     }), 'utf8');
-    bindings[m.slug] = { harness: m.harness, sessionEpoch: epoch, sourceId: m.sourceId };
+    bindings[m.slug] = { harness: m.harness, sessionEpoch: epoch };
   }
   const ingest = path.join(stateRoot, 'ingest.jsonl');
   const lines = [
@@ -150,8 +181,13 @@ test('cli ingest of four harness envelopes measures members and prints no raw ke
   assert.equal(body.members.length, 4);
   assert.equal(body.members.every((/** @type {{state:string}} */ m) => m.state === 'measured'), true);
   assert.doesNotMatch(r.stdout, /input_tokens|Authorization|transcript/);
-  const outputs = body.members.map((/** @type {{usage: {components: {output: {value: number}}}}} */ m) => m.usage.components.output.value).sort((/** @type {number} */ a, /** @type {number} */ b) => a - b);
-  assert.deepEqual(outputs, [4, 5, 6, 8]);
+  const byHarness = Object.fromEntries(body.members.map((/** @type {{slug: string, usage: any}} */ m) => [m.slug, m.usage]));
+  assert.equal(byHarness['sess-claude'].request.provisional[0].components.output.value, 4);
+  assert.equal(byHarness['sess-omp'].request.provisional[0].components.output.value, 5);
+  assert.equal(byHarness['sess-codex'].snapshot.provisional[0].components.output.value, 6);
+  assert.equal(byHarness['sess-codex'].request.provisional.length, 0);
+  assert.equal(byHarness['sess-amore'].aggregate.components.output.value, 8);
+  assert.equal(Object.hasOwn(byHarness['sess-amore'].request.components, 'output'), false);
 });
 
 test('cli ingest reports failed lines instead of dropping them silently', async () => {

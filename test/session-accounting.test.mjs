@@ -28,11 +28,33 @@ function ingest(offset) {
 }
 
 test('pid and bootEpoch are refused as a source binding', () => {
-  assert.throws(() => readBinding({ harness: 'codex', sessionEpoch: 'e', sourceId: 's', pid: 12 }), /not a source binding/);
-  assert.throws(() => readBinding({ harness: 'codex', sessionEpoch: 'e', sourceId: 's', bootEpoch: 'x' }), /not a source binding/);
-  assert.throws(() => readBinding({ harness: ' ', sessionEpoch: 'e', sourceId: 's' }), /binding requires/);
-  const ok = readBinding({ harness: 'codex', sessionEpoch: 'e', sourceId: 's' });
-  assert.equal(ok.sourceId, 's');
+  assert.throws(() => readBinding({ harness: 'codex', sessionEpoch: 'e', pid: 12 }), /not a source binding/);
+  assert.throws(() => readBinding({ harness: 'codex', sessionEpoch: 'e', bootEpoch: 'x' }), /not a source binding/);
+  assert.throws(() => readBinding({ harness: ' ', sessionEpoch: 'e' }), /binding requires/);
+  const ok = readBinding({ harness: 'codex', sessionEpoch: 'e' });
+  assert.equal(ok.sessionEpoch, 'e');
+  assert.equal(Object.hasOwn(ok, 'sourceId'), false);
+});
+
+test('a binding that still carries sourceId is refused, not silently ignored', async () => {
+  assert.throws(
+    () => readBinding({ harness: 'codex', sessionEpoch: 'e', sourceId: 'req-a' }),
+    (/** @type {any} */ err) => err.code === 'session-accounting-binding-source-id'
+      && /sourceId is not a binding field/.test(err.message),
+  );
+  const dir = await mkdtemp(path.join(tmpdir(), 'agora-s-'));
+  await writeFile(path.join(dir, 'house.cursor'), '0', 'utf8');
+  const rows = await inventoryMembers(
+    [{ slug: 'sess-a', dir, record: { bearer: 'Codex/a' }, state: 'live' }],
+    {
+      roomKey: 'house',
+      bindings: { 'sess-a': { harness: 'codex', sessionEpoch: 'epoch-1', sourceId: 'req-a' } },
+      snapshot: { entries: {} },
+    },
+  );
+  assert.equal(rows[0].state, 'unsupported');
+  assert.equal(rows[0].reason, 'session-accounting-binding-source-id');
+  assert.equal(Object.hasOwn(rows[0], 'usage'), false);
 });
 
 test('measured and unsupported members are shown together; missing is never zero', async () => {
@@ -54,13 +76,13 @@ test('measured and unsupported members are shown together; missing is never zero
     const snapshot = { entries: (await import('../src/usage/session-ledger.mjs')).readLedgerSnapshot(ledger).entries };
     const rows = await inventoryMembers(records, {
       roomKey: 'house',
-      bindings: { 'sess-a': { harness: 'codex', sessionEpoch: 'epoch-1', sourceId: 'req-a' } },
+      bindings: { 'sess-a': { harness: 'codex', sessionEpoch: 'epoch-1' } },
       snapshot,
     });
     assert.equal(rows.length, 2);
     assert.equal(rows[0].state, 'measured');
     assert.equal(rows[0].status, 'confirmed');
-    assert.equal(/** @type {any} */ (rows[0].usage).components.output.value, 80);
+    assert.equal(/** @type {any} */ (rows[0].usage).request.components.output.value, 80);
     assert.equal(rows[1].state, 'unsupported');
     assert.equal(rows[1].status, undefined);
     assert.equal(rows[1].reason, 'unknown-binding');
@@ -93,10 +115,10 @@ test('lowering-output 100 to 80 is what the inventory reports', async () => {
     await writeFile(path.join(dir, 'house.cursor'), '0', 'utf8');
     const rows = await inventoryMembers(
       [{ slug: 'sess-a', dir, record: { bearer: 'Codex/a' }, state: 'live' }],
-      { roomKey: 'house', bindings: { 'sess-a': { harness: 'codex', sessionEpoch: 'epoch-1', sourceId: 'req-a' } }, snapshot },
+      { roomKey: 'house', bindings: { 'sess-a': { harness: 'codex', sessionEpoch: 'epoch-1' } }, snapshot },
     );
     assert.equal(rows[0].state, 'measured');
-    assert.equal(/** @type {any} */ (rows[0].usage).components.output.value, 80);
+    assert.equal(/** @type {any} */ (rows[0].usage).request.components.output.value, 80);
   } finally {
     await closeSessionLedger(ledger);
   }
@@ -201,9 +223,9 @@ test('four harness envelopes ingest; a failed decode is not stored as overlap no
       {
         roomKey: 'house',
         bindings: {
-          claude: { harness: 'claude-code', sessionEpoch: EPOCH, sourceId: 'msg_synthetic_claude_01' },
-          codex: { harness: 'codex', sessionEpoch: EPOCH, sourceId: 'rollout:offset:12' },
-          amore: { harness: 'amore-build', sessionEpoch: EPOCH, sourceId: 'prompt_synthetic_01:grok-4.6' },
+          claude: { harness: 'claude-code', sessionEpoch: EPOCH },
+          codex: { harness: 'codex', sessionEpoch: EPOCH },
+          amore: { harness: 'amore-build', sessionEpoch: EPOCH },
         },
         snapshot: snap,
       },
@@ -211,12 +233,82 @@ test('four harness envelopes ingest; a failed decode is not stored as overlap no
     assert.equal(rows.every((r) => r.state === 'measured'), true);
     assert.equal(rows.every((r) => r.status === 'confirmed' || r.status === 'provisional'), true);
     assert.equal(rows.some((r) => r.status === 'provisional'), true);
-    assert.equal(/** @type {any} */ (rows[0].usage).components.output.value, 20);
-    assert.equal(/** @type {any} */ (rows[1].usage).components.output.value, 7);
-    assert.equal(/** @type {any} */ (rows[2].usage).components.output.value, 30);
+    const claude = /** @type {any} */ (rows[0].usage);
+    const codex = /** @type {any} */ (rows[1].usage);
+    const amore = /** @type {any} */ (rows[2].usage);
+    assert.equal(claude.request.provisional.length, 1);
+    assert.equal(claude.request.provisional[0].components.output.value, 20);
+    assert.equal(Object.hasOwn(claude.request.components, 'output'), false);
+    assert.equal(codex.snapshot.provisional.length, 1);
+    assert.equal(codex.snapshot.provisional[0].components.output.value, 7);
+    assert.equal(codex.request.provisional.length, 0);
+    assert.equal(amore.aggregate.components.output.value, 30);
+    assert.equal(Object.hasOwn(amore.request.components, 'output'), false);
+    assert.equal(rows[0].entryCount, 1);
+    assert.equal(rows[2].status, 'confirmed');
   } finally {
     await closeSessionLedger(ledger);
   }
+});
+
+test('a member bound to an epoch with three request entries reports the sum and entryCount 3', async () => {
+  const ledgerRoot = await mkdtemp(path.join(tmpdir(), 'agora-led-'));
+  const ledger = await openSessionLedger({ root: ledgerRoot, limits: { maxBytes: 256_000, maxEntries: 64 } });
+  try {
+    await commitLedgerEvent(ledger, { record: usageRecord('req-1', 10), ingest: ingest(1) });
+    await commitLedgerEvent(ledger, { record: usageRecord('req-2', 20), ingest: ingest(2) });
+    await commitLedgerEvent(ledger, { record: usageRecord('req-3', 30), ingest: ingest(3) });
+    const snapshot = (await import('../src/usage/session-ledger.mjs')).readLedgerSnapshot(ledger);
+    const dir = await mkdtemp(path.join(tmpdir(), 'agora-s-'));
+    await writeFile(path.join(dir, 'house.cursor'), '0', 'utf8');
+    const rows = await inventoryMembers(
+      [{ slug: 'sess-a', dir, record: { bearer: 'Codex/a' }, state: 'live' }],
+      { roomKey: 'house', bindings: { 'sess-a': { harness: 'codex', sessionEpoch: 'epoch-1' } }, snapshot },
+    );
+    assert.equal(rows[0].state, 'measured');
+    assert.equal(rows[0].entryCount, 3);
+    assert.equal(rows[0].provisionalCount, 0);
+    assert.equal(/** @type {any} */ (rows[0].usage).request.components.output.value, 60);
+  } finally {
+    await closeSessionLedger(ledger);
+  }
+});
+
+test('a matching conflict entry makes the member usage-unavailable', async () => {
+  const ledgerRoot = await mkdtemp(path.join(tmpdir(), 'agora-led-'));
+  const ledger = await openSessionLedger({ root: ledgerRoot, limits: { maxBytes: 256_000, maxEntries: 64 } });
+  try {
+    const first = usageRecord('req-x', 10);
+    await commitLedgerEvent(ledger, { record: first, ingest: ingest(1) });
+    await commitLedgerEvent(ledger, {
+      record: { ...first, usage: { components: { output: known(99) }, coverage: 'partial' } },
+      ingest: ingest(2),
+    });
+    const snapshot = (await import('../src/usage/session-ledger.mjs')).readLedgerSnapshot(ledger);
+    const dir = await mkdtemp(path.join(tmpdir(), 'agora-s-'));
+    await writeFile(path.join(dir, 'house.cursor'), '0', 'utf8');
+    const rows = await inventoryMembers(
+      [{ slug: 'sess-a', dir, record: { bearer: 'Codex/a' }, state: 'live' }],
+      { roomKey: 'house', bindings: { 'sess-a': { harness: 'codex', sessionEpoch: 'epoch-1' } }, snapshot },
+    );
+    assert.equal(rows[0].state, 'unsupported');
+    assert.equal(rows[0].reason, 'usage-unavailable');
+    assert.equal(Object.hasOwn(rows[0], 'usage'), false);
+  } finally {
+    await closeSessionLedger(ledger);
+  }
+});
+
+test('a binding with zero matching entries is no-ledger-entries, never measured zero', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'agora-s-'));
+  await writeFile(path.join(dir, 'house.cursor'), '0', 'utf8');
+  const rows = await inventoryMembers(
+    [{ slug: 'sess-a', dir, record: { bearer: 'Codex/a' }, state: 'live' }],
+    { roomKey: 'house', bindings: { 'sess-a': { harness: 'codex', sessionEpoch: 'missing-epoch' } }, snapshot: { entries: {} } },
+  );
+  assert.equal(rows[0].state, 'unsupported');
+  assert.equal(rows[0].reason, 'no-ledger-entries');
+  assert.equal(Object.hasOwn(rows[0], 'usage'), false);
 });
 
 test('replay ingest is a duplicate and a kill mid-commit leaves the prior contribution', async () => {
