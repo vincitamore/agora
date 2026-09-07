@@ -283,6 +283,7 @@ function decodeOmp(envelope, sessionEpoch, harnessVersion, observedAt, context) 
     inputAlreadyExclusive: true,
     overlap: overlapFrom(context),
     sourceReportedCost: readOmpReportedCost(usage),
+    sourceReportedReasoning: readSourceReportedCost(usage, 'reasoningTokens', 'tokens'),
   });
 }
 
@@ -323,6 +324,7 @@ function decodeCodex(envelope, sessionEpoch, harnessVersion, observedAt, context
     // (700 real records reconciled; input < cache is the cache-exceeds-input case).
     subtractWrites: [readCountField(last, 'cache_write_input_tokens')],
     overlap: overlapFrom(context),
+    sourceReportedReasoning: readSourceReportedCost(last, 'reasoning_output_tokens', 'tokens'),
   });
 }
 
