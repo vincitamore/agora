@@ -892,3 +892,36 @@ test("a transport that owns a handle lets the process EXIT once it is closed, an
   );
   await rm(dir, { recursive: true, force: true });
 });
+
+test("the handshake's dark refusal fires in a process holding NO other handle", async () => {
+  // The rig condition IS the test: a `PassThrough` is not a referenced handle, so this child has
+  // nothing keeping Node's loop alive except the handshake timer itself. That is the case an
+  // unref'd timer loses — and it is invisible from the CLI, where the Tailcat child's stdio pipes
+  // hold the loop and the bound therefore appears to work. Measured on the previous head: the
+  // child exited in 1 ms with code 13 ("unsettled top-level await") and no message at all.
+  // A bound that fires only while something else is alive is not a bound.
+  const dir = await mkdtemp(path.join(tmpdir(), "agora-dark-"));
+  const probe = path.join(dir, "probe.mjs");
+  await writeFile(probe, `
+    import { PassThrough } from "node:stream";
+    import { completeMemberHandshake } from ${JSON.stringify(new URL("../src/native-remote.mjs", import.meta.url).href)};
+    const started = Date.now();
+    // A peer that is connected and silent: the shape that costs the whole budget, as opposed to a
+    // dead transport, which fails the dial in milliseconds.
+    try {
+      await completeMemberHandshake({ stream: new PassThrough(), binding: { accountId: "m-x" },
+        secret: "s", timeoutMs: 600 });
+      console.log("RESOLVED");
+    } catch (e) {
+      console.log(JSON.stringify({ elapsed: Date.now() - started, message: String(e.message) }));
+    }
+  `);
+  const run = promisify(execFile);
+  const { stdout } = await run(process.execPath, [probe], { timeout: 15000 });
+  const seen = JSON.parse(stdout.trim());
+  assert.match(seen.message, /member-channel-dark/,
+    "a silent peer produced no named refusal, so the channel went dark without saying so");
+  assert.ok(seen.elapsed >= 550,
+    `the refusal arrived after ${seen.elapsed} ms, which is short of the bound it claims to enforce`);
+  await rm(dir, { recursive: true, force: true });
+});

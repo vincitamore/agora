@@ -99,7 +99,14 @@ class HandshakeReader {
           this.failure ??= new AgoraError(`member-channel-dark: the host's ${label} did not arrive within ${this.timeoutMs} ms`);
           done();
         }, this.timeoutMs);
-        timer.unref?.();
+        // NOT unref'd, and the difference is a whole diagnosis. This is the only timer that can
+        // emit `member-channel-dark`, so unref'ing it means a consumer holding no other referenced
+        // handle EXITS instead of refusing: measured on the previous head at 1 ms with code 13 and
+        // no message at all, against 600 ms and the named reason once the ref is kept. It was safe
+        // in the CLI only because the Tailcat child's pipes happened to hold the loop — a bound
+        // that fires only when something ELSE is alive is not a bound. Every timer created here is
+        // cleared by `done()` on both the frame path and the timeout path, so keeping the ref
+        // extends the process's life by at most `timeoutMs`, which is the wait it exists to bound.
         const done = () => { clearTimeout(timer); this.waiter = undefined; resolve(undefined); };
         this.waiter = done;
       });
