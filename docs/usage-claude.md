@@ -71,8 +71,13 @@ numeric window arithmetic.
 - `resets_at` is converted to exact `Date.toISOString()`. Absent or null omits the field, so
   freshness is `unknown`, never `fresh`. A present unparseable value is unavailable with
   `unsupported-reset`; it is not reported as a window with no reset metadata.
-- `organization.uuid` is `principalRef`. Absence is identity-unavailable, never a path-derived
-  principal. Names, email and account blocks never leave the process.
+- `organization.uuid` is `principalRef`. Absence or null is identity-unavailable. A present
+  blank, non-string, or oversize uuid is identity-malformed, never treated as absent and
+  never used as a pool key. Names, email and account blocks never leave the process.
+- `organization_type` (else `rate_limit_tier`) is optional `plan`. A blank or oversize
+  label is omitted; a nonempty label is kept.
+- `utilization` type, range, and finer-than-a-basis-point faults are three codes:
+  `unsupported-percent-type`, `unsupported-percent-range`, `unsupported-precision`.
 
 ## When there is no reading
 
