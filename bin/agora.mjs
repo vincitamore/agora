@@ -67,6 +67,8 @@ import { codexLiveness, codexSpawnWarning, codexThread, queueCodex, resolveCodex
 import { codexServerURL, deliverCodexServer } from "../src/codex-server.mjs";
 import { buildLabel, buildPredates, cacheTtls, clearWatchMode, installedBuild, touchWatchMode, watchModeSentinel } from "../src/harness.mjs";
 import { SERVICE_DARK, ServiceDarkError, openNativeSubscription, serviceDescriptorStatus, validateNativeRoomId } from "../src/wake/subscriber.mjs";
+import { assertRemoteDescriptor, openRemoteSubscription, readRemoteDescriptor, resolveSeatIdentity } from "../src/native-remote.mjs";
+import { readRouteSecret } from "../src/native-member.mjs";
 import { closeServiceRoute, createServiceRoom, listServiceRoutes, openServiceRoute, runService,
   seatAccountId, seatLabel, serviceStatus, startService, stopService } from "../src/service-cli.mjs";
 import { spawnFromFile } from "../src/spawn-cli.mjs";
@@ -149,7 +151,7 @@ const SCHEMA = {
       does: "force-drop a native board holder. The human label is cooperative (the caller supplies authorKind; the store refuses an agent label; the event records session and bearer). Slack and other transports have no board",
     },
     room: {
-      args: ["faces", "<room>"],
+      args: ["faces <room> | add-remote <alias> <descriptor-path>"],
       options: {
         "--add <transport>": `give the native room a face on this transport (${FACE_BUILT.join(", ")}); the token is borrowed from a configured room of that transport. A github face is the --via room's issue: one comment per faced post, no threads, no upload (an image faces as its link or its digest)`,
         "--via <room>": "with --add: the configured room whose token and target the face borrows (default: the one configured room of that transport); a github face takes its repo and issue from here",
@@ -165,7 +167,7 @@ const SCHEMA = {
         "--face <transport>": "which face an edit applies to, when the room has more than one",
         "--show": "print the record and change nothing (the default with no edit option)",
       },
-      does: "the face policy of a native room: which transports carry a copy of which of its posts, per author kind, read from and written to the seat's own state (never the shared config), with where the record lives and when it was last written. An unknown transport, selector or mode is refused by name and nothing is written",
+      does: "faces: the face policy of a native room — which transports carry a copy of which of its posts, per author kind, read from and written to the seat's own state (never the shared config), with where the record lives and when it was last written; an unknown transport, selector or mode is refused by name and nothing is written. add-remote: verify a route descriptor the operator carried from another seat's host and PRINT the native-remote room row to paste; it never writes the shared config, and the row carries no roomId because the descriptor's binding is the one source",
     },
     faces: {
       args: ["<room>"],
@@ -739,6 +741,21 @@ async function main(argv) {
     }
   }
 
+  // `room add-remote` refuses its own arguments before loadConfig, so a missing or unreadable
+  // config cannot steal the usage code from a missing alias or path. Present is not the same as
+  // well formed: an alias that cannot name a room is refused here too, or a malformed one would
+  // reach loadConfig and exit 1 where the rule wants 2. The twin — both arguments given, with
+  // AGORA_CONFIG at a path that does not exist — must still REACH config and exit 1, which the
+  // alias-collision check below is what makes true.
+  if (verb === "room" && roomAlias === "add-remote") {
+    if (rest[0] === undefined || rest[1] === undefined)
+      throw new AgoraError("agora room add-remote needs <alias> <descriptor-path>", EXIT.usage);
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(String(rest[0])))
+      throw new AgoraError("a room alias starts with a letter or digit and carries letters, digits, dot, underscore or hyphen", EXIT.usage);
+    if (!String(rest[1]).trim())
+      throw new AgoraError("agora room add-remote needs a descriptor path", EXIT.usage);
+  }
+
   const cfg = await loadConfig(values.config);
   const json = Boolean(values.json);
   const build = await installedBuild({ version, root: projectRoot, entry: entryFile });
@@ -1252,6 +1269,36 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
   }
 
   if (verb === "room") {
+    // `agora room add-remote <alias> <descriptor-path>`: validates the route descriptor the
+    // operator carried and PRINTS the config row. It does not write agora.json — the tool never
+    // writes the shared config, the same standing prohibition that keeps `service room create`
+    // to printing an id. The row carries no roomId: the room is descriptor.binding.roomId, which
+    // the descriptor's own digest covers, and a second source beside it could disagree in silence.
+    if (roomAlias === "add-remote") {
+      const alias = String(rest[0]);
+      const file = resolvePath(String(rest[1]));
+      const existing = cfg.rooms[alias];
+      if (existing)
+        throw new AgoraError(`room "${alias}" is already configured as a ${existing.transport} room in ${cfg.path}; choose another alias`);
+      const descriptor = await readRemoteDescriptor(file);
+      const seat = await resolveSeatIdentity(stateRoot);
+      assertRemoteDescriptor(descriptor, { stateRoot, nodeKey: seat.nodeKey });
+      // Resolve the secret too: it is the half that arrives by a git checkout, so it is the half
+      // whose mode is actually wrong, and finding that here beats finding it on the first dial.
+      await readRouteSecret(stateRoot, descriptor.binding, descriptor.proofRef);
+      const row = { transport: "native-remote", descriptor: file };
+      if (json) {
+        console.log(JSON.stringify({ type: "room", action: "add-remote", alias, row, config: cfg.path,
+          roomId: descriptor.binding.roomId, host: descriptor.binding.host.id, member: descriptor.binding.accountId,
+          written: false }));
+      } else {
+        console.log(`descriptor ${file} verified: room ${descriptor.binding.roomId} on host ${descriptor.binding.host.id}, this seat posts as ${descriptor.binding.accountId}`);
+        console.log(`the route secret named by ${descriptor.proofRef} resolves and its mode is private`);
+        console.log(`\nadd this to "rooms" in ${cfg.path} yourself (agora never writes the shared config):\n`);
+        console.log(`  ${JSON.stringify(alias)}: ${JSON.stringify(row, null, 2).split("\n").join("\n  ")}`);
+      }
+      return EXIT.ok;
+    }
     // `agora room faces <room>`: the one admin verb of the face policy. The record is the seat's
     // own state under native/rooms/<roomId>/faces.json; the shared config is read and never written.
     if (roomAlias !== "faces") throw new AgoraError(`room takes "faces" (agora room faces <room> ...)${roomAlias ? `, not "${roomAlias}"` : ""}`, EXIT.usage);
@@ -1776,10 +1823,16 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
        * @type {import('../src/wake/subscriber.mjs').NativeSubscription | undefined}
        */
       let subscription;
-      if (room.transport === "native") {
+      if (room.transport === "native" || room.transport === "native-remote") {
         try {
-          subscription = await openNativeSubscription({ stateRoot, roomId: transport.room, since: seeded.cursor });
-          console.error(`agora: subscribed to ${roomAlias} through the seat service (${subscription.seat.seatLabel}); events wake this watch, nothing polls`);
+          // Same subscription contract either way, so the loop below is the same loop: a local
+          // room subscribes through this seat's service, a remote one over its Tailcat member
+          // channel. The remote opener lives in src/native-remote.mjs behind the same
+          // NativeSubscription shape, so nothing in src/wake/subscriber.mjs moves for it.
+          subscription = room.transport === "native"
+            ? await openNativeSubscription({ stateRoot, roomId: transport.room, since: seeded.cursor })
+            : await openRemoteSubscription({ room: /** @type {any} */ (transport).remote, since: seeded.cursor });
+          console.error(`agora: subscribed to ${roomAlias} through ${room.transport === "native" ? "the seat service" : "a member channel"} (${subscription.seat.seatLabel}); events wake this watch, nothing polls`);
           if (subscription.neverOffered) {
             const h = subscription.neverOffered;
             console.error(`agora: no position was saved for ${key}, so this watch starts at the newest window: committed positions ${h.from} to ${h.to} (${h.count}) were never offered to this session by it; run \`agora cursor ${roomAlias} --set ${h.from.split(":")[0]}:0\` to be offered them from the start`);

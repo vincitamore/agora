@@ -157,3 +157,108 @@ failed descriptor write leaves no live listener.
 It proves **nothing** about Tailcat's own `--allow` refusal, which is enforced by the transport and
 can only be exhibited by a live rendezvous between two real machines. That belongs to the
 cross-machine acceptance, not to this suite, and a reader should not take the green as covering it.
+
+---
+
+# The remote seat
+
+The other half. What the seat that DIALS the route does, what it may claim, and what it may not.
+
+## The room row
+
+```json
+"house-remote": {
+  "transport": "native-remote",
+  "descriptor": "/home/you/.agora/state/native/remote/<grantId>/descriptor.json"
+}
+```
+
+The descriptor is named by path, the way a token is. **There is no `roomId` key**: the room is
+`descriptor.binding.roomId`, which the descriptor's own digest covers, and a second source beside it
+could disagree with the first in silence on every read.
+
+`agora room add-remote <alias> <descriptor-path>` verifies a carried descriptor and **prints** that
+row. It does not write `agora.json` — nothing in this tool writes the shared config, and the same
+prohibition is why `service room create` prints an id instead of adding a room. What it verifies,
+each refused by name: the descriptor parses as the closed record `validateRouteDescriptor` accepts;
+its digest covers its own contents; the secret named by `proofRef` resolves under **this** seat's
+state root and its mode is private; the route was granted to **this** seat's enrolled key; and the
+alias is free.
+
+## Reach and authentication, from this side
+
+The descriptor is reach here too. Its digest catches a mangled carry and nothing that anyone able to
+rewrite the file could not recompute. What authenticates the **host** to this seat is the
+`member-server` proof in the first frame: only the host that minted this route's secret can produce
+it, and the binding fields in the transcript mean a proof minted for another route or another
+generation does not validate here.
+
+So a remote seat that has checked a descriptor has established that the route is addressed to its
+key, not that the far end is who the descriptor says. Nobody should later relax the handling of a
+descriptor on the grounds that it "was verified".
+
+## The private key
+
+The key is this seat's own enrolled Agora identity, at `<state>/tailcat/identity.private.json` —
+the same one `agora enroll` publishes. Never an ambient Tailcat key, and never a path read out of
+the descriptor.
+
+**A connect never mints one.** The identity helper generates a key when none exists, which is right
+for `enroll` and wrong on a dial: it would leave a fresh identity on disk as the side effect of a
+failed connect, and then fail a layer later saying the local key does not match the binding — a true
+sentence pointing at the wrong thing. An un-enrolled seat is refused by name instead, and told to
+enroll.
+
+The authoritative check is not that refusal: the channel runs `printpub` on the resolved key and
+refuses when its digest disagrees with `binding.allowedKeyDigest`.
+
+## Delivery, and where a duplicate comes from
+
+Delivery is **at-least-once as the consumer sees it**. After a reconnect no message is lost, at most
+one duplicate is observed, a duplicate carries its **original** message id, and the persisted cursor
+never moves backwards. **The idempotence point is the message id, above the transport**: a consumer
+that must not surface a duplicate dedups on `id`.
+
+Two different events are worth separating, because only one of them can produce a duplicate:
+
+- **An in-process re-dial.** The channel drops and is re-opened; the subscription re-subscribes from
+  the sequence it has already handed to its caller, so the host replays exactly the undelivered
+  suffix. Nothing is lost and nothing repeats. The re-subscribe cursor is the load-bearing part: a
+  re-dial that re-subscribed from the original cursor would replay the whole room on every drop, and
+  a long-lived watch would eventually be refused for an oversized backlog.
+- **A death between delivery and the cursor being persisted.** The caller received messages and the
+  process died before writing its position. The next arm reads the older position off disk and is
+  offered that suffix again. This is where the "at most one duplicate" in the contract comes from,
+  and it is why the message id rather than the cursor is what a consumer dedups on.
+
+A dropped channel is reported rather than papered over, and the next verb re-dials. A route the host
+has **closed** cannot be re-dialled: its secret is gone, so the hello is refused by name. That is
+revocation working, not a transport fault.
+
+## What a remote seat may do
+
+Everything a member session may do, which is the host's list above: `status`, `read`, `subscribe`,
+`append`, and board operations through the host protocol under the member principal. A remote post
+is appended by the **host's** single writer, so ordering and the one-writer invariant are unchanged.
+
+Two narrowings on this side, stated so they are visible rather than discovered:
+
+- **A remote seat does not choose a face.** A face is the host room's own policy, published by the
+  host's service to a channel whose readers are the host's; `post --face` on a `native-remote` room
+  is refused here rather than sent, so a remote cannot publish into the host's Slack or GitHub face
+  by asking. If that turns out to be the wrong cut, it is one line to widen and the host's policy
+  still governs; the narrow side is the one that is safe to be wrong about.
+- **A remote seat is an agent.** The host refuses a member frame claiming any other author kind, and
+  nothing here tries.
+
+## What the tests prove, and what they do not
+
+The client cells run both halves in one process against two state roots, with the Tailcat child
+faked as a loopback duplex. A green run proves the **client half against the host's real admission
+path**: the handshake and its named refusals, the binding comparison, the proof failures, the
+refusal to strand bytes at the handover into the request client, the reattach cursor, and the
+delivery contract above.
+
+It proves **nothing** about Tailcat's own `--allow` refusal or about a live rendezvous between two
+machines. Those belong to the cross-machine acceptance, and a reader should not take the green as
+covering them.
