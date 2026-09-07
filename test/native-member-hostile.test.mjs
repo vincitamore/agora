@@ -114,6 +114,30 @@ test("T3 incomplete and oversized frame bytes cannot yield an append payload", (
   assert.throws(() => new NativeFrameDecoder().push(prefix), /invalid .*frame/);
 });
 
+test("T3 kill during the member handshake leaves the host log empty", async (t) => {
+  const { accept, service } = await fixture(t);
+  const socket = pair(); accept(socket.host);
+  await readUntil(socket.client, (frame) => frame.type === "member-server-hello");
+  // The peer disappears after receiving the greeting and before its client proof.
+  socket.client.end();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal((await service.openRoom(ROOM)).read({}).length, 0,
+    "a killed member handshake committed a record");
+});
+
+test("T3 kill during a member append leaves no partial frame committed", async (t) => {
+  const { accept, secret, service } = await fixture(t);
+  const socket = pair(); accept(socket.host);
+  assert.equal((await hello(socket.client, secret)).result.type, "member-welcome");
+  const append = encodeNativeFrame({ protocol: NATIVE_PROTOCOL, type: "append", requestId: "k".repeat(32), roomId: ROOM,
+    operation: { operationId: "l".repeat(32), authorName: "remote", text: "must not commit" } });
+  socket.client.write(append.subarray(0, append.length - 1));
+  socket.client.end();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal((await service.openRoom(ROOM)).read({}).length, 0,
+    "a killed append committed a partial record");
+});
+
 test("T3 route secrets reject selection, world-readable mode, and stale generations", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "agora-t3-secret-"));
   t.after(() => rm(root, { recursive: true, force: true }));
