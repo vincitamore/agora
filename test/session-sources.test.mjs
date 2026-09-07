@@ -11,6 +11,8 @@ import {
   disjointUncached,
   SESSION_SOURCE_HARNESSES,
   SESSION_SOURCE_CODES,
+  OVERLAP_BASIS,
+  resolveOverlap,
 } from '../src/usage/session-sources.mjs';
 import { validateSessionUsageRecord } from '../src/protocol/session-usage.mjs';
 
@@ -465,4 +467,65 @@ test('a blank model label is omitted, not a lost record; a nonempty label is kep
     cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 },
   })));
   assert.equal(kept.records[0].model, 'claude-opus-4-6');
+});
+
+// --- Overlap: absent is a basis, malformed is an error, and neither is a manufactured claim ----
+
+test('a malformed overlap is an error with a reason, never a relation', () => {
+  // Each refusal beside the SAME envelope with a usable overlap, so the cell shows that the
+  // malformed VALUE is refused and not that the field is unwelcome.
+  const ok = supported(decode('claude-code', claudeEnvelope({ input_tokens: 40, output_tokens: 10 }), {
+    context: { overlap: { relation: 'contained-in-parent', peerKey: 'parent-key' } },
+  }));
+  assert.deepEqual(ok.records[0].usage.overlap, { relation: 'contained-in-parent', peerKey: 'parent-key' });
+
+  for (const bad of ['contained-in-parent', null, 7, true]) {
+    const result = decode('claude-code', claudeEnvelope({ input_tokens: 40, output_tokens: 10 }), {
+      context: { overlap: bad },
+    });
+    const refused = rejected(result);
+    assert.equal(refused.code, SESSION_SOURCE_CODES.envelopeUnusable);
+    assert.equal(refused.reason, 'type:overlap');
+  }
+
+  // An explicit unknown is a real answer and is carried, not treated as malformed.
+  const unknown = supported(decode('claude-code', claudeEnvelope({ input_tokens: 40, output_tokens: 10 }), {
+    context: { overlap: { relation: 'unknown' } },
+  }));
+  assert.deepEqual(unknown.records[0].usage.overlap, { relation: 'unknown' });
+});
+
+test('an ABSENT overlap is none only where the harness has a written basis', () => {
+  // none is a positive claim a ledger sums on, so each of these rests on the source's structure,
+  // documented in OVERLAP_BASIS and in docs/session-sources.md.
+  const cases = [
+    ['claude-code', claudeEnvelope({ input_tokens: 40, output_tokens: 10 }), {}],
+    ['omp', ompEnvelope({ input_tokens: 40, output_tokens: 10 }), {}],
+    // Codex carries no request id of its own, so the caller supplies the opaque source id.
+    ['codex', codexEnvelope({ input_tokens: 40, output_tokens: 10 }, { input_tokens: 40, output_tokens: 10 }),
+      { sourceId: 'rollout:offset:12' }],
+    ['amore-build', amoreEnvelope({ 'grok-a': { input_tokens: 40, output_tokens: 10 } }), {}],
+  ];
+  for (const [harness, envelope, ctx] of cases) {
+    const result = supported(decode(/** @type {string} */ (harness), envelope,
+      { context: /** @type {Record<string, unknown>} */ (ctx) }));
+    for (const record of result.records) {
+      assert.deepEqual(record.usage.overlap, { relation: 'none' }, `${harness} states none on its basis`);
+    }
+  }
+});
+
+test('a harness with no written basis gets unknown, not an inherited none', () => {
+  // The structural guarantee, fired rather than asserted in prose: adding a harness to
+  // SESSION_SOURCE_HARNESSES without an OVERLAP_BASIS entry must not silently inherit `none`.
+  assert.deepEqual(resolveOverlap({}, 'a-future-harness'), { overlap: { relation: 'unknown' } });
+  // The twin: a listed harness still gets none, so the default did not swallow the basis.
+  assert.deepEqual(resolveOverlap({}, 'codex'), { overlap: { relation: 'none' } });
+  // And every shipped harness carries a basis, so today none of them takes the unknown branch.
+  for (const harness of SESSION_SOURCE_HARNESSES) {
+    assert.ok(Object.hasOwn(OVERLAP_BASIS, harness), `${harness} needs a written overlap basis`);
+  }
+  // A present overlap still wins over the basis, in both directions.
+  assert.deepEqual(resolveOverlap({ overlap: { relation: 'unknown' } }, 'codex'), { overlap: { relation: 'unknown' } });
+  assert.deepEqual(resolveOverlap({ overlap: 'nope' }, 'codex'), { malformed: 'type:overlap' });
 });

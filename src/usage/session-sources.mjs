@@ -19,6 +19,29 @@ import { validateSessionUsageRecord } from '../protocol/session-usage.mjs';
 
 export const SESSION_SOURCE_HARNESSES = Object.freeze(['claude-code', 'omp', 'codex', 'amore-build']);
 
+/**
+ * Why each harness may state `overlap: none` on an envelope that says nothing about overlap.
+ *
+ * `none` is a POSITIVE claim -- it asserts these counts overlap no other record's, and a ledger
+ * sums on it -- so it is stated only where the adapter saw the source structure and can support
+ * it. A harness absent from this table resolves to `unknown`, never `none`: unknown is a real
+ * answer, and inheriting a default someone else earned is how a silent double count starts.
+ *
+ * Every entry is a claim about the SOURCE, checkable against that source's own format:
+ * - `claude-code`: one assistant envelope is one request, so its counters cover that call alone.
+ * - `omp`: likewise, one envelope per request.
+ * - `codex`: a `token_count` payload is one cumulative snapshot of the session, not a slice of
+ *   another record.
+ * - `amore-build`: a `turn_completed` yields one aggregate per model, disjoint by construction
+ *   because a model's usage appears under exactly one `modelUsage` entry.
+ */
+export const OVERLAP_BASIS = Object.freeze({
+  'claude-code': 'envelope is one request',
+  omp: 'envelope is one request',
+  codex: 'token_count is one cumulative snapshot',
+  'amore-build': 'turn_completed yields per-model aggregates, disjoint by construction',
+});
+
 export const SESSION_SOURCE_CODES = Object.freeze({
   unknownHarness: 'session-source-harness-unknown',
   missingEnvelope: 'session-source-envelope-missing',
@@ -132,16 +155,25 @@ export function decodeSessionUsage(input) {
   if ('missing' in observedAt) return { status: 'error', code: CODE.observedAtMissing };
   if ('malformed' in observedAt) return { status: 'error', code: CODE.observedAtMalformed, reason: observedAt.reason };
 
+  // Resolved ONCE here, so the four decoders cannot disagree about it and none of them can
+  // manufacture a relation. A record the contract itself refuses still fails in wrap(), with
+  // reason contract:<field>.
+  const resolved = resolveOverlap(context, harness);
+  if ('malformed' in resolved) {
+    return { status: 'error', code: CODE.envelopeUnusable, reason: resolved.malformed };
+  }
+  const decodeContext = { ...context, overlap: resolved.overlap };
+
   if (harness === 'claude-code') {
-    return wrap(decodeClaude(input.envelope, epoch.id, harnessVersion, observedAt.value, context));
+    return wrap(decodeClaude(input.envelope, epoch.id, harnessVersion, observedAt.value, decodeContext));
   }
   if (harness === 'omp') {
-    return wrap(decodeOmp(input.envelope, epoch.id, harnessVersion, observedAt.value, context));
+    return wrap(decodeOmp(input.envelope, epoch.id, harnessVersion, observedAt.value, decodeContext));
   }
   if (harness === 'codex') {
-    return wrap(decodeCodex(input.envelope, epoch.id, harnessVersion, observedAt.value, context));
+    return wrap(decodeCodex(input.envelope, epoch.id, harnessVersion, observedAt.value, decodeContext));
   }
-  return wrap(decodeAmore(input.envelope, epoch.id, harnessVersion, observedAt.value, context));
+  return wrap(decodeAmore(input.envelope, epoch.id, harnessVersion, observedAt.value, decodeContext));
 }
 
 /** @param {unknown} result @returns {DecodeResult} */
@@ -479,10 +511,31 @@ function exactIso(value, field) {
   return { value: date.toISOString() };
 }
 
+/**
+ * Resolve the overlap a record will carry, or refuse.
+ *
+ * Three cases, kept apart on purpose. PRESENT AND USABLE: carried through verbatim. PRESENT AND
+ * NOT A RECORD: an error, never a default -- every other malformed field in this module produces
+ * a reason code, and overlap is the one place where quietly substituting a value would turn bad
+ * input into an assertion a consumer acts on. ABSENT: `none` only where this harness has a
+ * written basis in OVERLAP_BASIS, otherwise `unknown`.
+ * @param {Record<string, unknown>} context @param {string} harness
+ * @returns {{ overlap: Record<string, unknown> } | { malformed: string }}
+ */
+export function resolveOverlap(context, harness) {
+  if (Object.hasOwn(context, 'overlap') && context.overlap !== undefined) {
+    if (!isRecord(context.overlap)) return { malformed: 'type:overlap' };
+    return { overlap: context.overlap };
+  }
+  return Object.hasOwn(OVERLAP_BASIS, harness)
+    ? { overlap: { relation: 'none' } }
+    : { overlap: { relation: 'unknown' } };
+}
+
 /** @param {Record<string, unknown>} context */
 function overlapFrom(context) {
-  if (isRecord(context.overlap)) return context.overlap;
-  return { relation: 'none' };
+  // decodeSessionUsage has already resolved this; a decoder never re-derives it.
+  return /** @type {Record<string, unknown>} */ (context.overlap);
 }
 
 /**
