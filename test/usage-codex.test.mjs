@@ -206,3 +206,77 @@ test('an absent CLI is unsupported rather than an error, and nothing is spawned'
   assert.equal(result.code, 'codex-spawn-failed');
   assert.equal(spawned, false);
 });
+
+// --- Bounds: timeout, cancellation, and the process boundary. -----------------
+// These three exercise guards that had code and no fixture at the first freeze. Each names
+// the failure it demands, so a mutant that breaks the guard reddens THIS test and not merely
+// something. The spawner records every child it makes, so "only the helper we started" is
+// assertable rather than asserted in prose.
+
+/** A spawner that records its children, so cleanup can be measured rather than described. */
+function recordingSpawn(/** @type {(msg: any, reply: (frame: object) => void, child: any) => void} */ script) {
+  /** @type {any[]} */
+  const children = [];
+  const make = fakeSpawn(script);
+  const spawn = /** @type {any} */ (() => {
+    const child = make();
+    children.push(child);
+    return child;
+  });
+  return { spawn, children };
+}
+
+/** Answers `initialize` and then goes silent: the read is never answered. */
+const answersInitOnly = (/** @type {any} */ msg, /** @type {any} */ reply) => {
+  if (msg.method === 'initialize') reply({ id: msg.id, result: { ok: true } });
+  // account/rateLimits/read is deliberately never answered.
+};
+
+test('a server that never answers the read times out and does not hang', async () => {
+  const { spawn, children } = recordingSpawn(answersInitOnly);
+  const result = await collectCodexUsage({ poolId: POOL, producer: PRODUCER, now: NOW, spawn, resolveBinary, timeoutMs: 20 });
+  if (result.status === 'supported') return assert.fail('expected the read to time out');
+  assert.equal(result.status, 'unsupported');
+  assert.equal(result.code, 'codex-timeout');
+  // The budget is the whole contract here: without it this test would never return.
+  assert.equal(children.length, 1);
+  assert.equal(children[0].killed, true, 'the helper must be stopped when the budget expires');
+});
+
+test('an abort mid-flight is cancelled, not timed out, and stops the helper', async () => {
+  const controller = new AbortController();
+  const { spawn, children } = recordingSpawn((msg, reply) => {
+    if (msg.method === 'initialize') { reply({ id: msg.id, result: { ok: true } }); controller.abort(); }
+  });
+  const result = await collectCodexUsage({
+    poolId: POOL, producer: PRODUCER, now: NOW, spawn, resolveBinary,
+    timeoutMs: 60_000, signal: controller.signal,
+  });
+  if (result.status === 'supported') return assert.fail('expected the read to be cancelled');
+  assert.equal(result.status, 'unsupported');
+  // Distinguishing cancelled from timeout is the point: a generous budget is still running.
+  assert.equal(result.code, 'codex-cancelled');
+  assert.equal(children[0].killed, true, 'an aborted read must stop the helper it started');
+});
+
+test('a signal already aborted cancels without waiting for the budget', async () => {
+  const { spawn, children } = recordingSpawn(answersInitOnly);
+  const result = await collectCodexUsage({
+    poolId: POOL, producer: PRODUCER, now: NOW, spawn, resolveBinary,
+    timeoutMs: 60_000, signal: AbortSignal.abort(),
+  });
+  if (result.status === 'supported') return assert.fail('expected an immediate cancellation');
+  assert.equal(result.code, 'codex-cancelled');
+  assert.equal(children[0].killed, true);
+});
+
+test('cleanup stops only the helper this call started, never a peer process', async () => {
+  // A peer the collector never started: another session's helper, standing in the same host.
+  const peer = { killed: false, kill() { this.killed = true; return true; } };
+  const { spawn, children } = recordingSpawn(answersInitOnly);
+  const result = await collectCodexUsage({ poolId: POOL, producer: PRODUCER, now: NOW, spawn, resolveBinary, timeoutMs: 20 });
+  assert.equal(result.status, 'unsupported');
+  assert.equal(children.length, 1, 'exactly one helper is started per read');
+  assert.equal(children[0].killed, true);
+  assert.equal(peer.killed, false, 'a process this collector did not start is never signalled');
+});
