@@ -128,8 +128,28 @@ function jsonResponse(status, body, extra = {}) {
   const buf = Buffer.from(text);
   return {
     status,
-    arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
+    body: new ReadableStream({
+      start(controller) {
+        controller.enqueue(new Uint8Array(buf));
+        controller.close();
+      },
+    }),
     ...extra,
+  };
+}
+
+/** @param {unknown} body @param {number} delayMs */
+function delayedJson(body, delayMs) {
+  const buf = Buffer.from(JSON.stringify(body));
+  return {
+    status: 200,
+    body: new ReadableStream({
+      async pull(controller) {
+        await new Promise((r) => setTimeout(r, delayMs));
+        controller.enqueue(new Uint8Array(buf));
+        controller.close();
+      },
+    }),
   };
 }
 
@@ -237,48 +257,74 @@ test('public path capturedAt comes from the injected clock', async () => {
   assert.equal(result.observation.capturedAt, '2026-09-07T00:20:00.000Z');
 });
 
-test('a 5ms budget still times out when arrayBuffer is delayed 25ms per request', async () => {
-  /** @param {unknown} body */
-  const delayed = (body) => ({
-    status: 200,
-    arrayBuffer: async () => {
-      await new Promise((r) => setTimeout(r, 25));
-      const buf = Buffer.from(JSON.stringify(body));
-      return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
-    },
-  });
+test('a 5ms budget times out a stream whose pull never resolves', async () => {
   const started = Date.now();
   const result = await collectClaudeUsage({
     poolId: POOL, producer: PRODUCER, now: NOW, timeoutMs: 5, readCredential,
-    fetch: async (url) => delayed(String(url).includes('profile') ? profile : threeWindowUsage),
+    fetch: async () => ({
+      status: 200,
+      body: new ReadableStream({ pull() { return new Promise(() => {}); } }),
+    }),
   });
   assert.equal(result.status, 'unsupported');
   assert.equal(result.code, 'claude-timeout');
   assert.ok(Date.now() - started < 200);
 });
 
-test('abort during the profile body is cancelled, not supported', async () => {
+test('a 5ms budget still times out when stream pull is delayed 25ms', async () => {
+  const started = Date.now();
+  const result = await collectClaudeUsage({
+    poolId: POOL, producer: PRODUCER, now: NOW, timeoutMs: 5, readCredential,
+    fetch: async (url) => delayedJson(String(url).includes('profile') ? profile : threeWindowUsage, 25),
+  });
+  assert.equal(result.status, 'unsupported');
+  assert.equal(result.code, 'claude-timeout');
+  assert.ok(Date.now() - started < 200);
+});
+
+test('abort during the final profile read(done) is cancelled, not supported', async () => {
   const controller = new AbortController();
+  let pulls = 0;
   const result = await collectClaudeUsage({
     poolId: POOL, producer: PRODUCER, now: NOW, signal: controller.signal, timeoutMs: 5000, readCredential,
     fetch: async (url) => {
-      if (String(url).includes('profile')) {
-        return {
-          status: 200,
-          arrayBuffer: async () => {
+      if (!String(url).includes('profile')) return jsonResponse(200, threeWindowUsage);
+      const buf = Buffer.from(JSON.stringify(profile));
+      return {
+        status: 200,
+        body: new ReadableStream({
+          pull(c) {
+            pulls += 1;
+            if (pulls === 1) {
+              c.enqueue(new Uint8Array(buf));
+              return;
+            }
             controller.abort();
-            await new Promise((r) => setTimeout(r, 25));
-            const buf = Buffer.from(JSON.stringify(profile));
-            return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+            c.close();
           },
-        };
-      }
-      const buf = Buffer.from(JSON.stringify(threeWindowUsage));
-      return { status: 200, arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) };
+        }),
+      };
     },
   });
   assert.equal(result.status, 'unsupported');
   assert.equal(result.code, 'claude-cancelled');
+});
+
+test('a body without a stream is refused and arrayBuffer is never called', async () => {
+  let allocated = 0;
+  const result = await collectClaudeUsage({
+    poolId: POOL, producer: PRODUCER, now: NOW, readCredential,
+    fetch: async () => ({
+      status: 200,
+      arrayBuffer: async () => {
+        allocated = 2_000_000;
+        return new ArrayBuffer(2_000_000);
+      },
+    }),
+  });
+  assert.equal(result.status, 'unsupported');
+  assert.equal(result.code, 'claude-body-unstreamed');
+  assert.equal(allocated, 0);
 });
 
 test('an oversized stream is refused without waiting for the whole body', async () => {

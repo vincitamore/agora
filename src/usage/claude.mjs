@@ -21,9 +21,9 @@ export const CLAUDE_LIMITS = Object.freeze({ timeoutMs: 15000, maxBytes: 1_048_5
 /** @typedef {(path?: string) => Promise<string>} CredentialFn */
 
 /** @param {FetchResponse} response */
-async function disposeBody(response) {
+function disposeBody(response) {
   try {
-    if (response.body && typeof response.body.cancel === 'function') await response.body.cancel();
+    if (response.body && typeof response.body.cancel === 'function') void response.body.cancel();
   } catch { /* already gone */ }
 }
 
@@ -34,54 +34,55 @@ async function disposeBody(response) {
  */
 async function readBoundedBody(response, maxBytes, signal) {
   if (signal.aborted) {
-    await disposeBody(response);
+    disposeBody(response);
     return { ok: false, code: abortCode(signal) };
   }
   const length = Number(response.headers?.get?.('content-length'));
   if (Number.isFinite(length) && length > maxBytes) {
-    await disposeBody(response);
+    disposeBody(response);
     return { ok: false, code: CODE.oversized };
   }
   const reader = response.body && typeof response.body.getReader === 'function' ? response.body.getReader() : null;
-  if (reader) {
-    const chunks = [];
-    let total = 0;
-    try {
-      while (true) {
-        if (signal.aborted) {
-          try { await reader.cancel(); } catch { /* already gone */ }
-          return { ok: false, code: abortCode(signal) };
-        }
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (value) {
-          total += value.byteLength;
-          if (total > maxBytes) {
-            try { await reader.cancel(); } catch { /* already gone */ }
-            return { ok: false, code: CODE.oversized };
-          }
-          chunks.push(Buffer.from(value));
-        }
-      }
-      return { ok: true, buf: chunks.length ? Buffer.concat(chunks) : Buffer.alloc(0) };
-    } catch {
-      try { await reader.cancel(); } catch { /* already gone */ }
-      return { ok: false, code: signal.aborted ? abortCode(signal) : CODE.provider };
-    }
+  if (!reader) {
+    disposeBody(response);
+    return { ok: false, code: CODE.unstreamed };
   }
-  if (typeof response.arrayBuffer !== 'function') return { ok: false, code: CODE.badJson };
-  const abortPromise = new Promise((_, reject) => {
+  const abortWait = () => new Promise((_, reject) => {
     if (signal.aborted) reject(new Error('aborted'));
     signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
   });
+  const chunks = [];
+  let total = 0;
   try {
-    const ab = await Promise.race([response.arrayBuffer(), abortPromise]);
-    if (signal.aborted) return { ok: false, code: abortCode(signal) };
-    const buf = Buffer.from(ab);
-    if (buf.byteLength > maxBytes) return { ok: false, code: CODE.oversized };
-    return { ok: true, buf };
+    while (true) {
+      if (signal.aborted) {
+        try { void reader.cancel(); } catch { /* already gone */ }
+        return { ok: false, code: abortCode(signal) };
+      }
+      const chunk = await Promise.race([reader.read(), abortWait()]);
+      if (signal.aborted) {
+        try { void reader.cancel(); } catch { /* already gone */ }
+        return { ok: false, code: abortCode(signal) };
+      }
+      if (chunk.done) {
+        if (signal.aborted) {
+          try { void reader.cancel(); } catch { /* already gone */ }
+          return { ok: false, code: abortCode(signal) };
+        }
+        break;
+      }
+      if (chunk.value) {
+        total += chunk.value.byteLength;
+        if (total > maxBytes) {
+          try { void reader.cancel(); } catch { /* already gone */ }
+          return { ok: false, code: CODE.oversized };
+        }
+        chunks.push(Buffer.from(chunk.value));
+      }
+    }
+    return { ok: true, buf: chunks.length ? Buffer.concat(chunks) : Buffer.alloc(0) };
   } catch {
-    await disposeBody(response);
+    try { void reader.cancel(); } catch { /* already gone */ }
     return { ok: false, code: signal.aborted ? abortCode(signal) : CODE.provider };
   }
 }
@@ -110,6 +111,7 @@ const CODE = Object.freeze({
   provider: 'claude-provider-error',
   noQuota: 'claude-no-quota-reported',
   badQuota: 'claude-quota-shape-unsupported',
+  unstreamed: 'claude-body-unstreamed',
 });
 
 const ALLOWED_CODES = new Set(Object.values(CODE));
@@ -285,15 +287,15 @@ async function getJson(options) {
       return { ok: false, code: controller.signal.reason === 'timeout' ? CODE.timeout : CODE.cancelled };
     }
     if (response.status >= 300 && response.status < 400) {
-      await disposeBody(response);
+      disposeBody(response);
       return { ok: false, code: CODE.redirect };
     }
     if (response.status === 401) {
-      await disposeBody(response);
+      disposeBody(response);
       return { ok: false, code: CODE.untilRefresh };
     }
     if (response.status !== 200) {
-      await disposeBody(response);
+      disposeBody(response);
       return { ok: false, code: CODE.provider };
     }
     const body = await readBoundedBody(response, CLAUDE_LIMITS.maxBytes, controller.signal);
