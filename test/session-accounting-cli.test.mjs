@@ -28,9 +28,11 @@ function run(args, env) {
 }
 
 test('usage-sessions requires --ledger-root', async () => {
-  const r = await run(['usage-sessions', '--json'], {});
+  const missingConfig = path.join(tmpdir(), `agora-no-config-${process.pid}.json`);
+  const r = await run(['usage-sessions', '--json'], { AGORA_CONFIG: missingConfig });
   assert.equal(r.code, 2);
   assert.match(r.stderr, /ledger-root/);
+  assert.doesNotMatch(r.stderr, /no config/);
   assert.equal(r.stdout, '');
 });
 

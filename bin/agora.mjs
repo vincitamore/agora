@@ -665,6 +665,10 @@ async function main(argv) {
   }
 
   if (verb === "usage-sessions") {
+    // Missing --ledger-root is exit 2 before loadConfig: a missing config must not steal the usage code.
+    if (values["ledger-root"] === undefined) {
+      throw new AgoraError("--ledger-root is required", EXIT.usage);
+    }
     const ac = new AbortController();
     const onStop = () => { try { ac.abort(); } catch { /* already aborted */ } };
     process.once("SIGINT", onStop);
