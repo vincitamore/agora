@@ -334,6 +334,27 @@ const BARE_IMPORT = /(?:^|[;\n])\s*import\s*["']([^"']+)["']/g;
  * while appearing to have been measured. */
 const REQUIRE_CALL = /(?<![.\w])require\s*\(/g;
 const REQUIRE_LITERAL = /(?<![.\w])require\s*\(\s*["'`]([^"'`]+)["'`]\s*\)/g;
+/**
+ * Computed loads that provably cannot name a repository file, listed one by one with the reason and
+ * the exact count.
+ *
+ * This is DATA a reader can audit, not a heuristic. It exists because the alternative is worse in a
+ * specific way: the whole 53-file closure of the entry contains exactly one computed load, a chooser
+ * between the builtins `bun:sqlite` and `node:sqlite`, and treating it as a hole makes the real
+ * closure permanently unmeasurable — so every watch reports "unknown", forever, safely, uselessly,
+ * and while appearing to have been measured. That is the failure this unit exists to remove.
+ *
+ * It fails CLOSED in both directions. A computed load in any file not listed here is a hole. A
+ * SECOND computed load in a listed file exceeds its count and is a hole, so the exemption cannot
+ * silently widen to cover a new one. And a listed file that no longer has that many is a stale
+ * entry, which a cell catches rather than a reader having to notice.
+ */
+export const COMPUTED_LOAD_EXEMPTIONS = Object.freeze({
+  "src/native-service.mjs": Object.freeze({
+    imports: 1, requires: 0,
+    why: "one dynamic import choosing between the builtins bun:sqlite and node:sqlite; neither is a path and neither can be a repository file",
+  }),
+});
 
 /**
  * Every repository file reachable from `entry` by a static import, plus whether that set can be
@@ -344,7 +365,7 @@ const REQUIRE_LITERAL = /(?<![.\w])require\s*\(\s*["'`]([^"'`]+)["'`]\s*\)/g;
  * member can do is report a re-arm that is not needed.
  *
  * @param {{ entry: string, root: string, read?: (file: string) => string }} opts
- * @returns {{ files: Set<string>, complete: boolean, reason?: string }}
+ * @returns {{ files: Set<string>, complete: boolean, reason?: string, caveats?: string[] }}
  */
 export function importClosure(opts) {
   const read = opts.read ?? ((/** @type {string} */ file) => readFileSync(file, "utf8"));
@@ -357,6 +378,9 @@ export function importClosure(opts) {
   let complete = true;
   /** @type {string | undefined} */
   let reason;
+  /** Computed loads that provably cannot name a repository file. See `RELATIVE_LITERAL`. */
+  /** @type {string[]} */
+  const caveats = [];
   const incomplete = (/** @type {string} */ why) => { if (complete) { complete = false; reason = why; } };
 
   while (queue.length) {
@@ -378,14 +402,20 @@ export function importClosure(opts) {
 
     // A load the static graph cannot resolve makes the whole closure a non-superset, which is the
     // one thing that must never be reported as inert. A load it CAN resolve simply joins it.
-    const dynamic = (source.match(DYNAMIC_IMPORT) ?? []).length;
-    const dynamicLiteral = (source.match(DYNAMIC_LITERAL) ?? []).length;
-    if (dynamic > dynamicLiteral)
-      incomplete(`${relative} has ${dynamic - dynamicLiteral} dynamic import call(s) with a computed specifier`);
-    const requires = (source.match(REQUIRE_CALL) ?? []).length;
-    const requireLiterals = (source.match(REQUIRE_LITERAL) ?? []).length;
-    if (requires > requireLiterals)
-      incomplete(`${relative} has ${requires - requireLiterals} require call(s) with a computed specifier`);
+    // A computed specifier is a hole in the closure unless it is one of the counted, reasoned
+    // exemptions above. Exceeding the count is a hole, so a new computed load never hides behind an
+    // old exemption.
+    const key = relative.split(path.sep).join("/");
+    const exempt = /** @type {Record<string, { imports: number, requires: number, why: string }>} */
+      (COMPUTED_LOAD_EXEMPTIONS)[key];
+    const computed = (/** @type {string} */ label, /** @type {RegExp} */ all, /** @type {RegExp} */ literal, /** @type {number} */ allowed) => {
+      const n = (source.match(all) ?? []).length - (source.match(literal) ?? []).length;
+      if (n <= 0) return;
+      if (n <= allowed) caveats.push(`${key}: ${n} ${label} with a computed specifier, exempt because ${/** @type {any} */ (exempt).why}`);
+      else incomplete(`${key} has ${n} ${label} with a computed specifier and only ${allowed} exempted; the closure cannot be shown to be a superset of what it loads`);
+    };
+    computed("dynamic import call(s)", DYNAMIC_IMPORT, DYNAMIC_LITERAL, exempt?.imports ?? 0);
+    computed("require call(s)", REQUIRE_CALL, REQUIRE_LITERAL, exempt?.requires ?? 0);
 
     for (const pattern of [FROM_SPEC, BARE_IMPORT, DYNAMIC_LITERAL, REQUIRE_LITERAL]) {
       pattern.lastIndex = 0;
@@ -397,7 +427,7 @@ export function importClosure(opts) {
       }
     }
   }
-  return { files, complete, ...(reason ? { reason } : {}) };
+  return { files, complete, ...(reason ? { reason } : {}), ...(caveats.length ? { caveats } : {}) };
 }
 
 /**
@@ -407,6 +437,7 @@ export function importClosure(opts) {
  * @property {string[]} changed the repository files that moved AND are on the import graph
  * @property {number} [scanned] how many files changed between the two builds in all
  * @property {string} [reason] why the answer is unknown, in words a seat can act on
+ * @property {string[]} [caveats] computed loads the closure judged unable to name a repository file
  */
 
 /**
@@ -474,6 +505,7 @@ export async function watchModuleDelta(opts) {
   if (!closure.complete && changed.length === 0)
     return { state: "unknown", changed: [], scanned,
       reason: `nothing on the measured import graph moved, but the graph is not provably complete: ${closure.reason}` };
-  if (changed.length === 0) return { state: "inert", changed: [], scanned };
+  if (changed.length === 0) return { state: "inert", changed: [], scanned,
+    ...(closure.caveats ? { caveats: closure.caveats } : {}) };
   return { state: "owed", changed, scanned };
 }
