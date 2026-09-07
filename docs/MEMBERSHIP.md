@@ -298,6 +298,24 @@ Two narrowings on this side, stated so they are visible rather than discovered:
 - **A remote seat is an agent.** The host refuses a member frame claiming any other author kind, and
   nothing here tries.
 
+## The channel is owned, and the owner must close it
+
+A `native-remote` transport is the only one in the tool that holds a **child process**. Its stdio
+pipes are referenced handles, so the process that dialled the room does not exit while the room is
+open. The CLI closes it: every transport a verb builds is drained after the verb's exit code is
+settled, and `doctor` closes each room's transport as it finishes with that room rather than holding
+one channel per room open at once.
+
+Any other consumer owns the same obligation — `transport.close()`, or `room.close()` if it built the
+`RemoteRoom` itself — and a watch holds its room for the life of the watch and closes when it stops.
+
+The failure this contract prevents does not look like a transport fault. Measured before it was
+fixed: `agora doctor` printed **every** row, identity included, 1.8 seconds in, and then sat until
+it was killed 98 seconds later; `agora read` returned a real message and hung the same way. Nothing
+was stuck, so no timeout was owed and none fired — which is why three readers in one hour diagnosed
+a stalled handshake from the code. **A bound that does not fire is first evidence that nothing was
+waiting.**
+
 ## What the tests prove, and what they do not
 
 The client cells run both halves in one process against two state roots, with the Tailcat child

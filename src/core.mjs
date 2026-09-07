@@ -83,6 +83,14 @@ const execFileAsync = promisify(execFile);
  * @property {(opts?: ReadOptions) => Promise<ReadResult>} read
  * @property {(text: string, opts?: PostOptions) => Promise<PostResult>} post
  * @property {(payload: { action: string, subject: string, because?: string, leaseId?: string, fence?: string, leaseMs?: number }) => Promise<unknown>} [board] native rooms: a typed board event, not a chat message
+ * @property {() => Promise<void>} [close] release what this transport holds OPEN, once the caller
+ *   is done with it. Optional because most transports hold nothing: a Slack or GitHub transport is
+ *   a `fetch` closure, and a finished request references nothing. A transport that owns a live
+ *   handle — a child process, a socket, a pipe — must implement this, because Node exits when the
+ *   loop empties and a referenced handle means a verb that has already printed its answer never
+ *   returns. Measured on `native-remote`: `doctor` printed every row in 1.8 s and then sat until
+ *   SIGKILL 98 s later. Must be idempotent and must never throw; teardown after the answer is
+ *   printed cannot be allowed to fail the verb that succeeded.
  * @property {(cursor: string) => string | undefined} [validateCursor] why this string is not a
  *   cursor here, or nothing. `cursor --set` asks before it writes, so a shape the transport can
  *   never read is refused at the boundary instead of throwing on every later read.

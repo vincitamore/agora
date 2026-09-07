@@ -652,6 +652,15 @@ function envPrefix(session, bearer) {
   ];
 }
 
+/** Transports built by a verb that own something the event loop references. Drained after `main`
+ * resolves, in one place, because `main` returns from some forty sites inside one switch and a
+ * `finally` at each of them is a rule that holds only until the next verb is written. Holds the
+ * closers rather than the transports, called through the transport so `this` is its own: a set of
+ * transports would need the checker told that `close` is present, and casting there is how a
+ * declared contract stops being checked at the one site that matters.
+ * @type {Set<() => Promise<void> | void>} */
+const openTransports = new Set();
+
 /** @param {string[]} argv */
 async function main(argv) {
   /** @type {ReturnType<typeof parseArgs<{ options: typeof OPTIONS, allowPositionals: true, strict: true }>>} */
@@ -1136,12 +1145,18 @@ async function main(argv) {
       }
       if (report.token === "missing" && TRANSPORTS[/** @type {keyof typeof TRANSPORTS} */ (room.transport)]?.needsToken) bad++;
       if (!values.offline && report.token !== "missing") {
+        /** @type {import("../src/core.mjs").Transport | undefined} */
+        let t;
         try {
-          const t = await createTransport(alias, room, cfg);
+          t = await createTransport(alias, room, cfg);
           report.identity = await t.whoami();
         } catch (e) {
           report.error = redact(e instanceof Error ? e.message : String(e));
           bad++;
+        } finally {
+          // Closed per room rather than at the end, so probing ten rooms never holds ten channels
+          // open at once. `whoami` on a native-remote room dials a real one.
+          await t?.close?.();
         }
       }
       if (json) console.log(JSON.stringify(report));
@@ -1475,6 +1490,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
     session: session.slug,
     ...(materializeFiles ? { mediaDir: path.join(sdir, "media", roomAlias) } : {}),
   });
+  if (transport.close) openTransports.add(() => transport.close?.());
   const thread = values.thread;
   if (thread && !transport.threads) throw new AgoraError(`${transport.kind} rooms have no threads`, EXIT.usage);
   // Validation belongs at the caller boundaries only. An id typed here (or into --re) is a usage
@@ -2203,4 +2219,9 @@ main(process.argv.slice(2)).then(
     console.error(redact(`agora: ${msg}`));
     process.exitCode = code;
   },
-);
+).finally(async () => {
+  // After the exit code is settled and the output is written: releasing a channel must never
+  // change what the verb reported, and a failure here is not the verb's failure.
+  for (const close of openTransports) { try { await close(); } catch { /* nothing left to report to */ } }
+  openTransports.clear();
+});
