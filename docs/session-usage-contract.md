@@ -116,6 +116,22 @@ Why carry it at all, in a module that prices nothing: a provider's own figure is
 independent check on a cost derived from token counts and a rate table, and the rate is the input
 most likely to be stale.
 
+## Blank is not a value
+
+Every string in this contract that must *say* something — `harness`, `sessionEpoch`, `sourceId`,
+`harnessVersion`, `model`, `member`, `peerKey`, a cost `unit`, and every `reason` — is refused
+when it is empty once trimmed.
+
+A minimum length counts characters and a space is a character, so `min: 1` admitted `" "`: a
+value that is present, well-formed, and names nothing. For a key component that produces a real,
+addressable identity for no source. For a `reason` it satisfies "unsupported **with a reason**"
+vacuously, which is the exact rule the reason exists to enforce. For an opaque `unit` it gives a
+consumer a bucket whose name is nothing.
+
+The refusal does **not** trim what it accepts. An opaque foreign identifier is stored verbatim,
+surrounding whitespace included, because silently rewriting a source's own identifier is the same
+class of harm as accepting a blank one.
+
 ## Coverage
 
 `coverage` (`complete` / `partial` / `none`) is stated by the adapter, not derived from which keys

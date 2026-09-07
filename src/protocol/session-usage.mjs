@@ -77,6 +77,27 @@ function isRecordLike(value) {
 }
 
 /**
+ * A string that must actually SAY something: `readString` plus a refusal of a value that is
+ * empty once trimmed.
+ *
+ * A minimum length counts characters, and a space is a character, so `min: 1` admits " " -- a
+ * value that is present, well-formed, and names nothing. That is the blank-identity class: for a
+ * key component it produces a real, addressable identity for no source; for a `reason` it
+ * satisfies "unsupported WITH a reason" vacuously, which is the exact rule the reason exists to
+ * enforce; for an opaque `unit` it gives a consumer a bucket whose name is nothing.
+ *
+ * The value is still stored VERBATIM. This refuses a blank; it does not trim what it accepts,
+ * because trimming an opaque foreign identifier would silently rewrite it.
+ * @param {unknown} value @param {string} field
+ * @param {{min?: number, max: number, controls?: boolean}} options
+ */
+function readMeaningfulString(value, field, options) {
+  const s = readString(value, field, options);
+  if (s.trim() === '') throw new ProtocolUsageError('context', field);
+  return s;
+}
+
+/**
  * A single counter.
  *
  * `known` carries an integer and a unit. The other three carry NEITHER, deliberately: attaching a
@@ -99,7 +120,7 @@ export function validateCounter(value) {
     return {
       state,
       ...(Object.hasOwn(v, 'reason')
-        ? { reason: readString(v.reason, 'reason', { max: SESSION_USAGE_LIMITS.reasonBytes }) }
+        ? { reason: readMeaningfulString(v.reason, 'reason', { max: SESSION_USAGE_LIMITS.reasonBytes }) }
         : {}),
     };
   }
@@ -139,7 +160,7 @@ export function validateSourceReportedCost(value) {
     return {
       state,
       ...(Object.hasOwn(v, 'reason')
-        ? { reason: readString(v.reason, 'reason', { max: SESSION_USAGE_LIMITS.reasonBytes }) }
+        ? { reason: readMeaningfulString(v.reason, 'reason', { max: SESSION_USAGE_LIMITS.reasonBytes }) }
         : {}),
     };
   }
@@ -147,7 +168,7 @@ export function validateSourceReportedCost(value) {
     state: /** @type {const} */ ('known'),
     // An integer in the source's own unit. Ticks stay ticks; converting here would invent a rate.
     amount: readInteger(v.amount, 'amount', 0, SESSION_USAGE_LIMITS.maxCounterValue),
-    unit: readString(v.unit, 'unit', { min: 1, max: SESSION_USAGE_LIMITS.costUnitBytes, controls: true }),
+    unit: readMeaningfulString(v.unit, 'unit', { min: 1, max: SESSION_USAGE_LIMITS.costUnitBytes, controls: true }),
   };
 }
 
@@ -177,19 +198,19 @@ export function validateSourceIdentity(value) {
     ['harness', 'sessionEpoch', 'sourceId', 'sourceUnit', 'finality'],
     ['harnessVersion', 'revision'],
   );
-  const sourceId = readString(v.sourceId, 'sourceId', {
+  const sourceId = readMeaningfulString(v.sourceId, 'sourceId', {
     min: 1, max: SESSION_USAGE_LIMITS.sourceIdBytes, controls: true,
   });
   return {
     // P6: all three key components refuse control characters, not just sourceId. A key
     // component that may contain NUL or a newline is a key component that can be forged.
-    harness: readString(v.harness, 'harness', { min: 1, max: SESSION_USAGE_LIMITS.harnessBytes, controls: true }),
-    sessionEpoch: readString(v.sessionEpoch, 'sessionEpoch', { min: 1, max: 128, controls: true }),
+    harness: readMeaningfulString(v.harness, 'harness', { min: 1, max: SESSION_USAGE_LIMITS.harnessBytes, controls: true }),
+    sessionEpoch: readMeaningfulString(v.sessionEpoch, 'sessionEpoch', { min: 1, max: 128, controls: true }),
     sourceId,
     sourceUnit: readEnum(v.sourceUnit, 'sourceUnit', SOURCE_UNITS),
     finality: readEnum(v.finality, 'finality', FINALITY),
     ...(Object.hasOwn(v, 'harnessVersion')
-      ? { harnessVersion: readString(v.harnessVersion, 'harnessVersion', { min: 1, max: SESSION_USAGE_LIMITS.versionBytes }) }
+      ? { harnessVersion: readMeaningfulString(v.harnessVersion, 'harnessVersion', { min: 1, max: SESSION_USAGE_LIMITS.versionBytes }) }
       : {}),
     // A revision ORDINAL, supplied by the source. Its absence is not "first"; it is unknown.
     ...(Object.hasOwn(v, 'revision') ? { revision: readInteger(v.revision, 'revision', 0) } : {}),
@@ -254,7 +275,7 @@ export function validateOverlap(value) {
   const v = readRecord(value, ['relation'], ['peerKey']);
   const relation = readEnum(v.relation, 'relation', OVERLAP_RELATIONS);
   if (relation === 'contained-in-parent' || relation === 'contains-child') {
-    return { relation, peerKey: readString(v.peerKey, 'peerKey', { min: 1, max: 1024, controls: true }) };
+    return { relation, peerKey: readMeaningfulString(v.peerKey, 'peerKey', { min: 1, max: 1024, controls: true }) };
   }
   if (Object.hasOwn(v, 'peerKey')) throw new ProtocolUsageError('context', 'peerKey');
   return { relation };
@@ -270,13 +291,13 @@ export function validateMemberCoverage(value) {
   const state = readEnum(v.state, 'state', /** @type {const} */ (['measured', 'unsupported']));
   if (state === 'unsupported') {
     return {
-      member: readString(v.member, 'member', { min: 1, max: 128 }),
+      member: readMeaningfulString(v.member, 'member', { min: 1, max: 128 }),
       state,
       // An unsupported member must say why, or the inventory cannot be acted on.
-      reason: readString(v.reason, 'reason', { max: SESSION_USAGE_LIMITS.reasonBytes }),
+      reason: readMeaningfulString(v.reason, 'reason', { max: SESSION_USAGE_LIMITS.reasonBytes }),
     };
   }
-  return { member: readString(v.member, 'member', { min: 1, max: 128 }), state };
+  return { member: readMeaningfulString(v.member, 'member', { min: 1, max: 128 }), state };
 }
 
 /**
@@ -291,7 +312,7 @@ export function validateSessionUsageRecord(value) {
     usage: validateComponentSet(v.usage),
     // An unknown model binding is REPRESENTED by omission, never invented. A consumer that needs
     // a model must treat its absence as unknown rather than substituting a default.
-    ...(Object.hasOwn(v, 'model') ? { model: readString(v.model, 'model', { min: 1, max: 128 }) } : {}),
+    ...(Object.hasOwn(v, 'model') ? { model: readMeaningfulString(v.model, 'model', { min: 1, max: 128 }) } : {}),
     // Optional and additive: a source that reports no cost omits the field, which is distinct
     // from a source that reported one we could not use (state 'invalid' with a reason).
     ...(Object.hasOwn(v, 'sourceReportedCost')
