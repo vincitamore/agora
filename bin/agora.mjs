@@ -272,6 +272,7 @@ const SCHEMA = {
       options: {
         "--ledger-root <path>": "E1c ledger directory (required for measured rows)",
         "--bind <file>": "JSON object mapping session slug to {harness, sessionEpoch, sourceId}; pid and bootEpoch are refused",
+        "--ingest <file>": "JSONL of original usage envelopes decoded through E1b and committed to the ledger before the inventory",
         "--room <key>": "only members with state in this cursor key",
         "--json": "one inventory object",
         "--follow": "emit a snapshot each interval until --for or SIGINT; a one-shot is not this mode",
@@ -369,6 +370,7 @@ const OPTIONS = /** @type {const} */ ({
   "pool-id": { type: "string" },
   "ledger-root": { type: "string" },
   bind: { type: "string" },
+  ingest: { type: "string" },
   room: { type: "string" },
 });
 
@@ -673,6 +675,7 @@ async function main(argv) {
         stateRoot: stateDir(cfg),
         ledgerRoot: values["ledger-root"] !== undefined ? String(values["ledger-root"]) : undefined,
         bindPath: values.bind !== undefined ? String(values.bind) : undefined,
+        ingestPath: values.ingest !== undefined ? String(values.ingest) : undefined,
         roomKey: values.room !== undefined ? String(values.room) : undefined,
         json: Boolean(values.json),
         follow: Boolean(values.follow),

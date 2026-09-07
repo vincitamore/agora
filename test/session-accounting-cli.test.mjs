@@ -70,6 +70,66 @@ test('cli json lists measured and unsupported together and never prints a transc
   assert.doesNotMatch(r.stdout, /transcript|Authorization|Bearer /);
 });
 
+test('cli ingest of four harness envelopes measures members and prints no raw keys', async () => {
+  const stateRoot = await mkdtemp(path.join(tmpdir(), 'agora-st-'));
+  const epoch = 'session-epoch-synthetic-e1d-01';
+  const observed = '2026-09-07T10:00:00.000Z';
+  const members = [
+    { slug: 'sess-claude', sourceId: 'msg_synthetic_claude_01', harness: 'claude-code' },
+    { slug: 'sess-omp', sourceId: 'msg_synthetic_omp_01', harness: 'omp' },
+    { slug: 'sess-codex', sourceId: 'rollout:offset:12', harness: 'codex' },
+    { slug: 'sess-amore', sourceId: 'prompt_synthetic_01:grok-4.6', harness: 'amore-build' },
+  ];
+  /** @type {Record<string, unknown>} */
+  const bindings = {};
+  for (const m of members) {
+    const sess = path.join(stateRoot, 'sessions', m.slug);
+    await mkdir(sess, { recursive: true });
+    await writeFile(path.join(sess, 'house.cursor'), '0', 'utf8');
+    await writeFile(path.join(sess, 'session.json'), JSON.stringify({
+      bearer: m.slug, pid: process.pid, lastSeen: new Date().toISOString(),
+    }), 'utf8');
+    bindings[m.slug] = { harness: m.harness, sessionEpoch: epoch, sourceId: m.sourceId };
+  }
+  const ingest = path.join(stateRoot, 'ingest.jsonl');
+  const lines = [
+    JSON.stringify({
+      harness: 'claude-code', sessionEpoch: epoch,
+      envelope: { timestamp: observed, message: { id: 'msg_synthetic_claude_01', model: 'claude-opus-4-6', usage: { input_tokens: 10, output_tokens: 4, cache_read_input_tokens: 0, cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 } } } },
+    }),
+    JSON.stringify({
+      harness: 'omp', sessionEpoch: epoch,
+      envelope: { timestamp: observed, message: { id: 'msg_synthetic_omp_01', model: 'gpt-5.4', usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cttl: { ephemeral5m: 0, ephemeral1h: 0 } } } },
+    }),
+    JSON.stringify({
+      harness: 'codex', sessionEpoch: epoch,
+      envelope: { type: 'event_msg', timestamp: observed, payload: { type: 'token_count', info: { last_token_usage: { input_tokens: 10, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 6 } } } },
+      context: { sourceId: 'rollout:offset:12', observedAt: observed },
+    }),
+    JSON.stringify({
+      harness: 'amore-build', sessionEpoch: epoch,
+      envelope: { timestamp: observed, params: { sessionId: 's', update: { sessionUpdate: 'turn_completed', prompt_id: 'prompt_synthetic_01', usage: { modelUsage: { 'grok-4.6': { inputTokens: 10, outputTokens: 8, cachedReadTokens: 0, cacheCreationTokens: 0 } } } } } },
+    }),
+  ];
+  await writeFile(ingest, `${lines.join('\n')}\n`, 'utf8');
+  const bind = path.join(stateRoot, 'bind.json');
+  await writeFile(bind, JSON.stringify(bindings), 'utf8');
+  const ledgerRoot = await mkdtemp(path.join(tmpdir(), 'agora-led-'));
+  const cfg = path.join(stateRoot, 'agora.json');
+  await writeFile(cfg, JSON.stringify({ actor: { name: 'Test/cli', kind: 'agent' }, rooms: { house: { transport: 'local', path: 'house.ndjson' } } }), 'utf8');
+  const r = await run(
+    ['usage-sessions', '--json', '--ledger-root', ledgerRoot, '--bind', bind, '--ingest', ingest, '--room', 'house'],
+    { AGORA_STATE: stateRoot, AGORA_CONFIG: cfg },
+  );
+  assert.equal(r.code, 0, r.stderr);
+  const body = JSON.parse(r.stdout);
+  assert.equal(body.members.length, 4);
+  assert.equal(body.members.every((/** @type {{state:string}} */ m) => m.state === 'measured'), true);
+  assert.doesNotMatch(r.stdout, /input_tokens|Authorization|transcript/);
+  const outputs = body.members.map((/** @type {{usage: {components: {output: {value: number}}}}} */ m) => m.usage.components.output.value).sort((/** @type {number} */ a, /** @type {number} */ b) => a - b);
+  assert.deepEqual(outputs, [4, 5, 6, 8]);
+});
+
 test('SIGINT cell is skipped on win32 where process.kill is TerminateProcess', { skip: process.platform === 'win32' }, async () => {
   const stateRoot = await mkdtemp(path.join(tmpdir(), 'agora-st-'));
   await mkdir(path.join(stateRoot, 'sessions'), { recursive: true });

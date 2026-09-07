@@ -5,7 +5,7 @@ import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
-  collectUsageSessions, formatInventory, inventoryMembers, publicRow, readBinding, runUsageSessions,
+  collectUsageSessions, formatInventory, ingestJsonl, inventoryMembers, publicRow, readBinding, runUsageSessions,
 } from '../src/session-accounting.mjs';
 import { closeSessionLedger, commitLedgerEvent, openSessionLedger } from '../src/usage/session-ledger.mjs';
 
@@ -29,6 +29,7 @@ function ingest(offset) {
 test('pid and bootEpoch are refused as a source binding', () => {
   assert.throws(() => readBinding({ harness: 'codex', sessionEpoch: 'e', sourceId: 's', pid: 12 }), /not a source binding/);
   assert.throws(() => readBinding({ harness: 'codex', sessionEpoch: 'e', sourceId: 's', bootEpoch: 'x' }), /not a source binding/);
+  assert.throws(() => readBinding({ harness: ' ', sessionEpoch: 'e', sourceId: 's' }), /binding requires/);
   const ok = readBinding({ harness: 'codex', sessionEpoch: 'e', sourceId: 's' });
   assert.equal(ok.sourceId, 's');
 });
@@ -115,4 +116,125 @@ test('follow cancels via AbortController and does not emit a zero inventory', as
     (/** @type {any} */ err) => err.code === 'session-accounting-cancelled',
   );
   assert.equal(chunks.join('').includes('"output":0'), false);
+});
+
+const EPOCH = 'session-epoch-synthetic-e1d-01';
+const OBSERVED_ISO = '2026-09-07T10:00:00.000Z';
+
+function claudeLine() {
+  return JSON.stringify({
+    harness: 'claude-code',
+    sessionEpoch: EPOCH,
+    envelope: {
+      timestamp: OBSERVED_ISO,
+      message: {
+        id: 'msg_synthetic_claude_01',
+        model: 'claude-opus-4-6',
+        usage: {
+          input_tokens: 100,
+          output_tokens: 20,
+          cache_read_input_tokens: 40,
+          cache_creation: { ephemeral_5m_input_tokens: 10, ephemeral_1h_input_tokens: 5 },
+        },
+      },
+    },
+  });
+}
+
+test('four harness envelopes ingest; a failed decode is not stored as overlap none', async () => {
+  const ledgerRoot = await mkdtemp(path.join(tmpdir(), 'agora-led-'));
+  const ledger = await openSessionLedger({ root: ledgerRoot, limits: { maxBytes: 256_000, maxEntries: 64 } });
+  try {
+    const jsonl = [
+      claudeLine(),
+      JSON.stringify({
+        harness: 'omp',
+        sessionEpoch: EPOCH,
+        envelope: {
+          timestamp: OBSERVED_ISO,
+          message: { id: 'msg_synthetic_omp_01', model: 'gpt-5.4', usage: { input: 80, output: 9, cacheRead: 30, cacheWrite: 20, cttl: { ephemeral5m: 12, ephemeral1h: 8 } } },
+        },
+      }),
+      JSON.stringify({
+        harness: 'codex',
+        sessionEpoch: EPOCH,
+        envelope: {
+          type: 'event_msg',
+          timestamp: OBSERVED_ISO,
+          payload: { type: 'token_count', info: { last_token_usage: { input_tokens: 90, cached_input_tokens: 40, cache_write_input_tokens: 10, output_tokens: 7 } } },
+        },
+        context: { sourceId: 'rollout:offset:12', observedAt: OBSERVED_ISO },
+      }),
+      JSON.stringify({
+        harness: 'amore-build',
+        sessionEpoch: EPOCH,
+        envelope: {
+          timestamp: OBSERVED_ISO,
+          params: {
+            sessionId: 'sess_synthetic_amore_01',
+            update: {
+              sessionUpdate: 'turn_completed',
+              prompt_id: 'prompt_synthetic_01',
+              usage: { modelUsage: { 'grok-4.6': { inputTokens: 120, outputTokens: 30, cachedReadTokens: 50, cacheCreationTokens: 10 } } },
+            },
+          },
+        },
+      }),
+      JSON.stringify({ harness: 'other', sessionEpoch: EPOCH, envelope: {} }),
+    ].join('\n');
+    const outcomes = await ingestJsonl(ledger, jsonl);
+    assert.equal(outcomes.filter((o) => /** @type {{status?:string}} */ (o).status === 'ingested').length, 4);
+    assert.equal(outcomes.some((o) => /** @type {{code?:string}} */ (o).code === 'session-source-harness-unknown'), true);
+    const snap = (await import('../src/usage/session-ledger.mjs')).readLedgerSnapshot(ledger);
+    assert.equal(Object.values(snap.entries).some((e) => e.usage?.overlap?.relation === 'none' && e.identity?.harness === 'other'), false);
+    const dir = await mkdtemp(path.join(tmpdir(), 'agora-s-'));
+    await writeFile(path.join(dir, 'house.cursor'), '0', 'utf8');
+    const rows = await inventoryMembers(
+      [
+        { slug: 'claude', dir, record: { bearer: 'Opus/a' }, state: 'live' },
+        { slug: 'codex', dir, record: { bearer: 'Codex/a' }, state: 'live' },
+        { slug: 'amore', dir, record: { bearer: 'Grok/a' }, state: 'live' },
+      ],
+      {
+        roomKey: 'house',
+        bindings: {
+          claude: { harness: 'claude-code', sessionEpoch: EPOCH, sourceId: 'msg_synthetic_claude_01' },
+          codex: { harness: 'codex', sessionEpoch: EPOCH, sourceId: 'rollout:offset:12' },
+          amore: { harness: 'amore-build', sessionEpoch: EPOCH, sourceId: 'prompt_synthetic_01:grok-4.6' },
+        },
+        snapshot: snap,
+      },
+    );
+    assert.equal(rows.every((r) => r.state === 'measured'), true);
+    assert.equal(/** @type {any} */ (rows[0].usage).components.output.value, 20);
+    assert.equal(/** @type {any} */ (rows[1].usage).components.output.value, 7);
+    assert.equal(/** @type {any} */ (rows[2].usage).components.output.value, 30);
+  } finally {
+    await closeSessionLedger(ledger);
+  }
+});
+
+test('replay ingest is a duplicate and a kill mid-commit leaves the prior contribution', async () => {
+  const ledgerRoot = await mkdtemp(path.join(tmpdir(), 'agora-led-'));
+  const ledger = await openSessionLedger({ root: ledgerRoot, limits: { maxBytes: 256_000, maxEntries: 64 } });
+  try {
+    const once = await ingestJsonl(ledger, claudeLine());
+    assert.equal(/** @type {any} */ (once[0]).committed[0].action, 'accept');
+    const again = await ingestJsonl(ledger, claudeLine());
+    assert.equal(/** @type {any} */ (again[0]).committed[0].action, 'duplicate');
+    const { readLedgerSnapshot } = await import('../src/usage/session-ledger.mjs');
+    assert.equal(Object.keys(readLedgerSnapshot(ledger).entries).length, 1);
+    ledger.io.writeAtomic = async () => { throw new Error('injected'); };
+    await assert.rejects(() => ingestJsonl(ledger, JSON.stringify({
+      harness: 'omp',
+      sessionEpoch: EPOCH,
+      envelope: {
+        timestamp: OBSERVED_ISO,
+        message: { id: 'msg_synthetic_omp_02', model: 'gpt-5.4', usage: { input: 1, output: 1 } },
+      },
+    })));
+    assert.equal(Object.keys(readLedgerSnapshot(ledger).entries).length, 1);
+  } finally {
+    await closeSessionLedger(ledger);
+  }
 });

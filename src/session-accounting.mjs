@@ -4,7 +4,10 @@
 // boot epoch plus PID is never a source identity. No provider, no transcript text.
 import { setTimeout as delay } from 'node:timers/promises';
 import { hasRoomState, listRecords } from './session.mjs';
-import { ledgerKey, openSessionLedger, closeSessionLedger, readLedgerSnapshot } from './usage/session-ledger.mjs';
+import { decodeSessionUsage } from './usage/session-sources.mjs';
+import {
+  ledgerKey, openSessionLedger, closeSessionLedger, readLedgerSnapshot, commitLedgerEvent,
+} from './usage/session-ledger.mjs';
 
 export const USAGE_SESSIONS_INTERVAL_MAX_S = 60;
 export const USAGE_SESSIONS_FOR_MAX_S = 3600;
@@ -29,11 +32,96 @@ export function readBinding(value) {
     const err = Object.assign(new Error('binding requires harness, sessionEpoch, sourceId'), { code: 'session-accounting-binding-malformed' });
     throw err;
   }
+  if (harness.trim() === '' || sessionEpoch.trim() === '' || sourceId.trim() === '') {
+    const err = Object.assign(new Error('binding requires harness, sessionEpoch, sourceId'), { code: 'session-accounting-binding-malformed' });
+    throw err;
+  }
   if ('pid' in rec || 'bootEpoch' in rec) {
     const err = Object.assign(new Error('pid and bootEpoch are not a source binding'), { code: 'session-accounting-binding-inferred' });
     throw err;
   }
   return { harness, sessionEpoch, sourceId };
+}
+
+/**
+ * Match on the binding triple only. sourceUnit is not assumed: Codex snapshots
+ * and Amore aggregates are not requests.
+ * @param {Record<string, { status: string, usage?: unknown, identity?: unknown }>} entries
+ * @param {SourceBinding} binding
+ */
+export function findBoundEntry(entries, binding) {
+  for (const [key, entry] of Object.entries(entries)) {
+    const id = entry.identity;
+    if (!id || typeof id !== 'object' || Array.isArray(id)) continue;
+    const rec = /** @type {Record<string, unknown>} */ (id);
+    if (rec.harness === binding.harness && rec.sessionEpoch === binding.sessionEpoch && rec.sourceId === binding.sourceId) {
+      return { key, entry };
+    }
+  }
+  return null;
+}
+
+/**
+ * Decode one original envelope through E1b and commit the records. A decode
+ * that is not supported is not stored as overlap none.
+ * @param {Awaited<ReturnType<typeof openSessionLedger>>} ledger
+ * @param {Record<string, unknown>} item
+ * @param {{ locator: string, sourceGeneration: number, offset: number, fingerprint: string }} ingest
+ */
+export async function ingestEnvelope(ledger, item, ingest) {
+  const decoded = decodeSessionUsage({
+    harness: item.harness,
+    sessionEpoch: item.sessionEpoch,
+    envelope: item.envelope,
+    harnessVersion: item.harnessVersion,
+    context: item.context && typeof item.context === 'object' && !Array.isArray(item.context) ? item.context : {},
+  });
+  if (decoded.status !== 'supported') {
+    return { status: decoded.status, code: decoded.code };
+  }
+  /** @type {{ action?: string, key: string }[]} */
+  const committed = [];
+  for (const record of decoded.records) {
+    const result = await commitLedgerEvent(ledger, { record, ingest });
+    committed.push({ action: result.action, key: ledgerKey(record.identity) });
+  }
+  return { status: 'ingested', committed };
+}
+
+/**
+ * @param {Awaited<ReturnType<typeof openSessionLedger>>} ledger
+ * @param {string} text
+ * @param {string} [locator]
+ */
+export async function ingestJsonl(ledger, text, locator = 'ingest.jsonl') {
+  const lines = text.split(/\r?\n/);
+  let offset = 0;
+  /** @type {unknown[]} */
+  const outcomes = [];
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    offset += 1;
+    let item;
+    try { item = JSON.parse(line); }
+    catch {
+      outcomes.push({ status: 'error', code: 'session-accounting-ingest-malformed', offset });
+      continue;
+    }
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      outcomes.push({ status: 'error', code: 'session-accounting-ingest-malformed', offset });
+      continue;
+    }
+    const rec = /** @type {Record<string, unknown>} */ (item);
+    const generation = rec.sourceGeneration;
+    const outcome = await ingestEnvelope(ledger, rec, {
+      locator,
+      sourceGeneration: typeof generation === 'number' && Number.isSafeInteger(generation) && generation >= 1 ? generation : 1,
+      offset,
+      fingerprint: typeof rec.fingerprint === 'string' && rec.fingerprint.trim() ? rec.fingerprint : `ingest:${offset}`,
+    });
+    outcomes.push({ ...outcome, offset });
+  }
+  return outcomes;
 }
 
 /**
@@ -61,19 +149,12 @@ export async function inventoryMembers(records, opts) {
       });
       continue;
     }
-    const key = ledgerKey({
-      harness: binding.harness,
-      sessionEpoch: binding.sessionEpoch,
-      sourceId: binding.sourceId,
-      sourceUnit: 'request',
-      finality: 'final',
-    });
-    const entry = opts.snapshot.entries[key];
-    if (!entry || entry.status !== 'confirmed' || !entry.usage) {
-      rows.push({ member, slug: r.slug, liveness: r.state, state: 'unsupported', reason: 'usage-unavailable', key });
+    const found = findBoundEntry(opts.snapshot.entries, binding);
+    if (!found || !found.entry.usage || (found.entry.status !== 'confirmed' && found.entry.status !== 'provisional')) {
+      rows.push({ member, slug: r.slug, liveness: r.state, state: 'unsupported', reason: 'usage-unavailable', key: found?.key });
       continue;
     }
-    rows.push({ member, slug: r.slug, liveness: r.state, state: 'measured', key, usage: entry.usage });
+    rows.push({ member, slug: r.slug, liveness: r.state, state: 'measured', key: found.key, usage: found.entry.usage });
   }
   return rows;
 }
@@ -113,6 +194,8 @@ export function formatInventory(rows, opts) {
  *   forMs?: number,
  *   signal?: AbortSignal,
  *   list?: typeof listRecords,
+ *   ingestText?: string,
+ *   ingestLocator?: string,
  * }} opts
  */
 export async function collectUsageSessions(opts) {
@@ -123,6 +206,7 @@ export async function collectUsageSessions(opts) {
   const records = await (opts.list ?? listRecords)(opts.stateRoot);
   const ledger = await openSessionLedger({ root: opts.ledgerRoot, limits: { maxBytes: 2_000_000, maxEntries: 4096 } });
   try {
+    if (opts.ingestText) await ingestJsonl(ledger, opts.ingestText, opts.ingestLocator ?? 'ingest.jsonl');
     const snapshot = readLedgerSnapshot(ledger);
     return inventoryMembers(records, { roomKey: opts.roomKey, bindings: opts.bindings, snapshot });
   } finally {
@@ -177,6 +261,7 @@ export async function runUsageSessions(opts) {
  *   follow?: boolean,
  *   interval?: string,
  *   forSeconds?: string,
+ *   ingestPath?: string,
  *   stateRoot: string,
  *   signal?: AbortSignal,
  * }} args
@@ -185,10 +270,10 @@ export async function runUsageSessionsCli(args) {
   if (!args.ledgerRoot) {
     return { exit: 2, stdout: '', stderr: 'agora: --ledger-root is required\n' };
   }
+  const { readFile } = await import('node:fs/promises');
   /** @type {Record<string, unknown>} */
   let bindings = {};
   if (args.bindPath) {
-    const { readFile } = await import('node:fs/promises');
     try {
       bindings = JSON.parse(await readFile(args.bindPath, 'utf8'));
       if (!bindings || typeof bindings !== 'object' || Array.isArray(bindings)) {
@@ -197,6 +282,11 @@ export async function runUsageSessionsCli(args) {
     } catch {
       return { exit: 2, stdout: '', stderr: 'agora: --bind is not readable JSON\n' };
     }
+  }
+  let ingestText;
+  if (args.ingestPath) {
+    try { ingestText = await readFile(args.ingestPath, 'utf8'); }
+    catch { return { exit: 2, stdout: '', stderr: 'agora: --ingest is not readable\n' }; }
   }
   let intervalMs = 1000;
   let forMs = 15_000;
@@ -224,6 +314,8 @@ export async function runUsageSessionsCli(args) {
       intervalMs,
       forMs,
       signal: args.signal,
+      ingestText,
+      ingestLocator: args.ingestPath,
       write: (t) => { chunks.push(t); },
     });
     return { exit: 0, stdout: chunks.join(''), stderr: '' };
