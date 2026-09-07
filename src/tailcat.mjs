@@ -63,7 +63,12 @@ export async function atomicJson(target,data) {
   } finally {await rm(temp,{force:true});}
 }
 
-/** @param {string} stateRoot @param {{resolveBinary?:typeof resolveTailcatBinary, exec?:typeof exec}} [deps] */
+/** `create:false` reads an existing identity and refuses rather than minting one. It exists so a
+ * caller that must not mint (a route dial: a fresh key cannot match the binding, and leaving one on
+ * disk as the side effect of a failed dial is worse than the failure) does its check and its use in
+ * ONE call. Checking with lstat and then calling this without the flag is check-then-use: the file
+ * can go between the two, and the second call quietly mints.
+ * @param {string} stateRoot @param {{resolveBinary?:typeof resolveTailcatBinary, exec?:typeof exec, create?:boolean}} [deps] */
 export async function localTransferIdentity(stateRoot,deps={}) {
   const dir=await privateDirectory(path.join(stateRoot,'tailcat'));
   const keyPath=path.join(dir,'identity.private.json');
@@ -73,6 +78,7 @@ export async function localTransferIdentity(stateRoot,deps={}) {
     if(!st.isFile() || st.isSymbolicLink()) throw new AgoraError('Transfer identity is not a regular file. Restore the Agora-owned identity before running agora enroll.');
   } catch(e) {
     if(/** @type {NodeJS.ErrnoException} */(e).code!=='ENOENT') throw e;
+    if(deps.create===false) throw new AgoraError(`enrollment-absent: this seat has no Agora transfer identity at ${keyPath}; run \`agora enroll <room>\` on the room the descriptor came through. This call does not mint one.`);
     const binary=await (deps.resolveBinary ?? resolveTailcatBinary)({stateRoot});
     // Upstream genkey uses WriteFile, not exclusive creation. Generate privately and publish
     // with a no-clobber link so concurrent first use cannot rotate another caller's identity.

@@ -155,19 +155,11 @@ export async function readRemoteDescriptor(file) {
  * @param {{ identity?: typeof localTransferIdentity }} [deps]
  */
 export async function resolveSeatIdentity(stateRoot, deps = {}) {
-  const keyPath = path.join(stateRoot, "tailcat", "identity.private.json");
-  /** @type {import("node:fs").Stats} */
-  let info;
-  try { info = await lstat(keyPath); }
-  catch (e) {
-    const code = /** @type {NodeJS.ErrnoException} */ (e).code;
-    if (code === "ENOENT" || code === "ENOTDIR")
-      throw new AgoraError(`enrollment-absent: this seat has no Agora transfer identity at ${keyPath}; run \`agora enroll <room>\` on the room the descriptor came through. A route connect never mints one.`);
-    throw e;
-  }
-  if (!info.isFile() || info.isSymbolicLink())
-    throw new AgoraError(`enrollment-absent: ${keyPath} is not a regular file; restore the Agora-owned identity before dialling a route`);
-  return (deps.identity ?? localTransferIdentity)(stateRoot);
+  // ONE call, not a check and then a use. The earlier shape stat'ed the key and then called the
+  // identity helper, which mints on ENOENT: two observations of a file that can change between
+  // them, and the second one quietly creates what the first was checking for. `create: false` makes
+  // the refusal the helper's own, at the moment it would otherwise have minted.
+  return (deps.identity ?? localTransferIdentity)(stateRoot, { create: false });
 }
 
 /**
@@ -400,6 +392,10 @@ export async function openRemoteSubscription(opts) {
   const waiters = new Set();
   const wake = () => { for (const w of waiters) w(); waiters.clear(); };
   const markDark = (/** @type {string} */ why) => { darkReason ??= why; wake(); };
+  /** A host-answered refusal, kept as itself so `read` can throw the real cause rather than a
+   * darkness that was never observed. @type {unknown} */
+  let failure;
+  const markFailed = (/** @type {unknown} */ error) => { failure ??= error; wake(); };
 
   const push = (/** @type {any[]} */ messages) => {
     let added = false;
@@ -430,7 +426,13 @@ export async function openRemoteSubscription(opts) {
   if (!since) {
     const status = (await first.request("status", { roomId })).status;
     const epoch = String(status.epoch);
-    const committed = Number(status.committed);
+    // Number() on a field from the wire is the silent-number shape: 3.7 and -5 both survive it and
+    // then Math.max(0, committed - window) launders either into the valid cursor 0, which is a
+    // full-room replay reported with neverOffered null — a well-formed answer to a malformed
+    // status. A count is a non-negative safe integer or the status is refused.
+    const committed = status.committed;
+    if (typeof committed !== "number" || !Number.isSafeInteger(committed) || committed < 0)
+      throw new AgoraError(`the host reported a committed count of ${JSON.stringify(committed)} for ${roomId}; a committed count is a non-negative safe integer, and no cursor is derived from a malformed one`);
     const window = opts.window && opts.window > 0 ? opts.window : 1000;
     const start = Math.max(0, committed - window);
     since = nativeCursor(epoch, start);
@@ -453,15 +455,20 @@ export async function openRemoteSubscription(opts) {
     // process happened to buffer.
     for (let attempt = 0; attempt < maxReconnects && !stopped; attempt += 1) {
       reconnects += 1;
+      /** @type {NativeServiceClient | undefined} */
+      let client;
       try {
-        const client = await room.client();
+        client = await room.client();
         await attach(client, nativeCursor(epoch, drained));
         wake();
         return;
       } catch (error) {
         if (stopped) return;
-        // A refusal the host answered (a foreign epoch, a revoked route) is this session's to
-        // recover and is reported as itself; only an exhausted redial is "dark".
+        // A refusal the host ANSWERED — a revoked route, a foreign epoch, a backlog it will not
+        // replay — arrived on a live socket. It is this session's to recover and it reports
+        // ITSELF; retrying it four more times and then calling it "could not be re-dialled" would
+        // replace a precise cause with a false one, which is worse than either alone.
+        if (client && !client.socket.destroyed) return markFailed(error);
         if (attempt + 1 >= maxReconnects)
           return markDark(`remote room ${roomId} could not be re-dialled after ${reconnects} attempt(s): ${error instanceof Error ? error.message : String(error)}`);
         await new Promise((resolve) => { const t = setTimeout(resolve, backoffMs * (attempt + 1)); t.unref?.(); });
@@ -489,11 +496,12 @@ export async function openRemoteSubscription(opts) {
       }
       queue = keep;
       if (out.length) drained = parseNativeCursor(out[out.length - 1].cursor).sequence;
+      else if (failure !== undefined) throw failure;
       else if (darkReason !== undefined) throw new ServiceDarkError(darkReason);
       return /** @type {import("./core.mjs").ReadResult} */ (out);
     },
     wait(ms) {
-      if (queue.length || darkReason !== undefined) return Promise.resolve();
+      if (queue.length || darkReason !== undefined || failure !== undefined) return Promise.resolve();
       return new Promise((resolve) => {
         const timer = setTimeout(() => { waiters.delete(done); resolve(undefined); }, Math.max(0, ms));
         const done = () => { clearTimeout(timer); resolve(undefined); };
