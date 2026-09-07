@@ -2,9 +2,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  COUNTER_STATES, SOURCE_UNITS, USAGE_COMPONENTS, FINALITY, OVERLAP_RELATIONS, validateOverlap,
+  COUNTER_STATES, COUNTER_UNITS, SOURCE_UNITS, USAGE_COMPONENTS, FINALITY, OVERLAP_RELATIONS, validateOverlap,
   validateCounter, validateSourceIdentity, validateComponentSet, validateMemberCoverage,
-  validateSessionUsageRecord, validateMembershipCoverage, ledgerKey,
+  validateSessionUsageRecord, validateMembershipCoverage, ledgerKey, validateSourceReportedCost,
   supersedesContribution, isSummableUnit,
 } from '../src/protocol/session-usage.mjs';
 
@@ -187,6 +187,89 @@ test('a component set states its coverage and refuses component names it does no
   assert.ok(refuses(() => validateComponentSet({ components: { invented: { state: 'unknown' } }, coverage: 'none' })));
   assert.ok(refuses(() => validateComponentSet({ components: {}, coverage: 'most' })), 'invented coverage');
   assert.ok(refuses(() => validateComponentSet({ components: {} })), 'coverage is required, not derived');
+});
+
+// --- Source-reported cost ------------------------------------------------------------------
+
+test('a source-reported cost is stored in the source unit and never converted', () => {
+  const c = validateSourceReportedCost({ state: 'known', amount: 1234, unit: 'usd-ticks' });
+  assert.equal(c.amount, 1234, 'the number is carried through untouched');
+  assert.equal(c.unit, 'usd-ticks', 'ticks stay ticks; converting here would invent a rate');
+
+  // The unit is OPAQUE, so a unit this module has never heard of is ordinary, not invalid.
+  assert.equal(validateSourceReportedCost({ state: 'known', amount: 0, unit: 'jpy-micros' }).unit,
+    'jpy-micros', 'an unfamiliar source unit is accepted verbatim');
+  // A measured zero cost is a real answer and keeps its unit.
+  assert.equal(validateSourceReportedCost({ state: 'known', amount: 0, unit: 'usd-ticks' }).amount, 0);
+});
+
+test('a cost unit is not a counter unit, in either direction', () => {
+  // The two vocabularies are separate on purpose: a cost must never be reachable by code
+  // walking the token counters, and a counter must never acquire a money-ish unit.
+  // The literal is refused by tsc as well, which is the point; the cast keeps the RUNTIME
+  // refusal exercised for consumers that are not typechecked.
+  const costUnit = /** @type {any} */ ('usd-ticks');
+  assert.ok(refuses(() => validateCounter({ state: 'known', value: 5, unit: costUnit })),
+    'a counter cannot be denominated in a cost unit');
+  // The twin: the counter's own units still work, so the separation cost nothing.
+  assert.equal(validateCounter({ state: 'known', value: 5, unit: 'tokens' }).unit, 'tokens');
+  assert.ok(!(/** @type {readonly string[]} */ (COUNTER_UNITS)).includes('usd-ticks'),
+    'cost units are not in the counter vocabulary');
+});
+
+test('a non-known cost carries no number, exactly as a counter does not', () => {
+  assert.equal(validateSourceReportedCost({ state: 'unknown' }).state, 'unknown');
+  const bad = validateSourceReportedCost({ state: 'invalid', reason: 'provider returned a null total' });
+  assert.ok(bad.state === 'invalid', 'the state survives');
+  assert.equal(bad.reason, 'provider returned a null total', 'and the reason is carried');
+  assert.ok(refuses(() => validateSourceReportedCost({ state: 'unknown', amount: 0, unit: 'usd-ticks' })),
+    'an unknown cost with a zero amount would read as a measured zero');
+  assert.ok(refuses(() => validateSourceReportedCost({ state: 'unknown', unit: 'usd-ticks' })),
+    'and carries no unit either');
+  // The twin: the SAME amount under state known is ordinary.
+  assert.equal(validateSourceReportedCost({ state: 'known', amount: 0, unit: 'usd-ticks' }).state, 'known');
+});
+
+test('an unusable cost is refused rather than coerced', () => {
+  const ok = { state: 'known', amount: 10, unit: 'usd-ticks' };
+  assert.ok(validateSourceReportedCost(ok), 'the ordinary case, beside each refusal');
+  assert.ok(refuses(() => validateSourceReportedCost({ ...ok, amount: -1 })), 'negative');
+  assert.ok(refuses(() => validateSourceReportedCost({ ...ok, amount: 1.5 })), 'non-integer');
+  assert.ok(refuses(() => validateSourceReportedCost({ ...ok, amount: '10' })), 'string amount');
+  assert.ok(refuses(() => validateSourceReportedCost({ ...ok, unit: '' })), 'empty unit');
+  assert.ok(refuses(() => validateSourceReportedCost({ ...ok, unit: 'u'.repeat(33) })), 'oversize unit');
+  assert.ok(refuses(() => validateSourceReportedCost({ ...ok, unit: 'a' + String.fromCharCode(0) + 'b' })),
+    'control char in unit');
+  assert.ok(refuses(() => validateSourceReportedCost({ state: 'known', amount: 10 })), 'known needs a unit');
+});
+
+test('cost on a record is optional and additive: OMITTED is not the same as unusable', () => {
+  const base = {
+    identity: ID,
+    observedAt: '2026-09-07T10:00:00.000Z',
+    usage: { components: { output: { state: 'known', value: 42, unit: 'tokens' } }, coverage: 'partial' },
+  };
+  const without = validateSessionUsageRecord(base);
+  assert.ok(!Object.hasOwn(without, 'sourceReportedCost'), 'a source that reported none omits it');
+
+  const with_ = validateSessionUsageRecord({
+    ...base, sourceReportedCost: { state: 'known', amount: 42, unit: 'usd-ticks' },
+  });
+  const kept = with_.sourceReportedCost;
+  assert.ok(kept && kept.state === 'known', 'the field survived validation');
+  assert.equal(kept.amount, 42, 'and one that did keeps it');
+
+  // The distinction the field exists for: reported-but-unusable is a THIRD state, not absence.
+  const bad = validateSessionUsageRecord({
+    ...base, sourceReportedCost: { state: 'invalid', reason: 'ticks field was null' },
+  });
+  const unusable = bad.sourceReportedCost;
+  assert.ok(unusable, 'a reported-but-unusable cost is present, not dropped to absent');
+  assert.equal(unusable.state, 'invalid');
+  assert.ok(!Object.hasOwn(unusable, 'amount'), 'and still carries no number');
+
+  // A malformed cost fails the whole record rather than being silently dropped back to absent.
+  assert.ok(refuses(() => validateSessionUsageRecord({ ...base, sourceReportedCost: { state: 'known' } })));
 });
 
 // --- Membership coverage ----------------------------------------------------------------------

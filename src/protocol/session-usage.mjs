@@ -65,6 +65,7 @@ export const COVERAGE_STATES = Object.freeze(/** @type {const} */ ([
 export const SESSION_USAGE_LIMITS = Object.freeze({
   sourceIdBytes: 512,
   reasonBytes: 200,
+  costUnitBytes: 32,
   harnessBytes: 64,
   versionBytes: 64,
   maxCounterValue: Number.MAX_SAFE_INTEGER,
@@ -106,6 +107,47 @@ export function validateCounter(value) {
     state: /** @type {const} */ ('known'),
     value: readInteger(v.value, 'value', 0, SESSION_USAGE_LIMITS.maxCounterValue),
     unit: readEnum(v.unit, 'unit', COUNTER_UNITS),
+  };
+}
+
+/**
+ * A cost the SOURCE reported, in the source's own unit, stored and never converted.
+ *
+ * This does not make the contract a pricing authority: it prices nothing, derives nothing, and
+ * applies no rate table. It records a figure a provider stated, exactly as `sourceId` records an
+ * identifier a provider stated. Dropping such a figure because we decline to type it would
+ * collapse "we chose not to carry this" into "no cost information exists" -- the same
+ * absent-vs-unknown collapse the rest of this module exists to prevent, one level up, and
+ * unrecoverable once the adapter has discarded it. A provider's own figure is also the only
+ * independent check on a cost derived from token counts and a rate table.
+ *
+ * `unit` is OPAQUE and source-supplied (`usd-ticks`, `usd-micros`), never parsed into money and
+ * never normalized. It is deliberately NOT drawn from COUNTER_UNITS and lives in its own field,
+ * so a cost can never be reached by code walking the token counters, and `isSummableUnit` has
+ * nothing to say about it: a cost is never added to a counter, and two costs in different units
+ * are not addable to each other either.
+ * @param {unknown} value
+ */
+export function validateSourceReportedCost(value) {
+  const v = readRecord(value, ['state'], ['amount', 'unit', 'reason']);
+  const state = readEnum(v.state, 'state', COUNTER_STATES);
+  if (state !== 'known') {
+    // Same rule as a counter: a non-known cost carries no number, so there is nothing to add up
+    // and nothing to mistake for a measured zero.
+    if (Object.hasOwn(v, 'amount')) throw new ProtocolUsageError('context', 'amount');
+    if (Object.hasOwn(v, 'unit')) throw new ProtocolUsageError('context', 'unit');
+    return {
+      state,
+      ...(Object.hasOwn(v, 'reason')
+        ? { reason: readString(v.reason, 'reason', { max: SESSION_USAGE_LIMITS.reasonBytes }) }
+        : {}),
+    };
+  }
+  return {
+    state: /** @type {const} */ ('known'),
+    // An integer in the source's own unit. Ticks stay ticks; converting here would invent a rate.
+    amount: readInteger(v.amount, 'amount', 0, SESSION_USAGE_LIMITS.maxCounterValue),
+    unit: readString(v.unit, 'unit', { min: 1, max: SESSION_USAGE_LIMITS.costUnitBytes, controls: true }),
   };
 }
 
@@ -242,7 +284,7 @@ export function validateMemberCoverage(value) {
  * @param {unknown} value
  */
 export function validateSessionUsageRecord(value) {
-  const v = readRecord(value, ['identity', 'observedAt', 'usage'], ['model']);
+  const v = readRecord(value, ['identity', 'observedAt', 'usage'], ['model', 'sourceReportedCost']);
   return {
     identity: validateOrderableIdentity(v.identity),
     observedAt: readTimestamp(v.observedAt, 'observedAt'),
@@ -250,6 +292,11 @@ export function validateSessionUsageRecord(value) {
     // An unknown model binding is REPRESENTED by omission, never invented. A consumer that needs
     // a model must treat its absence as unknown rather than substituting a default.
     ...(Object.hasOwn(v, 'model') ? { model: readString(v.model, 'model', { min: 1, max: 128 }) } : {}),
+    // Optional and additive: a source that reports no cost omits the field, which is distinct
+    // from a source that reported one we could not use (state 'invalid' with a reason).
+    ...(Object.hasOwn(v, 'sourceReportedCost')
+      ? { sourceReportedCost: validateSourceReportedCost(v.sourceReportedCost) }
+      : {}),
   };
 }
 
