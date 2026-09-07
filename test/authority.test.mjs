@@ -311,3 +311,34 @@ test('enrollment requires fresh possession over the exact retained record and lo
   await assert.rejects(enrollAuthorityRecord(root, rebound, rebound.keyId, enrollment(f, rebound)),
     { code: 'authority-already-enrolled' });
 });
+
+test('small-order authority keys refuse enrollment and verification, including sign and noncanonical aliases', async (t) => {
+  const f = fixture(), root = await mkdtemp(path.join(tmpdir(), 'agora-authority-small-order-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  // Independent decimal y-coordinate vectors from libsodium 1.0.18 ref10.
+  // Check both sign bits, including noncanonical y=p and y=p+1 aliases.
+  const p = (1n << 255n) - 19n;
+  const ys = [0n, 1n, 2707385501144840649318225287225658788936804267575313519463743609750303402022n,
+    55188659117513257062467267217118295137698188065244968500265048394206261417927n, p - 1n, p, p + 1n];
+  for (const y of ys) for (const signBit of [0n, 1n]) {
+    const encoding = (y | (signBit << 255n)).toString(16).padStart(64, '0');
+    const publicKey = Buffer.from(encoding, 'hex').reverse().toString('hex');
+    const record = { ...f.record, publicKey, authorityId: authorityIdForKey(publicKey), keyId: humanKeyId(publicKey) };
+    refuses(() => validateAuthorityRecord(record), 'authority-key-small-order');
+    // Construct envelopes without going through the newly guarded challenge builders.
+    // R=identity, S=0 is a forgery for the identity public key, not a real signature.
+    const signature = `01${'00'.repeat(63)}`;
+    const challenge = { ...f.challenge, keyId: record.keyId,
+      act: { ...f.challenge.act, authorityId: record.authorityId, proofRef: `${record.authorityId}.json` } };
+    refuses(() => verifyAuthorityProof({ challenge, signature }, record, challenge, f.request, NOW),
+      'authority-key-small-order');
+    const retainedChallenge = { ...enrollment(f).retainedChallenge, recordDigest: nativeDigest(record) };
+    await assert.rejects(enrollAuthorityRecord(root, record, record.keyId, {
+      targetNodeKeyDigest: TARGET, retainedChallenge, proof: { challenge: retainedChallenge, signature }, now: NOW,
+    }), { code: 'authority-key-small-order' });
+    assert.deepEqual(await readdir(root), [], 'a rejected authority must leave no enrollment state');
+  }
+  // Real-key twins still enroll and verify through the same boundaries.
+  await enrollAuthorityRecord(root, f.record, f.record.keyId, enrollment(f));
+  assert.equal(verifyAuthorityProof(f.proof, f.record, f.challenge, f.request, NOW).keyId, f.record.keyId);
+});
