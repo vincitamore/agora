@@ -1,5 +1,6 @@
 // @ts-check
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -370,9 +371,53 @@ const interpolated = (/** @type {string} */ quote, /** @type {string} */ spec) =
 export const COMPUTED_LOAD_EXEMPTIONS = Object.freeze({
   "src/native-service.mjs": Object.freeze({
     imports: 1, requires: 0,
+    // The AUDITED EXPRESSION, as a digest over every line of the module that mentions the operand,
+    // whitespace-normalised. Anything else — a different chooser, a different binding, a name built
+    // by concatenation, an operand that is not a bare identifier — fails the comparison and the
+    // graph is unknown. A count and a stray-literal scan were both proxies for this, and a
+    // concatenation defeats each of them while naming a repository module.
+    //
+    // A digest rather than the text itself, and the reason is this scanner reading its own file:
+    // an exemption quoting the call form verbatim would put that form in THIS file, which is on the
+    // graph, and every measurement would report unknown forever. The same constraint forbids a
+    // runnable snippet here, since a relative specifier in prose is an unresolved load; the re-pin
+    // command lives in README's stale-build paragraph, and `auditedChooserDigest` below is what it
+    // calls. Re-pin only after reading the expression and satisfying yourself it still cannot name
+    // a repository file.
+    chooserDigest: "sha256:568fcb018546e5b99ca656f24a01c2b7dcbf20b3eb2853229300b837bb28ff5d",
+    chooserSummary: "a const bound to a ternary over process.versions.bun yielding one of two colon-prefixed builtin names, and the call that awaits it",
     why: "one dynamic import choosing between the builtins bun:sqlite and node:sqlite; neither is a path and neither can be a repository file",
   }),
 });
+
+/** The operand of a computed load, when it is a bare identifier the audit can follow. */
+const COMPUTED_OPERAND = /\bimport\s*\(\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\)/g;
+const REQUIRE_OPERAND = /(?<![.\w])require\s*\(\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\)/g;
+const squeeze = (/** @type {string} */ s) => s.replace(/\s+/g, " ").trim();
+const digestOf = (/** @type {string} */ s) => `sha256:${createHash("sha256").update(s).digest("hex")}`;
+
+/** Re-pin an exemption after re-reading its expression. Prints what the record must hold.
+ * @param {string} file @param {string} [root] */
+export function auditedChooserDigest(file, root = process.cwd()) {
+  const source = readFileSync(path.join(root, file), "utf8");
+  const audited = auditedChooser(source, COMPUTED_OPERAND) ?? auditedChooser(source, REQUIRE_OPERAND);
+  return audited === undefined ? undefined : digestOf(audited);
+}
+
+/**
+ * The source this exemption was audited against: every line mentioning the operand, and the call.
+ * Returns undefined when the operand is not a bare identifier, which is itself disqualifying —
+ * an audit cannot follow an expression it cannot name.
+ * @param {string} source @param {RegExp} operandPattern
+ */
+function auditedChooser(source, operandPattern) {
+  operandPattern.lastIndex = 0;
+  const names = [...source.matchAll(operandPattern)].map((m) => m[1]);
+  if (names.length !== 1) return undefined;
+  const name = names[0];
+  const lines = source.split(/\r?\n/).filter((line) => new RegExp(`\\b${name}\\b`).test(line));
+  return squeeze(lines.join(" "));
+}
 
 /** @param {string} root @param {string} file */
 function repoKey(root, file) {
@@ -400,8 +445,6 @@ export function importClosure(opts) {
   const queue = [entry];
   /** @type {string[]} */
   const caveats = [];
-  /** Exemptions to justify once the closure is closed. @type {Array<{ key: string, label: string, n: number, dir: string, source: string, why: string }>} */
-  const pending = [];
   let complete = true;
   /** @type {string | undefined} */
   let reason;
@@ -433,6 +476,9 @@ export function importClosure(opts) {
     /** Specifiers this module names and the scanner could not resolve to a repository file. */
     /** @type {string[]} */
     const unresolved = [];
+    /** Specifiers carrying an escape this scanner does not decode. */
+    /** @type {string[]} */
+    const escaped = [];
 
     /** @param {RegExp} pattern */
     const follow = (pattern) => {
@@ -440,6 +486,11 @@ export function importClosure(opts) {
       for (const match of source.matchAll(pattern)) {
         const [, quote, spec] = match;
         if (interpolated(quote, spec)) continue;           // counted as computed below
+        // An escape the RUNTIME decodes and this scanner does not is not a bare specifier: the
+        // engine loads "\x2e/loaded.mjs" as "./loaded.mjs" while startsWith(".") sees a backslash
+        // and calls it a dependency. Rather than reimplement JS string decoding, the spelling is
+        // reported: incompleteness is a supported result, a missed module is not.
+        if (spec.includes("\\")) { escaped.push(spec); continue; }
         if (!spec.startsWith(".")) continue;               // a builtin or a dependency
         const resolved = path.resolve(path.dirname(real), spec);
         if (!existsSync(resolved)) { unresolved.push(spec); continue; }
@@ -453,6 +504,8 @@ export function importClosure(opts) {
     // closure stays a subset while claiming to be complete.
     for (const spec of unresolved)
       incomplete(`${key} loads ${JSON.stringify(spec)}, which does not resolve in this checkout, so the closure cannot be shown to cover it`);
+    for (const spec of escaped)
+      incomplete(`${key} loads ${JSON.stringify(spec)}, whose escape sequence this scanner does not decode; the runtime would, so the spelling is reported rather than read as a bare specifier`);
 
     /** @param {string} label @param {RegExp} all @param {RegExp} spec @param {number} allowed */
     const computed = (label, all, spec, allowed) => {
@@ -466,23 +519,23 @@ export function importClosure(opts) {
         incomplete(`${key} has ${n} ${label} with a computed specifier and only ${allowed} exempted; the closure cannot be shown to be a superset of what it loads`);
         return;
       }
-      // The exemption's REASON is checked at the END, not here: a module's own imports are still in
-      // the queue while it is being scanned, so its ordinary specifiers would all look like strays.
-      pending.push({ key, label, n, dir: path.dirname(real), source, why: /** @type {any} */ (exempt).why });
+      // The exemption is bound to the AUDITED EXPRESSION. A count authorised any same-count
+      // substitution; a stray-literal scan authorised a name built by concatenation ("." plus
+      // "/loaded.mjs" is neither a relative literal nor a stray). Only the expression itself says
+      // what this load can name, so the expression is what is compared.
+      const actual = auditedChooser(source, label.startsWith("dynamic") ? COMPUTED_OPERAND : REQUIRE_OPERAND);
+      if (actual === undefined) {
+        incomplete(`${key} is exempted for ${n} ${label}, but its operand is not a single bare identifier this audit can follow`);
+        return;
+      }
+      if (digestOf(actual) !== /** @type {any} */ (exempt).chooserDigest) {
+        incomplete(`${key} is exempted for ${n} ${label}, but its chooser is no longer the audited expression; re-audit it and re-pin the exemption rather than widening a count`);
+        return;
+      }
+      caveats.push(`${key}: ${n} ${label} with a computed specifier, exempt because ${/** @type {any} */ (exempt).why}`);
     };
     computed("dynamic import call(s)", DYNAMIC_CALL, DYNAMIC_SPEC, exempt?.imports ?? 0);
     computed("require call(s)", REQUIRE_CALL, REQUIRE_SPEC, exempt?.requires ?? 0);
-  }
-  // The exemption's REASON, checked rather than recited, against the CLOSED set: a chooser that can
-  // name a repository path is not a chooser between builtins, whatever the count says. Its own
-  // ordinary imports are members by now, so what remains is a specifier the scanner never followed.
-  for (const item of pending) {
-    RELATIVE_LITERAL.lastIndex = 0;
-    const strays = [...new Set([...item.source.matchAll(RELATIVE_LITERAL)].map((m) => m[1]))]
-      .filter((s) => !files.has(repoKey(root, path.resolve(item.dir, s))));
-    if (strays.length)
-      incomplete(`${item.key} is exempted for ${item.n} ${item.label}, but names relative specifier(s) ${JSON.stringify(strays)} that are not closure members, so the exemption's reason no longer holds`);
-    else caveats.push(`${item.key}: ${item.n} ${item.label} with a computed specifier, exempt because ${item.why}`);
   }
   return { files, complete, ...(reason ? { reason } : {}), ...(caveats.length ? { caveats } : {}) };
 }
