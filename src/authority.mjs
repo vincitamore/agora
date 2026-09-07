@@ -18,6 +18,16 @@ import { readRecord, readArray, readString, readInteger, readEnum, readTimestamp
 export const AUTHORITY_CHALLENGE_MAX_MS = 120_000;
 const DOMAIN = 'agora-route-operator-act-v1';
 const RECORD_MAX_BYTES = 262144;
+// libsodium 1.0.18 ge25519_has_small_order: seven y encodings, sign bit ignored.
+// Includes y=p and p+1 aliases; exact-byte blocking of only eight points misses them.
+// https://github.com/jedisct1/libsodium/blob/1.0.18/src/libsodium/crypto_core/ed25519/ref10/ed25519_ref10.c
+// Public-input rejection only, not a replacement for Ed25519 signature verification.
+const SMALL_ORDER_Y = new Set([
+  '00'.repeat(32), `01${'00'.repeat(31)}`,
+  '26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05',
+  'c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a',
+  `ec${'ff'.repeat(30)}7f`, `ed${'ff'.repeat(30)}7f`, `ee${'ff'.repeat(30)}7f`,
+]);
 
 export class AuthorityError extends Error {
   /** @param {string} code */
@@ -97,6 +107,9 @@ export function validateAuthorityRecord(value) {
     const v = readRecord(value, ['version', 'authorityId', 'algorithm', 'publicKey', 'keyId',
       'boundNodeKeyDigest', 'enrolledAt', 'enrolledBy', 'label', 'profile', 'policy']);
     const publicKey = hex(v.publicKey, 32, 'publicKey');
+    const y = Buffer.from(publicKey, 'hex');
+    y[31] &= 0x7f;
+    if (SMALL_ORDER_Y.has(y.toString('hex'))) refuse('authority-key-small-order');
     const authorityId = validateNativeId(v.authorityId), keyId = validateDigest(v.keyId);
     if (authorityId !== authorityIdForKey(publicKey) || keyId !== humanKeyId(publicKey))
       refuse('authority-key-mismatch');
