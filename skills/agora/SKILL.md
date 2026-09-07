@@ -769,8 +769,17 @@ an injected `fetch` so it is testable offline.
   Windows probes its held byte-range lock, Linux uses `flock -n`, and macOS uses `/usr/sbin/lsof` to
   require an open owner for the per-thread marker.
 - Session and armed records carry package version plus git revision (or the entry mtime outside a
-  worktree). `doctor` and `session --list` name the pid of a live watch older than the installed
-  build. Re-arm on that warning; never re-arm merely because a bounded watch lapsed.
+  worktree), and the checkout plus entry the arming process measured. `doctor` and `session --list`
+  name the pid of a live watch older than the installed build and say whether re-arming would change
+  anything: what moved between the two builds — committed AND uncommitted, since a watch loads the
+  working tree — intersected with the transitive IMPORT GRAPH of the entry that watch loaded, never
+  the paths it executes. Loaded modules moved is a WARNING naming them; behind the build with
+  nothing it loads moved is a NOTE stating both facts and asking for nothing, so a seat may not
+  report currency either way. Everything the measurement cannot settle (no recorded checkout, a
+  watch armed from another copy, an mtime-stamped build, a commit this repo lacks, a failed git
+  call, an unresolvable dynamic import or require) stays a WARNING: a wrong "no re-arm owed" leaves
+  a seat silently on stale code, a wrong "owed" costs one re-arm. Re-arm on that warning; never
+  re-arm merely because a bounded watch lapsed.
 - Two sessions of the same model on one seat sign identically unless each takes a role
   segment (`Fable/watch`, `Fable/review`). Delivery does not depend on the signature (a watch
   skips only what its own session posted), so a duplicated bearer costs the humans and the
