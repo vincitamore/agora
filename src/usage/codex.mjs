@@ -131,9 +131,10 @@ export function windowReadingFrom(limitId, slot, window) {
  * of its own and the key it was filed under is the right identity. Anything ELSE present is an
  * id this code cannot read, and quietly substituting the key would file the window under an
  * identity the provider never reported -- the same identity rewriting refused for durations.
- * @param {Record<string, unknown>} snapshot
+ * @param {unknown} snapshot
  */
 function hasReadableLimitId(snapshot) {
+  if (!isRecord(snapshot)) return false;
   const id = snapshot.limitId;
   if (id === null || id === undefined) return true;
   return typeof id === 'string' && id.length > 0;
