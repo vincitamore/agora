@@ -33,9 +33,9 @@ const supported = {
 test('parseTimeoutMs refuses non-integer and over-cap', () => {
   assert.equal(parseTimeoutMs(undefined, 15000), 15000);
   assert.equal(parseTimeoutMs('20', 15000), 20);
-  assert.throws(() => parseTimeoutMs('20.5', 15000));
-  assert.throws(() => parseTimeoutMs('0', 15000));
-  assert.throws(() => parseTimeoutMs('60001', 15000));
+  assert.throws(() => parseTimeoutMs('20.5', 15000), /must be a positive integer/);
+  assert.throws(() => parseTimeoutMs('0', 15000), /must be an integer from 1 to 60000/);
+  assert.throws(() => parseTimeoutMs('60001', 15000), /must be an integer from 1 to 60000/);
 });
 
 test('unsupported provider is a usage error, not a zero quota', async () => {

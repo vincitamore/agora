@@ -86,7 +86,7 @@ test("fixture 01: room faces reads an absent record as a room with no faces, and
   assert.match(r.stdout, /faces of nat \(native room 8f2c1a0b/);
   assert.match(r.stdout, /absent: every post is native only and nothing refuses/);
   assert.match(r.stdout, /no faces; add one: agora room faces nat --add slack/);
-  await assert.rejects(stat(policyFile), "a read creates no record");
+  await assert.rejects(stat(policyFile), { code: "ENOENT" }, "a read creates no record");
 
   r = await agora(["room", "faces", "nat", "--json"], env);
   assert.deepEqual(JSON.parse(r.stdout), { type: "face-policy", alias: "nat", room: ROOM, path: policyFile, updatedAt: null, written: false, faces: [] });
@@ -325,7 +325,7 @@ test("fixture 09 row 1 and the seam: a name the policy admits rides the append f
   assert.deepEqual(out.faces, [], "the seat service in this test runs no face publisher, so there is no row to read: absent, never pending");
   assert.match(r.stderr, /no face rows for a{32}:1: the seat service wrote none .*; agora faces nat --for a{32}:1 reads them later/);
   assert.deepEqual([...(await readFaceRecords(root, ROOM)).values()], [], "the CLI never fakes a publish: not one line in the record log");
-  await assert.rejects(stat(faceRecordsPath(root, ROOM)));
+  await assert.rejects(stat(faceRecordsPath(root, ROOM)), { code: "ENOENT" });
 });
 
 test("the native transport carries the face choice on the append frame and returns the ack's face rows as the receipt's, inventing none", async (t) => {
@@ -452,7 +452,7 @@ test("the post-time options are a native room's: --face on a slack room, --face 
   assert.match(r.stderr, /--split chunks a Slack post; "nat" is a native room/);
   r = await agora(["read", "nat", "--json"], env);
   assert.equal(r.stdout.trim(), "", "nothing was posted");
-  await assert.rejects(stat(path.join(root, "down.ndjson")));
+  await assert.rejects(stat(path.join(root, "down.ndjson")), { code: "ENOENT" });
 });
 
 test("no credential shape reaches stdout, stderr, the policy record or the face record log", async (t) => {
