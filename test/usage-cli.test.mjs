@@ -50,7 +50,10 @@ test('missing provider and pool-id are usage errors', async () => {
 });
 
 test('JSON stdout is the result only and keeps two slots under one limit id', async () => {
-  let seenNow, seenTimeout;
+  /** @type {(() => Date) | undefined} */
+  let seenNow;
+  /** @type {number | undefined} */
+  let seenTimeout;
   const r = await runUsage({
     provider: 'codex', poolId: POOL, timeout: '1500', json: true, now: NOW, producer: PRODUCER,
     collect: async (opts) => {
@@ -61,12 +64,12 @@ test('JSON stdout is the result only and keeps two slots under one limit id', as
   });
   assert.equal(r.exit, 0);
   assert.equal(typeof seenNow, 'function');
-  assert.equal(seenNow().toISOString(), NOW().toISOString());
+  assert.equal(seenNow && seenNow().toISOString(), NOW().toISOString());
   assert.equal(seenTimeout, 1500);
   const parsed = JSON.parse(r.stdout);
   assert.equal(parsed.status, 'supported');
   assert.equal(parsed.observation.windows.length, 3);
-  const keys = parsed.observation.windows.map((w) => windowKey(w.window));
+  const keys = parsed.observation.windows.map((/** @type {{ window: unknown }} */ w) => windowKey(w.window));
   assert.equal(new Set(keys).size, 3);
   assert.equal(r.stdout.includes('Authorization'), false);
 });

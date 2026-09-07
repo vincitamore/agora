@@ -64,7 +64,8 @@ export function formatUsageResult(result, opts) {
 
 /**
  * @param {{ provider?: string, poolId?: string, timeout?: string, json?: boolean,
- *           now?: () => Date, collect?: typeof collectCodexUsage,
+ *           now?: () => Date,
+ *           collect?: (opts: { poolId: string, producer: unknown, now: () => Date, timeoutMs?: number, signal?: AbortSignal, spawn?: any, resolveBinary?: any }) => Promise<UsageResult>,
  *           producer?: { producerId: string, generation: number, sequence: number },
  *           spawn?: any, resolveBinary?: any, signal?: AbortSignal }} options
  * @returns {Promise<{ exit: number, stdout: string, stderr: string }>}
