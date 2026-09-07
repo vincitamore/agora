@@ -4,15 +4,31 @@ import { fileURLToPath } from 'node:url';
 import { finished } from 'node:stream/promises';
 import { addAbortListener } from 'node:events';
 import { resolveTailcatBinary } from './tailcat-runtime.mjs';
-import { AgoraError } from './core.mjs';
+import { AgoraError, redact } from './core.mjs';
 import { prepareRuntimeLifetime, runtimeExpiryDelay, runtimeCancelled } from './tailcat-lifetime.mjs';
 
 const STDERR_TAIL_BYTES=512;
+const STDERR_CAPTURE_BYTES=2048;
+
+/** Tailcat is a verified third-party binary, but its stderr is still foreign input. Agora gives it
+ * only a private-key PATH (never the route secret), yet a future upstream diagnostic could echo
+ * the key it read. Redact the house credential shapes and Tailcat private/auth key shapes before
+ * any retained bytes leave this child boundary. The larger private capture keeps a credential's
+ * prefix available when the public 512-byte tail is cut. @param {string} value */
+function safeStderr(value){
+  return redact(value).replace(/\b(?:privkey|tskey-[a-z]+)[:_-][A-Za-z0-9+/_=-]{16,}/gi,'[redacted]');
+}
 
 /** @param {Buffer} previous @param {Buffer|string} chunk */
 function appendStderrTail(previous,chunk){
   const next=Buffer.concat([previous,Buffer.isBuffer(chunk)?chunk:Buffer.from(chunk)]);
-  return next.length<=STDERR_TAIL_BYTES?next:next.subarray(next.length-STDERR_TAIL_BYTES);
+  return next.length<=STDERR_CAPTURE_BYTES?next:next.subarray(next.length-STDERR_CAPTURE_BYTES);
+}
+
+/** @param {Buffer} captured */
+function publicStderrTail(captured){
+  const safe=Buffer.from(safeStderr(captured.toString('utf8')));
+  return (safe.length<=STDERR_TAIL_BYTES?safe:safe.subarray(safe.length-STDERR_TAIL_BYTES)).toString('utf8');
 }
 
 /**
@@ -28,7 +44,7 @@ export async function spawnTailcat(args,options,owner) {
   const guardian=spawn(process.execPath,[fileURLToPath(import.meta.url),'--guardian'],{stdio:['pipe','pipe','pipe','ipc'],windowsHide:true});
   let stderrTail=Buffer.alloc(0);
   guardian.stderr?.on('data',chunk=>{stderrTail=appendStderrTail(stderrTail,chunk);});
-  Object.defineProperty(guardian,'tailcatStderrTail',{enumerable:false,value:()=>stderrTail.toString('utf8')});
+  Object.defineProperty(guardian,'tailcatStderrTail',{enumerable:false,value:()=>publicStderrTail(stderrTail)});
   // Keep ownership until rejected startup has actually terminated. The caller has no
   // handle yet and cannot join cleanup if rejection races the guardian's exit.
   // Node on Windows can omit ChildProcess.close after parent IPC disconnect.

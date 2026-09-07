@@ -378,6 +378,7 @@ test("a read past the frame cap is refused by its CONDITION, and the limit it na
 
   const refused = await request({ type: "read" });
   assert.equal(refused.type, "error", "a read larger than one frame was delivered");
+  assert.equal(refused.code, "read-batch-refused", "the host flattened the actionable refusal code");
   assert.match(refused.message, /read-batch-refused/,
     "the refusal did not name the condition");
   // The regression this cell exists for. The defect was not the cap; it was that the caller was
@@ -400,6 +401,7 @@ test("a read past the frame cap is refused by its CONDITION, and the limit it na
   // And it is the BOUNDARY, not a comfortable value below it: one more message does not fit.
   const over = await request({ type: "read", limit: named + 1 });
   assert.equal(over.type, "error", `limit ${named + 1} fit, so the refusal understated what the frame holds`);
+  assert.equal(over.code, "read-batch-refused", "the boundary refusal lost its code on the member wire");
   assert.match(over.message, /read-batch-refused/);
 });
 
