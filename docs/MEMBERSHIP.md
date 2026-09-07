@@ -207,7 +207,9 @@ the descriptor.
 for `enroll` and wrong on a dial: it would leave a fresh identity on disk as the side effect of a
 failed connect, and then fail a layer later saying the local key does not match the binding — a true
 sentence pointing at the wrong thing. An un-enrolled seat is refused by name instead, and told to
-enroll.
+enroll — and the refusal creates **nothing**, the private directory included, so a failed dial
+leaves the seat exactly as it was rather than an empty `tailcat/` a later reader would take as
+evidence that enrolment had been attempted.
 
 The authoritative check is not that refusal: the channel runs `printpub` on the resolved key and
 refuses when its digest disagrees with `binding.allowedKeyDigest`.
@@ -232,8 +234,23 @@ Two different events are worth separating, because only one of them can produce 
   and it is why the message id rather than the cursor is what a consumer dedups on.
 
 A dropped channel is reported rather than papered over, and the next verb re-dials. A route the host
-has **closed** cannot be re-dialled: its secret is gone, so the hello is refused by name. That is
-revocation working, not a transport fault.
+has **closed** cannot be re-dialled — but be precise about how that arrives, because the obvious
+expectation is wrong in both directions and a reader who knows the secret was rotated will look for
+the wrong name:
+
+- **Closed.** `route close` tears down the *listener* as well as the secret, so nothing on the host
+  is left to refuse a handshake. Revocation reaches the remote as an **unreachable route**: the
+  member hello goes unanswered and the dial ends `member-channel-dark` on its timeout. A named end,
+  not a proof refusal.
+- **Closed and reopened.** A reopen mints a new grant and a new generation, and the remote is still
+  holding the old descriptor. The transcript's **binding comparison fires before the proof**, so
+  this ends `member-binding-mismatch` — the grant ids disagree, and the secret is never consulted.
+- **A stale secret failing the proof** is therefore not on either of those paths. It needs a
+  *mismatched pair*: the new descriptor carried to the remote beside the old secret file. Rotation
+  protects against a replayed proof; what protects against a stale descriptor is the binding.
+
+A held client is refused too rather than answering out of a socket that still looks live: its next
+verb ends `native service is dark; request was not sent`, from the shared request machine.
 
 ## What a remote seat may do
 
