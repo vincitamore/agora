@@ -72,6 +72,7 @@ import { closeServiceRoute, createServiceRoom, listServiceRoutes, openServiceRou
 import { spawnFromFile } from "../src/spawn-cli.mjs";
 import { runUsage } from "../src/usage-cli.mjs";
 import { runUsageSessionsCli } from "../src/session-accounting.mjs";
+import { readShadowArgs, runEconomyShadowCli, ShadowInputError } from "../src/economy/shadow.mjs";
 import { clearStandDown, clearWatchStop, completeStandDownAck, declareStandDown, listStandDowns, standDownRequested } from "../src/stand-down.mjs";
 import { FACE_ATTACHMENT_MODES, FACE_BUILT, FACE_SELECTORS, appendFaceRecord, facePolicyPath, listFaceRecords, normalizeSelectors, readFacePolicy, selectFaces, writeFacePolicy } from "../src/faces.mjs";
 
@@ -288,6 +289,26 @@ const SCHEMA = {
       },
       does: "list every joined member with measured session usage or an explicit unsupported reason. Never prints transcript text or credentials. Missing is not zero. SIGINT/SIGTERM abort the owned controller",
     },
+    economy: {
+      args: ["shadow"],
+      options: {
+        "--ledger-root <path>": "E1c ledger directory to replay",
+        "--rates <file>": "E2a rate table (data/rates.json shape); no default, the table priced against is named",
+        "--billing-context <file>": "data/billing-contexts.json: per-harness provider, endpoint, serviceTier, region, billingMode, each known-with-source or unknown-with-reason; modelRevision comes from each record's retained model",
+        "--envelope <file>": "assumed scenario dimensions, each {value, source}: summaryTokens, postCompactionTokens, recoveryTokens, pingTokens, cacheTtlSeconds; prefixReuse is refused (unassessable in E2)",
+        "--verification-cost <usd>": "required, finite, >= 0; zero only as the literal and labelled explicit-zero; applied at zero future calls",
+        "--epsilon <n>": "the F1 margin: a crossing needs the least-favourable continue/compact ratio above 1 + epsilon",
+        "--risk-budget <q>": "0.1 | 0.5 | 0.9: the horizon quantile the conservative scenario reads (E2b exposes those three)",
+        "--as-of <iso>": "rate lookup time (E2a asOf); event time is each record's observedAt",
+        "--observation-cutoff <iso>": "E2b observation cutoff",
+        "--split-at <iso>": "E2b calibration split, strictly before the cutoff; a decision point before it is leakage and shadow-only",
+        "--classify <rule>": "all-requests-useful (default; every horizon line carries assumption: no-maintenance-evidence-in-ledger) | unknown (horizon unknown by construction)",
+        "--ended-after <s>": "a session quiet for longer than this before the cutoff is treated as ended at its last request, labelled on every horizon line; absent means every session is right-censored",
+        "--session <harness>/<epoch>": "replay one session; the cohort still fits over every session of its harness",
+        "--json": "one economy-shadow object",
+      },
+      does: "replay the E1 ledger through E2a pricing and the E2b horizon and print, per session and per decision point, the competing trajectories (continue, cold compaction, warm-then-compact, periodic ping) with their costs, the three baselines, and why no action won. shadow: true and actuationAllowed: false on every output; horizonEligible copied from the horizon. No config, no room, no provider, nothing actuated; a missing rate, an unmeasured context or an unknown horizon leaves a reason, never a zero",
+    },
   },
 };
 
@@ -383,6 +404,18 @@ const OPTIONS = /** @type {const} */ ({
   bind: { type: "string" },
   ingest: { type: "string" },
   room: { type: "string" },
+  rates: { type: "string" },
+  "billing-context": { type: "string" },
+  envelope: { type: "string" },
+  "verification-cost": { type: "string" },
+  epsilon: { type: "string" },
+  "risk-budget": { type: "string" },
+  "as-of": { type: "string" },
+  "observation-cutoff": { type: "string" },
+  "split-at": { type: "string" },
+  classify: { type: "string" },
+  "ended-after": { type: "string" },
+  session: { type: "string" },
 });
 
 /**
@@ -736,6 +769,22 @@ async function main(argv) {
         throw new AgoraError(`agora service route ${sub} needs --allow-key <nodekey:64hex>`, EXIT.usage);
       if (!/^nodekey:[a-f0-9]{64}$/.test(String(values["allow-key"]).trim()))
         throw new AgoraError("--allow-key takes the public node key as enroll prints it: nodekey: followed by 64 hex characters", EXIT.usage);
+    }
+  }
+
+  if (verb === "economy") {
+    // Room-less and config-less: every argument is refused before any file is read, so a missing
+    // config can never steal the usage code, and a machine with no agora.json replays a ledger.
+    if (roomAlias !== "shadow") throw new AgoraError(`economy takes one subverb: shadow (got ${JSON.stringify(roomAlias ?? "")})`, EXIT.usage);
+    let args;
+    try { args = readShadowArgs(values); }
+    catch (e) { throw new AgoraError(e instanceof Error ? e.message : String(e), EXIT.usage); }
+    try {
+      process.stdout.write(await runEconomyShadowCli({ ...args, json: Boolean(values.json) }));
+      return EXIT.ok;
+    } catch (e) {
+      if (e instanceof ShadowInputError) throw new AgoraError(e.message, EXIT.error);
+      throw e;
     }
   }
 

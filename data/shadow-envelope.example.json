@@ -1,0 +1,7 @@
+{
+  "summaryTokens": { "value": 10000, "source": "the session-economy design record, forward economic model: illustrative summary of 10K; an assumption, not a measurement" },
+  "postCompactionTokens": { "value": 100000, "source": "same section: post-compaction 100K including orientation and summary; assumption" },
+  "recoveryTokens": { "value": 100000, "source": "same section: conservatively rebuilds all 100K after compaction; assumption" },
+  "pingTokens": { "value": 40, "source": "the fixed maintenance instruction 'Cache maintenance only. Perform no task or tool call. Produce only `.` and end.' is about 40 tokens; assumption" },
+  "cacheTtlSeconds": { "value": 3600, "source": "the seat's promptCacheTtl is 1h (agora doctor reads it from ~/.claude/settings.json); assumption that the session honours it" }
+}
