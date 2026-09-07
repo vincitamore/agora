@@ -269,7 +269,7 @@ test('an abort mid-flight is cancelled, not timed out, and stops the helper', as
   assert.equal(children[0].killed, true, 'an aborted read must stop the helper it started');
 });
 
-test('a signal already aborted cancels without waiting for the budget', async () => {
+test('a signal already aborted cancels without spawning a helper at all', async () => {
   const { spawn, children } = recordingSpawn(answersInitOnly);
   const result = await collectCodexUsage({
     poolId: POOL, producer: PRODUCER, now: NOW, spawn, resolveBinary,
@@ -277,7 +277,10 @@ test('a signal already aborted cancels without waiting for the budget', async ()
   });
   if (result.status === 'supported') return assert.fail('expected an immediate cancellation');
   assert.equal(result.code, 'codex-cancelled');
-  assert.equal(children[0].killed, true);
+  // This assertion used to be "the child we spawned was killed", which encoded the weaker
+  // contract. A process created only to be abandoned can still fail asynchronously after the
+  // result is returned, so the right behaviour is not to create one.
+  assert.equal(children.length, 0, 'a pre-cancelled read must not spawn anything');
 });
 
 test('cleanup stops only the helper this call started, never a peer process', async () => {
@@ -436,4 +439,55 @@ test('HOLD 6: an owned stream error is bounded and never crashes the caller', as
   // promises never to emit.
   assert.equal(/^\s*at .*:\d+:\d+/m.test(run.stderr || ''), false, 'a raw stack reached stderr');
   assert.match(run.stdout, /RESULT unsupported codex-transport-error/);
+});
+
+// --- Third integrator HOLD (Bruno :560): required shape, and the pre-abort spawn race. -----
+
+test('HOLD 7: record-ness is not snapshot shape; a bucket missing a required slot is refused', async () => {
+  // {} is a perfectly good record and a malformed snapshot. A snapshot carrying `primary` but
+  // no `secondary` KEY is missing a required field, which is not the same claim as reporting
+  // no window there.
+  const cases = /** @type {Array<[string, Record<string, unknown>]>} */ ([
+    ['empty object bucket', { codex: snapOf('codex', win(8, 10080, 1789269881), null), other: {} }],
+    ['missing secondary key', { codex: { limitId: 'codex', primary: win(8, 10080, 1789269881) } }],
+  ]);
+  for (const [label, map] of cases) {
+    const result = await collect({ accountId: 'a-1', rateLimits: null, rateLimitsByLimitId: map });
+    if (result.status === 'supported') return assert.fail(label + ' was accepted as a snapshot');
+    assert.equal(result.code, 'codex-quota-shape-unsupported', label);
+  }
+});
+
+test('HOLD 7 pair: a present-but-null secondary is a complete snapshot and still reads', async () => {
+  // The discriminating half: null means "no window here" and must keep working, or the fix
+  // above would have bought its strictness by breaking the ordinary case.
+  const result = await collect({ accountId: 'a-1', rateLimits: null,
+    rateLimitsByLimitId: { codex: snapOf('codex', win(8, 10080, 1789269881), null) } });
+  assert.ok(result.status === 'supported', 'a null secondary must remain a valid snapshot');
+  assert.equal(result.observation.windows.length, 1);
+});
+
+test('HOLD 8: a pre-cancelled read spawns nothing and cannot crash the caller later', async () => {
+  // The race: the collector returned `cancelled` correctly and the abandoned child then failed
+  // asynchronously with ENOENT, so the caller received a good result AND died a tick later.
+  // Isolated, because the crash it guards against terminates the process observing it.
+  const collector = new URL('../src/usage/codex.mjs', import.meta.url).href;
+  const probe = [
+    "import { collectCodexUsage } from '" + collector + "';",
+    'const r = await collectCodexUsage({',
+    "  poolId: '" + POOL + "',",
+    "  producer: { producerId: '" + PRODUCER.producerId + "', generation: 1, sequence: 1 },",
+    '  now: () => new Date(), signal: AbortSignal.abort(), timeoutMs: 500,',
+    "  resolveBinary: async () => 'C:/synthetic/definitely-not-here-9f3a.exe',",
+    '});',
+    "console.log('RESULT ' + r.status + ' ' + (r.code || ''));",
+    'await new Promise((res) => setTimeout(res, 250));',
+  ].join('\n');
+  const dir = mkdtempSync(join(tmpdir(), 'n2-preabort-'));
+  const file = join(dir, 'probe.mjs');
+  writeFileSync(file, probe, 'utf8');
+  const run = spawnSync(process.execPath, [file], { encoding: 'utf8' });
+  assert.equal(run.status, 0, 'a pre-cancelled read must not crash the caller afterwards');
+  assert.equal(/^\s*at .*:\d+:\d+/m.test(run.stderr || ''), false, 'a raw stack reached stderr');
+  assert.match(run.stdout, /RESULT unsupported codex-cancelled/);
 });

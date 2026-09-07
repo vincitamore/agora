@@ -36,6 +36,18 @@ const CODE = Object.freeze({
 function isRecord(value) { return typeof value === 'object' && value !== null && !Array.isArray(value); }
 
 /**
+ * A `RateLimitSnapshot` REQUIRES both window slots; each may be schema null. Record-ness is not
+ * snapshot shape: `{}` is a perfectly good record and a malformed snapshot, and a snapshot with
+ * `primary` but no `secondary` key is missing a required field rather than reporting no window
+ * there. An ABSENT key and a null are different claims -- the same distinction this module was
+ * repaired for at the slot and the bucket, now checked at the field.
+ * @param {unknown} value
+ */
+function isSnapshotShape(value) {
+  return isRecord(value) && Object.hasOwn(value, 'primary') && Object.hasOwn(value, 'secondary');
+}
+
+/**
  * Epoch seconds (the shape the installed schema uses for `resetsAt`) to an ISO instant.
  * A non-finite or out-of-range value is NOT coerced: it returns undefined so the reading
  * carries no reset metadata, which the contract reports as unknown freshness rather than
@@ -153,12 +165,17 @@ export function normalizeRateLimitsResponse(response, context) {
       // bucket is a false claim about its own completeness, so refuse rather than under-report.
       // This is the same collapse the window slots were repaired for, one level up: fixing the
       // inner level and leaving the outer one is exactly how it survived the first repair.
-      if (!isRecord(snapshot)) return { status: 'error', code: CODE.badQuota };
+      if (!isSnapshotShape(snapshot)) return { status: 'error', code: CODE.badQuota };
       covered.add(typeof (/** @type {any} */ (snapshot)?.limitId) === 'string' && /** @type {any} */ (snapshot).limitId ? /** @type {any} */ (snapshot).limitId : key);
       readings.push(...windowsFromSnapshot(snapshot, key));
     }
   }
   const legacy = response.rateLimits;
+  // The same check at the level above the buckets: a legacy summary we are about to CONSUME
+  // must be a snapshot, not merely an object.
+  if (!mapSupplied && legacy !== null && legacy !== undefined && !isSnapshotShape(legacy)) {
+    return { status: 'error', code: CODE.badQuota };
+  }
   if (isRecord(legacy)) {
     const legacyId = typeof legacy.limitId === 'string' && legacy.limitId ? legacy.limitId : 'codex';
     // Only when the authoritative map did not already carry this bucket.
@@ -199,6 +216,9 @@ export async function requestRateLimits(options = {}) {
     // the absence of a CLI on this seat is a fact about the seat.
     return { ok: /** @type {const} */ (false), code: CODE.spawnFailed };
   }
+  // Already cancelled before anything started: do not spawn at all. A process created only to
+  // be abandoned can still fail asynchronously, and there is nothing to attach handlers to yet.
+  if (options.signal?.aborted) return { ok: /** @type {const} */ (false), code: CODE.cancelled };
   let child;
   try {
     // Args and stdio match the measured census probe: the server needs `--stdio`, and
@@ -234,7 +254,18 @@ export async function requestRateLimits(options = {}) {
     };
     const onAbort = () => finish({ ok: false, code: CODE.cancelled });
     const timer = setTimeout(() => finish({ ok: false, code: CODE.timeout }), timeoutMs);
+
+    // LIFECYCLE HANDLERS FIRST, before any path that can complete early. A spawned child fails
+    // asynchronously (ENOENT arrives after spawn returns), so a completion that returns before
+    // these are attached leaves the failure unhandled: the caller got its bounded result AND
+    // then died on an uncaught error. Ordering is the fix; a later handler is no handler.
+    child.on('error', () => finish({ ok: false, code: CODE.spawnFailed }));
+    child.on('exit', () => finish({ ok: false, code: CODE.earlyExit }));
+    child.stdin?.on('error', () => finish({ ok: false, code: CODE.transport }));
+    child.stdout?.on('error', () => finish({ ok: false, code: CODE.transport }));
+
     if (options.signal) {
+      // Aborted between the pre-spawn check and here: the handlers above are already attached.
       if (options.signal.aborted) { finish({ ok: false, code: CODE.cancelled }); return; }
       options.signal.addEventListener('abort', onAbort, { once: true });
     }
@@ -243,12 +274,6 @@ export async function requestRateLimits(options = {}) {
       try { child.stdin?.write(`${JSON.stringify(message)}\n`); } catch { finish({ ok: false, code: CODE.protocolError }); }
     };
 
-    // A stream error arrives ASYNCHRONOUSLY and is not caught by try/catch around write, nor by
-    // child.on('error') which reports spawn failures only. Unhandled, an 'error' event on an
-    // EventEmitter is rethrown: it terminates the CALLER's process and prints a raw stack, which
-    // is both a crash this library must never cause and a breach of the no-raw-output boundary.
-    child.stdin?.on('error', () => finish({ ok: false, code: CODE.transport }));
-    child.stdout?.on('error', () => finish({ ok: false, code: CODE.transport }));
     child.stdout?.setEncoding('utf8');
     child.stdout?.on('data', (chunk) => {
       bytes += Buffer.byteLength(chunk, 'utf8');
@@ -286,9 +311,6 @@ export async function requestRateLimits(options = {}) {
         // Any other id belongs to a request this collector did not make: ignore it.
       }
     });
-    child.on('error', () => finish({ ok: false, code: CODE.spawnFailed }));
-    child.on('exit', () => finish({ ok: false, code: CODE.earlyExit }));
-
     send({ id: initId, method: 'initialize', params: { clientInfo: { name: 'agora-usage-collector', title: 'Read-only usage collector', version: '1' }, capabilities: null } });
   });
 }

@@ -94,6 +94,11 @@ single `limitId`. They are distinct windows, so the slot name becomes the observ
   omitting it would be a false claim about the reading's own completeness, so the whole reading
   is refused instead. Fixing this at the slot level and leaving it at the bucket level is
   exactly how it survived a first round of repair.
+- Being an object is not being a snapshot. A snapshot **requires** both `primary` and
+  `secondary`, each of which may be null, so `{}` is a well-formed record and a malformed
+  snapshot, and a bucket carrying `primary` with no `secondary` **key** is missing a required
+  field rather than reporting no window there. Required keys are checked at every represented
+  bucket, and at the legacy summary when that summary is the one being consumed.
 - A window slot that is schema `null` means the provider reports **no** window there. A slot that
   is present but unreadable means a window exists that cannot be expressed, which is a different
   fact and is reported unavailable with `unsupported-shape` rather than dropped. Collapsing the
@@ -130,7 +135,9 @@ reports identity unavailable rather than deriving a principal from a credential 
   the allow-listed fields above.
 - Same-process execution is not authority. This collector states a `cooperative` reading; a
   consumer needing an authenticated context resolves it through the contract's seat binding.
-- Only the helper this collector started is cleaned up. A peer process is never touched.
+- Only the helper this collector started is cleaned up. A peer process is never touched, and a
+  read that is already cancelled when it begins starts no process at all: one created only to be
+  abandoned can still fail asynchronously, after the caller has its result.
 - Errors on the streams this collector owns are bounded results, never crashes. A stream error
   arrives asynchronously, so it is caught by neither a `try`/`catch` around the write nor the
   child's own `error` event; unhandled, it would terminate the **calling** process and print a
