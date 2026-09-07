@@ -1,0 +1,129 @@
+# Session source adapters
+
+`src/usage/session-sources.mjs` turns one original usage envelope plus explicit
+harness, version and session context into typed session-usage records. It is a
+pure decoder: no network, no corpus walk, no persistence, no pricing.
+
+A value that decodes here is a well-formed claim about what the envelope
+contained. It is not a verified bill, a membership, or a live harness snapshot.
+
+Records are validated by `src/protocol/session-usage.mjs` before they are
+returned. A decode that cannot produce a well-formed contract record is an
+error, not a partial claim.
+
+## API
+
+```js
+import { decodeSessionUsage } from '../src/usage/session-sources.mjs';
+
+const result = decodeSessionUsage({
+  harness: 'claude-code',
+  harnessVersion: '2.0.0',
+  sessionEpoch: 'session-epoch-synthetic-01',
+  envelope,
+  context: {},
+});
+if (result.status === 'supported') {
+  result.records;
+} else {
+  result.code;
+}
+```
+
+`decodeSessionUsage(input)` — the public path.
+
+| Field | Required | Meaning |
+|---|---|---|
+| `harness` | yes | `claude-code`, `omp`, `codex`, or `amore-build`. Anything else is `unsupported`. |
+| `sessionEpoch` | yes | Opaque session/process-start epoch supplied by the caller. Not invented. |
+| `envelope` | yes | The original usage payload. Missing is an error; other update kinds are unusable. |
+| `harnessVersion` | no | Source-version label. Absent leaves versioned `not-applicable` claims unavailable. |
+| `sourceVersion` | no | Accepted as an alias of `harnessVersion`. |
+| `context` | no | Harness-specific caller facts. Codex **requires** `context.sourceId` and may carry `context.model` from a preceding turn context. `context.observedAt` supplies the required exact ISO instant when the envelope has none. |
+
+Returns `{status: 'supported', records}` or `{status: 'unsupported'|'error', code, reason?}`.
+`records` is an array: one Claude, OMP or Codex envelope yields one record; one
+Amore Build `turn_completed` envelope yields one record per `modelUsage` entry.
+
+Lower-level exports: `knownCount`, `unknownCount`, `invalidCount`,
+`notApplicableCount`, `readCountField`, `disjointUncached`,
+`SESSION_SOURCE_HARNESSES`, `SESSION_SOURCE_CODES`.
+
+## Counters
+
+Each numeric component is a tagged union, never a sentinel:
+
+- `known` — a safe nonnegative integer and a unit (`tokens`). Zero is known.
+- `unknown` — the envelope did not evidence the component. Carries a reason.
+- `invalid` — the envelope said something unusable (null, wrong type, negative,
+  non-integer, cache exceeding input). Carries a reason. The rest of the record
+  still decodes.
+- `not-applicable` — only when a versioned source contract excludes the
+  component. This decoder does not emit it without that contract.
+
+Absent is not zero. Null is not absent. An unsplit cache-write total is not a
+five-minute write. Nothing clamps: if cached input plus writes exceed input,
+`uncached-input` is `invalid` with `cache-exceeds-input`.
+
+## Components
+
+Every record carries:
+
+| Component | Meaning |
+|---|---|
+| `uncached-input` | Input minus known cache parts. Unknown if any subtracted part is unknown. |
+| `cached-input` | Cache-read tokens. |
+| `cache-write-5m` | Five-minute cache-write tokens, or unknown when the TTL split is absent. |
+| `cache-write-1h` | One-hour cache-write tokens, or unknown when the source does not evidence them. |
+| `cache-write-unknown-ttl` | Unsplit write total. Omitted when the source split the TTL. |
+| `output` | Output tokens. Reasoning is not added to this. |
+| `reasoning-billed` | Unknown unless the envelope evidences inclusion or exclusion. |
+| `tool` | Unknown unless a versioned source contract includes tool charges. |
+
+An unsplit write total, when the source supplies one, is emitted as
+`cache-write-unknown-ttl`. There is no pooled `cache-write` bucket. Coverage
+is `complete` or `partial` as the contract names it: partial whenever any
+component is unknown. Overlap defaults to `none`; the caller may pass a
+contract overlap object in `context.overlap`.
+
+`sourceId` is opaque source text. It is checked for length and control
+characters only. It is never rewritten into native id grammar. A Codex
+cumulative watermark is not the source id and is not copied onto the record;
+the caller supplies the locator. Reported OMP `cost.total` and Amore
+`costUsdTicks` are dropped from the typed record.
+
+## Four sources
+
+**Claude Code** (`sourceUnit: request`). Usage lives at `message.usage`. Identity
+is `message.id` (then `requestId`, then `uuid`). `cache_creation` is the TTL
+split; `cache_creation_input_tokens` without that object is an unsplit total.
+Finality is `unknown`: streaming corrections share an id and are not ordered here.
+
+**OMP** (`sourceUnit: request`). Same envelope family, different keys (`input`,
+`output`, `cacheRead`, `cacheWrite`, `cttl.ephemeral5m` / `ephemeral1h`).
+Identity is `message.id` then top-level `id`. Reported `cost.total` is not a
+token component and is not converted.
+
+**Codex** (`sourceUnit: cumulative-snapshot`). Envelope is
+`event_msg` / `payload.type === 'token_count'` / `info.last_token_usage`.
+`context.sourceId` is required. `context.model` comes from a preceding
+`turn_context` when the caller has it; this decoder does not walk a log to find
+one. `cache_write_input_tokens` is the five-minute write when present.
+One-hour writes are unknown, not a known zero. The cumulative watermark is not
+a request id and equal watermarks do not invent revisions.
+
+**Amore Build** (`sourceUnit: aggregate`). Envelope is `params.update` with
+`sessionUpdate: 'turn_completed'`. Identity per record is the opaque
+`prompt_id:model` text. One prompt with several `modelUsage` entries yields
+several records. Top-level totals are not added to children. `modelCalls` is
+not expanded into requests. Finality is `final` because the source labelled the
+update completed. One-hour writes are unknown. `costUsdTicks` is not converted
+into dollars.
+
+## What this module does not do
+
+It does not scan a transcript, call a provider, join a member, price a token,
+pick a max-output revision, or treat an ingest-row hint (`kind: usage`, `text`)
+as a counter. Revision precedence is the ledger's problem: if the source does
+not evidence order, this decoder emits `finality: unknown` and does not
+supersede.
