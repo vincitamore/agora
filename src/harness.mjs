@@ -1,6 +1,6 @@
 // @ts-check
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -300,4 +300,180 @@ export async function clearWatchMode(target, opts = {}) {
     return;
   }
   await rm(target.sentinel, { force: true });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Is a stale build one this watch would actually notice?
+//
+// `buildPredates` answers "are you running the installed build", which is not the question a seat
+// asks when it sees the warning. The question is whether any module this watch LOADED moved, and
+// those are different: three library-only landings can leave a watch behind main while nothing it
+// runs has changed, and one landing to a module the entry imports statically changes everything it
+// runs without touching the file the seat thought to look at.
+//
+// Two rules govern everything below.
+//
+//   It is the IMPORT GRAPH, not the executed paths. A static `import` at the top of the entry
+//   loads its module on every invocation, so a watch that never calls a verb still has that verb's
+//   code resident. Asking what the process executes gives the wrong answer in the unsafe direction.
+//
+//   Every unknown WIDENS to owed; none narrows to inert. A wrong "no re-arm owed" leaves a seat
+//   silently running stale code and is discovered by a defect; a wrong "owed" costs one re-arm.
+
+/** A dynamic import whose specifier is a literal is resolvable; any other is not. */
+const DYNAMIC_IMPORT = /\bimport\s*\(/g;
+const DYNAMIC_LITERAL = /\bimport\s*\(\s*["'`]([^"'`]+)["'`]\s*\)/g;
+const FROM_SPEC = /\bfrom\s*["']([^"']+)["']/g;
+const BARE_IMPORT = /(?:^|[;\n])\s*import\s*["']([^"']+)["']/g;
+/** A `require` minted by `createRequire` loads outside the ESM graph, so it gets the same treatment
+ * as a dynamic import: a literal specifier resolves and joins the closure, a computed one makes the
+ * closure a non-superset. A blanket "any createRequire is unmeasurable" was the first shape of this
+ * rule and it was wrong in the way that matters: the entry uses exactly one, with a literal
+ * specifier, to read package.json — so the rule would have made the real closure permanently
+ * incomplete, the inert state unreachable, and the whole measurement a warning that always fires
+ * while appearing to have been measured. */
+const REQUIRE_CALL = /(?<![.\w])require\s*\(/g;
+const REQUIRE_LITERAL = /(?<![.\w])require\s*\(\s*["'`]([^"'`]+)["'`]\s*\)/g;
+
+/**
+ * Every repository file reachable from `entry` by a static import, plus whether that set can be
+ * trusted to be complete.
+ *
+ * Deliberately over-inclusive on what counts as a specifier (a path inside a comment or a string
+ * would be followed): a superset keeps the answer on the safe side, and the only thing a false
+ * member can do is report a re-arm that is not needed.
+ *
+ * @param {{ entry: string, root: string, read?: (file: string) => string }} opts
+ * @returns {{ files: Set<string>, complete: boolean, reason?: string }}
+ */
+export function importClosure(opts) {
+  const read = opts.read ?? ((/** @type {string} */ file) => readFileSync(file, "utf8"));
+  const root = path.resolve(opts.root);
+  const entry = path.resolve(opts.entry);
+  /** @type {Set<string>} */
+  const files = new Set();
+  /** @type {string[]} */
+  const queue = [entry];
+  let complete = true;
+  /** @type {string | undefined} */
+  let reason;
+  const incomplete = (/** @type {string} */ why) => { if (complete) { complete = false; reason = why; } };
+
+  while (queue.length) {
+    const file = /** @type {string} */ (queue.shift());
+    const relative = path.relative(root, file);
+    if (relative.startsWith("..") || path.isAbsolute(relative)) {
+      // Outside the repository (a ../ module, a symlink out of the tree). Dropping it would make
+      // the closure a SUBSET, which is the one direction that can produce a false inert; no diff
+      // of this repo can speak for it, so the whole answer becomes unknown.
+      incomplete(`${file} is outside ${root}, so no diff of this repository can say whether it moved`);
+      continue;
+    }
+    if (files.has(relative)) continue;
+    /** @type {string} */
+    let source;
+    try { source = read(file); }
+    catch { incomplete(`${relative} could not be read, so its own imports are unknown`); continue; }
+    files.add(relative);
+
+    // A load the static graph cannot resolve makes the whole closure a non-superset, which is the
+    // one thing that must never be reported as inert. A load it CAN resolve simply joins it.
+    const dynamic = (source.match(DYNAMIC_IMPORT) ?? []).length;
+    const dynamicLiteral = (source.match(DYNAMIC_LITERAL) ?? []).length;
+    if (dynamic > dynamicLiteral)
+      incomplete(`${relative} has ${dynamic - dynamicLiteral} dynamic import call(s) with a computed specifier`);
+    const requires = (source.match(REQUIRE_CALL) ?? []).length;
+    const requireLiterals = (source.match(REQUIRE_LITERAL) ?? []).length;
+    if (requires > requireLiterals)
+      incomplete(`${relative} has ${requires - requireLiterals} require call(s) with a computed specifier`);
+
+    for (const pattern of [FROM_SPEC, BARE_IMPORT, DYNAMIC_LITERAL, REQUIRE_LITERAL]) {
+      pattern.lastIndex = 0;
+      for (const match of source.matchAll(pattern)) {
+        const spec = match[1];
+        if (!spec || !spec.startsWith(".")) continue; // a builtin or a dependency, not in the repo
+        const resolved = path.resolve(path.dirname(file), spec);
+        if (existsSync(resolved)) queue.push(resolved);
+      }
+    }
+  }
+  return { files, complete, ...(reason ? { reason } : {}) };
+}
+
+/**
+ * @typedef {object} ModuleDelta
+ * @property {"owed" | "inert" | "unknown"} state owed: something this watch loads moved, or the
+ *   measurement could not be trusted to say otherwise. inert: measured, and nothing it loads moved.
+ * @property {string[]} changed the repository files that moved AND are on the import graph
+ * @property {number} [scanned] how many files changed between the two builds in all
+ * @property {string} [reason] why the answer is unknown, in words a seat can act on
+ */
+
+/**
+ * Did anything this watch loaded move between the build it armed on and the installed one?
+ *
+ * @param {{ root: string, entry: string, from: import('./harness.mjs').BuildIdentity | undefined,
+ *  to: import('./harness.mjs').BuildIdentity, armedRoot?: string,
+ *  run?: typeof execFileAsync, read?: (file: string) => string }} opts
+ * @returns {Promise<ModuleDelta>}
+ */
+export async function watchModuleDelta(opts) {
+  const run = opts.run ?? execFileAsync;
+  const root = path.resolve(opts.root);
+  const unknown = (/** @type {string} */ reason) => ({ state: /** @type {const} */ ("unknown"), changed: [], reason });
+
+  // The record may name a DIFFERENT clone. Nothing in the shipped comparison checks this, and a
+  // diff of this tree is not evidence about another copy — a watch armed as a bare `agora` can be
+  // a global install entirely outside this checkout.
+  if (opts.armedRoot === undefined)
+    return unknown("this watch recorded no root, so which checkout it loaded is unknown; re-arm it once to make module freshness measurable");
+  // By realpath, not by string: a worktree path and the shared checkout are genuinely different
+  // roots and rightly unknown, but a symlinked same root must not read as different.
+  const real = (/** @type {string} */ dir) => { try { return realpathSync(dir); } catch { return path.resolve(dir); } };
+  if (real(opts.armedRoot) !== real(root))
+    return unknown(`this watch loaded ${opts.armedRoot}, not ${root}; a diff of this checkout says nothing about another copy`);
+  if (!opts.from?.git || !opts.to.git)
+    return unknown("one of the two builds is stamped by file time rather than by a commit, so there is no diff to take");
+
+  for (const sha of [opts.from.git, opts.to.git]) {
+    try { await run("git", ["-C", root, "cat-file", "-e", `${sha}^{commit}`], { windowsHide: true, maxBuffer: 64 * 1024 }); }
+    catch { return unknown(`commit ${sha.slice(0, 8)} is not in ${root}, so the change between the two builds cannot be read`); }
+  }
+
+  /** @type {string[]} */
+  let changedFiles;
+  try {
+    // A non-zero exit is NOT an empty change list. Reading it as one is the exact shape that turns
+    // a broken measurement into a confident "nothing moved".
+    const result = await run("git", ["-C", root, "diff", "--name-only", opts.from.git, opts.to.git],
+      { windowsHide: true, maxBuffer: 4 * 1024 * 1024 });
+    changedFiles = String(result.stdout).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  } catch (e) {
+    return unknown(`the change between the two builds could not be read (${e instanceof Error ? e.message : String(e)})`);
+  }
+
+  // A sha diff cannot see an UNCOMMITTED edit, and a watch loaded the working tree at arm time
+  // while this process reads the working tree now. On a trunk that is dirty for hours — the normal
+  // case on a shared checkout — a peer's uncommitted change to a module on the closure is exactly
+  // the change a seat most needs to know about, and it is invisible to `git diff <sha> <sha>`.
+  /** @type {string[]} */
+  let dirtyFiles = [];
+  try {
+    const status = await run("git", ["-C", root, "status", "--porcelain", "--untracked-files=all"],
+      { windowsHide: true, maxBuffer: 4 * 1024 * 1024 });
+    dirtyFiles = String(status.stdout).split(/\r?\n/).map((line) => line.slice(3).trim())
+      .filter(Boolean).map((line) => line.includes(" -> ") ? line.split(" -> ")[1] : line);
+  } catch (e) {
+    return unknown(`the working tree's state could not be read (${e instanceof Error ? e.message : String(e)}), and an uncommitted edit to a loaded module is invisible to a commit diff`);
+  }
+
+  const closure = importClosure({ entry: opts.entry, root, ...(opts.read ? { read: opts.read } : {}) });
+  const onGraph = (/** @type {string} */ file) => closure.files.has(file.split("/").join(path.sep)) || closure.files.has(file);
+  const changed = [...new Set([...changedFiles, ...dirtyFiles])].filter(onGraph);
+  const scanned = new Set([...changedFiles, ...dirtyFiles]).size;
+  if (!closure.complete && changed.length === 0)
+    return { state: "unknown", changed: [], scanned,
+      reason: `nothing on the measured import graph moved, but the graph is not provably complete: ${closure.reason}` };
+  if (changed.length === 0) return { state: "inert", changed: [], scanned };
+  return { state: "owed", changed, scanned };
 }
