@@ -6,7 +6,9 @@ well-formed *claim* about what a harness reported, never evidence the claim is t
 here infers trust from the syntax of a value.
 
 It prices nothing. Rates, tiers and money belong elsewhere; putting them here would turn a shape
-validator into a pricing authority.
+validator into a pricing authority. It does **record** a cost a source itself reported, in that
+source's own unit, without converting it — see *Source-reported cost*, which is storage, not
+pricing.
 
 ## The one idea
 
@@ -92,6 +94,28 @@ strictly increasing revision ordinals on **both** sides. Later arrival, larger o
 leaves an unresolved contribution for the ledger to hold, which is honest; picking max-output or
 last-arrival would silently choose one of two conflicting truths.
 
+## Source-reported cost
+
+Some sources report a cost of their own (`cost.total`, `costUsdTicks`). `sourceReportedCost` is
+an **optional** field on a record, shaped exactly like a counter: `known` carries an `amount` and
+a `unit`; `unknown`, `invalid` and `not-applicable` carry no number at all.
+
+- The `unit` is **opaque and source-supplied** (`usd-ticks`, `usd-micros`). It is stored verbatim
+  and never parsed into money. Ticks stay ticks; converting them here would invent a rate.
+- It is deliberately **not** a `COUNTER_UNITS` value and lives outside `components`, so a cost can
+  never be reached by code walking the token counters, and a counter can never be denominated in
+  a cost unit. `isSummableUnit` has nothing to say about a cost: a cost is never added to a
+  counter, and two costs in different units are not addable to each other.
+- **Omitted** means the source reported none. That is different from `invalid` with a reason,
+  which means the source reported something unusable. Dropping a reported figure because we
+  decline to type it would collapse those two into "no cost information exists" — the same
+  absent-versus-unknown collapse this module exists to prevent, one level up, and unrecoverable
+  once an adapter has discarded it.
+
+Why carry it at all, in a module that prices nothing: a provider's own figure is the only
+independent check on a cost derived from token counts and a rate table, and the rate is the input
+most likely to be stale.
+
 ## Coverage
 
 `coverage` (`complete` / `partial` / `none`) is stated by the adapter, not derived from which keys
@@ -110,5 +134,6 @@ worse than either alone.
 `COUNTER_STATES`, `COUNTER_UNITS`, `SOURCE_UNITS`, `USAGE_COMPONENTS`, `OVERLAP_RELATIONS`,
 `FINALITY`, `COVERAGE_STATES`, `SESSION_USAGE_LIMITS`, `ProtocolUsageError`,
 `validateCounter`, `validateSourceIdentity`, `validateComponentSet`, `validateOverlap`,
+`validateSourceReportedCost`,
 `validateMemberCoverage`, `validateMembershipCoverage`, `validateSessionUsageRecord`,
 `ledgerKey`, `supersedesContribution`, `isSummableUnit`.
