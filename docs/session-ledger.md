@@ -20,8 +20,9 @@ Under a caller-supplied `root`:
   recycled pid still looks live.
 - `state.json` — one JSON object: ledger generation, last ingest position, per-key entries,
   gap records. Contribution and ingest position are the same write. Each stored entry
-  retains `observedAt`, and `model` / `sourceReportedCost` when the record carried them.
-  `sourceReportedCost` keeps the source's stated unit. The digest is still identity+usage
+  retains `observedAt`, `model` when present, and every `sourceReported*` field the
+  contract admitted (`sourceReportedCost` now; later optionals without a ledger edit).
+  Each keeps the source's stated unit. The digest is still identity+usage
   only, so existing ledgers open; entries written before these fields simply omit them
   and a reader must treat omission as absent, never invent a time, model or cost. A
   later record with the same identity+usage and a different cost is a duplicate and
