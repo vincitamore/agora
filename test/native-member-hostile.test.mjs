@@ -43,6 +43,13 @@ function readUntil(stream, predicate) {
   });
 }
 
+function waitForPeerEof(stream, label) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error(`timed out waiting for ${label} peer EOF`)), 500);
+    stream.once("end", () => { clearTimeout(timeout); resolve(); });
+  });
+}
+
 function child(signal, exit = null) {
   const stdout = new PassThrough();
   const listeners = {};
@@ -133,8 +140,9 @@ test("T3 kill during the member handshake leaves no record and the route welcome
   const socket = pair(); accept(socket.host);
   await readUntil(socket.client, (frame) => frame.type === "member-server-hello");
   // The peer disappears after receiving the greeting and before its client proof.
+  const closed = waitForPeerEof(socket.host, "member handshake");
   socket.client.end();
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  await closed;
   assert.equal((await service.openRoom(ROOM)).read({}).length, 0,
     "a killed member handshake committed a record");
   const fresh = pair(); accept(fresh.host);
@@ -149,10 +157,14 @@ test("T3 kill during a member append leaves no partial frame committed", async (
   const append = encodeNativeFrame({ protocol: NATIVE_PROTOCOL, type: "append", requestId: "k".repeat(32), roomId: ROOM,
     operation: { operationId: "l".repeat(32), authorName: "remote", text: "must not commit" } });
   socket.client.write(append.subarray(0, append.length - 1));
+  const closed = waitForPeerEof(socket.host, "member append");
   socket.client.end();
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  await closed;
   assert.equal((await service.openRoom(ROOM)).read({}).length, 0,
     "a killed append committed a partial record");
+  const fresh = pair(); accept(fresh.host);
+  assert.equal((await hello(fresh.client, secret)).result.type, "member-welcome",
+    "a killed append poisoned the route for a fresh member");
 });
 
 test("T3 route secrets reject selection, world-readable mode, and stale generations", async (t) => {
@@ -260,6 +272,8 @@ test("T3 mixed writers serialize two member principals and one local append with
   assert.equal(left.type, "append-ack"); assert.equal(right.type, "append-ack"); assert.ok(local.cursor);
   const records = store.read({});
   assert.equal(records.length, 3);
+  assert.deepEqual(records.map((record) => record.cursor.split(":")[1]), ["1", "2", "3"],
+    "three committed writers left a cursor gap");
   assert.equal(records.filter((record) => record.author.id === opened.descriptor.binding.accountId).length, 1);
   assert.equal(records.filter((record) => record.author.id === second.descriptor.binding.accountId).length, 1);
   assert.notEqual(opened.descriptor.binding.accountId, second.descriptor.binding.accountId,
