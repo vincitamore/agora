@@ -683,10 +683,12 @@ export class NativeRoomService {
     if (held || this.openingRoutes.has(key)) {
       // The message carries the route's state, because the operator's next move differs: a live
       // route is closed first; a closing one is already being torn down and its key is held until
-      // its resource settles, so the honest instruction is to wait, not to close again.
-      throw new AgoraError(held?.state === "closing"
-        ? `route-already-open: ${roomId} already admits this key and that route is closing; wait for its close to settle before opening a new grant`
-        : `route-already-open: ${roomId} already admits this key; close it before opening a new grant`);
+      // its resource settles; an OPENING one is the reservation itself, not yet in the registry,
+      // so `route close` would say route-not-open and the honest instruction is to wait.
+      const state = held ? (held.state === "closing" ? "closing" : "live") : "opening";
+      throw new AgoraError(state === "live"
+        ? `route-already-open: ${roomId} already admits this key; close it before opening a new grant`
+        : `route-already-open: ${roomId} already admits this key and that route is ${state}; wait for it to settle before opening a new grant`);
     }
     this.openingRoutes.add(key);
     try {
