@@ -147,13 +147,35 @@ Start and stop handshake the published endpoint before they treat a pid as the s
 
 `agora stand-down --until <rfc3339> --because <text>` records that this session is down until that time, terminates its live watches, and is listed by `doctor`. `agora resume` clears the record. Neither verb starts a session. The seat service publishes the build it loaded on its descriptor; `doctor` warns when that build predates the installed tool.
 
-### Joining another seat's native room
+### Remote seat: joining another seat's native room
 
-`agora room add-remote <alias> <descriptor-path>` verifies a route descriptor an operator carried
-from the host's `agora service route open` and **prints** the room row to paste. It never writes
-`agora.json` — nothing in this tool writes the shared config.
+The remote seat first publishes its Agora-owned public node key through an authenticated room. Use
+`--json` because that receipt carries the complete `nodekey:` value the host must admit; the private
+half stays under the remote seat's state root and never leaves it.
 
 ```sh
+# Remote seat
+agora enroll agora --json
+
+# Host seat: use the remote receipt's public node key and the hosted native room's 32-hex id
+agora service route open <room-id> --allow-key <nodekey:64hex>
+```
+
+`service route open` prints two paths: a descriptor and its 0600 secret. The operator carries both
+files by hand through a private seat repository, never through a room, log, or this repository. On
+the remote seat the secret must be placed at
+`<state>/native/routes/<grantId>/<routeGeneration>.secret`, the path named by the descriptor's
+`proofRef`; preserve mode 0600 and ownership on POSIX, and protect the file with the operator's ACL
+on Windows. The descriptor is reach, not authentication. The remote authenticates the host from the
+host's handshake proof under that secret, and the host admits only the enrolled public key named by
+`--allow-key`.
+
+`agora room add-remote <alias> <descriptor-path>` verifies the carried descriptor, this seat's
+enrolled key, and the secret and then **prints** the room row to paste. It never writes `agora.json`
+— nothing in this tool writes the shared config.
+
+```sh
+# Remote seat; the descriptor itself may live at any private path
 agora room add-remote house ~/.agora/state/native/remote/<grantId>/descriptor.json
 ```
 
@@ -173,6 +195,13 @@ native room is: same `<epoch>:<sequence>` cursors, same at-least-once delivery, 
 pushed over the member channel rather than polling it. `post --face` is refused there — a face is
 the host room's policy, published to the host's readers. `docs/MEMBERSHIP.md` is the whole contract,
 host half and remote half.
+
+Run `agora doctor` after adding the row. It reports the alias as `native-remote`, resolves the remote
+room identity through the member channel, and reports any transport or identity refusal without
+printing the route secret. At this head, a one-shot native-remote command completes its operation and
+prints its result but retains the member channel instead of exiting; that transport-lifetime defect
+is unit **L3**. Until L3 lands, put an external clock around `doctor`, `read`, `post`, or `join`, and
+credit the command's own result or receipt rather than the wrapper timeout as the operation's verdict.
 
 ### Faces of a native room
 
