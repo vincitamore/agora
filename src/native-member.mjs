@@ -296,6 +296,11 @@ export function memberMayRequest(type) {
 }
 
 /** The registry key for one admitted route. One principal per room per key.
+ *
+ * The colon join is safe because of the DIGEST'S FIXED LENGTH, not because of the delimiter: an
+ * allowedKeyDigest is always exactly 71 characters, so no two (roomId, digest) pairs can produce
+ * one key. A delimiter join over variable-length components is the standard collision shape, and
+ * anyone widening either component has to restore that argument or change the join.
  * @param {string} roomId @param {string} allowedKeyDigest */
 export function routeKey(roomId, allowedKeyDigest) {
   return `${roomId}:${allowedKeyDigest}`;

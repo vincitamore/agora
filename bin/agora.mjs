@@ -953,7 +953,7 @@ async function main(argv) {
         if (values.out !== undefined) await copyFile(opened.descriptorPath, String(values.out));
         const where = values.out !== undefined ? String(values.out) : opened.descriptorPath;
         if (json) console.log(JSON.stringify({ type: "service", action: "route-open", ...opened, descriptorPath: where }));
-        else console.log(`route open ${opened.descriptor.binding.roomId} member ${opened.descriptor.binding.accountId}\ndescriptor ${where}\nsecret ${opened.secretRef} (0600, carry it beside the descriptor; it never travels in the descriptor)`);
+        else console.log(`route open ${opened.descriptor.binding.roomId} member ${opened.descriptor.binding.accountId}\ndescriptor ${where}\nsecret ${opened.secretPath} (0600, carry it beside the descriptor; it never travels in the descriptor)`);
         return EXIT.ok;
       }
       if (sub === "list") {
