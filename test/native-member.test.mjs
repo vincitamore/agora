@@ -603,21 +603,26 @@ test("openRoute hands Tailcat a runtime the REAL resolver accepts", async (t) =>
   assert.equal(handed.stateRoot, service.root, "the runtime's stateRoot is not this service's root");
 
   const { resolveTailcatBinary } = await import("../src/tailcat-runtime.mjs");
+  const { existsSync, readFileSync } = await import("node:fs");
+  const { createHash } = await import("node:crypto");
 
-  // The discriminating half: the REAL resolver must accept what openRoute actually builds.
+  // The discriminator is ON DISK, not in an error string. resolveTailcatBinary runs inside the
+  // guardian child, whose catch reports a status with no text, so the service reports the same
+  // "runtime verification or startup failed" for a bare stateRoot and for a real launch failure
+  // alike -- an assertion on the message cannot tell the fix from the defect.
   const resolved = await resolveTailcatBinary(handed);
-  assert.ok(resolved?.path, "the real resolver returned no binary for openRoute's runtime");
+  assert.ok(existsSync(resolved.path), "the resolver reported a path that is not on disk");
   assert.ok(resolved.path.startsWith(service.root),
-    "the resolved binary is cached outside the service's own state root");
+    "the binary cached outside the service's own state root");
+  assert.equal(path.basename(path.dirname(resolved.path)), resolved.sha256,
+    "the cache directory is not named for the locked digest");
+  assert.equal(createHash("sha256").update(readFileSync(resolved.path)).digest("hex"), resolved.sha256,
+    "the extracted bytes do not match the lock");
 
-  // And the cell is self-calibrating: the same real resolver must REJECT the pre-fix runtime,
-  // or this proves nothing about the fix. An empty runtime is what openRoute used to pass.
-  // The cast is deliberate and is itself the finding: tsc KNOWS stateRoot is required here, and
-  // the defect survived only because openRoute's `request.runtime` is untyped, so the empty object
-  // reached this call as `any`. Typing that parameter would make this class a build error.
-  await assert.rejects(resolveTailcatBinary(/** @type {any} */ ({})), (/** @type {any} */ e) => {
-    assert.match(String(e.message), /paths\[0\]|must be of type string/,
-      "the pre-fix runtime failed for some reason other than the missing stateRoot");
-    return true;
-  }, "an empty runtime resolved, so this cell cannot detect the defect it was written for");
+  // The twin, and it is what makes the assertion above mean something: the pre-fix runtime puts
+  // NOTHING under the root. Same real resolver, same machine, one field different.
+  const bare = path.join(service.root, "bin", "tailcat");
+  await assert.rejects(resolveTailcatBinary(/** @type {any} */ ({})),
+    "an empty runtime resolved, so this cell cannot detect the defect it was written for");
+  assert.ok(existsSync(bare), "the fixture never extracted anything, so the twin proves nothing");
 });
