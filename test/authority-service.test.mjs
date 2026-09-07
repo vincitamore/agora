@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign } from 'node:crypto';
-import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile, stat, chmod, symlink } from 'node:fs/promises';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { AuthorityJournal } from '../src/authority-journal.mjs';
@@ -15,9 +15,15 @@ import { buildRouteBinding } from '../src/native-member.mjs';
 import { PassThrough, Duplex } from 'node:stream';
 import { EventEmitter } from 'node:events';
 import { NativeFrameDecoder } from '../src/native-protocol.mjs';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
+import { generateSeatAuthority, prepareSeatAuthorityEnrollment, signSeatAuthorityEnrollment,
+  completeSeatAuthorityEnrollment, signSeatRouteAct, readAuthorityInput, writeAuthorityOutput } from '../src/service-cli.mjs';
 
 const NOW = '2026-09-07T20:00:00.000Z', ACCOUNT = 'a'.repeat(32), ROOM = 'b'.repeat(32);
 const LOCAL = `nodekey:${'1'.repeat(64)}`, PEER = `nodekey:${'2'.repeat(64)}`, MEMBER = `nodekey:${'3'.repeat(64)}`;
+const SECOND_MEMBER = `nodekey:${'4'.repeat(64)}`;
 const refusal = (/** @type {string} */ code) => ({ name: 'AuthorityError', code });
 function transport() {
   /** @type {(stream: any) => void} */ let accept = () => { throw Error('listener absent'); };
@@ -67,7 +73,7 @@ async function fixture(t) {
     keyId: humanKeyId(publicKey), boundNodeKeyDigest: publicNodeKeyDigest(PEER), enrolledAt: NOW,
     enrolledBy: 'operator-local-bootstrap', label: 'counter seat', profile: 'pinned-cooperative',
     policy: { policyId: 'c'.repeat(32), revision: 1, validFrom: NOW, expiresAt: '2026-09-08T20:00:00.000Z',
-      entries: [{ roomId: ROOM, allowedKeyDigest: publicNodeKeyDigest(MEMBER), actions: ['room-enroll', 'room-revoke'] }] } };
+      entries: [MEMBER, SECOND_MEMBER].map(key => ({ roomId: ROOM, allowedKeyDigest: publicNodeKeyDigest(key), actions: ['room-enroll', 'room-revoke'] })) } };
   const challenge = createAuthorityEnrollmentChallenge(record, publicNodeKeyDigest(LOCAL), NOW);
   await enrollAuthorityRecord(root, record, record.keyId, { targetNodeKeyDigest: publicNodeKeyDigest(LOCAL),
     retainedChallenge: challenge, now: NOW,
@@ -249,6 +255,21 @@ test('two retained challenges at one revision cannot both commit; the stale one 
   assert.equal(f.journal.status(b.request.operationId).state, 'unknown');
 });
 
+test('concurrent different member keys still serialize the room admission revision', async (t) => {
+  const f = await fixture(t), first = transport(), second = transport();
+  const a = await f.service.createRouteChallenge({ action: 'room-enroll', roomId: ROOM, publicNodeKey: MEMBER });
+  const b = await f.service.createRouteChallenge({ action: 'room-enroll', roomId: ROOM, publicNodeKey: SECOND_MEMBER });
+  const outcomes = await Promise.allSettled([
+    f.service.openRoute({ roomId: ROOM, publicNodeKey: MEMBER, proof: f.signed(a.challenge), routeOptions: first.routeOptions }),
+    f.service.openRoute({ roomId: ROOM, publicNodeKey: SECOND_MEMBER, proof: f.signed(b.challenge), routeOptions: second.routeOptions }),
+  ]);
+  assert.equal(outcomes.filter(x => x.status === 'fulfilled').length, 1);
+  const lost = outcomes.find(x => x.status === 'rejected'); assert.ok(lost && lost.status === 'rejected');
+  assert.deepEqual({ name: lost.reason.name, code: lost.reason.code }, refusal('operator-context-refused'));
+  assert.equal(first.starts() + second.starts(), 1);
+  assert.equal(f.service.listRoutes().length, 1); assert.equal(f.journal.revision(ROOM), 2);
+});
+
 test('failed durable commit never activates a ready listener and cleanup retains consumed intent', async (t) => {
   const f = await fixture(t), rig = transport();
   const p = await f.service.createRouteChallenge({ action: 'room-enroll', roomId: ROOM, publicNodeKey: MEMBER });
@@ -262,4 +283,88 @@ test('failed durable commit never activates a ready listener and cleanup retains
   assert.deepEqual(f.service.listRoutes(), []);
   assert.equal(f.journal.status(p.request.operationId).state, 'intent');
   await assert.rejects(f.service.createRouteChallenge({ action: 'room-enroll', roomId: ROOM, publicNodeKey: MEMBER }), refusal('authority-journal-unavailable'));
+});
+
+test('authority and proof rows refuse before config; each new preflight has a config-reaching valid twin', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'agora-act-preflight-')); t.after(() => rm(root, { recursive: true, force: true }));
+  const run = promisify(execFile), bin = fileURLToPath(new URL('../bin/agora.mjs', import.meta.url));
+  const base = { env: { ...process.env, AGORA_CONFIG: path.join(root, 'absent.json'), AGORA_STATE: root }, timeout: 5000 };
+  /** @param {string[]} args */
+  async function invoke(args) {
+    try { return { code: 0, ...(await run(process.execPath, [bin, ...args], base)) }; }
+    catch (error) { const e = /** @type {any} */ (error); return { code: e.code, stderr: e.stderr, stdout: e.stdout }; }
+  }
+  for (const [args, expected] of /** @type {[string[], string][]} */ ([
+    [['authority', 'sign'], 'authority needs --file'],
+    [['authority', 'enroll', '--file', 'proof.json'], 'authority enrollment needs --fingerprint'],
+    [['service', 'start', '--authority', 'not-an-id'], 'service start --authority takes'],
+    [['service', 'route', 'open', ROOM, '--allow-key', MEMBER], 'route open needs --proof-file'],
+    [['service', 'route', 'close', ROOM, '--allow-key', MEMBER], 'route close needs --proof-file'],
+    [['service', 'route', 'challenge', ROOM, '--allow-key', MEMBER], 'route challenge needs --act'],
+    [['service', 'route', 'act-status', 'wrong'], 'route act-status needs'],
+  ])) {
+    const result = await invoke(args); assert.equal(result.code, 2); assert.ok(result.stderr.includes(expected), result.stderr);
+    assert.doesNotMatch(result.stderr, /no config at/);
+  }
+  for (const args of [
+    ['authority', 'sign', '--file', 'challenge.json', '--out', 'new.json'],
+    ['service', 'start', '--authority', `a-${'a'.repeat(64)}`],
+    ['service', 'route', 'open', ROOM, '--allow-key', MEMBER, '--proof-file', 'proof.json'],
+    ['service', 'route', 'challenge', ROOM, '--allow-key', MEMBER, '--act', 'room-enroll', '--out', 'new.json'],
+  ]) {
+    const result = await invoke(args); assert.equal(result.code, 1); assert.match(result.stderr, /no config at/);
+  }
+});
+
+test('hand-carried bootstrap keeps signing key on counter-seat, proves possession and checks both delegation lists', async (t) => {
+  const f = await fixture(t);
+  const signerRoot = await mkdtemp(path.join(tmpdir(), 'agora-signer-')); t.after(() => rm(signerRoot, { recursive: true, force: true }));
+  const targetRoot = await mkdtemp(path.join(tmpdir(), 'agora-target-')); t.after(() => rm(targetRoot, { recursive: true, force: true }));
+  const signerIdentity = async () => ({ nodeKey: PEER }), targetIdentity = async () => ({ nodeKey: LOCAL });
+  const record = await generateSeatAuthority(signerRoot, f.record.policy, 'counter-seat', signerIdentity);
+  assert.ok(!('privateKey' in record)); assert.equal(record.boundNodeKeyDigest, publicNodeKeyDigest(PEER));
+  const privatePath = path.join(signerRoot, 'native/authority-key.json');
+  if (process.platform !== 'win32') assert.equal((await stat(privatePath)).mode & 0o777, 0o600);
+  const before = await readFile(privatePath);
+  await assert.rejects(generateSeatAuthority(signerRoot, f.record.policy, 'other', signerIdentity), refusal('authority-output-exists'));
+  assert.deepEqual(await readFile(privatePath), before);
+  const pending = await prepareSeatAuthorityEnrollment(targetRoot, record, record.keyId, targetIdentity);
+  const proof = await signSeatAuthorityEnrollment(signerRoot, pending, signerIdentity);
+  const receipt = await completeSeatAuthorityEnrollment(targetRoot, proof, record.keyId, targetIdentity);
+  assert.equal(receipt.authorityId, record.authorityId);
+  const targetRecord = await readAuthorityInput(receipt.file, true);
+  assert.ok(!('privateKey' in targetRecord));
+  await assert.rejects(readFile(path.join(targetRoot, 'native/authority-key.json')), { code: 'ENOENT' });
+  const service = new NativeRoomService({ root: targetRoot, accountId: ACCOUNT, seatLabel: 'target',
+    authorityId: record.authorityId, readLocalIdentity: targetIdentity });
+  await service.start(); t.after(() => service.stop()); await service.createRoom({ roomId: ROOM });
+  const request = await service.createRouteChallenge({ action: 'room-enroll', roomId: ROOM, publicNodeKey: MEMBER });
+  const signed = await signSeatRouteAct(signerRoot, request, signerIdentity);
+  const rig = transport();
+  await service.openRoute({ roomId: ROOM, publicNodeKey: MEMBER, proof: signed, routeOptions: rig.routeOptions });
+  assert.equal(rig.starts(), 1);
+  await assert.rejects(signSeatRouteAct(signerRoot, request, targetIdentity), refusal('authority-seat-binding-refused'));
+  // Local signer list can be stricter than target. Pinning on target is not permission for signer.
+  const keyFile = JSON.parse(before.toString('utf8')); keyFile.record.policy.entries = [];
+  await writeFile(privatePath, JSON.stringify(keyFile));
+  await assert.rejects(signSeatRouteAct(signerRoot, request, signerIdentity), refusal('operator-scope-refused'));
+});
+
+test('hand-carried authority input is bounded and link-refusing; public output is atomic no-clobber', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'agora-authority-io-')); t.after(() => rm(root, { recursive: true, force: true }));
+  const file = path.join(root, 'public.json');
+  await writeAuthorityOutput(file, { public: true });
+  assert.deepEqual(await readAuthorityInput(file), { public: true });
+  await assert.rejects(writeAuthorityOutput(file, { replacement: true }), refusal('authority-output-exists'));
+  assert.deepEqual(await readAuthorityInput(file), { public: true });
+  await writeFile(file, 'x'.repeat(262145));
+  await assert.rejects(readAuthorityInput(file), refusal('authority-input-too-large'));
+  await writeFile(file, '{}');
+  if (process.platform !== 'win32') {
+    await chmod(file, 0o644);
+    await assert.rejects(readAuthorityInput(file, true), refusal('authority-input-permissions'));
+    assert.deepEqual(await readAuthorityInput(file), {});
+    const alias = path.join(root, 'alias.json'); await symlink(file, alias);
+    await assert.rejects(readAuthorityInput(alias), refusal('authority-input-unreadable'));
+  }
 });

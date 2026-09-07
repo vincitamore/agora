@@ -5,7 +5,7 @@
 // only the live probe in T3 exhibits. Every cell that claims a refusal asserts the NAMED reason,
 // never merely that something threw.
 import assert from "node:assert/strict";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, generateKeyPairSync, sign } from "node:crypto";
 import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -19,14 +19,63 @@ import {
 } from "../src/native-member.mjs";
 import { NativeFrameDecoder, NATIVE_FRAME_MAX, NATIVE_PROTOCOL, encodeNativeFrame, nativeFramePayloadBytes, nativeHandshakeProof } from "../src/native-protocol.mjs";
 import { NativeRoomService } from "../src/native-service.mjs";
-import { closeServiceRoute, listServiceRoutes, openServiceRoute } from "../src/service-cli.mjs";
+import { closeServiceRoute, listServiceRoutes, openServiceRoute, challengeServiceRoute } from "../src/service-cli.mjs";
 import { publicNodeKeyDigest } from "../src/protocol/route.mjs";
+import { authorityIdForKey, createAuthorityEnrollmentChallenge, authorityEnrollmentSigningBytes,
+  enrollAuthorityRecord, authoritySigningBytes } from '../src/authority.mjs';
+import { humanKeyId } from '../src/protocol/human-authority.mjs';
 
 const ACCOUNT = "a".repeat(32);
 const ROOM = "b".repeat(32);
 const EPOCH = "c".repeat(32);
 const KEY = `nodekey:${"d".repeat(64)}`;
 const OTHER_KEY = `nodekey:${"e".repeat(64)}`;
+const LOCAL_KEY = `nodekey:${'1'.repeat(64)}`;
+/** @type {WeakMap<NativeRoomService, import('node:crypto').KeyObject>} */
+const fixtureSigners = new WeakMap();
+
+/** Approved-act fixture only: service methods are NEVER replaced or bypassed.
+ * @param {string} root @param {Record<string, unknown>} [routeOptions] */
+async function enrolledService(root, routeOptions) {
+  const keys = generateKeyPairSync('ed25519');
+  const publicKey = Buffer.from(/** @type {string} */ (keys.publicKey.export({ format: 'jwk' }).x), 'base64url').toString('hex');
+  const now = new Date().toISOString();
+  const record = { version: 1, algorithm: 'ed25519', authorityId: authorityIdForKey(publicKey), publicKey,
+    keyId: humanKeyId(publicKey), boundNodeKeyDigest: publicNodeKeyDigest(`nodekey:${'2'.repeat(64)}`),
+    enrolledAt: now, enrolledBy: 'operator-local-bootstrap', label: 'fixture counter-seat', profile: 'pinned-cooperative',
+    policy: { policyId: '3'.repeat(32), revision: 1, validFrom: now,
+      expiresAt: new Date(Date.now() + 86400000).toISOString(),
+      entries: [KEY, OTHER_KEY].map(key => ({ roomId: ROOM, allowedKeyDigest: publicNodeKeyDigest(key), actions: ['room-enroll', 'room-revoke'] })) } };
+  const targetNodeKeyDigest = publicNodeKeyDigest(LOCAL_KEY);
+  const challenge = createAuthorityEnrollmentChallenge(record, targetNodeKeyDigest, now);
+  await enrollAuthorityRecord(root, record, record.keyId, { targetNodeKeyDigest, retainedChallenge: challenge, now,
+    proof: { challenge, signature: sign(null, authorityEnrollmentSigningBytes(challenge), keys.privateKey).toString('hex') } });
+  const service = new NativeRoomService({ root, accountId: ACCOUNT, seatLabel: 'admin-pc', routeOptions,
+    authorityId: record.authorityId, readLocalIdentity: async () => ({ nodeKey: LOCAL_KEY }) });
+  fixtureSigners.set(service, keys.privateKey); return service;
+}
+/** @param {NativeRoomService} service @param {unknown} challenge */
+function fixtureProof(service, challenge) {
+  const key = fixtureSigners.get(service); assert.ok(key);
+  return { challenge, signature: sign(null, authoritySigningBytes(challenge), key).toString('hex') };
+}
+/** @param {NativeRoomService} service @param {Parameters<NativeRoomService['openRoute']>[0]} input */
+async function approvedOpen(service, input) {
+  const p = await service.createRouteChallenge({ action: 'room-enroll', roomId: input.roomId, publicNodeKey: input.publicNodeKey });
+  return service.openRoute({ ...input, proof: fixtureProof(service, p.challenge) });
+}
+/** @param {NativeRoomService} service @param {{roomId: string, publicNodeKey: string}} input */
+async function approvedClose(service, input) {
+  const p = await service.createRouteChallenge({ action: 'room-revoke', ...input });
+  return service.closeRoute({ ...input, proof: fixtureProof(service, p.challenge) });
+}
+/** Keep the entire wire cell on the real client, challenge AND effect.
+ * @param {NativeRoomService} service @param {'room-enroll'|'room-revoke'} action */
+async function approvedWire(service, action) {
+  const p = await challengeServiceRoute(service.root, action, ROOM, KEY);
+  const call = action === 'room-enroll' ? openServiceRoute : closeServiceRoute;
+  return call(service.root, ROOM, KEY, fixtureProof(service, p.challenge));
+}
 
 /** A binding without a running service, for the pure-function cells. */
 function binding(over = {}) {
@@ -205,7 +254,7 @@ test("a member session may not reach the control surface", () => {
 async function memberFixture(t) {
   const root = await mkdtemp(path.join(tmpdir(), "agora-member-host-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const service = new NativeRoomService({ root, accountId: ACCOUNT, seatLabel: "admin-pc" });
+  const service = await enrolledService(root);
   await service.start();
   await service.createRoom({ roomId: ROOM, epoch: EPOCH });
   t.after(() => service.stop());
@@ -267,7 +316,7 @@ function fakeChild(options = {}) {
 async function openFakedRoute(service, publicNodeKey = KEY) {
   /** @type {((socket: any) => void) | undefined} */ let accept;
   const address = `tc${"a".repeat(48)}`;
-  const result = await service.openRoute({
+  const result = await approvedOpen(service, {
     roomId: ROOM, publicNodeKey,
     routeOptions: {
       listen: async (/** @type {(socket: any) => void} */ hook) => { accept = hook; return { port: 4242, close: async () => {} }; },
@@ -622,11 +671,11 @@ test("close revokes: the route leaves the registry and its secret is gone", asyn
   const { service } = await memberFixture(t);
   const { descriptor } = await openFakedRoute(service);
   assert.equal(service.listRoutes().length, 1);
-  const closed = await service.closeRoute({ roomId: ROOM, publicNodeKey: KEY });
+  const closed = await approvedClose(service, { roomId: ROOM, publicNodeKey: KEY });
   assert.equal(closed.revoked, true);
   assert.equal(service.listRoutes().length, 0);
   await assert.rejects(readRouteSecret(service.root, descriptor.binding, descriptor.proofRef), /ENOENT|no such file/i);
-  await assert.rejects(service.closeRoute({ roomId: ROOM, publicNodeKey: KEY }), /route-not-open/);
+  await assert.rejects(approvedClose(service, { roomId: ROOM, publicNodeKey: KEY }), /route-not-open/);
   // A reopen mints a NEW generation, so the operator must carry a new descriptor and secret.
   const again = await openFakedRoute(service);
   assert.notEqual(again.descriptor.binding.routeGeneration, descriptor.binding.routeGeneration);
@@ -647,7 +696,7 @@ test("a descriptor-write failure leaves no live orphan route", async (t) => {
     address: async () => `tc${"a".repeat(48)}`,
   };
   service.nativeDirectory = blocker;
-  await assert.rejects(service.openRoute({ roomId: ROOM, publicNodeKey: KEY, routeOptions }));
+  await assert.rejects(approvedOpen(service, { roomId: ROOM, publicNodeKey: KEY, routeOptions }));
   service.nativeDirectory = original;
   assert.equal(service.listRoutes().length, 0, "a failed open left a route in the registry");
   assert.ok(stopped, "a failed descriptor write left the listener running");
@@ -731,8 +780,8 @@ test("two CONCURRENT opens for one key: one route, one named refusal, no orphan 
     address: async () => `tc${"a".repeat(48)}`,
   };
   const both = await Promise.allSettled([
-    service.openRoute({ roomId: ROOM, publicNodeKey: KEY, routeOptions }),
-    service.openRoute({ roomId: ROOM, publicNodeKey: KEY, routeOptions }),
+    approvedOpen(service, { roomId: ROOM, publicNodeKey: KEY, routeOptions }),
+    approvedOpen(service, { roomId: ROOM, publicNodeKey: KEY, routeOptions }),
   ]);
   const won = both.filter((r) => r.status === "fulfilled");
   const lost = both.filter((r) => r.status === "rejected");
@@ -763,7 +812,7 @@ test("close retains the handle while cleanup is pending, and reports it as closi
   };
   entry.resource.closed = new Promise((resolve) => { release = () => resolve(undefined); });
 
-  await assert.rejects(service.closeRoute({ roomId: ROOM, publicNodeKey: KEY }), /cleanup is pending/);
+  await assert.rejects(approvedClose(service, { roomId: ROOM, publicNodeKey: KEY }), /cleanup is pending/);
   const during = service.listRoutes();
   assert.equal(during.length, 1, "the handle was dropped while its child was still being torn down");
   assert.equal(during[0].state, "closing");
@@ -791,7 +840,7 @@ test("openRoute hands Tailcat a runtime the REAL resolver accepts", async (t) =>
   void (() => service.openRoute({ runtime: { notAResolverKey: 1 }, roomId: ROOM, publicNodeKey: KEY }));
 
   /** @type {any} */ let handed;
-  await service.openRoute({
+  await approvedOpen(service, {
     roomId: ROOM, publicNodeKey: KEY,
     routeOptions: {
       listen: async (/** @type {(socket: any) => void} */ _hook) => ({ port: 4242, close: async () => {} }),
@@ -862,7 +911,7 @@ test("route-already-open names the state: a live route says close it, a closing 
       { code: "AGORA_CLEANUP_PENDING", cleanupPending: true });
   };
   entry.resource.closed = new Promise((resolve) => { release = () => resolve(undefined); });
-  await assert.rejects(service.closeRoute({ roomId: ROOM, publicNodeKey: KEY }), /cleanup is pending/);
+  await assert.rejects(approvedClose(service, { roomId: ROOM, publicNodeKey: KEY }), /cleanup is pending/);
   assert.equal(service.listRoutes()[0].state, "closing");
   // The key is held while the resource settles: the refusal says so, and says what to do.
   await assert.rejects(openFakedRoute(service), /route-already-open: .*that route is closing; wait for it to settle/);
@@ -915,7 +964,7 @@ test("revocation from the host's side: close stops the listener so no hello is e
     ...fakeRouteOptions(counters).options,
     listen: async (/** @type {(socket: any) => void} */ hook) => { accept = hook; counters.opened += 1; return { port: 4242, close: async () => { counters.closed += 1; } }; },
   };
-  const first = await service.openRoute({ roomId: ROOM, publicNodeKey: KEY, routeOptions });
+  const first = await approvedOpen(service, { roomId: ROOM, publicNodeKey: KEY, routeOptions });
   const secret = await readRouteSecret(service.root, first.descriptor.binding, first.descriptor.proofRef);
   // A live route greets a dial with a server hello that names its grant.
   {
@@ -925,7 +974,7 @@ test("revocation from the host's side: close stops the listener so no hello is e
     assert.equal(hello.grantId, first.descriptor.binding.grantId);
     assert.equal(hello.routeGeneration, first.descriptor.binding.routeGeneration);
   }
-  await service.closeRoute({ roomId: ROOM, publicNodeKey: KEY });
+  await approvedClose(service, { roomId: ROOM, publicNodeKey: KEY });
   assert.equal(counters.closed, 1, "close did not stop the listener");
   // Nothing greets a dial on the closed route: the listener is gone, so the remote sees an
   // unreachable route, not a refusal by name. With the transport faked, "gone" is the stopped
@@ -951,7 +1000,7 @@ test("revocation from the host's side: close stops the listener so no hello is e
   }
   // A reopen mints a new grant and generation, and its hello names them: a remote still holding
   // the old descriptor disagrees on the binding before any proof is exchanged.
-  const second = await service.openRoute({ roomId: ROOM, publicNodeKey: KEY, routeOptions });
+  const second = await approvedOpen(service, { roomId: ROOM, publicNodeKey: KEY, routeOptions });
   assert.notEqual(second.descriptor.binding.grantId, first.descriptor.binding.grantId);
   assert.notEqual(second.descriptor.binding.routeGeneration, first.descriptor.binding.routeGeneration);
   {
@@ -977,22 +1026,22 @@ test("route open, list, a second open, and close reach the service through a rea
   const root = await mkdtemp(path.join(tmpdir(), "agora-member-wire-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const { counters, options } = fakeRouteOptions();
-  const service = new NativeRoomService({ root, accountId: ACCOUNT, seatLabel: "admin-pc", routeOptions: options });
+  const service = await enrolledService(root, options);
   await service.start();
   await service.createRoom({ roomId: ROOM, epoch: EPOCH });
   t.after(() => service.stop());
   assert.deepEqual(await listServiceRoutes(root), [], "list through the wire on an empty registry");
-  const opened = await openServiceRoute(root, ROOM, KEY);
+  const opened = await approvedWire(service, 'room-enroll');
   assert.equal(opened.descriptor.binding.roomId, ROOM);
   assert.equal(counters.opened, 1);
   const listed = await listServiceRoutes(root);
   assert.equal(listed.length, 1);
   assert.equal(listed[0].grantId, opened.descriptor.binding.grantId);
   assert.equal(listed[0].state, "live");
-  await assert.rejects(openServiceRoute(root, ROOM, KEY), /route-already-open: .*close it before opening a new grant/);
-  const closed = await closeServiceRoute(root, ROOM, KEY);
+  await assert.rejects(approvedWire(service, 'room-enroll'), /route-already-open: .*close it before opening a new grant/);
+  const closed = await approvedWire(service, 'room-revoke');
   assert.equal(closed.revoked, true);
   assert.equal(counters.closed, 1);
   assert.deepEqual(await listServiceRoutes(root), []);
-  await assert.rejects(closeServiceRoute(root, ROOM, KEY), /route-not-open/);
+  await assert.rejects(approvedWire(service, 'room-revoke'), /route-not-open/);
 });
