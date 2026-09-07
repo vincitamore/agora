@@ -26,6 +26,7 @@ export const SESSION_SOURCE_CODES = Object.freeze({
   identityMissing: 'session-source-identity-missing',
   identityMalformed: 'session-source-identity-malformed',
   observedAtMissing: 'session-source-observed-at-missing',
+  observedAtMalformed: 'session-source-observed-at-malformed',
 });
 
 const CODE = SESSION_SOURCE_CODES;
@@ -129,7 +130,7 @@ export function decodeSessionUsage(input) {
   const context = isRecord(input.context) ? input.context : {};
   const observedAt = readObservedAt(input.envelope, context);
   if ('missing' in observedAt) return { status: 'error', code: CODE.observedAtMissing };
-  if ('malformed' in observedAt) return { status: 'error', code: CODE.identityMalformed, reason: observedAt.reason };
+  if ('malformed' in observedAt) return { status: 'error', code: CODE.observedAtMalformed, reason: observedAt.reason };
 
   if (harness === 'claude-code') {
     return wrap(decodeClaude(input.envelope, epoch.id, harnessVersion, observedAt.value, context));
@@ -425,6 +426,7 @@ function readOpaqueId(value, field) {
   if (value.length === 0 || Buffer.byteLength(value, 'utf8') > 512) {
     return { malformed: true, reason: `length:${field}` };
   }
+  if (value.trim() === '') return { malformed: true, reason: `blank:${field}` };
   if (/[\u0000-\u001f\u007f-\u009f]/u.test(value)) return { malformed: true, reason: `controls:${field}` };
   return { id: value };
 }
@@ -445,6 +447,7 @@ function firstOpaqueId(candidates) {
 function readModelLabel(value) {
   if (value === undefined || value === null || value === '') return undefined;
   if (typeof value !== 'string') return undefined;
+  if (value.trim() === '') return undefined;
   if (value.length > 128 || /[\u0000-\u001f\u007f-\u009f]/u.test(value)) return undefined;
   return value;
 }

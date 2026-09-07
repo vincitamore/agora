@@ -406,3 +406,63 @@ test('sourceId stays opaque source text and is not rewritten as a native id', ()
   assert.match(result.records[0].identity.sourceId, /^msg_/);
   assertContract(result.records[0]);
 });
+
+test('an unparseable observedAt is observed-at-malformed, not an identity fault; a valid instant still works', () => {
+  const bad = rejected(decode('claude-code', claudeEnvelope({ input_tokens: 1, output_tokens: 1 }), {
+    context: { observedAt: 'yesterday' },
+  }));
+  assert.equal(bad.code, SESSION_SOURCE_CODES.observedAtMalformed);
+  assert.notEqual(bad.code, SESSION_SOURCE_CODES.identityMalformed);
+
+  const ok = supported(decode('claude-code', claudeEnvelope({
+    input_tokens: 1,
+    output_tokens: 1,
+    cache_read_input_tokens: 0,
+    cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 },
+  })));
+  assert.equal(ok.records[0].observedAt, OBSERVED);
+});
+
+test('a blank sessionEpoch is identity-malformed, not envelope-unusable; a real epoch still works', () => {
+  const blank = rejected(decodeSessionUsage({
+    harness: 'claude-code',
+    sessionEpoch: ' ',
+    envelope: claudeEnvelope({ input_tokens: 1, output_tokens: 1 }),
+  }));
+  assert.equal(blank.code, SESSION_SOURCE_CODES.identityMalformed);
+  assert.notEqual(blank.code, SESSION_SOURCE_CODES.envelopeUnusable);
+
+  const ok = supported(decode('claude-code', claudeEnvelope({
+    input_tokens: 1,
+    output_tokens: 1,
+    cache_read_input_tokens: 0,
+    cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 },
+  })));
+  assert.equal(ok.records[0].identity.sessionEpoch, EPOCH);
+});
+
+test('a blank model label is omitted, not a lost record; a nonempty label is kept', () => {
+  const blank = supported(decode('claude-code', {
+    timestamp: OBSERVED,
+    message: {
+      id: 'msg_synthetic_claude_01',
+      model: ' ',
+      usage: {
+        input_tokens: 1,
+        output_tokens: 1,
+        cache_read_input_tokens: 0,
+        cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 },
+      },
+    },
+  }));
+  assert.equal(Object.hasOwn(blank.records[0], 'model'), false);
+  assertContract(blank.records[0]);
+
+  const kept = supported(decode('claude-code', claudeEnvelope({
+    input_tokens: 1,
+    output_tokens: 1,
+    cache_read_input_tokens: 0,
+    cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 },
+  })));
+  assert.equal(kept.records[0].model, 'claude-opus-4-6');
+});

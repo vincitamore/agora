@@ -35,11 +35,11 @@ if (result.status === 'supported') {
 | Field | Required | Meaning |
 |---|---|---|
 | `harness` | yes | `claude-code`, `omp`, `codex`, or `amore-build`. Anything else is `unsupported`. |
-| `sessionEpoch` | yes | Opaque session/process-start epoch supplied by the caller. Not invented. |
+| `sessionEpoch` | yes | Opaque session/process-start epoch supplied by the caller. Not invented. A value empty after trim is identity-malformed, not envelope-unusable. |
 | `envelope` | yes | The original usage payload. Missing is an error; other update kinds are unusable. |
 | `harnessVersion` | no | Source-version label. Absent leaves versioned `not-applicable` claims unavailable. |
 | `sourceVersion` | no | Accepted as an alias of `harnessVersion`. |
-| `context` | no | Harness-specific caller facts. Codex **requires** `context.sourceId` and may carry `context.model` from a preceding turn context. `context.observedAt` supplies the required exact ISO instant when the envelope has none. |
+| `context` | no | Harness-specific caller facts. Codex **requires** `context.sourceId` and may carry `context.model` from a preceding turn context. `context.observedAt` supplies the required exact ISO instant when the envelope has none. An unparseable instant is `session-source-observed-at-malformed`, not an identity fault. A blank model label is omitted, not a lost record. |
 
 Returns `{status: 'supported', records}` or `{status: 'unsupported'|'error', code, reason?}`.
 `records` is an array: one Claude, OMP or Codex envelope yields one record; one
