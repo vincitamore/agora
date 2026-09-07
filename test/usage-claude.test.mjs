@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  collectClaudeUsage, normalizeUsageAndProfile, windowsFromUsage, resetsAtToIso, CLAUDE_ORIGIN,
+  collectClaudeUsage, normalizeUsageAndProfile, windowsFromUsage, resetsAtToIso, CLAUDE_ORIGIN, CLAUDE_LIMITS,
 } from '../src/usage/claude.mjs';
 import { windowKey, windowFreshness } from '../src/protocol/usage.mjs';
 
@@ -11,7 +11,7 @@ const PRODUCER = { producerId: 'producer_synthetic_0001', generation: 1, sequenc
 const NOW = () => new Date('2026-09-07T00:20:00.000Z');
 const ctx = { poolId: POOL, capturedAt: '2026-09-07T00:20:00.000Z', producer: PRODUCER };
 
-const ORG = '44455ed0-6bf5-4e7e-b37b-e25e9ff05f04';
+const ORG = 'org_synthetic_claude_01';
 const profile = {
   organization: {
     uuid: ORG,
@@ -30,7 +30,7 @@ const threeWindowUsage = {
   limits: [
     { kind: 'session', percent: 21, resets_at: '2026-09-07T00:40Z', is_active: true },
     { kind: 'weekly_all', percent: 5, resets_at: '2026-09-13T17:00Z', is_active: true },
-    { kind: 'weekly_scoped', percent: 7, resets_at: '2026-09-13T17:00Z', is_active: true, scope: { model: { display_name: 'Fable' } } },
+    { kind: 'weekly_scoped', percent: 7, resets_at: '2026-09-13T17:00Z', is_active: true, scope: { model: { display_name: 'Synthetic Model' } } },
   ],
 };
 
@@ -235,6 +235,83 @@ test('public path capturedAt comes from the injected clock', async () => {
   assert.equal(result.status, 'supported');
   if (result.status !== 'supported') return;
   assert.equal(result.observation.capturedAt, '2026-09-07T00:20:00.000Z');
+});
+
+test('a 5ms budget still times out when arrayBuffer is delayed 25ms per request', async () => {
+  /** @param {unknown} body */
+  const delayed = (body) => ({
+    status: 200,
+    arrayBuffer: async () => {
+      await new Promise((r) => setTimeout(r, 25));
+      const buf = Buffer.from(JSON.stringify(body));
+      return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+    },
+  });
+  const started = Date.now();
+  const result = await collectClaudeUsage({
+    poolId: POOL, producer: PRODUCER, now: NOW, timeoutMs: 5, readCredential,
+    fetch: async (url) => delayed(String(url).includes('profile') ? profile : threeWindowUsage),
+  });
+  assert.equal(result.status, 'unsupported');
+  assert.equal(result.code, 'claude-timeout');
+  assert.ok(Date.now() - started < 200);
+});
+
+test('abort during the profile body is cancelled, not supported', async () => {
+  const controller = new AbortController();
+  const result = await collectClaudeUsage({
+    poolId: POOL, producer: PRODUCER, now: NOW, signal: controller.signal, timeoutMs: 5000, readCredential,
+    fetch: async (url) => {
+      if (String(url).includes('profile')) {
+        return {
+          status: 200,
+          arrayBuffer: async () => {
+            controller.abort();
+            await new Promise((r) => setTimeout(r, 25));
+            const buf = Buffer.from(JSON.stringify(profile));
+            return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+          },
+        };
+      }
+      const buf = Buffer.from(JSON.stringify(threeWindowUsage));
+      return { status: 200, arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) };
+    },
+  });
+  assert.equal(result.status, 'unsupported');
+  assert.equal(result.code, 'claude-cancelled');
+});
+
+test('an oversized stream is refused without waiting for the whole body', async () => {
+  let sent = 0;
+  const chunk = new Uint8Array(64 * 1024);
+  const body = new ReadableStream({
+    pull(controller) {
+      sent += chunk.byteLength;
+      controller.enqueue(chunk);
+      if (sent > CLAUDE_LIMITS.maxBytes) controller.close();
+    },
+  });
+  const result = await collectClaudeUsage({
+    poolId: POOL, producer: PRODUCER, now: NOW, readCredential,
+    fetch: async () => ({ status: 200, body }),
+  });
+  assert.equal(result.status, 'unsupported');
+  assert.equal(result.code, 'claude-output-oversized');
+  assert.ok(sent < CLAUDE_LIMITS.maxBytes + chunk.byteLength * 3);
+});
+
+test('exception.code is not copied; only allowlisted codes are returned', async () => {
+  const result = await collectClaudeUsage({
+    poolId: POOL, producer: PRODUCER, now: NOW,
+    readCredential: async () => {
+      const e = /** @type {any} */ (new Error('no'));
+      e.code = 'SYNTHETIC_PRIVATE_TOKEN_AND_PATH';
+      throw e;
+    },
+  });
+  assert.equal(result.status, 'unsupported');
+  assert.equal(result.code, 'claude-credential-unavailable');
+  assert.equal(JSON.stringify(result).includes('SYNTHETIC_PRIVATE_TOKEN_AND_PATH'), false);
 });
 
 test('stdout JSON path never includes the token in the result object', async () => {
