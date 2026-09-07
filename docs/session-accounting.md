@@ -18,8 +18,9 @@ assumed, so a Codex snapshot or Amore aggregate still binds.
 `--ingest` is JSONL of original usage envelopes `{ harness, sessionEpoch, envelope, context? }`.
 Each line is decoded through `decodeSessionUsage` and committed. A decode that is
 not `supported` is not stored as overlap `none`. `--follow` re-reads the file each
-poll and ingests only lines past the ledger's persisted position for that locator;
-a shrink opens a new source generation. Each snapshot reports ingest counts
+poll and ingests only lines past the ledger's persisted position for that locator
+when the line at that offset still matches the stored fingerprint. A shorter file
+or a fingerprint mismatch is a rotation: new generation, ingest from line one. Each snapshot reports ingest counts
 (`ingested`, `duplicate`, `unsupported`, `malformed`) and the offsets of failed
 lines: in the JSON object, and as one stderr line in text mode.
 

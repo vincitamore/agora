@@ -5,7 +5,8 @@ import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
-  collectUsageSessions, formatInventory, ingestJsonl, inventoryMembers, publicRow, readBinding, runUsageSessions,
+  collectUsageSessions, formatInventory, ingestJsonl, inventoryMembers, lineFingerprint, publicRow, readBinding,
+  runUsageSessions, selectIngestLines,
 } from '../src/session-accounting.mjs';
 import { closeSessionLedger, commitLedgerEvent, openSessionLedger } from '../src/usage/session-ledger.mjs';
 
@@ -290,4 +291,26 @@ test('ingest outcomes are counted; follow re-reads and tails past the persisted 
     stateRoot, ledgerRoot, bindings: {}, ingestPath, ingestLocator: ingestPath,
   });
   assert.equal(shrunk.ingest?.duplicate, 1);
+});
+
+test('rotate-to-longer is a new generation; a genuine append is not', () => {
+  const loc = 'f.jsonl';
+  const prior = ['o1', 'o2', 'o3', 'o4', 'o5'];
+  const last = { locator: loc, sourceGeneration: 1, offset: 5, fingerprint: lineFingerprint('o5') };
+  const nl = (/** @type {string[]} */ rows) => `${rows.join('\n')}\n`;
+  const shorter = selectIngestLines(nl(['a', 'b', 'c']), loc, last);
+  assert.equal(shorter.generation, 2);
+  assert.equal(shorter.items.length, 3);
+  assert.equal(shorter.items[0].line, 'a');
+  const longer = selectIngestLines(nl(['n1', 'n2', 'n3', 'n4', 'n5', 'n6']), loc, last);
+  assert.equal(longer.generation, 2);
+  assert.equal(longer.items.length, 6);
+  assert.equal(longer.items[0].line, 'n1');
+  const appended = selectIngestLines(nl([...prior, 'o6']), loc, last);
+  assert.equal(appended.generation, 1);
+  assert.equal(appended.items.length, 1);
+  assert.equal(appended.items[0].line, 'o6');
+  const restart = selectIngestLines(nl(prior), loc, last);
+  assert.equal(restart.generation, 1);
+  assert.equal(restart.items.length, 0);
 });
