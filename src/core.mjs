@@ -83,6 +83,11 @@ const execFileAsync = promisify(execFile);
  * @property {(opts?: ReadOptions) => Promise<ReadResult>} read
  * @property {(text: string, opts?: PostOptions) => Promise<PostResult>} post
  * @property {(payload: { action: string, subject: string, because?: string, leaseId?: string, fence?: string, leaseMs?: number }) => Promise<unknown>} [board] native rooms: a typed board event, not a chat message
+ * @property {string} [closeFailed] set by `close()` when a teardown failure was swallowed: the
+ *   reason, redacted, never a count. Absent means no close has failed — a counter reading 0 cannot
+ *   distinguish "nothing failed" from "something failed and said nothing", which is the defect this
+ *   field exists to remove. Surfaced by `doctor` in the room's row and by the CLI's drain as one
+ *   stderr line; never thrown.
  * @property {() => Promise<void>} [close] release what this transport holds OPEN, once the caller
  *   is done with it. Optional because most transports hold nothing: a Slack or GitHub transport is
  *   a `fetch` closure, and a finished request references nothing. A transport that owns a live
