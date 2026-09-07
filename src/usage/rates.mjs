@@ -146,7 +146,21 @@ export function loadRateTable(value) {
   const version = readInteger(v.version, 'version', 1);
   if (version !== 1) throw new RateError('table-version');
   if (!Array.isArray(v.rows)) throw new RateError('rows-type');
-  return { version: /** @type {const} */ (1), rows: v.rows.map((row) => validateRateRow(row)) };
+  const rows = v.rows.map((row) => validateRateRow(row));
+  for (let i = 0; i < rows.length; i += 1) {
+    for (let j = i + 1; j < rows.length; j += 1) {
+      const left = rows[i];
+      const right = rows[j];
+      const sameKey = RATE_KEY_FIELDS.every((field) => left[field] === right[field]);
+      const overlaps = Math.max(left.contextBracketMin, right.contextBracketMin)
+        < Math.min(left.contextBracketMax, right.contextBracketMax);
+      if (sameKey && left.effective === right.effective && overlaps) {
+        const key = RATE_KEY_FIELDS.map((field) => `${field}=${left[field]}`).join(',');
+        throw new RateError('duplicate-rate-row', `key=${key}; effective=${left.effective}`);
+      }
+    }
+  }
+  return { version: /** @type {const} */ (1), rows };
 }
 
 /** @param {RateKey} key @param {RateRow} row */

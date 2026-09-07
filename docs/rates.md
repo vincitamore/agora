@@ -43,9 +43,10 @@ priceUsage(record, table, { eventTime, asOf }, billingContext, residentContext, 
 - Returns `{ apiEquivalent, reportedBill, subscriptionConsumption, unpriced, coverage, row }`.
   `apiEquivalent` is from the dated `publishedApi` column. `reportedBill` is the
   record's `sourceReportedCost` in its stated unit, or unknown — never a
-  tabulated usdPerMillion. `subscriptionConsumption` is unknown unless observed
-  on the record; it is never derived from list-price dollars and never read from
-  a rate row. A missing rate puts tokens in `unpriced` with a reason; it never
+  tabulated usdPerMillion. `subscriptionConsumption` is unknown in this cut on
+  every path; the record carries no such field and no rate row prices it. When a
+  pool observation exists it enters through the meter, never through a rate row.
+  A missing rate puts tokens in `unpriced` with a reason; it never
   returns a cost of 0.
 
 ## Pool attribution
