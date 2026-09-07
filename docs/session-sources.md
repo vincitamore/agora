@@ -62,8 +62,13 @@ Each numeric component is a tagged union, never a sentinel:
   component. This decoder does not emit it without that contract.
 
 Absent is not zero. Null is not absent. An unsplit cache-write total is not a
-five-minute write. Nothing clamps: if cached input plus writes exceed input,
-`uncached-input` is `invalid` with `cache-exceeds-input`.
+five-minute write. Nothing clamps: if cached input plus writes exceed input
+on a harness whose input **includes** cache (Codex, OMP, Amore), `uncached-input`
+is `invalid` with `cache-exceeds-input`. Claude Code is the other branch:
+Anthropic's `input_tokens` is already exclusive of `cache_read_input_tokens`
+and cache-creation (`total_input = cache_read + cache_creation + input_tokens`),
+so uncached-input is `input_tokens` as reported and those pools sit beside it,
+never subtracted.
 
 ## Components
 
@@ -71,7 +76,7 @@ Every record carries:
 
 | Component | Meaning |
 |---|---|
-| `uncached-input` | Input minus known cache parts. Unknown if any subtracted part is unknown. |
+| `uncached-input` | Claude: `input_tokens` as reported (already exclusive). Codex/OMP/Amore: input minus known cache parts. Unknown if any subtracted part is unknown. |
 | `cached-input` | Cache-read tokens. |
 | `cache-write-5m` | Five-minute cache-write tokens, or unknown when the TTL split is absent. |
 | `cache-write-1h` | One-hour cache-write tokens, or unknown when the source does not evidence them. |
@@ -113,8 +118,10 @@ token component and is not converted.
 `event_msg` / `payload.type === 'token_count'` / `info.last_token_usage`.
 `context.sourceId` is required. `context.model` comes from a preceding
 `turn_context` when the caller has it; this decoder does not walk a log to find
-one. `cache_write_input_tokens` is the five-minute write when present.
-One-hour writes are unknown, not a known zero. The cumulative watermark is not
+one. `cache_write_input_tokens` is an unsplit write: it lands in
+`cache-write-unknown-ttl`. `cache-write-5m` and `cache-write-1h` are unknown
+with reason `codex-cache-write-ttl-unknown` (OpenAI documents no TTL classes
+for writes; the 5m bucket is Anthropic's). The cumulative watermark is not
 a request id and equal watermarks do not invent revisions.
 
 **Amore Build** (`sourceUnit: aggregate`). Envelope is `params.update` with

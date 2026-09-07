@@ -230,6 +230,7 @@ function decodeClaude(envelope, sessionEpoch, harnessVersion, observedAt, contex
     subtractWrites: writes.cacheWriteUnknownTtl
       ? [writes.cacheWriteUnknownTtl]
       : [writes.cacheWrite5m, writes.cacheWrite1h],
+    inputAlreadyExclusive: true,
     overlap: overlapFrom(context),
   });
 }
@@ -309,9 +310,9 @@ function decodeCodex(envelope, sessionEpoch, harnessVersion, observedAt, context
     input: readCountField(last, 'input_tokens'),
     output: readCountField(last, 'output_tokens'),
     cacheRead: readCountField(last, 'cached_input_tokens'),
-    cacheWrite5m: readCountField(last, 'cache_write_input_tokens'),
-    cacheWrite1h: unknownCount('codex-cache-write-1h-unsupported'),
-    cacheWriteUnknownTtl: null,
+    cacheWrite5m: unknownCount('codex-cache-write-ttl-unknown'),
+    cacheWrite1h: unknownCount('codex-cache-write-ttl-unknown'),
+    cacheWriteUnknownTtl: readCountField(last, 'cache_write_input_tokens'),
     subtractWrites: [readCountField(last, 'cache_write_input_tokens')],
     overlap: overlapFrom(context),
   });
@@ -582,6 +583,7 @@ function readOmpReportedCost(usage) {
  *   cacheWrite1h: Counter,
  *   cacheWriteUnknownTtl: Counter | null,
  *   subtractWrites: Counter[],
+ *   inputAlreadyExclusive?: boolean,
  *   overlap: unknown,
  *   sourceReportedCost?: { state: string, amount?: number, unit?: string, reason?: string },
  * }} parts
@@ -591,7 +593,9 @@ function makeRecord(parts) {
 
   /** @type {Record<string, Counter>} */
   const components = {
-    'uncached-input': disjointUncached(parts.input, subtract),
+    'uncached-input': parts.inputAlreadyExclusive
+      ? parts.input
+      : disjointUncached(parts.input, subtract),
     'cached-input': parts.cacheRead,
     'cache-write-5m': parts.cacheWrite5m,
     'cache-write-1h': parts.cacheWrite1h,
