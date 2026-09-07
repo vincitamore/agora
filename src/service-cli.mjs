@@ -23,6 +23,9 @@ import { nativeDigest } from './native-protocol.mjs';
 import { readRecord } from './protocol/common.mjs';
 
 const STOP_MS = 5000;
+/** @typedef {(root: string) => Promise<{nodeKey: string}>} AuthorityIdentityReader */
+/** @type {AuthorityIdentityReader} */
+const existingAuthorityIdentity = root => localTransferIdentity(root, { create: false });
 
 /** Bounded hand-carried JSON, never a room lookup. Private inputs additionally deny group/other.
  * @param {string} file @param {boolean} [privateInput] */
@@ -73,9 +76,9 @@ export async function writeAuthorityOutput(file, value) {
 
 /** Explicit key generation only. The output is PUBLIC; the private half stays on this seat.
  * The operator provides this signer's own delegation list, independently of the verifier's.
- * @param {string} root @param {unknown} policy @param {string} label */
-export async function generateSeatAuthority(root, policy, label) {
-  const identity = await localTransferIdentity(root, { create: false });
+ * @param {string} root @param {unknown} policy @param {string} label @param {AuthorityIdentityReader} [readIdentity] */
+export async function generateSeatAuthority(root, policy, label, readIdentity = existingAuthorityIdentity) {
+  const identity = await readIdentity(root);
   const keys = generateKeyPairSync('ed25519');
   const publicKey = Buffer.from(/** @type {string} */ (keys.publicKey.export({ format: 'jwk' }).x), 'base64url').toString('hex');
   const record = validateAuthorityRecord({ version: 1, algorithm: 'ed25519', authorityId: authorityIdForKey(publicKey),
@@ -86,8 +89,8 @@ export async function generateSeatAuthority(root, policy, label) {
   return record;
 }
 
-/** @param {string} root */
-async function signingIdentity(root) {
+/** @param {string} root @param {AuthorityIdentityReader} readIdentity */
+async function signingIdentity(root, readIdentity) {
   const value = readRecord(await readAuthorityInput(path.join(root, 'native/authority-key.json'), true), ['record', 'privateKey']);
   const record = validateAuthorityRecord(value.record);
   let key;
@@ -96,18 +99,18 @@ async function signingIdentity(root) {
   const publicKey = createPublicKey(key).export({ format: 'jwk' });
   if (key.asymmetricKeyType !== 'ed25519' || Buffer.from(publicKey.x ?? '', 'base64url').toString('hex') !== record.publicKey)
     throw new AuthorityError('authority-key-mismatch');
-  const target = publicNodeKeyDigest((await localTransferIdentity(root, { create: false })).nodeKey);
+  const target = publicNodeKeyDigest((await readIdentity(root)).nodeKey);
   if (record.boundNodeKeyDigest !== target) throw new AuthorityError('authority-seat-binding-refused');
   return { record, key };
 }
 
 /** Prepare and retain locally BEFORE carrying the challenge to the counter-seat.
  * Fingerprint must be confirmed on that seat's terminal; shared room names prove no provenance.
- * @param {string} root @param {unknown} candidate @param {string} fingerprint */
-export async function prepareSeatAuthorityEnrollment(root, candidate, fingerprint) {
+ * @param {string} root @param {unknown} candidate @param {string} fingerprint @param {AuthorityIdentityReader} [readIdentity] */
+export async function prepareSeatAuthorityEnrollment(root, candidate, fingerprint, readIdentity = existingAuthorityIdentity) {
   const record = validateAuthorityRecord(candidate);
   if (record.keyId !== fingerprint) throw new AuthorityError('authority-fingerprint-refused');
-  const target = publicNodeKeyDigest((await localTransferIdentity(root, { create: false })).nodeKey);
+  const target = publicNodeKeyDigest((await readIdentity(root)).nodeKey);
   const challenge = createAuthorityEnrollmentChallenge(record, target, new Date().toISOString());
   const dir = await privateDirectory(path.join(root, 'native/authority-enrollments'));
   const retained = { record, challenge };
@@ -116,9 +119,9 @@ export async function prepareSeatAuthorityEnrollment(root, candidate, fingerprin
 }
 
 /** Sign possession on the seat holding the private key, never on the enrolling target.
- * @param {string} root @param {unknown} input */
-export async function signSeatAuthorityEnrollment(root, input) {
-  const { record, key } = await signingIdentity(root);
+ * @param {string} root @param {unknown} input @param {AuthorityIdentityReader} [readIdentity] */
+export async function signSeatAuthorityEnrollment(root, input, readIdentity = existingAuthorityIdentity) {
+  const { record, key } = await signingIdentity(root, readIdentity);
   const value = readRecord(input, ['record', 'challenge']);
   const proposed = validateAuthorityRecord(value.record);
   const bytes = authorityEnrollmentSigningBytes(value.challenge);
@@ -131,21 +134,21 @@ export async function signSeatAuthorityEnrollment(root, input) {
   return { challenge, signature: sign(null, bytes, key).toString('hex') };
 }
 
-/** @param {string} root @param {unknown} input @param {string} fingerprint */
-export async function completeSeatAuthorityEnrollment(root, input, fingerprint) {
+/** @param {string} root @param {unknown} input @param {string} fingerprint @param {AuthorityIdentityReader} [readIdentity] */
+export async function completeSeatAuthorityEnrollment(root, input, fingerprint, readIdentity = existingAuthorityIdentity) {
   const proof = readRecord(input, ['challenge', 'signature']);
   authorityEnrollmentSigningBytes(proof.challenge);
   const challenge = /** @type {ReturnType<typeof createAuthorityEnrollmentChallenge>} */ (proof.challenge);
   const retained = readRecord(await readAuthorityInput(path.join(root, 'native/authority-enrollments', `${challenge.challengeId}.json`), true), ['record', 'challenge']);
-  const target = publicNodeKeyDigest((await localTransferIdentity(root, { create: false })).nodeKey);
+  const target = publicNodeKeyDigest((await readIdentity(root)).nodeKey);
   return await enrollAuthorityRecord(root, retained.record, fingerprint,
     { targetNodeKeyDigest: target, retainedChallenge: retained.challenge, proof, now: new Date().toISOString() });
 }
 
 /** Deliberate local signing command. No signer is invoked by the service or any room message.
- * @param {string} root @param {unknown} input */
-export async function signSeatRouteAct(root, input) {
-  const { record, key } = await signingIdentity(root);
+ * @param {string} root @param {unknown} input @param {AuthorityIdentityReader} [readIdentity] */
+export async function signSeatRouteAct(root, input, readIdentity = existingAuthorityIdentity) {
+  const { record, key } = await signingIdentity(root, readIdentity);
   const value = readRecord(input, ['request', 'challenge']);
   const request = validateAuthorityRequest(value.request), challenge = validateAuthorityChallenge(value.challenge);
   // The signing seat's list is an additional restriction, not a replacement verifier grant.

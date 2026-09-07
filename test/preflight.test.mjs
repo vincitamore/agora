@@ -114,7 +114,7 @@ test("economy-shadow preflight owns the subverb and every argument shape", async
 
 test("ARGUMENT_PREFLIGHTS is the only verb-specific pre-config refusal table (value and source-shape guard)", async () => {
   assert.deepEqual(ARGUMENT_PREFLIGHTS.map((row) => row.name), [
-    "usage-sessions", "service-route", "room-add-remote", "watch-codex-bridge", "economy-shadow",
+    "usage-sessions", "service-route", "authority", "service-authority", "room-add-remote", "watch-codex-bridge", "economy-shadow",
   ]);
   assert.equal(new Set(ARGUMENT_PREFLIGHTS.map((row) => row.name)).size, ARGUMENT_PREFLIGHTS.length);
 

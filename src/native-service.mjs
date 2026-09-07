@@ -391,6 +391,8 @@ export class NativeRoomService {
     /** @type {Map<string, {request: ReturnType<typeof import('./authority.mjs').validateAuthorityRequest>, challenge: ReturnType<typeof createAuthorityChallenge>}>} */
     this.routeChallenges = new Map();
     /** @type {Map<string, Promise<unknown>>} */ this.admissions = new Map();
+    /** Failed opens with unconfirmed resource cleanup remain owned until service drain.
+     * @type {Map<string, {stop: () => Promise<unknown>}>} */ this.failedAdmissions = new Map();
     this.draining = false;
     this.nativeDirectory = path.join(this.root, "native");
     this.descriptorPath = path.join(this.nativeDirectory, "service.json");
@@ -812,8 +814,14 @@ export class NativeRoomService {
     journal.assertAvailable(input.roomId);
     const key = routeKey(input.roomId, publicNodeKeyDigest(publicNodeKey));
     const existing = this.routes.get(key);
-    if (input.action === 'room-enroll' && (existing || this.openingRoutes.has(key)))
-      throw new AuthorityError('route-already-open');
+    if (input.action === 'room-enroll' && (existing || this.openingRoutes.has(key))) {
+      const state = existing ? (existing.state === 'closing' ? 'closing' : 'live') : 'opening';
+      const error = new AuthorityError('route-already-open');
+      error.message = state === 'live'
+        ? `route-already-open: ${input.roomId} already admits this key; close it before opening a new grant`
+        : `route-already-open: ${input.roomId} already admits this key and that route is ${state}; wait for it to settle before opening a new grant`;
+      throw error;
+    }
     if (input.action === 'room-revoke' && (!existing || existing.state !== 'live'))
       throw new AuthorityError('route-not-open');
     const now = this.now().toISOString();
@@ -871,7 +879,7 @@ export class NativeRoomService {
       this.routeChallenges.delete(submitted.act.challengeId);
       try { return await effect(current.binding, current.operationId); }
       catch (error) {
-        if (!journal.unavailable && journal.status(current.operationId).state === 'intent')
+        if (!journal.unavailable && !journal.recoveryRooms.has(roomId) && journal.status(current.operationId).state === 'intent')
           await journal.finish(current.operationId, 'failed', this.now().toISOString());
         throw error;
       }
@@ -916,7 +924,10 @@ export class NativeRoomService {
     const { proofRef, file: secretPath } = await writeRouteSecret(this.root, binding, secret);
     if (!this.routeOwner || this.routeOwner.signal.aborted) this.routeOwner = new AbortController();
     const owner = { serviceId: this.accountId, serviceBootId: this.bootEpoch, signal: this.routeOwner.signal };
-    const resource = startMemberRoute({ binding, allowedNodeKey: publicNodeKey }, {
+    let resource;
+    const file = path.join(this.nativeDirectory, 'routes', binding.grantId, 'descriptor.json');
+    try {
+    resource = startMemberRoute({ binding, allowedNodeKey: publicNodeKey }, {
       owner,
       // The service's state root is REQUIRED, not decorative: resolveTailcatBinary gives every
       // other option a default (platform, arch, vendorDir, override, overrideSha256) and reads
@@ -928,12 +939,9 @@ export class NativeRoomService {
       ...(request.routeOptions ?? this.routeOptions ?? {}),
       acceptChannel: (accepted, stream, signal) => this.#acceptMember({ binding: accepted, secret, activation }, stream, signal),
     });
-    let published;
-    try {
-      published = /** @type {any} */ (await resource.ready);
+      const published = /** @type {any} */ (await resource.ready);
       const descriptor = buildRouteDescriptor({ binding, endpoint: published.endpoint, proofRef,
         issuedAt: this.now().toISOString() });
-      const file = path.join(this.nativeDirectory, "routes", binding.grantId, "descriptor.json");
       await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
       await writeAtomic(file, descriptor);
       const entry = { binding, secret, proofRef, descriptor, resource, descriptorPath: file,
@@ -944,8 +952,15 @@ export class NativeRoomService {
       return { descriptor, descriptorPath: file, secretRef: proofRef, secretPath };
     } catch (error) {
       // A failed descriptor write must not leave a live listener nobody has a record of.
-      try { await resource.stop(); } catch { /* the open is already failing; report its cause */ }
-      await removeRouteSecret(this.root, binding);
+      try {
+        await resource?.stop();
+        await removeRouteSecret(this.root, binding);
+        await rm(file, { force: true });
+      } catch {
+        if (resource) this.failedAdmissions.set(operationId, resource);
+        journal.recoveryRooms.add(roomId);
+        throw new AuthorityError('operator-recovery-required');
+      }
       throw error;
     }
     } finally {
@@ -1132,6 +1147,10 @@ export class NativeRoomService {
       route.activation.active = false;
       try { await route.resource.stop(); } catch { /* reported by closeRoute; stop() is best-effort */ }
     }
+    for (const resource of this.failedAdmissions.values()) {
+      try { await resource.stop(); } catch { /* durable intent retains the recovery obligation */ }
+    }
+    this.failedAdmissions.clear();
     this.routes.clear();
     this.routeOwner?.abort();
     this.routeOwner = undefined;
