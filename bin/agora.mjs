@@ -6,7 +6,7 @@ import { shareFiles, fetchFiles, listOffers, stopOffer, resumeOffer, forgetOffer
 import { parseArgs } from "node:util";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { copyFile, readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -67,7 +67,8 @@ import { codexLiveness, codexSpawnWarning, codexThread, queueCodex, resolveCodex
 import { codexServerURL, deliverCodexServer } from "../src/codex-server.mjs";
 import { buildLabel, buildPredates, cacheTtls, clearWatchMode, installedBuild, touchWatchMode, watchModeSentinel } from "../src/harness.mjs";
 import { SERVICE_DARK, ServiceDarkError, openNativeSubscription, serviceDescriptorStatus, validateNativeRoomId } from "../src/wake/subscriber.mjs";
-import { createServiceRoom, runService, seatAccountId, seatLabel, serviceStatus, startService, stopService } from "../src/service-cli.mjs";
+import { closeServiceRoute, createServiceRoom, listServiceRoutes, openServiceRoute, runService,
+  seatAccountId, seatLabel, serviceStatus, startService, stopService } from "../src/service-cli.mjs";
 import { spawnFromFile } from "../src/spawn-cli.mjs";
 import { runUsage } from "../src/usage-cli.mjs";
 import { runUsageSessionsCli } from "../src/session-accounting.mjs";
@@ -365,6 +366,8 @@ const OPTIONS = /** @type {const} */ ({
   help: { type: "boolean", short: "h", default: false },
   daemon: { type: "boolean", default: false },
   "room-id": { type: "string" },
+  "allow-key": { type: "string" },
+  out: { type: "string" },
   until: { type: "string" },
   "keep-watches": { type: "boolean", default: false },
   provider: { type: "string" },
@@ -711,6 +714,21 @@ async function main(argv) {
     }
   }
 
+  // `service route` refuses its own arguments before loadConfig, like every verb this cut
+  // touched: a missing or unreadable config must not steal the usage code from a missing
+  // --allow-key or a malformed room id. Its cell pins AGORA_CONFIG at a path that does not exist.
+  if (verb === "service" && roomAlias === "route") {
+    const sub = rest[0];
+    if (sub !== "open" && sub !== "list" && sub !== "close")
+      throw new AgoraError("agora service route needs open, list or close", EXIT.usage);
+    if (sub !== "list") {
+      if (rest[1] === undefined)
+        throw new AgoraError(`agora service route ${sub} needs <room>`, EXIT.usage);
+      if (values["allow-key"] === undefined)
+        throw new AgoraError(`agora service route ${sub} needs --allow-key <nodekey:64hex>`, EXIT.usage);
+    }
+  }
+
   const cfg = await loadConfig(values.config);
   const json = Boolean(values.json);
   const build = await installedBuild({ version, root: projectRoot, entry: entryFile });
@@ -918,7 +936,32 @@ async function main(argv) {
       }
       throw new AgoraError(`agora service room needs create`, EXIT.usage);
     }
-    throw new AgoraError(`agora service needs start, stop, status or room create`, EXIT.usage);
+    if (action === "route") {
+      const sub = rest[0];
+      if (sub === "open") {
+        const opened = await openServiceRoute(stateRoot, rest[1], values["allow-key"]);
+        if (values.out !== undefined) await copyFile(opened.descriptorPath, String(values.out));
+        const where = values.out !== undefined ? String(values.out) : opened.descriptorPath;
+        if (json) console.log(JSON.stringify({ type: "service", action: "route-open", ...opened, descriptorPath: where }));
+        else console.log(`route open ${opened.descriptor.binding.roomId} member ${opened.descriptor.binding.accountId}\ndescriptor ${where}\nsecret ${opened.secretRef} (0600, carry it beside the descriptor; it never travels in the descriptor)`);
+        return EXIT.ok;
+      }
+      if (sub === "list") {
+        const routes = await listServiceRoutes(stateRoot);
+        if (json) console.log(JSON.stringify({ type: "service", action: "route-list", routes }));
+        else if (!routes.length) console.log("no live member routes on this service");
+        else for (const r of routes) console.log(`${r.roomId} ${r.accountId} generation ${r.routeGeneration} since ${r.openedAt}`);
+        return EXIT.ok;
+      }
+      if (sub === "close") {
+        const closed = await closeServiceRoute(stateRoot, rest[1], values["allow-key"]);
+        if (json) console.log(JSON.stringify({ type: "service", action: "route-close", ...closed }));
+        else console.log(`route closed ${closed.roomId} member ${closed.accountId}; the remote's secret is now stale and its next hello is refused`);
+        return EXIT.ok;
+      }
+      throw new AgoraError(`agora service route needs open, list or close`, EXIT.usage);
+    }
+    throw new AgoraError(`agora service needs start, stop, status, room create or route open/list/close`, EXIT.usage);
   }
 
   if (verb === "spawn") {
