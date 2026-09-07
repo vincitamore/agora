@@ -272,6 +272,58 @@ test('cost on a record is optional and additive: OMITTED is not the same as unus
   assert.ok(refuses(() => validateSessionUsageRecord({ ...base, sourceReportedCost: { state: 'known' } })));
 });
 
+// --- The blank-identity class ------------------------------------------------------------------
+
+test('a string that is blank once trimmed is refused wherever it must SAY something', () => {
+  // A minimum length counts characters and a space is a character, so min:1 admitted " ":
+  // present, well-formed, and naming nothing. Each refusal sits beside the ordinary value of
+  // the SAME field, so the cell shows the blank is what is refused.
+  const BLANK = ' ';
+  const usage = { components: { output: { state: 'known', value: 1, unit: 'tokens' } }, coverage: 'partial' };
+  const at = '2026-09-07T10:00:00.000Z';
+
+  // Key components. Worst of the class: a blank here is a real, addressable identity for no source.
+  assert.ok(validateSourceIdentity({ ...ID, harness: 'codex-cli' }), 'ordinary harness');
+  assert.ok(refuses(() => validateSourceIdentity({ ...ID, harness: BLANK })), 'blank harness');
+  assert.ok(refuses(() => validateSourceIdentity({ ...ID, sessionEpoch: BLANK })), 'blank epoch');
+  assert.ok(refuses(() => validateSourceIdentity({ ...ID, sourceId: BLANK })), 'blank sourceId');
+  assert.ok(validateSourceIdentity({ ...ID, harnessVersion: '1.2.3' }), 'ordinary version');
+  assert.ok(refuses(() => validateSourceIdentity({ ...ID, harnessVersion: BLANK })), 'blank version');
+
+  // Opaque unit: a bucket whose name is nothing.
+  assert.ok(validateSourceReportedCost({ state: 'known', amount: 1, unit: 'usd-ticks' }), 'ordinary unit');
+  assert.ok(refuses(() => validateSourceReportedCost({ state: 'known', amount: 1, unit: BLANK })), 'blank unit');
+
+  // A reason that says nothing satisfies "unsupported WITH a reason" vacuously, which is the
+  // exact rule the reason exists to enforce.
+  assert.ok(validateMemberCoverage({ member: 'seat-a', state: 'unsupported', reason: 'no counters' }));
+  assert.ok(refuses(() => validateMemberCoverage({ member: 'seat-a', state: 'unsupported', reason: BLANK })),
+    'blank reason');
+  assert.ok(refuses(() => validateMemberCoverage({ member: BLANK, state: 'measured' })), 'blank member');
+  assert.ok(refuses(() => validateCounter({ state: 'invalid', reason: BLANK })), 'blank counter reason');
+
+  assert.ok(validateOverlap({ relation: 'contained-in-parent', peerKey: 'src:1:h1:e1:x' }), 'ordinary peer');
+  assert.ok(refuses(() => validateOverlap({ relation: 'contained-in-parent', peerKey: BLANK })), 'blank peerKey');
+
+  assert.ok(validateSessionUsageRecord({ identity: ID, observedAt: at, usage, model: 'm-1' }), 'ordinary model');
+  assert.ok(refuses(() => validateSessionUsageRecord({ identity: ID, observedAt: at, usage, model: BLANK })),
+    'blank model');
+
+  // Tabs and newlines are blank too, and a value that merely CONTAINS a space is not blank.
+  assert.ok(refuses(() => validateSourceReportedCost({ state: 'known', amount: 1, unit: '	' })), 'tab-only');
+  assert.equal(validateSourceReportedCost({ state: 'known', amount: 1, unit: 'usd ticks' }).unit, 'usd ticks',
+    'an inner space is content, not blankness');
+});
+
+test('a refused blank is not a licence to trim what is accepted', () => {
+  // The value is stored VERBATIM. Trimming an opaque foreign identifier would silently rewrite
+  // it, which is the same class of harm as refusing it for the wrong reason.
+  assert.equal(validateSourceIdentity({ ...ID, sourceId: ' resp-1 ' }).sourceId, ' resp-1 ',
+    'surrounding space is preserved: the id belongs to the source, not to us');
+  assert.equal(validateSourceReportedCost({ state: 'known', amount: 1, unit: ' usd-ticks' }).unit,
+    ' usd-ticks', 'and the same for an opaque unit');
+});
+
 // --- Membership coverage ----------------------------------------------------------------------
 
 test('every member is measured or explicitly unsupported WITH a reason', () => {
