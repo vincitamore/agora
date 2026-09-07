@@ -29,6 +29,7 @@ const CODE = Object.freeze({
   earlyExit: 'codex-early-exit', oversized: 'codex-output-oversized', badFrame: 'codex-malformed-frame',
   protocolError: 'codex-protocol-error', noIdentity: 'codex-account-identity-unavailable',
   noQuota: 'codex-no-quota-reported', badQuota: 'codex-quota-shape-unsupported',
+  transport: 'codex-transport-error',
 });
 
 /** @param {unknown} value @returns {value is Record<string, unknown>} */
@@ -146,7 +147,13 @@ export function normalizeRateLimitsResponse(response, context) {
   if (byLimitId) {
     for (const key of Object.keys(byLimitId)) {
       const snapshot = byLimitId[key];
-      if (snapshot === undefined || snapshot === null) continue;
+      // The schema types every map value as a RateLimitSnapshot, so a null or non-record value
+      // is not "no bucket" -- it is a bucket the provider represents and this code cannot read.
+      // The observation is declared `full`, and a full reading that quietly omits a represented
+      // bucket is a false claim about its own completeness, so refuse rather than under-report.
+      // This is the same collapse the window slots were repaired for, one level up: fixing the
+      // inner level and leaving the outer one is exactly how it survived the first repair.
+      if (!isRecord(snapshot)) return { status: 'error', code: CODE.badQuota };
       covered.add(typeof (/** @type {any} */ (snapshot)?.limitId) === 'string' && /** @type {any} */ (snapshot).limitId ? /** @type {any} */ (snapshot).limitId : key);
       readings.push(...windowsFromSnapshot(snapshot, key));
     }
@@ -236,6 +243,12 @@ export async function requestRateLimits(options = {}) {
       try { child.stdin?.write(`${JSON.stringify(message)}\n`); } catch { finish({ ok: false, code: CODE.protocolError }); }
     };
 
+    // A stream error arrives ASYNCHRONOUSLY and is not caught by try/catch around write, nor by
+    // child.on('error') which reports spawn failures only. Unhandled, an 'error' event on an
+    // EventEmitter is rethrown: it terminates the CALLER's process and prints a raw stack, which
+    // is both a crash this library must never cause and a breach of the no-raw-output boundary.
+    child.stdin?.on('error', () => finish({ ok: false, code: CODE.transport }));
+    child.stdout?.on('error', () => finish({ ok: false, code: CODE.transport }));
     child.stdout?.setEncoding('utf8');
     child.stdout?.on('data', (chunk) => {
       bytes += Buffer.byteLength(chunk, 'utf8');

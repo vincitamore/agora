@@ -88,6 +88,12 @@ single `limitId`. They are distinct windows, so the slot name becomes the observ
   window the authoritative source says does not exist. Absent, the summary is used on its own. A
   map supplied as something other than an object is malformed, and a malformed authority is never
   silently downgraded to the legacy view: that is `codex-quota-shape-unsupported`.
+- The same rule applies one level up, to the buckets themselves. Every value in the map is a
+  snapshot by the schema, so a value that is null or not an object is a bucket the provider
+  represents and this code cannot read. Since the observation is declared `full`, quietly
+  omitting it would be a false claim about the reading's own completeness, so the whole reading
+  is refused instead. Fixing this at the slot level and leaving it at the bucket level is
+  exactly how it survived a first round of repair.
 - A window slot that is schema `null` means the provider reports **no** window there. A slot that
   is present but unreadable means a window exists that cannot be expressed, which is a different
   fact and is reported unavailable with `unsupported-shape` rather than dropped. Collapsing the
@@ -109,7 +115,8 @@ credential, a path or a command line.
 | `codex-protocol-error` | The provider returned an error. |
 | `codex-account-identity-unavailable` | No account id, so no principal. |
 | `codex-no-quota-reported` | A reply with no usable window. |
-| `codex-quota-shape-unsupported` | A window whose units cannot be expressed. |
+| `codex-quota-shape-unsupported` | A window, or a represented bucket, whose shape cannot be expressed. |
+| `codex-transport-error` | An owned stream failed (a broken pipe, for instance). |
 
 An absent CLI is `unsupported` rather than an error: a seat without Codex installed is a fact
 about the seat, not a fault. Identity is never invented — with no account id the collector
@@ -124,3 +131,7 @@ reports identity unavailable rather than deriving a principal from a credential 
 - Same-process execution is not authority. This collector states a `cooperative` reading; a
   consumer needing an authenticated context resolves it through the contract's seat binding.
 - Only the helper this collector started is cleaned up. A peer process is never touched.
+- Errors on the streams this collector owns are bounded results, never crashes. A stream error
+  arrives asynchronously, so it is caught by neither a `try`/`catch` around the write nor the
+  child's own `error` event; unhandled, it would terminate the **calling** process and print a
+  raw stack, which is both a crash this library must not cause and a breach of the rule above.
