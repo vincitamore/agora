@@ -233,9 +233,13 @@ const SCHEMA = {
     share: { args: ["<room>", "[file ...]"], options: {"--to <account-id>": "authenticated recipient account; repeatable, maximum four", "--once": "consume each recipient route after verified receipt", "--expires-in <seconds>": "60 to 86400, default 3600", "--list": "local offers and measured liveness", "--prune": "remove expired offline offers owned by this session", "--stop <id>": "stop a local offer", "--resume <id>": "reconcile uncertain publication without duplicate posting", "--forget <id>": "explicitly release the operation guard after checking publication"}, does: "snapshot named files and publish a recipient-restricted native transfer offer after every route is ready" },
     fetch: { args: ["<room>","<offer-id>"], options: {"--into <directory>": "destination; existing files are never overwritten", "--pages <n>": "offer discovery depth"}, does: "explicitly receive, verify and commit files before acknowledging; receiving an offer never executes or fetches automatically" },
     service: {
-      args: ["start|stop|status|room create"],
-      options: { "--room-id <id>": "with room create: use this 32-hex id instead of minting one" },
-      does: "the seat-local native room service: start writes native/service.json and binds the endpoint; stop is bounded; status reports the descriptor without the nonce; room create mints a 32-hex id on the running service and prints it. Never writes the shared config",
+      args: ["start|stop|status|room create|route open/list/close"],
+      options: {
+        "--room-id <id>": "with room create: use this 32-hex id instead of minting one",
+        "--allow-key <nodekey:64hex>": "with route open/close: the member's PUBLIC node key as enroll prints it; never a private key, a key file or a digest",
+        "--out <path>": "with route open: also write the descriptor here for the operator to carry",
+      },
+      does: "the seat-local native room service: start writes native/service.json and binds the endpoint; stop is bounded; status reports the descriptor without the nonce; room create mints a 32-hex id on the running service and prints it; route open admits one enrolled key over Tailcat and route close revokes it, the service owning the route rather than the verb. Never writes the shared config",
     },
     spawn: {
       args: [],
