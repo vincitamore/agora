@@ -290,3 +290,21 @@ export async function queueCodex(room, messages, opts = {}) {
     await opts.onQueued?.({ thread, cursor: message.cursor, bin, message });
   }
 }
+
+/**
+ * A watch armed under a Codex session with no delivery bridge delivers to nobody: Codex does not
+ * treat terminal output as a wake, so the process polls, prints, advances the cursor, and the
+ * task never hears a word. That mistake was made twice in one day by copying a Claude Code watch
+ * form onto Codex seats, and it was silent both times. So it is refused here, before any config
+ * is read, with the one-line fixes; `--print-only` says a printing watch is wanted on purpose.
+ * Returns the refusal text, or undefined when the watch may arm.
+ * @param {{ "codex-queue"?: unknown, "codex-server"?: unknown, "codex-token-file"?: unknown, "print-only"?: unknown }} values
+ * @param {NodeJS.ProcessEnv | Record<string, string | undefined>} env
+ */
+export function codexBridgeRefusal(values, env = process.env) {
+  const thread = codexThread(env);
+  if (!thread) return undefined;
+  if (values["codex-queue"] || values["codex-server"] || values["codex-token-file"] || values["print-only"]) return undefined;
+  const source = env.CODEX_THREAD_ID?.trim() ? "CODEX_THREAD_ID" : "CODEX_SESSION_ID";
+  return `this watch runs under a Codex session (${source} is set) with no delivery bridge; Codex does not treat terminal output as a wake, so a printing watch delivers to nobody. Add --codex-queue (or arm through scripts/start-codex-watch.sh / start-codex-watch.ps1), or --codex-server <ws://127.0.0.1:PORT> --codex-token-file <absolute path> for the native input path; --print-only arms a printing watch on purpose`;
+}

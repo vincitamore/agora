@@ -63,7 +63,7 @@ import { carryState, carryWindow, foldRoom, renderCarry } from "../src/carry.mjs
 import { decorate, human } from "../src/render.mjs";
 import { formatTrailers, matchesAddress, parseTrailers, TRAILER_VALUE_MAX, trailerValueOk } from "../src/trailers.mjs";
 import { SLACK_TEXT_MAX, chunkAtLines, encodeSlackText } from "../src/transports/slack.mjs";
-import { codexLiveness, codexSpawnWarning, codexThread, queueCodex, resolveCodexBinary } from "../src/codex.mjs";
+import { codexBridgeRefusal, codexLiveness, codexSpawnWarning, codexThread, queueCodex, resolveCodexBinary } from "../src/codex.mjs";
 import { codexServerURL, deliverCodexServer } from "../src/codex-server.mjs";
 import { buildLabel, buildPredates, cacheTtls, clearWatchMode, installedBuild, touchWatchMode, watchModeSentinel } from "../src/harness.mjs";
 import { SERVICE_DARK, ServiceDarkError, openNativeSubscription, serviceDescriptorStatus, validateNativeRoomId } from "../src/wake/subscriber.mjs";
@@ -189,6 +189,7 @@ const SCHEMA = {
         "--all": "deliver this side's own posts too (skipped by default)",
         "--wake <all|addressed|mine>": "what wakes this watch: everything (default); everything except messages addressed to someone else; only messages addressed to you, your model, the seat, or everyone. Filtered messages still advance the cursor and still show in read",
         "--codex-queue": "queue each delivery into this Codex task through `codex queue`",
+        "--print-only": "arm a printing watch on purpose under a Codex session; without it, or a Codex bridge, such a watch is refused because Codex does not treat terminal output as a wake",
         "--codex-server <url>": "deliver bounded batches through the authenticated loopback server owning the Codex TUI",
         "--codex-token-file <path>": "absolute capability-token file for --codex-server; never a token value",
         "--codex-thread <id>": "target task/thread (else AGORA_CODEX_THREAD, CODEX_THREAD_ID, then CODEX_SESSION_ID)",
@@ -324,6 +325,7 @@ const OPTIONS = /** @type {const} */ ({
   all: { type: "boolean", default: false },
   wake: { type: "string" },
   "codex-queue": { type: "boolean", default: false },
+  "print-only": { type: "boolean", default: false },
   "codex-server": { type: "string" },
   "codex-token-file": { type: "string" },
   "codex-thread": { type: "string" },
@@ -737,6 +739,13 @@ async function main(argv) {
       if (!/^nodekey:[a-f0-9]{64}$/.test(String(values["allow-key"]).trim()))
         throw new AgoraError("--allow-key takes the public node key as enroll prints it: nodekey: followed by 64 hex characters", EXIT.usage);
     }
+  }
+
+  // A watch under a Codex session with no delivery bridge is refused before config is read: the
+  // refusal is the verb's own (env plus flags), and a missing config must not steal its code.
+  if (verb === "watch") {
+    const refusal = codexBridgeRefusal(values, process.env);
+    if (refusal) throw new AgoraError(refusal, EXIT.usage);
   }
 
   const cfg = await loadConfig(values.config);

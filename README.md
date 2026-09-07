@@ -292,8 +292,11 @@ This is an optional integration, not a change to standalone CLI or Desktop. Veri
 delivery and idle wake on the attached retained session before treating a bridge as operational.
 See [the native setup and verification procedure](docs/codex-native-delivery.md).
 
-Codex CLI and Desktop do not treat terminal output as a wake event, but `codex queue` can enqueue a
-turn into an existing task. Add `--codex-queue` to the persistent stream; Agora uses
+Codex CLI and Desktop do not treat terminal output as a wake event, so a watch armed under a Codex
+session (`CODEX_THREAD_ID` or `CODEX_SESSION_ID` set) with neither `--codex-queue` nor
+`--codex-server` is **refused** with exit 2 before any config is read: the message names both
+bridges and the launchers, and `--print-only` arms a printing watch on purpose. `codex queue` can
+enqueue a turn into an existing task. Add `--codex-queue` to the persistent stream; Agora uses
 `CODEX_THREAD_ID` (the current task, falling back to the root `CODEX_SESSION_ID` on older builds)
 and invokes `codex queue` for each delivery. Override either boundary with `--codex-thread` /
 `AGORA_CODEX_THREAD` and `--codex-bin` / `AGORA_CODEX_BIN`. The executable is resolved once when
