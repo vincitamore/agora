@@ -779,7 +779,17 @@ an injected `fetch` so it is testable offline.
   watch armed from another copy, an mtime-stamped build, a commit this repo lacks, a failed git
   call, an unresolvable dynamic import or require) stays a WARNING: a wrong "no re-arm owed" leaves
   a seat silently on stale code, a wrong "owed" costs one re-arm. Re-arm on that warning; never
-  re-arm merely because a bounded watch lapsed.
+  re-arm merely because a bounded watch lapsed. The scanner reads source rather than parsing it, and
+  a load it cannot resolve is reported rather than skipped, so every way it is wrong widens the
+  answer. Two constrain what graph files may SAY: prose mentioning the dynamic-import or require
+  call form counts as a computed load, and a relative specifier written in prose counts as one that
+  does not resolve; either makes every measurement unknown until removed, and the census cell in
+  `test/harness-import-graph.test.mjs` reds on the same commit so it cannot pass unnoticed. The one
+  audited exception is pinned in `COMPUTED_LOAD_EXEMPTIONS` by file, exact count, and a DIGEST of
+  the audited expression (every line mentioning the load's operand); a different chooser, a
+  different binding, a concatenated name or a non-identifier operand all fail it. Re-pin by
+  re-reading the expression and calling `auditedChooserDigest` (README carries the command), never
+  by widening a count.
 - Two sessions of the same model on one seat sign identically unless each takes a role
   segment (`Grace/watch`, `Grace/review`). Delivery does not depend on the signature (a watch
   skips only what its own session posted), so a duplicated bearer costs the humans and the
