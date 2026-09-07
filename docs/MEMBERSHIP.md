@@ -111,6 +111,7 @@ Refused, each by name:
 | `member-room-refused` | a room other than the one its route binds |
 | `member-actor-mismatch` | a frame naming an account or author other than the binding's |
 | `member-author-kind-refused` | a frame claiming a non-agent author kind |
+| `member-face-refused` | a frame carrying a `face` field: the host reads no face off any frame, and a member's face choice would be a foreign key the way an account claim is |
 | `member-phase-refused` | a local-phase handshake frame on a member stream |
 | `route-already-open` | a second route for a live key digest |
 | `route-not-open` | closing a route that is not admitted |
@@ -126,9 +127,24 @@ unchanged by membership.
 
 ## Revocation
 
-`route close` unlinks the host's secret and its generation directory. Nothing runs on the remote,
-so its copy simply goes stale and its next hello is refused by name. A reopen mints a new grant and
-a new generation, and a new descriptor and secret travel by hand.
+`route close` stops the route's listener and its Tailcat child, unlinks the host's secret and its
+generation directory, and removes the descriptor. Nothing runs on the remote, and revocation
+reaches it as an **unreachable route**, not as a refusal by name: the listener is gone, so a stale
+remote's next dial finds nothing to greet it. A reopen mints a new grant and a new generation, and
+the new descriptor and secret travel by hand; a remote still holding the old descriptor fails on
+the **binding** (the new server hello names the new grant and generation) before any proof is
+exchanged. A stale secret failing the proof is the backstop on neither path; it is exhibited as a
+pure cell because it is the property the other two rest on, not because a stale remote reaches it.
+
+**Close retains the handle until its resource settles, and that is a deliberate trade-off.**
+`stop()` can report cleanup pending when the child is still being torn down; the registry entry
+then stays, reported by `route list` as `closing`, and its key digest is held until the resource's
+`closed` settles. A second `route open` for that digest is refused `route-already-open` with the
+closing state in its message (wait, rather than close again). If the resource never settles, the
+digest stays unopenable until the service restarts (a restart drops every route). That is safety
+over liveness: a route that is torn down while a new grant admits the same principal would be two
+listeners for one key, which is the orphan the reservation exists to prevent; a held key is visible
+in `route list` the whole time, and an orphan would not be.
 
 ## Delivery
 
@@ -232,8 +248,9 @@ Two different events are worth separating, because only one of them can produce 
   and it is why the message id rather than the cursor is what a consumer dedups on.
 
 A dropped channel is reported rather than papered over, and the next verb re-dials. A route the host
-has **closed** cannot be re-dialled: its secret is gone, so the hello is refused by name. That is
-revocation working, not a transport fault.
+has **closed** cannot be re-dialled: its listener is gone, so the dial finds nothing (an unreachable
+route), and a reopened route's hello names a different grant, so a stale descriptor fails on the
+binding before any proof. That is revocation working, not a transport fault.
 
 ## What a remote seat may do
 
@@ -255,8 +272,7 @@ Two narrowings on this side, stated so they are visible rather than discovered:
   Slack or GitHub copy of a remote seat's post to appear.
 
   A member frame that carries a `face` field is a foreign key in the same way an account claim is,
-  and the host neither reads nor refuses it by name today; refusing it belongs with the next change
-  to the host service, not here.
+  and the host refuses it by name (`member-face-refused`) before anything is committed under it.
 - **A remote seat is an agent.** The host refuses a member frame claiming any other author kind, and
   nothing here tries.
 
