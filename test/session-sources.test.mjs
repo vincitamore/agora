@@ -15,6 +15,12 @@ import {
   resolveOverlap,
 } from '../src/usage/session-sources.mjs';
 import { validateSessionUsageRecord } from '../src/protocol/session-usage.mjs';
+import {
+  closeSessionLedger, commitLedgerEvent, ledgerKey, openSessionLedger, readLedgerSnapshot,
+} from '../src/usage/session-ledger.mjs';
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
 const EPOCH = 'session-epoch-synthetic-e1b-01';
 const OBSERVED = '2026-09-07T00:20:00.000Z';
@@ -426,6 +432,49 @@ test('sourceReportedReasoning is omitted; reasoning-billed stays unknown and is 
     const billed = component(record, 'reasoning-billed');
     assert.equal(billed.state, 'unknown');
     assert.equal(billed.state === 'unknown' ? billed.reason : undefined, 'reasoning-inclusion-unknown');
+  }
+});
+
+test('a ledger holding both sourceReportedCost and sourceReportedReasoning closes and reopens; a duplicate keeps the first observation', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'agora-ledger-'));
+  const identity = {
+    harness: 'codex',
+    sessionEpoch: EPOCH,
+    sourceId: 'both-fields',
+    sourceUnit: /** @type {const} */ ('request'),
+    finality: /** @type {const} */ ('final'),
+  };
+  const usage = { components: { output: { state: 'known', value: 1, unit: 'tokens' } }, coverage: 'partial' };
+  const ledger = await openSessionLedger({ root, limits: { maxBytes: 256_000, maxEntries: 64 } });
+  try {
+    await commitLedgerEvent(ledger, {
+      record: {
+        identity, observedAt: OBSERVED, model: 'model-A', usage,
+        sourceReportedCost: { state: 'known', amount: 42, unit: 'usd-ticks' },
+        sourceReportedReasoning: { state: 'known', amount: 17, unit: 'source-reasoning-tokens' },
+      },
+      ingest: { locator: 'synth', sourceGeneration: 1, offset: 1, fingerprint: 'fp:1' },
+    });
+    await commitLedgerEvent(ledger, {
+      record: {
+        identity, observedAt: '2026-09-07T11:30:00.000Z', model: 'model-B', usage,
+        sourceReportedCost: { state: 'known', amount: 1, unit: 'usd-ticks' },
+        sourceReportedReasoning: { state: 'known', amount: 99, unit: 'source-reasoning-tokens' },
+      },
+      ingest: { locator: 'synth', sourceGeneration: 1, offset: 2, fingerprint: 'fp:2' },
+    });
+  } finally {
+    await closeSessionLedger(ledger);
+  }
+  const reopened = await openSessionLedger({ root, limits: { maxBytes: 256_000, maxEntries: 64 } });
+  try {
+    const entry = readLedgerSnapshot(reopened).entries[ledgerKey(identity)];
+    assert.equal(entry.observedAt, OBSERVED);
+    assert.equal(entry.model, 'model-A');
+    assert.deepEqual(entry.sourceReportedCost, { state: 'known', amount: 42, unit: 'usd-ticks' });
+    assert.deepEqual(entry.sourceReportedReasoning, { state: 'known', amount: 17, unit: 'source-reasoning-tokens' });
+  } finally {
+    await closeSessionLedger(reopened);
   }
 });
 
