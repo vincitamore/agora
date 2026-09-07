@@ -187,7 +187,7 @@ test('unknown harness is unsupported; missing envelope, epoch and observedAt are
   assert.ok(SESSION_SOURCE_HARNESSES.includes('codex'));
 });
 
-test('claude split writes stay split and uncached is input minus known cache parts', () => {
+test('claude split writes stay split and uncached is input_tokens as reported', () => {
   const result = supported(decode('claude-code', claudeEnvelope({
     input_tokens: 100,
     output_tokens: 20,
@@ -203,7 +203,7 @@ test('claude split writes stay split and uncached is input minus known cache par
   assert.deepEqual(component(record, 'cached-input'), knownCount(40));
   assert.deepEqual(component(record, 'cache-write-5m'), knownCount(10));
   assert.deepEqual(component(record, 'cache-write-1h'), knownCount(5));
-  assert.deepEqual(component(record, 'uncached-input'), knownCount(45));
+  assert.deepEqual(component(record, 'uncached-input'), knownCount(100));
   assert.deepEqual(component(record, 'output'), knownCount(20));
   assert.equal(component(record, 'reasoning-billed').state, 'unknown');
   assert.equal(component(record, 'tool').state, 'unknown');
@@ -224,10 +224,10 @@ test('claude unsplit cache_creation_input_tokens is cache-write-unknown-ttl, not
   assertUnknown(component(record, 'cache-write-5m'), 'ttl-split-absent');
   assert.equal(component(record, 'cache-write-1h').state, 'unknown');
   assert.deepEqual(component(record, 'cache-write-unknown-ttl'), knownCount(15));
-  assert.deepEqual(component(record, 'uncached-input'), knownCount(65));
+  assert.deepEqual(component(record, 'uncached-input'), knownCount(100));
 });
 
-test('claude absent cache fields are unknown, not zero; uncached is therefore unknown', () => {
+test('claude absent cache fields are unknown, not zero; uncached is input_tokens as reported', () => {
   const result = supported(decode('claude-code', claudeEnvelope({
     input_tokens: 50,
     output_tokens: 0,
@@ -237,7 +237,7 @@ test('claude absent cache fields are unknown, not zero; uncached is therefore un
   assert.deepEqual(component(record, 'output'), knownCount(0));
   assert.equal(component(record, 'cached-input').state, 'unknown');
   assert.equal(component(record, 'cache-write-5m').state, 'unknown');
-  assert.equal(component(record, 'uncached-input').state, 'unknown');
+  assert.deepEqual(component(record, 'uncached-input'), knownCount(50));
   assert.equal(record.usage.coverage, 'partial');
 });
 
@@ -249,7 +249,7 @@ test('claude null and oversized cache keep the record and mark the counter inval
   })));
   assertContract(nullRead.records[0]);
   assert.equal(component(nullRead.records[0], 'cached-input').state, 'invalid');
-  assert.equal(component(nullRead.records[0], 'uncached-input').state, 'invalid');
+  assert.deepEqual(component(nullRead.records[0], 'uncached-input'), knownCount(50));
 
   const over = supported(decode('claude-code', claudeEnvelope({
     input_tokens: 10,
@@ -258,8 +258,30 @@ test('claude null and oversized cache keep the record and mark the counter inval
     cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 },
   })));
   assertContract(over.records[0]);
-  assert.deepEqual(component(over.records[0], 'uncached-input'), invalidCount('cache-exceeds-input'));
+  assert.deepEqual(component(over.records[0], 'uncached-input'), knownCount(10));
   assert.deepEqual(component(over.records[0], 'cached-input'), knownCount(12));
+});
+
+test('claude real-shaped cache larger than input_tokens still yields uncached as reported', () => {
+  const result = supported(decode('claude-code', claudeEnvelope({
+    input_tokens: 2,
+    output_tokens: 1,
+    cache_read_input_tokens: 90577,
+    cache_creation_input_tokens: 1545,
+  })));
+  assertContract(result.records[0]);
+  assert.deepEqual(component(result.records[0], 'uncached-input'), knownCount(2));
+  assert.deepEqual(component(result.records[0], 'cached-input'), knownCount(90577));
+});
+
+test('claude fixture numbers that looked inclusive still take input_tokens as reported', () => {
+  const result = supported(decode('claude-code', claudeEnvelope({
+    input_tokens: 40,
+    output_tokens: 1,
+    cache_read_input_tokens: 10,
+    cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 },
+  })));
+  assert.deepEqual(component(result.records[0], 'uncached-input'), knownCount(40));
 });
 
 test('claude missing message id is identity-missing, not an invented key', () => {
@@ -338,8 +360,9 @@ test('codex requires caller sourceId and treats 1h write as unknown, never known
   assert.notEqual(record.identity.sourceId, '999');
   assert.equal(Object.hasOwn(record, 'cumulativeWatermark'), false);
   assert.deepEqual(component(record, 'cached-input'), knownCount(40));
-  assert.deepEqual(component(record, 'cache-write-5m'), knownCount(10));
-  assertUnknown(component(record, 'cache-write-1h'), 'codex-cache-write-1h-unsupported');
+  assertUnknown(component(record, 'cache-write-5m'), 'codex-cache-write-ttl-unknown');
+  assertUnknown(component(record, 'cache-write-1h'), 'codex-cache-write-ttl-unknown');
+  assert.deepEqual(component(record, 'cache-write-unknown-ttl'), knownCount(10));
   assert.deepEqual(component(record, 'uncached-input'), knownCount(50));
   assert.equal(record.model, 'gpt-5.4');
   assertNoRawKeys(record);
