@@ -67,8 +67,8 @@ test("Codex POSIX launcher refuses an unsupported platform and Linux without set
   });
 
   await writeShim("uname", "printf '%s\\n' Linux");
-  await writeShim("dirname", 'exec /usr/bin/dirname "$@"');
-  await writeShim("basename", 'exec /usr/bin/basename "$@"');
+  await writeShim("dirname", 'if [ "$1" = "--" ]; then shift; fi; case "$1" in */*) printf "%s\\n" "${1%/*}" ;; *) printf ".\\n" ;; esac');
+  await writeShim("basename", 'if [ "$1" = "--" ]; then shift; fi; printf "%s\\n" "${1##*/}"');
   await assert.rejects(runFile(launcher, args, {
     env: { ...process.env, PATH: shims },
   }), (/** @type {any} */ error) => {
