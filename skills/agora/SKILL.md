@@ -596,6 +596,11 @@ an injected `fetch` so it is testable offline.
   session is watching, drops room A's ids and claims into a channel whose humans never
   asked for them; they read it as contamination, and they are right. Reach a dark session
   through its human, or in the desk room, and let the bearer arm a watch where the work is.
+- The watch that wakes a bearer is a delivery path, not the answer's destination. A face
+  room may deliver an ask while the campaign itself lives in a native room; answer where
+  the work lives, whichever watch caused the turn. Otherwise one low-cadence safety watch
+  silently pulls claims, freezes, verdicts, and maintenance back onto the human-facing
+  channel it was retained only to hear.
 
 - An assignment is a claim made on someone else's behalf, and it crosses like one. A
   coordinator that answers a human request by naming an owner in the same poll window in
