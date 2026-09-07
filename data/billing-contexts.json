@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "retrieved": "2026-09-07T18:10:00.000Z",
+  "harnesses": {
+    "claude-code": {
+      "provider": { "state": "known", "value": "anthropic", "source": "Claude Code is Anthropic's CLI; https://code.claude.com/docs" },
+      "endpoint": { "state": "known", "value": "messages", "source": "Claude Code calls the Messages API; https://code.claude.com/docs/en/prompt-caching (usage fields are Messages API usage fields)" },
+      "serviceTier": { "state": "known", "value": "standard", "source": "measured: Claude Code transcript usage envelopes on this seat carry service_tier 'standard' (usage.service_tier, 2026-09-07); the Messages API standard tier, https://platform.claude.com/docs/en/about-claude/pricing" },
+      "region": { "state": "known", "value": "global", "source": "https://platform.claude.com/docs/en/about-claude/pricing lists one price per model with no regional column; 'global' names that region-less page, not a regional tariff" },
+      "billingMode": { "state": "known", "value": "subscription", "source": "this seat runs Claude Code on a Claude Max subscription (seat configuration, outside this repository); a subscription session draws on a pool, and the apiEquivalent column is the published API equivalent, never the bill" }
+    },
+    "omp": {
+      "provider": { "state": "unknown", "reason": "OMP routes to whichever provider the session was configured with; no per-harness provider record exists in the tree" },
+      "endpoint": { "state": "unknown", "reason": "not recorded per harness" },
+      "serviceTier": { "state": "unknown", "reason": "not recorded per harness" },
+      "region": { "state": "unknown", "reason": "not recorded per harness" },
+      "billingMode": { "state": "unknown", "reason": "not recorded per harness" }
+    },
+    "codex": {
+      "provider": { "state": "known", "value": "openai", "source": "Codex CLI is OpenAI's; https://developers.openai.com/codex" },
+      "endpoint": { "state": "unknown", "reason": "the Codex CLI's backend endpoint (responses vs chat completions) is not stated in a source this tree cites; a guess would price against the wrong tariff" },
+      "serviceTier": { "state": "unknown", "reason": "not stated for a subscription Codex session" },
+      "region": { "state": "unknown", "reason": "not stated" },
+      "billingMode": { "state": "known", "value": "subscription", "source": "this seat runs Codex on a ChatGPT subscription (seat configuration, outside this repository)" }
+    },
+    "amore-build": {
+      "provider": { "state": "known", "value": "xai", "source": "Amore Build is a fork of Grok Build, which calls xAI (seat configuration, outside this repository)" },
+      "endpoint": { "state": "unknown", "reason": "not recorded per harness" },
+      "serviceTier": { "state": "unknown", "reason": "not recorded per harness" },
+      "region": { "state": "unknown", "reason": "not recorded per harness" },
+      "billingMode": { "state": "unknown", "reason": "the seats' xAI billing (subscription vs metered API) is not in a record this tree cites" }
+    }
+  }
+}
