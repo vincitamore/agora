@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import { COMPUTED_LOAD_EXEMPTIONS, importClosure, watchModuleDelta } from "../src/harness.mjs";
+import { COMPUTED_LOAD_EXEMPTIONS, auditedChooserDigest, importClosure, watchModuleDelta } from "../src/harness.mjs";
 import { readFileSync } from "node:fs";
 
 const run = promisify(execFile);
@@ -92,24 +92,6 @@ test("a module outside the root is unknown, not quietly dropped from the interse
   const closure = importClosure({ entry: path.join(root, "entry.mjs"), root });
   assert.equal(closure.complete, false, "a module no diff of this repo can speak for was dropped silently");
   assert.match(String(closure.reason), /outside/);
-});
-
-test("every computed-load exemption still matches the file it names, exactly", () => {
-  // A stale exemption is an exemption that has stopped describing anything, and it would sit there
-  // licensing a hole nobody can see. A NEW computed load in an exempt file exceeds the count and is
-  // a hole by construction; this cell catches the other direction, where the code moved on and the
-  // data did not.
-  const root = path.resolve(new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
-  const D = /\bimport\s*\(/g, DL = /\bimport\s*\(\s*["'`][^"'`]+["'`]\s*\)/g;
-  const R = /(?<![.\w])require\s*\(/g, RL = /(?<![.\w])require\s*\(\s*["'`][^"'`]+["'`]\s*\)/g;
-  for (const [file, entry] of Object.entries(COMPUTED_LOAD_EXEMPTIONS)) {
-    const source = readFileSync(path.join(root, file), "utf8");
-    const imports = (source.match(D) ?? []).length - (source.match(DL) ?? []).length;
-    const requires = (source.match(R) ?? []).length - (source.match(RL) ?? []).length;
-    assert.equal(imports, entry.imports, `${file} exempts ${entry.imports} computed import(s) and has ${imports}`);
-    assert.equal(requires, entry.requires, `${file} exempts ${entry.requires} computed require(s) and has ${requires}`);
-    assert.ok(entry.why.length > 20, `${file}'s exemption carries no reason a reader can audit`);
-  }
 });
 
 test("an exemption fails closed: an unlisted file, and a second load in a listed one, are both holes", async (t) => {
@@ -217,27 +199,66 @@ test("closure membership is physical, and its keys are POSIX on every platform",
   }
 });
 
-test("an exemption is bound to its reason, not to its count", async (t) => {
-  // The count alone authorised any same-count substitution, including a chooser whose variable
-  // names a repository module: a false inert with an exemption's signature on it. An exempt module
-  // may hold no relative specifier that is not already a closure member.
+test("an exemption is bound to the audited expression, not to a proxy for it", async (t) => {
+  // A count authorised any same-count substitution. A stray-relative-literal scan authorised a name
+  // built by CONCATENATION, because "." and "/loaded.mjs" are each innocent and neither is a
+  // relative literal. Both were proxies. Only the expression says what the load can name, so the
+  // expression is what is compared, by digest over every line mentioning the operand.
   const { root } = await repo(t);
   await mkdir(path.join(root, "src"), { recursive: true });
   await writeFile(path.join(root, "src", "loaded.mjs"), "\n");
   await writeFile(path.join(root, "entry.mjs"), 'import "./src/native-service.mjs";\n');
-  await writeFile(path.join(root, "src", "native-service.mjs"),
-    'const name = "./loaded.mjs";\nawait import(name);\n');
-  const substituted = importClosure({ entry: path.join(root, "entry.mjs"), root });
-  assert.equal(substituted.complete, false, "an exemption survived its reason ceasing to hold");
-  assert.match(String(substituted.reason), /the exemption's reason no longer holds/);
 
-  // The twin, and it is the real one: the product's own chooser names only builtins, so it keeps
-  // the exemption and the closure stays measurable.
+  const attacks = [
+    ['concatenation', 'const moduleName = "." + "/loaded.mjs";\nawait import(moduleName);\n'],
+    ['a different chooser', 'const moduleName = process.env.X ? "./loaded.mjs" : "node:sqlite";\nawait import(moduleName);\n'],
+    ['an expression operand', 'await import(process.env.X ? "./loaded.mjs" : "node:sqlite");\n'],
+  ];
+  for (const [label, body] of attacks) {
+    await writeFile(path.join(root, "src", "native-service.mjs"), body);
+    const c = importClosure({ entry: path.join(root, "entry.mjs"), root });
+    assert.equal(c.complete, false, `${label} kept the exemption`);
+    assert.match(String(c.reason), /audited expression|bare identifier this audit can follow/);
+  }
+
+  // The twin, and it is the real one: the product's own chooser matches its pinned digest, so the
+  // closure stays measurable and the caveat is printed rather than a hole.
+  const product = path.resolve(new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
   await writeFile(path.join(root, "src", "native-service.mjs"),
-    'const name = process.versions.bun ? "bun:sqlite" : "node:sqlite";\nawait import(name);\n');
-  const builtins = importClosure({ entry: path.join(root, "entry.mjs"), root });
-  assert.equal(builtins.complete, true, builtins.reason);
-  assert.equal((builtins.caveats ?? []).length, 1);
+    readFileSync(path.join(product, "src", "native-service.mjs"), "utf8"));
+  const kept = importClosure({ entry: path.join(root, "entry.mjs"), root });
+  assert.equal((kept.caveats ?? []).length, 1, `the audited chooser lost its exemption: ${kept.reason}`);
+});
+
+test("the pinned digest still describes the file it names", () => {
+  // A stale pin is a pin that has stopped describing anything, and it would sit there licensing a
+  // hole nobody can see. Recomputed from the real file rather than asserted from the record.
+  const root = path.resolve(new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
+  for (const [file, entry] of Object.entries(COMPUTED_LOAD_EXEMPTIONS)) {
+    assert.equal(auditedChooserDigest(file, root), entry.chooserDigest,
+      `${file}'s chooser is not the audited one; re-read it, then re-pin`);
+    assert.ok(entry.chooserSummary.length > 20, `${file} carries no readable summary of what was audited`);
+  }
+});
+
+test("a spelling the runtime decodes and this scanner does not is reported, never read as bare", async (t) => {
+  // The engine loads a specifier whose leading dot is written as a JS escape; startsWith(".") sees
+  // a backslash and files it under "a dependency", which is the silent skip in its last disguise.
+  // Incompleteness is a supported result here; a missed module is not.
+  const { root } = await repo(t);
+  await mkdir(path.join(root, "src"), { recursive: true });
+  await writeFile(path.join(root, "src", "loaded.mjs"), "\n");
+  await writeFile(path.join(root, "entry.mjs"), 'import "\\x2e/src/loaded.mjs";\n');
+  const escaped = importClosure({ entry: path.join(root, "entry.mjs"), root });
+  assert.equal(escaped.complete, false, "an escaped specifier was read as a bare dependency");
+  assert.match(String(escaped.reason), /escape sequence this scanner does not decode/);
+
+  // The ordinary twin: an unescaped specifier still resolves, so the check is not bought by
+  // refusing anything with a backslash-shaped worry in it.
+  await writeFile(path.join(root, "entry.mjs"), 'import "./src/loaded.mjs";\n');
+  const plain = importClosure({ entry: path.join(root, "entry.mjs"), root });
+  assert.equal(plain.complete, true, plain.reason);
+  assert.ok(plain.files.has("src/loaded.mjs"));
 });
 
 // ------------------------------------------------------------------------ the measurement
