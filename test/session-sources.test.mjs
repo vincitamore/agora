@@ -448,6 +448,23 @@ test('sourceReportedReasoning is omitted; reasoning-billed stays unknown and is 
   }
 });
 
+test('omp reasoningTokens and codex reasoning_output_tokens are carried, never folded into a component', () => {
+  const omp = supported(decode('omp', ompEnvelope({
+    input: 142, output: 600, cacheRead: 64000, cacheWrite: 0, reasoningTokens: 120,
+  }))).records[0];
+  assert.deepEqual(omp.sourceReportedReasoning, { state: 'known', amount: 120, unit: 'tokens' });
+  assert.deepEqual(component(omp, 'output'), knownCount(600));
+  assert.equal(component(omp, 'reasoning-billed').state, 'unknown');
+
+  const codex = supported(decode('codex', codexEnvelope({
+    input_tokens: 10, cached_input_tokens: 2, cache_write_input_tokens: 1, output_tokens: 1,
+    reasoning_output_tokens: 100,
+  }), { context: { sourceId: 'rollout:offset:1' } })).records[0];
+  assert.deepEqual(codex.sourceReportedReasoning, { state: 'known', amount: 100, unit: 'tokens' });
+  assert.deepEqual(component(codex, 'output'), knownCount(1));
+  assert.equal(component(codex, 'reasoning-billed').state, 'unknown');
+});
+
 test('a ledger holding both sourceReportedCost and sourceReportedReasoning closes and reopens; a duplicate keeps the first observation', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'agora-ledger-'));
   const identity = {
