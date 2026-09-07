@@ -125,6 +125,34 @@ not expanded into requests. Finality is `final` because the source labelled the
 update completed. One-hour writes are unknown. `costUsdTicks` is not converted
 into dollars.
 
+## Overlap: a stated `none` needs a basis
+
+`overlap` says how a record's counts relate to another record's, and `none` is a **positive
+claim** — it asserts these counts overlap nothing, and a ledger sums on it. So it is never a
+fallback here.
+
+| context.overlap | result |
+|---|---|
+| a usable record | carried through verbatim, including `relation: unknown` |
+| present but not a record (string, `null`, number, boolean) | **error**, `session-source-envelope-unusable` with reason `type:overlap`; no record is emitted |
+| a record the contract refuses | **error**, reason `contract:<field>`, from the contract itself |
+| absent, harness listed in `OVERLAP_BASIS` | `{ relation: 'none' }`, on that harness's written basis |
+| absent, harness not listed | `{ relation: 'unknown' }` |
+
+The bases, each a checkable claim about the source's own format:
+
+- **claude-code** — one assistant envelope is one request, so its counters cover that call alone.
+- **omp** — likewise, one envelope per request.
+- **codex** — a `token_count` payload is one cumulative snapshot of the session, not a slice of
+  another record.
+- **amore-build** — a `turn_completed` yields one aggregate per model, disjoint by construction,
+  because a model's usage appears under exactly one `modelUsage` entry.
+
+A fifth harness inherits nothing. Absent an entry in `OVERLAP_BASIS` it resolves to `unknown`,
+because `unknown` is a real answer and adopting a `none` that another source earned is how a
+silent double count begins two units downstream. `resolveOverlap` is exported so that guarantee
+is fired by a test rather than asserted here.
+
 ## What this module does not do
 
 It does not scan a transcript, call a provider, join a member, price a token,
