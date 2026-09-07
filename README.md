@@ -382,6 +382,27 @@ record from before the checkout was recorded, a watch armed from another copy, a
 file time, a commit this repository does not have, a `git` command that failed, or a module the
 static graph cannot resolve — stays a `WARNING`, because a wrong "no re-arm owed" leaves a seat
 silently on stale code while a wrong "owed" costs one re-arm.
+
+**The scanner reads source; it does not parse it.** A load it cannot resolve is reported, never
+skipped, so the ways it can be wrong all widen the answer. Two of them constrain what files *on the
+graph* may say: prose mentioning `import(` or `require(` counts as a computed load, and a relative
+specifier written in prose counts as one that does not resolve. Either makes every measurement
+unknown until it is removed — the safe direction, and it cannot pass unnoticed, because the census
+cell in `test/harness-import-graph.test.mjs` asserts the real closure is complete and so the comment
+and the red arrive in the same commit. A specifier carrying a string escape the runtime decodes
+(`\x2e/x.mjs`) is reported for the same reason rather than read as a bare dependency.
+
+The one audited exception is pinned in `COMPUTED_LOAD_EXEMPTIONS` in `src/harness.mjs`: by file, by
+exact count, and by a **digest of the audited expression** — every line of that module mentioning the
+load's operand. A different chooser, a different binding, a name built by concatenation, or an
+operand that is not a bare identifier all fail the comparison and the graph goes unknown. Re-pinning
+means re-reading the expression, satisfying yourself it still cannot name a repository file, and then
+
+```sh
+node -e 'import("./src/harness.mjs").then(m => console.log(m.auditedChooserDigest("src/native-service.mjs")))'
+```
+
+never widening a count.
 `agora doctor` runs three preflights for a resident bearer, all derived at the call and stored
 nowhere: `cache-ttl` reads the harness prompt-cache TTL where a settings file or an environment
 variable makes it readable and warns when a watch is armed against a five-minute one,
