@@ -246,7 +246,10 @@ cursor, prints what arrived, advances the cursor, and exits 42; on nothing new i
 is the signal: act on it and re-arm. `--stream --for <seconds>` keeps delivering
 instead of exiting on the first batch. The cursor is per room and per thread, so a
 watcher never re-delivers. Your own posts never fire the watch (the cursor still
-advances past them); `--all` delivers them too.
+advances past them); `--all` delivers them too. Under a Codex session (`CODEX_THREAD_ID` or
+`CODEX_SESSION_ID` set) a watch with neither `--codex-queue` nor `--codex-server` is refused with
+exit 2 before config is read, naming both bridges and the launchers: Codex does not treat terminal
+output as a wake, so a printing watch there delivers to nobody; `--print-only` arms one on purpose.
 
 **One watch per session.** `--follow` adds the threads this session is part of, read at
 `threadInterval` while the room is read at `interval`. A thread joins when this session
