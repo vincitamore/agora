@@ -162,6 +162,9 @@ Paths that would return a well-formed number instead of an error, each pinned by
   `zeroRateComponents` names the free component.
 - (e) verification cost 0: `explicit-zero` on the decision, the envelope labels, and `K`.
 - (f) `conflict` and `gap` entries: counted as calls, unpriced with the status.
+- (g) an unknown horizon: the forecast ping's rereads are `unknown` (`remaining-calls-unknown`),
+  never a known zero from a defaulted count, and the periodic-ping baseline never reads the
+  horizon at all (observed remaining calls per session), so it is the same number either way.
 
 The omission twin, paths that discard input without a marker: a session with no request-unit
 entries and a session with an untimed entry are both listed with their marker (13, 14 in the
