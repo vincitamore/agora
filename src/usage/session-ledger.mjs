@@ -136,14 +136,15 @@ function isConfirmedEntry(entries, key) {
 
 /**
  * Own declarations first so a two-sided pair keeps the child's reason, then
- * contains-child names a peer by ledger key. A stub peerKey that is not an
- * entry key excludes nobody.
+ * contains-child names a peer by ledger key. A peerKey with no confirmed
+ * entry does not exclude anyone, but is recorded as peer-absent.
  * @param {Record<string, StoredEntry>} entries
- * @returns {Map<string, string>}
  */
 function overlapSkipReasons(entries) {
   /** @type {Map<string, string>} */
   const skip = new Map();
+  /** @type {{ key: string, bucket: 'request'|'aggregate'|'snapshot' }[]} */
+  const missingPeers = [];
   for (const [key, entry] of Object.entries(entries)) {
     if (entry.status !== 'confirmed') continue;
     const relation = entry.usage.overlap?.relation;
@@ -158,9 +159,17 @@ function overlapSkipReasons(entries) {
     if (entry.status !== 'confirmed') continue;
     if (entry.usage.overlap?.relation !== 'contains-child') continue;
     const peer = entry.usage.overlap.peerKey;
-    if (isConfirmedEntry(entries, peer) && peer && !skip.has(peer)) skip.set(peer, 'parent-declared');
+    const bucket = isSummableUnit(entry.identity) ? /** @type {const} */ ('request')
+      : entry.identity.sourceUnit === 'aggregate' ? /** @type {const} */ ('aggregate')
+        : /** @type {const} */ ('snapshot');
+    if (typeof peer !== 'string') continue;
+    if (isConfirmedEntry(entries, peer)) {
+      if (!skip.has(peer)) skip.set(peer, 'parent-declared');
+    } else {
+      missingPeers.push({ key: peer, bucket });
+    }
   }
-  return skip;
+  return { skip, missingPeers };
 }
 
 /** @param {Record<string, StoredEntry>} entries */
@@ -168,7 +177,8 @@ export function deriveTotals(entries) {
   const request = emptyTotals();
   const aggregate = emptyTotals();
   const snapshot = emptyTotals();
-  const skip = overlapSkipReasons(entries);
+  const buckets = { request, aggregate, snapshot };
+  const { skip, missingPeers } = overlapSkipReasons(entries);
   for (const [key, entry] of Object.entries(entries)) {
     if (entry.status !== 'confirmed') {
       if (entry.status === 'conflict') request.conflicts.push(key);
@@ -184,6 +194,12 @@ export function deriveTotals(entries) {
       continue;
     }
     mergeComponents(bucket.components, entry.usage.components);
+  }
+  for (const miss of missingPeers) {
+    const excluded = buckets[miss.bucket].excluded;
+    if (!excluded.some((row) => row.key === miss.key && row.reason === 'peer-absent')) {
+      excluded.push({ key: miss.key, reason: 'peer-absent' });
+    }
   }
   return { request, aggregate, snapshot };
 }
