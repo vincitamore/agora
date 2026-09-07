@@ -694,6 +694,14 @@ test("openRoute hands Tailcat a runtime the REAL resolver accepts", async (t) =>
   // Faking the child is still right here (CI holds no relay) — so the fake captures the runtime,
   // and the real resolver is then driven with it. No Tailcat process is started.
   const { service } = await memberFixture(t);
+
+  // Item 8's half of this cell, graded by `npm run check` rather than by the runner: the request's
+  // `runtime` is the resolver's own option surface, so a key the resolver does not have is refused
+  // where the request is WRITTEN. Widen this hop back to `any` and the directive goes unused and
+  // tsc fails — which is the only way to gate a defect that produced no bad value in this process.
+  // @ts-expect-error a key the binary resolver has no use for is not a runtime option.
+  void (() => service.openRoute({ runtime: { notAResolverKey: 1 }, roomId: ROOM, publicNodeKey: KEY }));
+
   /** @type {any} */ let handed;
   await service.openRoute({
     roomId: ROOM, publicNodeKey: KEY,

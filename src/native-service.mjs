@@ -725,7 +725,15 @@ export class NativeRoomService {
    * the owner's AbortSignal and requires the owner's serviceBootId, so a route started by a CLI's
    * own process would die with that process. `route open` is therefore a request to the running
    * service, the way `spawn` is, never a listener the verb starts for itself.
-   * @param {{ roomId: string, publicNodeKey: string, runtime?: any, routeOptions?: any }} request
+   * The host's own hop for the same requirement the remote client has: `runtime` is the resolver's
+   * option surface, with the state root optional because THIS layer fills it in below. Typed rather
+   * than narrowed — an in-process caller may still override the root, exactly as the remote room's
+   * caller may, and deciding otherwise is a contract change that does not belong in a types head.
+   * `routeOptions` stays `any` deliberately and is not widened here — it is a different surface
+   * with its own owner, and quietly typing it in a head cut for the runtime would be scope drift
+   * wearing a type annotation.
+   * @param {{ roomId: string, publicNodeKey: string,
+   *  runtime?: import("./tailcat-runtime.mjs").TailcatRuntimeOverrides, routeOptions?: any }} request
    */
   async openRoute(request) {
     if (!this.running) throw new AgoraError("native service is dark; start it explicitly before opening a route");
