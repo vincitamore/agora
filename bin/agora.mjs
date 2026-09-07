@@ -71,7 +71,10 @@ import { SERVICE_DARK, ServiceDarkError, openNativeSubscription, serviceDescript
 import { assertRemoteDescriptor, openRemoteSubscription, readRemoteDescriptor, resolveSeatIdentity } from "../src/native-remote.mjs";
 import { readRouteSecret } from "../src/native-member.mjs";
 import { closeServiceRoute, createServiceRoom, listServiceRoutes, openServiceRoute, runService,
-  seatAccountId, seatLabel, serviceStatus, startService, stopService } from "../src/service-cli.mjs";
+  seatAccountId, seatLabel, serviceStatus, startService, stopService,
+  readAuthorityInput, writeAuthorityOutput, generateSeatAuthority, prepareSeatAuthorityEnrollment,
+  signSeatAuthorityEnrollment, completeSeatAuthorityEnrollment, signSeatRouteAct,
+  challengeServiceRoute, statusServiceRouteAct } from "../src/service-cli.mjs";
 import { spawnFromFile } from "../src/spawn-cli.mjs";
 import { runUsage } from "../src/usage-cli.mjs";
 import { runUsageSessionsCli } from "../src/session-accounting.mjs";
@@ -238,13 +241,23 @@ const SCHEMA = {
     share: { args: ["<room>", "[file ...]"], options: {"--to <account-id>": "authenticated recipient account; repeatable, maximum four", "--once": "consume each recipient route after verified receipt", "--expires-in <seconds>": "60 to 86400, default 3600", "--list": "local offers and measured liveness", "--prune": "remove expired offline offers owned by this session", "--stop <id>": "stop a local offer", "--resume <id>": "reconcile uncertain publication without duplicate posting", "--forget <id>": "explicitly release the operation guard after checking publication"}, does: "snapshot named files and publish a recipient-restricted native transfer offer after every route is ready" },
     fetch: { args: ["<room>","<offer-id>"], options: {"--into <directory>": "destination; existing files are never overwritten", "--pages <n>": "offer discovery depth"}, does: "explicitly receive, verify and commit files before acknowledging; receiving an offer never executes or fetches automatically" },
     service: {
-      args: ["start|stop|status|room create|route open/list/close"],
+      args: ["start|stop|status|room create|route open/list/close/challenge/act-status"],
       options: {
         "--room-id <id>": "with room create: use this 32-hex id instead of minting one",
         "--allow-key <nodekey:64hex>": "with route open/close: the member's PUBLIC node key as enroll prints it; never a private key, a key file or a digest",
         "--out <path>": "with route open: also write the descriptor here for the operator to carry",
+        "--authority <a-64hex>": "with start: load counter-seat authority and policy once; rotation requires restart, a cooperative pin, not OS isolation",
+        "--proof-file <path>": "with route open/close: detached proof for a retained challenge; unsigned route effects refuse",
+        "--act <room-enroll|room-revoke>": "with route challenge: prepare this act without effects; --out writes a new public challenge file",
       },
       does: "the seat-local native room service: start writes native/service.json and binds the endpoint; stop is bounded; status reports the descriptor without the nonce; room create mints a 32-hex id on the running service and prints it; route open admits one enrolled key over Tailcat and route close revokes it, the service owning the route rather than the verb. Never writes the shared config",
+    },
+    authority: {
+      args: ['keygen|enrollment-challenge|sign-enrollment|enroll|sign'],
+      options: { '--file <path>': 'hand-carried JSON, never from a room; keygen takes signer policy, enrollment-challenge a public record, other verbs a challenge or proof',
+        '--fingerprint <sha256:64hex>': 'enrollment-challenge/enroll: confirm on the counter-seat terminal, never infer from shared room identity',
+        '--label <name>': 'keygen: bounded seat label', '--out <path>': 'required public output for keygen/challenge/sign; no overwrite or private key bytes' },
+      does: 'explicit counter-seat Ed25519 bootstrap and delegation signing. Keygen keeps its private half 0600 here. Enrollment requires retained possession challenge. Signing checks this seat list; target independently enforces its startup list. Pinned-cooperative, not protected from the same OS user',
     },
     spawn: {
       args: [],
@@ -397,6 +410,9 @@ const OPTIONS = /** @type {const} */ ({
   daemon: { type: "boolean", default: false },
   "room-id": { type: "string" },
   "allow-key": { type: "string" },
+  authority: { type: 'string' },
+  'proof-file': { type: 'string' },
+  act: { type: 'string' },
   out: { type: "string" },
   until: { type: "string" },
   "keep-watches": { type: "boolean", default: false },
@@ -711,7 +727,8 @@ export const ARGUMENT_PREFLIGHTS = Object.freeze([
     matches: ({ verb, roomAlias }) => verb === "service" && roomAlias === "route",
     refusal: ({ values, rest }) => {
       const sub = rest[0];
-      if (sub !== "open" && sub !== "list" && sub !== "close")
+      if (sub === 'act-status') return /^[a-f0-9]{32}$/.test(String(rest[1] ?? '')) ? undefined : 'route act-status needs a 32-hex operation id';
+      if (sub !== "open" && sub !== "list" && sub !== "close" && sub !== 'challenge')
         return "agora service route needs open, list or close";
       if (sub === "list") return undefined;
       if (rest[1] === undefined) return `agora service route ${sub} needs <room>`;
@@ -721,8 +738,33 @@ export const ARGUMENT_PREFLIGHTS = Object.freeze([
         return `agora service route ${sub} needs --allow-key <nodekey:64hex>`;
       if (!/^nodekey:[a-f0-9]{64}$/.test(String(values["allow-key"]).trim()))
         return "--allow-key takes the public node key as enroll prints it: nodekey: followed by 64 hex characters";
+      if (sub === 'challenge' && !['room-enroll', 'room-revoke'].includes(String(values.act)))
+        return 'route challenge needs --act room-enroll or room-revoke';
+      if (sub === 'challenge' && !values.out) return 'route challenge needs --out <new-file>';
+      if ((sub === 'open' || sub === 'close') && !values['proof-file'])
+        return `route ${sub} needs --proof-file <detached-proof>`;
       return undefined;
     },
+  },
+  {
+    name: 'authority',
+    matches: ({ verb }) => verb === 'authority',
+    refusal: ({ roomAlias, values }) => {
+      if (!['keygen', 'enrollment-challenge', 'sign-enrollment', 'enroll', 'sign'].includes(roomAlias ?? ''))
+        return 'authority needs keygen, enrollment-challenge, sign-enrollment, enroll or sign';
+      if (!values.file) return 'authority needs --file <hand-carried-json>';
+      if (roomAlias !== 'enroll' && !values.out) return 'authority needs --out <new-public-file>';
+      if (roomAlias === 'keygen' && !values.label) return 'authority keygen needs --label <seat-label>';
+      if (['enrollment-challenge', 'enroll'].includes(roomAlias ?? '') && !/^sha256:[a-f0-9]{64}$/.test(String(values.fingerprint ?? '')))
+        return 'authority enrollment needs --fingerprint sha256:64hex confirmed on the counter-seat terminal';
+      return undefined;
+    },
+  },
+  {
+    name: 'service-authority',
+    matches: ({ verb, roomAlias }) => verb === 'service' && roomAlias === 'start',
+    refusal: ({ values }) => values.authority !== undefined && !/^a-[a-f0-9]{64}$/.test(String(values.authority))
+      ? 'service start --authority takes a- followed by 64 lowercase hexadecimal characters' : undefined,
   },
   {
     name: "room-add-remote",
@@ -1063,19 +1105,32 @@ async function main(argv) {
     return EXIT.ok;
   }
 
+  if (verb === 'authority') {
+    const input = await readAuthorityInput(String(values.file));
+    let result;
+    if (roomAlias === 'keygen') result = await generateSeatAuthority(stateRoot, input, String(values.label));
+    else if (roomAlias === 'enrollment-challenge') result = await prepareSeatAuthorityEnrollment(stateRoot, input, String(values.fingerprint));
+    else if (roomAlias === 'sign-enrollment') result = await signSeatAuthorityEnrollment(stateRoot, input);
+    else if (roomAlias === 'enroll') result = await completeSeatAuthorityEnrollment(stateRoot, input, String(values.fingerprint));
+    else result = await signSeatRouteAct(stateRoot, input);
+    if (roomAlias !== 'enroll') await writeAuthorityOutput(String(values.out), result);
+    console.log(JSON.stringify(roomAlias === 'enroll' ? result : { action: roomAlias, file: String(values.out) }));
+    return EXIT.ok;
+  }
+
   if (verb === "service") {
     const action = values.daemon ? "daemon" : (roomAlias ?? "");
     if (action === "daemon") {
       const accountId = process.env.AGORA_SERVICE_ACCOUNT || await seatAccountId(stateRoot);
       const label = process.env.AGORA_SERVICE_LABEL || seatLabel();
-      await runService({ root: stateRoot, accountId, seatLabel: label, build });
+      await runService({ root: stateRoot, accountId, seatLabel: label, build, authorityId: process.env.AGORA_SERVICE_AUTHORITY || undefined });
       await new Promise(() => {});
       return EXIT.ok;
     }
     if (action === "start") {
       const accountId = await seatAccountId(stateRoot);
       const label = seatLabel();
-      const started = await startService({ root: stateRoot, entry: entryFile, execPath: process.execPath, accountId, seatLabel: label });
+      const started = await startService({ root: stateRoot, entry: entryFile, execPath: process.execPath, accountId, seatLabel: label, authorityId: values.authority });
       if (json) console.log(JSON.stringify({ type: "service", action: "start", ...started }));
       else console.log(`native service started pid ${started.pid ?? "unknown"} seat ${started.seatLabel} account ${started.accountId}`);
       return EXIT.ok;
@@ -1105,8 +1160,18 @@ async function main(argv) {
     }
     if (action === "route") {
       const sub = rest[0];
+      if (sub === 'challenge') {
+        const result = await challengeServiceRoute(stateRoot, String(values.act), rest[1], values['allow-key']);
+        await writeAuthorityOutput(String(values.out), result);
+        console.log(JSON.stringify({ operationId: result.request.operationId, file: String(values.out) }));
+        return EXIT.ok;
+      }
+      if (sub === 'act-status') {
+        console.log(JSON.stringify(await statusServiceRouteAct(stateRoot, String(rest[1]))));
+        return EXIT.ok;
+      }
       if (sub === "open") {
-        const opened = await openServiceRoute(stateRoot, rest[1], values["allow-key"]);
+        const opened = await openServiceRoute(stateRoot, rest[1], values["allow-key"], await readAuthorityInput(String(values['proof-file'])));
         if (values.out !== undefined) await copyFile(opened.descriptorPath, String(values.out));
         const where = values.out !== undefined ? String(values.out) : opened.descriptorPath;
         if (json) console.log(JSON.stringify({ type: "service", action: "route-open", ...opened, descriptorPath: where }));
@@ -1121,7 +1186,7 @@ async function main(argv) {
         return EXIT.ok;
       }
       if (sub === "close") {
-        const closed = await closeServiceRoute(stateRoot, rest[1], values["allow-key"]);
+        const closed = await closeServiceRoute(stateRoot, rest[1], values["allow-key"], await readAuthorityInput(String(values['proof-file'])));
         if (json) console.log(JSON.stringify({ type: "service", action: "route-close", ...closed }));
         else console.log(`route closed ${closed.roomId} member ${closed.accountId}; the remote's secret is now stale and its next hello is refused`);
         return EXIT.ok;
