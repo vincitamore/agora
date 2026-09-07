@@ -106,9 +106,11 @@ class HandshakeReader {
     }
   }
 
-  /** Detach, and refuse rather than strand anything the client's fresh decoder cannot see. */
-  finish() {
-    this.detach();
+  /** Refuse rather than strand anything the client's fresh decoder cannot see. Deliberately does
+   * NOT detach: between this reader's listener going away and the request client's going on, Node
+   * keeps the stream flowing and drops whatever it emits in the gap — the stranded-bytes shape one
+   * tick later. The caller attaches the client first and detaches after. */
+  assertDrained() {
     if (this.queue.length)
       throw new AgoraError(`member-hello-refused: the host sent ${this.queue.length} unsolicited frame(s) with its welcome`);
     if (this.decoder.buffer.length)
@@ -194,7 +196,8 @@ export function assertRemoteDescriptor(descriptor, seat) {
  *
  * This seat never sends an `accountId`: the route binds the principal, and a frame naming one is
  * refused by the host. Claiming it "for clarity" would be exactly the claim the binding replaces.
- * @param {{ stream: import("node:stream").Duplex, binding: any, secret: string, timeoutMs?: number }} input
+ * @param {{ stream: import("node:stream").Duplex, binding: any, secret: string, timeoutMs?: number,
+ *  onDrained?: (stream: import("node:stream").Duplex) => any }} input
  */
 export async function completeMemberHandshake(input) {
   const timeoutMs = input.timeoutMs ?? HANDSHAKE_TIMEOUT_MS;
@@ -229,8 +232,12 @@ export async function completeMemberHandshake(input) {
         throw new AgoraError(`member-welcome-refused: the welcome's ${field} does not echo the transcript this seat proved`);
     if (!verifyMemberHandshakeProof(welcome.proof, input.secret, MEMBER_PHASES.welcome, transcript))
       throw new AgoraError("member-welcome-refused: the welcome did not prove the fresh transcript");
-    reader.finish();
-    return { requestId, transcript, memberAccountId: input.binding.accountId };
+    reader.assertDrained();
+    // The handover, in the one order that leaves no gap: the client's listener goes on while this
+    // reader's is still attached, and only then does this one come off.
+    const handed = input.onDrained ? input.onDrained(input.stream) : undefined;
+    reader.detach();
+    return { requestId, transcript, memberAccountId: input.binding.accountId, handed };
   } catch (error) {
     reader.detach();
     throw error;
@@ -308,15 +315,15 @@ export class RemoteRoom {
           const closed = new Promise((resolve) => {
             if (stream.destroyed) resolve(undefined); else stream.once("close", () => resolve(undefined));
           });
-          void completeMemberHandshake({ stream, binding: accepted, secret: this.secret, timeoutMs: this.timeoutMs })
-            .then(() => {
-              // The SAME request machine a local native room runs. It touches only the duplex
-              // surface (data/error/close, destroyed, destroy, writable/writableLength/write),
-              // which is the duck-typing the host half already relies on, so the remote inherits
-              // the timeouts, the unknown-append-acceptance rule and the event fan-out unchanged.
-              client = new NativeServiceClient(/** @type {any} */ (stream), this.timeoutMs);
-              resolveReady(undefined);
-            }, (error) => { rejectReady(error); stream.destroy(); });
+          void completeMemberHandshake({ stream, binding: accepted, secret: this.secret, timeoutMs: this.timeoutMs,
+            // The SAME request machine a local native room runs. It touches only the duplex
+            // surface (data/error/close, destroyed, destroy, writable/writableLength/write),
+            // which is the duck-typing the host half already relies on, so the remote inherits
+            // the timeouts, the unknown-append-acceptance rule and the event fan-out unchanged.
+            // Constructed inside the handshake's handover so the stream is never unlistened.
+            onDrained: (ready) => { client = new NativeServiceClient(/** @type {any} */ (ready), this.timeoutMs); return client; } })
+            .then(() => { resolveReady(undefined); },
+              (error) => { rejectReady(error); stream.destroy(); });
           if (signal.aborted) stream.destroy();
           return { ready, closed, stop: async () => { stream.destroy(); await closed; } };
         },
@@ -449,6 +456,10 @@ export async function openRemoteSubscription(opts) {
     push(Array.isArray(result?.messages) ? result.messages : []);
   };
 
+  /** A refusal the far side named is a fact, not a flaky connection: retrying it five times spawns
+   * five Tailcat children to be told the same thing, and then reports the last one as darkness. */
+  const NAMED_REFUSAL = /(member-hello-refused|member-welcome-refused|member-host-proof-refused|member-phase-refused|member-binding-mismatch|member-actor-mismatch|member-request-refused|member-room-refused|member-author-kind-refused|descriptor-not-ours|descriptor-unreadable|proof-ref-refused|enrollment-absent|route-not-open|request-refused)/;
+
   const reattach = async () => {
     // Re-subscribing from `drained` is what makes "nothing is lost" true: the host replays every
     // committed message after the last sequence the CALLER received, not after the last one this
@@ -469,6 +480,7 @@ export async function openRemoteSubscription(opts) {
         // ITSELF; retrying it four more times and then calling it "could not be re-dialled" would
         // replace a precise cause with a false one, which is worse than either alone.
         if (client && !client.socket.destroyed) return markFailed(error);
+        if (NAMED_REFUSAL.test(error instanceof Error ? error.message : String(error))) return markFailed(error);
         if (attempt + 1 >= maxReconnects)
           return markDark(`remote room ${roomId} could not be re-dialled after ${reconnects} attempt(s): ${error instanceof Error ? error.message : String(error)}`);
         await new Promise((resolve) => { const t = setTimeout(resolve, backoffMs * (attempt + 1)); t.unref?.(); });
