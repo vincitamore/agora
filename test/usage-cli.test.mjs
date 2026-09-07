@@ -2,10 +2,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { parseTimeoutMs, formatUsageResult, runUsage } from '../src/usage-cli.mjs';
-import { windowKey } from '../src/protocol/usage.mjs';
+import { parseTimeoutMs, formatUsageResult, runUsage, USAGE_CLI_PRODUCER_ID } from '../src/usage-cli.mjs';
+import { windowKey, validateCompleteObservation } from '../src/protocol/usage.mjs';
 
 const POOL = 'pool_synthetic_01';
 const PRODUCER = { producerId: 'producer_synthetic_0001', generation: 1, sequence: 1 };
@@ -133,4 +135,75 @@ test('pre-aborted signal is forwarded to the collector', async () => {
   assert.equal(seen, signal);
   assert.equal(r.exit, 1);
   assert.match(r.stdout, /codex-cancelled/);
+});
+
+test('default producer identity satisfies the observation contract without an override', async () => {
+  assert.ok(USAGE_CLI_PRODUCER_ID.length >= 16 && USAGE_CLI_PRODUCER_ID.length <= 128);
+  /** @type {unknown} */
+  let seen;
+  const r = await runUsage({
+    provider: 'codex', poolId: 'pool_synthetic_codex_001', now: NOW,
+    collect: async (opts) => {
+      seen = opts.producer;
+      const observation = validateCompleteObservation({
+        kind: 'full', poolId: opts.poolId, capturedAt: '2026-09-07T03:55:00.000Z',
+        source: 'harness', attestation: 'cooperative', producer: opts.producer,
+        windows: [{ window: { limitId: 'codex', unit: 'basis-points', scope: 'primary', durationMinutes: 10080 },
+                    available: true, value: 1500, sense: 'used' }],
+      });
+      return {
+        status: 'supported',
+        principal: { poolId: opts.poolId, provider: 'codex', principalRef: 'account-synthetic-0001', identity: 'unverified' },
+        observation,
+      };
+    },
+  });
+  assert.equal(r.exit, 0, r.stderr);
+  assert.equal(/** @type {any} */ (seen)?.producerId, USAGE_CLI_PRODUCER_ID);
+  validateCompleteObservation({
+    kind: 'full', poolId: 'pool_synthetic_codex_001', capturedAt: '2026-09-07T03:55:00.000Z',
+    source: 'harness', attestation: 'cooperative', producer: seen,
+    windows: [{ window: { limitId: 'codex', unit: 'basis-points', scope: 'primary', durationMinutes: 10080 },
+                available: true, value: 1500, sense: 'used' }],
+  });
+});
+
+test('CLI subprocess: real collector, default producer, synthetic helper', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'agora-n3-usage-'));
+  try {
+    writeFileSync(path.join(dir, 'agora.json'), JSON.stringify({
+      actor: { name: 'n3', kind: 'agent' },
+      rooms: { down: { transport: 'local', path: path.join(dir, 'down.ndjson') } },
+    }));
+    writeFileSync(path.join(dir, 'down.ndjson'), '');
+    writeFileSync(path.join(dir, 'package.json'), '{"type":"module"}\n');
+    const helperSrc = fileURLToPath(new URL('./fixtures/usage/fake-codex-app-server.mjs', import.meta.url));
+    writeFileSync(path.join(dir, 'app-server.js'), readFileSync(helperSrc));
+    const env = { ...process.env };
+    for (const name of [
+      'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_PID',
+      'GROK_SESSION_ID', 'GROK_PID', 'CODEX_THREAD_ID', 'CODEX_SESSION_ID',
+      'HERMES_SESSION_ID', 'AGORA_SESSION_PID', 'AGORA_SESSION', 'AGORA_ACTOR',
+      'AGORA_CONFIG', 'AGORA_STATE', 'AGORA_CODEX_BIN',
+    ]) delete env[name];
+    env.AGORA_CONFIG = path.join(dir, 'agora.json');
+    env.AGORA_STATE = path.join(dir, 'state');
+    env.AGORA_SESSION = 'n3-usage-cli';
+    const run = spawnSync(process.execPath, [
+      bin, 'usage', '--provider', 'codex', '--pool-id', 'pool_synthetic_codex_001',
+      '--json', '--timeout', '8000', '--codex-bin', process.execPath,
+    ], { encoding: 'utf8', cwd: dir, env, windowsHide: true, timeout: 15000 });
+    assert.equal(run.status, 0, `stderr=${run.stderr}\nstdout=${run.stdout}`);
+    const parsed = JSON.parse(run.stdout);
+    assert.equal(parsed.status, 'supported');
+    assert.equal(parsed.observation.producer.producerId, USAGE_CLI_PRODUCER_ID);
+    assert.ok(parsed.observation.producer.producerId.length >= 16);
+    const primary = parsed.observation.windows.find((/** @type {{ window: { limitId: string, scope?: string } }} */ w) =>
+      w.window.limitId === 'codex' && w.window.scope === 'primary');
+    assert.ok(primary && primary.available);
+    assert.equal(primary.value, 800);
+    assert.equal(run.stdout.includes('Authorization'), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
