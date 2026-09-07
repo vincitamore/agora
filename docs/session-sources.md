@@ -63,12 +63,24 @@ Each numeric component is a tagged union, never a sentinel:
 
 Absent is not zero. Null is not absent. An unsplit cache-write total is not a
 five-minute write. Nothing clamps: if cached input plus writes exceed input
-on a harness whose input **includes** cache (Codex, OMP, Amore), `uncached-input`
-is `invalid` with `cache-exceeds-input`. Claude Code is the other branch:
-Anthropic's `input_tokens` is already exclusive of `cache_read_input_tokens`
-and cache-creation (`total_input = cache_read + cache_creation + input_tokens`),
-so uncached-input is `input_tokens` as reported and those pools sit beside it,
-never subtracted.
+on a harness whose input **includes** cache, `uncached-input` is `invalid` with
+`cache-exceeds-input`. The branch is chosen by a sourced identity, never by a
+fixture that happens to pass:
+
+- **Claude Code** — exclusive. Anthropic `total_input = cache_read + cache_creation
+  + input_tokens`. Cited:
+  `knowledge/claude-tooling/cli/anthropic-prompt-caching-mechanics-and-pricing`.
+- **OMP** — exclusive. Measured: `totalTokens = input + output + cacheRead +
+  cacheWrite` (142+600+64000+0 = 64742, and two siblings). `input` sits beside
+  the cache pools, never includes them.
+- **Codex** — inclusive. Measured on this seat: `last_token_usage.input_tokens`
+  includes `cached_input_tokens` (700 real records). Subtraction stays.
+- **Amore Build** — inclusive, asserted from the xAI field names
+  (`inputTokens` vs `cachedReadTokens` / `cacheCreationTokens`), **unmeasured**
+  on this seat. Flip if a real envelope shows input already exclusive.
+
+Claude and OMP take `input` as reported. Codex and Amore subtract known cache
+parts. A fixture that passes either branch is not a source.
 
 ## Components
 
@@ -76,7 +88,7 @@ Every record carries:
 
 | Component | Meaning |
 |---|---|
-| `uncached-input` | Claude: `input_tokens` as reported (already exclusive). Codex/OMP/Amore: input minus known cache parts. Unknown if any subtracted part is unknown. |
+| `uncached-input` | Claude and OMP: input as reported (already exclusive). Codex: input minus known cache parts (measured inclusive). Amore: same subtraction, unmeasured. Unknown if any subtracted part is unknown. |
 | `cached-input` | Cache-read tokens. |
 | `cache-write-5m` | Five-minute cache-write tokens, or unknown when the TTL split is absent. |
 | `cache-write-1h` | One-hour cache-write tokens, or unknown when the source does not evidence them. |
@@ -116,8 +128,9 @@ Finality is `unknown`: streaming corrections share an id and are not ordered her
 
 **OMP** (`sourceUnit: request`). Same envelope family, different keys (`input`,
 `output`, `cacheRead`, `cacheWrite`, `cttl.ephemeral5m` / `ephemeral1h`).
-Identity is `message.id` then top-level `id`. Reported `cost.total` is not a
-token component and is not converted.
+Identity is `message.id` then top-level `id`. `input` is exclusive of the cache
+pools (`totalTokens = input + output + cacheRead + cacheWrite`, measured).
+Reported `cost.total` is not a token component and is not converted.
 
 **Codex** (`sourceUnit: cumulative-snapshot`). Envelope is
 `event_msg` / `payload.type === 'token_count'` / `info.last_token_usage`.

@@ -230,6 +230,9 @@ function decodeClaude(envelope, sessionEpoch, harnessVersion, observedAt, contex
     subtractWrites: writes.cacheWriteUnknownTtl
       ? [writes.cacheWriteUnknownTtl]
       : [writes.cacheWrite5m, writes.cacheWrite1h],
+    // Anthropic: total_input = cache_read + cache_creation + input_tokens.
+    // input_tokens is already exclusive. See
+    // knowledge/claude-tooling/cli/anthropic-prompt-caching-mechanics-and-pricing.
     inputAlreadyExclusive: true,
     overlap: overlapFrom(context),
   });
@@ -275,6 +278,9 @@ function decodeOmp(envelope, sessionEpoch, harnessVersion, observedAt, context) 
     subtractWrites: writes.cacheWriteUnknownTtl
       ? [writes.cacheWriteUnknownTtl]
       : [writes.cacheWrite5m, writes.cacheWrite1h],
+    // Measured: totalTokens = input + output + cacheRead + cacheWrite
+    // (142+600+64000+0, 325+528+64512+0, 942+490+65280+0). input is exclusive.
+    inputAlreadyExclusive: true,
     overlap: overlapFrom(context),
     sourceReportedCost: readOmpReportedCost(usage),
   });
@@ -313,6 +319,8 @@ function decodeCodex(envelope, sessionEpoch, harnessVersion, observedAt, context
     cacheWrite5m: unknownCount('codex-cache-write-ttl-unknown'),
     cacheWrite1h: unknownCount('codex-cache-write-ttl-unknown'),
     cacheWriteUnknownTtl: readCountField(last, 'cache_write_input_tokens'),
+    // Measured: Codex last_token_usage.input_tokens includes cached_input_tokens
+    // (700 real records reconciled; input < cache is the cache-exceeds-input case).
     subtractWrites: [readCountField(last, 'cache_write_input_tokens')],
     overlap: overlapFrom(context),
   });
@@ -366,6 +374,9 @@ function decodeAmore(envelope, sessionEpoch, harnessVersion, observedAt, context
       cacheWrite5m: readCountField(entry, 'cacheCreationTokens'),
       cacheWrite1h: unknownCount('amore-cache-write-1h-unsupported'),
       cacheWriteUnknownTtl: null,
+      // Asserted from the xAI field names (inputTokens vs cachedReadTokens /
+      // cacheCreationTokens), unmeasured on this seat. Flip if a real envelope
+      // shows input already exclusive.
       subtractWrites: [readCountField(entry, 'cacheCreationTokens')],
       overlap: overlapFrom(context),
       sourceReportedCost: readSourceReportedCost(entry, 'costUsdTicks', 'usd-ticks'),
