@@ -9,6 +9,7 @@ import { execFile } from "node:child_process";
 import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { EventEmitter } from "node:events";
 import { Duplex, PassThrough } from "node:stream";
 import test from "node:test";
 import { promisify } from "node:util";
@@ -22,6 +23,8 @@ import {
 } from "../src/native-remote.mjs";
 import { NATIVE_PROTOCOL, NativeFrameDecoder, encodeNativeFrame, nativeCursor } from "../src/native-protocol.mjs";
 import { NativeRoomService } from "../src/native-service.mjs";
+import { localTransferIdentity } from "../src/tailcat.mjs";
+import { AgoraError } from "../src/core.mjs";
 
 const run = promisify(execFile);
 const BIN = new URL("../bin/agora.mjs", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
@@ -251,12 +254,19 @@ test("a connect never mints an identity: the refusal is named and no key is left
   const root = await mkdtemp(path.join(tmpdir(), "agora-t2-enroll-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const keyPath = path.join(root, "tailcat", "identity.private.json");
-  let minted = false;
-  await assert.rejects(resolveSeatIdentity(root, { identity: /** @type {any} */ (async () => { minted = true; return { keyPath, nodeKey: KEY, fingerprint: "x" }; }) }),
+  // The REAL helper, on an empty root: the refusal has to be the helper's own, at the moment it
+  // would otherwise mint, or the caller is doing check-then-use and the file can change between
+  // the two observations.
+  await assert.rejects(localTransferIdentity(root, { create: false }), /enrollment-absent/);
+  await assert.rejects(stat(keyPath), /ENOENT/, "the no-create read minted an identity anyway");
+
+  // And the caller passes it. One call, and the flag is what refuses.
+  /** @type {any[]} */
+  const calls = [];
+  await assert.rejects(resolveSeatIdentity(root, { identity: /** @type {any} */ (async (/** @type {string} */ _r, /** @type {any} */ o) => { calls.push(o); throw new AgoraError("enrollment-absent: stub"); }) }),
     /enrollment-absent/);
-  // The discriminating assertion, and the whole reason this function exists: the generator was not
-  // reached, so a failed dial leaves no new identity on disk to be mistaken for an enrolled one.
-  assert.equal(minted, false, "the identity generator ran on an un-enrolled seat");
+  assert.equal(calls.length, 1, "the seat identity was observed more than once");
+  assert.equal(calls[0]?.create, false, "the caller did not ask the helper to refuse rather than mint");
   await assert.rejects(stat(keyPath), /ENOENT/);
 });
 
@@ -487,6 +497,68 @@ test("a reattach re-subscribes from the DELIVERED floor, so the host replays the
   assert.equal(subscribes.length, 2, "the channel never re-subscribed");
   assert.equal(subscribes[1], nativeCursor(EPOCH, 4),
     `the reattach re-subscribed from ${subscribes[1]} instead of the delivered floor ${nativeCursor(EPOCH, 4)}`);
+  sub.close();
+});
+
+/** A room whose channel is scripted, for the two cells about how a failure is CLASSIFIED. The
+ * transport is not what is under test there; the classification is, so the socket is a real emitter
+ * (the reattach is driven by its close event) and nothing else is.
+ * @param {{ request?: (...a: any[]) => any, subscribe?: (...a: any[]) => any }} [script] */
+function scriptedRoom(script = {}) {
+  const socket = /** @type {any} */ (new EventEmitter());
+  socket.destroyed = false;
+  const client = {
+    socket,
+    request: script.request ?? (async () => ({ status: { epoch: EPOCH, committed: 0 } })),
+    subscribe: script.subscribe ?? (async () => ({ messages: [] })),
+  };
+  return /** @type {any} */ ({
+    binding: { roomId: ROOM, accountId: `m-${"d".repeat(32)}`, host: { id: HOST_ACCOUNT } },
+    client: async () => client, close: async () => {}, drops: 0, dials: 1, socket, script,
+  });
+}
+
+test("a malformed committed count is refused, not laundered into a full-room replay", async () => {
+  // Number() lets 3.7 and -5 through, and Math.max(0, committed - window) turns either into the
+  // valid cursor 0: a full replay of the room reported as if no history had been skipped. A count
+  // that is not a non-negative safe integer is refused instead.
+  for (const bad of [3.7, -5, "12", null, Number.NaN, Number.MAX_SAFE_INTEGER + 2]) {
+    const room = scriptedRoom({ request: async () => ({ status: { epoch: EPOCH, committed: bad } }) });
+    await assert.rejects(openRemoteSubscription({ room }), /committed count/,
+      `a committed count of ${JSON.stringify(bad)} was accepted`);
+  }
+  // And the ordinary value still works, or strictness bought by refusing the normal case is no win.
+  const ok = scriptedRoom({ request: async () => ({ status: { epoch: EPOCH, committed: 4 } }) });
+  const sub = await openRemoteSubscription({ room: ok });
+  assert.equal(sub.neverOffered, null);
+  sub.close();
+});
+
+test("a refusal the host ANSWERED reports itself once; only an unanswered dial is darkness", async () => {
+  let subscribes = 0;
+  const room = scriptedRoom({
+    subscribe: async () => {
+      subscribes += 1;
+      if (subscribes === 1) return { messages: [] };
+      // Answered on a LIVE socket: the host refused this cursor, and that is the cause a reader
+      // needs. Retrying it maxReconnects times and then reporting "could not be re-dialled" would
+      // replace a precise cause with a false one, which is worse than either alone.
+      throw new AgoraError("request-refused: native room cursor 9 exceeds committed sequence 0; recover explicitly without advancing");
+    },
+  });
+  const sub = await openRemoteSubscription({ room, since: nativeCursor(EPOCH, 0), backoffMs: 5, maxReconnects: 5 });
+  assert.equal(subscribes, 1);
+
+  room.socket.emit("close");                    // the drop the subscription reattaches on
+  const deadline = Date.now() + 4000;
+  while (subscribes < 2 && Date.now() < deadline) await sub.wait(20);
+
+  // The three discriminating assertions. Without the classification the error would be the dark
+  // one, the message would say could-not-be-re-dialled, and subscribes would be 6 rather than 2.
+  await assert.rejects(sub.read(), /exceeds committed sequence/);
+  await assert.rejects(sub.read(), (e) => !/could not be re-dialled/.test(String(e && /** @type {any} */ (e).message)));
+  assert.equal(subscribes, 2, `an answered refusal was retried: ${subscribes - 1} attempt(s)`);
+  assert.equal(sub.dark(), undefined, "an answered refusal was reported as darkness");
   sub.close();
 });
 
