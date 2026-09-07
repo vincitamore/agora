@@ -370,8 +370,18 @@ override. Verify the returned supervisor PID, the
 watcher PID in the session's
 `armed/<room>.json`, and the live-watch count plus Codex thread/binary reported by `agora doctor`.
 Session and armed records carry the package version and git revision (or entry-file mtime outside a
-worktree); `doctor` and `session --list` name the PID of any live resident older than the installed
-build and tell it to re-arm.
+worktree), plus the checkout and entry file the arming process measured. `doctor` and `session
+--list` name the PID of any live resident older than the installed build, and then say whether
+re-arming would change anything: they intersect what moved between the two builds — committed and
+uncommitted, since a watch loaded the working tree — with the transitive **import graph** of the
+entry that watch loaded, not with the paths it happens to execute (a static import at the top of
+the entry is resident whether or not its verb is ever called). A watch whose loaded modules moved is
+a `WARNING` naming the files; one that is behind the installed build while nothing it loads moved is
+a `NOTE` stating both facts and asking for nothing. Every case the measurement cannot settle — a
+record from before the checkout was recorded, a watch armed from another copy, a build stamped by
+file time, a commit this repository does not have, a `git` command that failed, or a module the
+static graph cannot resolve — stays a `WARNING`, because a wrong "no re-arm owed" leaves a seat
+silently on stale code while a wrong "owed" costs one re-arm.
 `agora doctor` runs three preflights for a resident bearer, all derived at the call and stored
 nowhere: `cache-ttl` reads the harness prompt-cache TTL where a settings file or an environment
 variable makes it readable and warns when a watch is armed against a five-minute one,
