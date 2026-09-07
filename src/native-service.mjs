@@ -625,9 +625,17 @@ export class NativeRoomService {
       const limit = frame.limit === undefined ? undefined : Number(frame.limit);
       if (frame.type === "read") {
         const messages = store.read({ ...(since ? { since } : {}), ...(limit !== undefined ? { limit } : {}) });
+        // The page must be the END the STORE would select, or the limit this refusal names is a
+        // limit for a different set of messages. `native-store.mjs` slices `-limit` when there is no
+        // `since` (the newest N) and forward from the cursor when there is (the oldest N after it).
+        // Measured live before this was fixed: with no cursor the host searched the head, named 765,
+        // and the caller's `--limit 765` asked for the newest 765 -- different, larger messages, so
+        // it refused again naming 761. It converges, so it is not a loop; it is worse than a loop,
+        // because the caller did exactly what it was told and was told something false.
         /** @param {number} count */
         const envelope = (count) => {
-          const page = count === messages.length ? messages : messages.slice(0, count);
+          const page = count === messages.length ? messages
+            : since ? messages.slice(0, count) : messages.slice(-count);
           const sequence = page.length ? parseNativeCursor(page.at(-1).cursor).sequence
             : since ? parseNativeCursor(since).sequence : store.status().committed;
           return { protocol: NATIVE_PROTOCOL, type: "read-result", requestId: frame.requestId,
@@ -649,7 +657,9 @@ export class NativeRoomService {
           // a client half; this is the floor under it, and it never lies about what it delivered.
           const fits = largestFittingCount(envelope, messages.length);
           if (!fits) {
-            const first = messages[0];
+            // The one message that cannot cross is the one the caller would have received first,
+            // which is the same end the page is taken from.
+            const first = since ? messages[0] : messages.at(-1);
             throw new AgoraError(`read-batch-refused: message ${first.cursor} alone encodes to `
               + `${nativeFramePayloadBytes(envelope(1))} bytes and one native protocol frame holds `
               + `${NATIVE_FRAME_MAX}; this protocol cannot deliver it (no cursor advanced)`);
