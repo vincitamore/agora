@@ -17,7 +17,7 @@ import {
   readRouteSecret, removeRouteSecret, routeProofRef, routeSecretPath, validatePublicNodeKey,
   verifyMemberHandshakeProof, writeRouteSecret,
 } from "../src/native-member.mjs";
-import { NativeFrameDecoder, NATIVE_PROTOCOL, encodeNativeFrame, nativeHandshakeProof } from "../src/native-protocol.mjs";
+import { NativeFrameDecoder, NATIVE_FRAME_MAX, NATIVE_PROTOCOL, encodeNativeFrame, nativeFramePayloadBytes, nativeHandshakeProof } from "../src/native-protocol.mjs";
 import { NativeRoomService } from "../src/native-service.mjs";
 import { closeServiceRoute, listServiceRoutes, openServiceRoute } from "../src/service-cli.mjs";
 import { publicNodeKeyDigest } from "../src/protocol/route.mjs";
@@ -319,6 +319,112 @@ test("a member append lands under the minted principal, and the host account is 
   assert.ok(isMemberAccountId(posted.author.id));
   assert.notEqual(posted.author.id, ACCOUNT, "a member post was stamped with the HOST account");
   assert.equal(posted.author.kind, "agent");
+});
+
+/** Fill the room until one read-result frame cannot hold it. Returns how many messages landed. */
+/** @param {any} service @param {number} [bytesEach] */
+async function fillPastTheFrameCap(service, bytesEach = 64 * 1024) {
+  const store = await service.openRoom(ROOM);
+  const body = "x".repeat(bytesEach);
+  let written = 0;
+  // One over the cap, not ten: the cell must fail if the bound moves, and a batch far past it
+  // would still refuse under a much larger cap and stop testing this bound at all.
+  while (written * bytesEach <= NATIVE_FRAME_MAX) {
+    await store.append({ operationId: randomUUID().replaceAll("-", ""), authorName: "filler", text: body },
+      { accountId: ACCOUNT });
+    written += 1;
+  }
+  return written;
+}
+
+/** A greeted member session on a real route with the transport faked. */
+/** @param {any} t */
+async function memberSession(t) {
+  const { service } = await memberFixture(t);
+  const { descriptor, accept } = await openFakedRoute(service);
+  const secret = await readRouteSecret(service.root, descriptor.binding, descriptor.proofRef);
+  const { hostSide, clientSide } = loopback();
+  accept(hostSide);
+  const welcome = await greet(clientSide, secret);
+  assert.equal(welcome.type, "member-welcome", `handshake refused: ${welcome.message ?? ""}`);
+  /** @param {any} operation */
+  const request = (operation) => {
+    clientSide.write(encodeNativeFrame({ protocol: NATIVE_PROTOCOL, requestId: randomUUID().replaceAll("-", ""),
+      roomId: ROOM, ...operation }));
+    return collect(clientSide, (f) => (f.type === "read-result" || f.type === "error" ? f : undefined));
+  };
+  return { service, request };
+}
+
+test("a read past the frame cap is refused by its CONDITION, and the limit it names actually works", async (t) => {
+  const { service, request } = await memberSession(t);
+  const total = await fillPastTheFrameCap(service);
+
+  const refused = await request({ type: "read" });
+  assert.equal(refused.type, "error", "a read larger than one frame was delivered");
+  assert.match(refused.message, /read-batch-refused/,
+    "the refusal did not name the condition");
+  // The regression this cell exists for. The defect was not the cap; it was that the caller was
+  // handed the ENCODER'S byte range ("native protocol frame must be 1-1048576 bytes"), which names
+  // the length prefix and says nothing about the batch, the room, or a request that would work.
+  assert.doesNotMatch(refused.message, /native protocol frame must be 1-/,
+    "the refusal still leaks the encoder's byte range instead of naming the batch");
+  assert.match(refused.message, new RegExp(`${total} messages`), "the refusal did not say how many it tried");
+  assert.match(refused.message, /no cursor advanced/, "the refusal did not say the cursor is intact");
+
+  // Exhibited by its CONSEQUENCE, not only by its refusal: the remedy the message names has to be
+  // one the caller can actually run. A refusal that names an unusable limit is a worse defect than
+  // the byte range it replaced, because it looks actionable.
+  const named = Number(refused.message.match(/re-read with limit (\d+)/)?.[1]);
+  assert.ok(Number.isInteger(named) && named > 0, `the refusal named no usable limit: ${refused.message}`);
+  const ok = await request({ type: "read", limit: named });
+  assert.equal(ok.type, "read-result", `the limit the refusal named was itself refused: ${ok.message ?? ""}`);
+  assert.equal(ok.messages.length, named);
+
+  // And it is the BOUNDARY, not a comfortable value below it: one more message does not fit.
+  const over = await request({ type: "read", limit: named + 1 });
+  assert.equal(over.type, "error", `limit ${named + 1} fit, so the refusal understated what the frame holds`);
+  assert.match(over.message, /read-batch-refused/);
+});
+
+test("a member read leaves the cursor where it was when the batch is refused", async (t) => {
+  const { service, request } = await memberSession(t);
+  await fillPastTheFrameCap(service);
+  const store = await service.openRoom(ROOM);
+  const before = store.status().committed;
+
+  assert.equal((await request({ type: "read" })).type, "error");
+
+  assert.equal(store.status().committed, before, "a refused read moved the room's committed position");
+  const small = await request({ type: "read", limit: 1 });
+  assert.equal(small.type, "read-result", `the room was left unreadable by a refusal: ${small.message ?? ""}`);
+  assert.equal(small.messages.length, 1, "the first message after a refusal was not the first message");
+});
+
+test("the LARGEST post the store accepts still fits one read frame, which is what keeps the batch bound narrowable", async (t) => {
+  const { service, request } = await memberSession(t);
+  const store = await service.openRoom(ROOM);
+  // The store refuses post text past 256 KiB (native-store.mjs MESSAGE_TEXT_MAX), so through the
+  // public append path a single message cannot outgrow a 1 MiB frame. That is not a coincidence to
+  // rely on quietly -- it is the invariant that makes "re-read with a smaller limit" terminate.
+  // Pin it here so raising either bound past the other fails a test instead of stranding a room.
+  const text = "z".repeat(256 * 1024);
+  await store.append({ operationId: randomUUID().replaceAll("-", ""), authorName: "filler", text },
+    { accountId: ACCOUNT });
+
+  const one = await request({ type: "read", limit: 1 });
+  assert.equal(one.type, "read-result", `the largest acceptable post could not be read back: ${one.message ?? ""}`);
+  assert.equal(one.messages.length, 1);
+  assert.equal(one.messages[0].text.length, text.length);
+
+  // The undeliverable-row branch in the read path is therefore unreachable through append TODAY,
+  // and it is kept rather than deleted because the store's own record bound (LOG_RECORD_MAX) is
+  // 1 MiB -- EQUAL to the frame bound, with the read envelope's fields added on top of it. A record
+  // written at that bound by any future operation kind cannot cross a frame, and the caller would
+  // meet it as an unnarrowable batch. Named here so the next reader of native-store.mjs sees it.
+  assert.ok(nativeFramePayloadBytes(one) <= NATIVE_FRAME_MAX);
+  assert.ok(256 * 1024 < NATIVE_FRAME_MAX,
+    "the post cap reached the frame cap; a single message can now strand a room's read");
 });
 
 test("a member frame naming another principal is refused by name", async (t) => {
