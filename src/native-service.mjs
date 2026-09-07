@@ -330,7 +330,7 @@ function readHandshakeFrame(socket, timeoutMs, label) {
 }
 
 export class NativeRoomService {
-  /** @param {{ root: string, accountId: string, seatLabel: string, now?: () => Date, nonce?: string, build?: import("./harness.mjs").BuildIdentity }} options */
+  /** @param {{ root: string, accountId: string, seatLabel: string, now?: () => Date, nonce?: string, build?: import("./harness.mjs").BuildIdentity, routeOptions?: Record<string, unknown> }} options */
   constructor(options) {
     validateNativeId(options.accountId, "service account id");
     if (!options.seatLabel?.trim() || options.seatLabel.length > 120) throw new AgoraError("native service needs a bounded seat label");
@@ -344,6 +344,10 @@ export class NativeRoomService {
     this.startedAt = this.now().toISOString();
     /** @type {import("./harness.mjs").BuildIdentity | undefined} */
     this.build = options.build;
+    // Route transport options every wire-path `route-open` uses when the frame carries none (a
+    // frame never carries them). Tests inject a faked listener and child here so the verbs can be
+    // driven through a real client against a live service; production leaves it undefined.
+    this.routeOptions = options.routeOptions;
     this.nativeDirectory = path.join(this.root, "native");
     this.descriptorPath = path.join(this.nativeDirectory, "service.json");
     /** @type {string | null} */
@@ -675,8 +679,15 @@ export class NativeRoomService {
     // and the second registration replace the first -- leaving a LIVE route that still admits the
     // key, is invisible to route list, and cannot be reached by route close. That is a live
     // resource with no marker, which is why the reservation is taken here and not after the awaits.
-    if (this.routes.has(key) || this.openingRoutes.has(key))
-      throw new AgoraError(`route-already-open: ${roomId} already admits this key; close it before opening a new grant`);
+    const held = this.routes.get(key);
+    if (held || this.openingRoutes.has(key)) {
+      // The message carries the route's state, because the operator's next move differs: a live
+      // route is closed first; a closing one is already being torn down and its key is held until
+      // its resource settles, so the honest instruction is to wait, not to close again.
+      throw new AgoraError(held?.state === "closing"
+        ? `route-already-open: ${roomId} already admits this key and that route is closing; wait for its close to settle before opening a new grant`
+        : `route-already-open: ${roomId} already admits this key; close it before opening a new grant`);
+    }
     this.openingRoutes.add(key);
     try {
     const binding = buildRouteBinding({
@@ -690,7 +701,7 @@ export class NativeRoomService {
     const resource = startMemberRoute({ binding, allowedNodeKey: publicNodeKey }, {
       owner, runtime: request.runtime ?? {},
       acceptChannel: (accepted, stream, signal) => this.#acceptMember({ binding: accepted, secret }, stream, signal),
-      ...(request.routeOptions ?? {}),
+      ...(request.routeOptions ?? this.routeOptions ?? {}),
     });
     let published;
     try {
@@ -711,8 +722,10 @@ export class NativeRoomService {
       throw error;
     }
     } finally {
-      // Released on every path, including the refusals above: a reservation that outlives its
-      // attempt would refuse the operator's next honest open with route-already-open forever.
+      // Released on every path AFTER the reservation: the mint, the listener start, the descriptor
+      // write and the failure branch. The route-already-open refusal above reserves nothing, so
+      // it has nothing to release. A reservation that outlived its attempt would refuse the
+      // operator's next honest open with route-already-open forever.
       this.openingRoutes.delete(key);
     }
   }
@@ -836,6 +849,15 @@ export class NativeRoomService {
           }
           if (frame.accountId !== undefined && frame.accountId !== route.binding.accountId)
             throw new AgoraError("member-actor-mismatch: this route admits one principal and the frame named another");
+          // A face choice is a foreign key on a member frame the way an account claim is. The host
+          // reads no face off any frame (face selection and publication run in the poster's own
+          // CLI against the poster's own state and token), so a member carrying one is refused
+          // by name rather than silently ignored, and nothing is committed under it.
+          // Checked at both positions a frame can carry it, the way the identity claim is: the local
+          // transport puts it at the top level, and a hand-built frame could put it in the operation.
+          const op = /** @type {any} */ (frame.operation);
+          if (Object.hasOwn(frame, "face") || (op && typeof op === "object" && !Array.isArray(op) && Object.hasOwn(op, "face")))
+            throw new AgoraError("member-face-refused: the host reads no face off a member frame; a face is chosen and published by the poster's own CLI, never through a route");
           await this.#dispatch(/** @type {any} */ (stream), frame, member);
         }).catch((error) => {
           const id = raw && typeof raw === "object" && "requestId" in raw && typeof raw.requestId === "string"
