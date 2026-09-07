@@ -9,12 +9,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-latest
+          - runner: [self-hosted, linux, house]
             target: linux
-          - runner: windows-latest
+          - runner: [self-hosted, windows, house]
             target: windows
-          - runner: macos-latest
-            target: darwin
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
