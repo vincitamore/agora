@@ -432,7 +432,7 @@ function confirmedEntry(id, counters = {}, overlap = undefined) {
   };
 }
 
-test('contains-child excludes the named ledger key and a stub peerKey excludes nobody', () => {
+test('contains-child excludes the named ledger key; a stub peerKey still sums and records peer-absent', () => {
   const parentId = identity({ sourceId: 'p' });
   const childId = identity({ sourceId: 'c' });
   const parentKey = ledgerKey(parentId);
@@ -449,7 +449,7 @@ test('contains-child excludes the named ledger key and a stub peerKey excludes n
     [childKey]: confirmedEntry(childId, { output: known(30) }),
   });
   assert.equal(stub.request.components.output.value, 130);
-  assert.deepEqual(stub.request.excluded, []);
+  assert.deepEqual(stub.request.excluded, [{ key: 'child-key', reason: 'peer-absent' }]);
 });
 
 test('unknown overlap is excluded with a reason; absent overlap still sums', () => {

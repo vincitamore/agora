@@ -45,9 +45,11 @@ refuses before the write; the previous snapshot remains.
 `contained-in-parent` excludes that record; `contains-child` excludes the named
 `peerKey` when that key is a confirmed ledger entry (`parent-declared`). `unknown`
 is not `none`: it is excluded with reason `overlap-unknown`, never added. An orphan
-child whose named parent is absent is excluded with reason `parent-absent`. Each
-excluded row is `{ key, reason }`. A `peerKey` that matches no entry excludes
-nobody. `reasoning-billed` is stored on the entry and is never folded into output.
+child whose named parent is absent is excluded with reason `parent-absent`. A
+`contains-child` whose `peerKey` matches no confirmed entry still sums the other
+records, and records `{ key: peerKey, reason: 'peer-absent' }` so the dropped
+claim is visible. Each excluded row is `{ key, reason }`. `reasoning-billed` is
+stored on the entry and is never folded into output.
 
 ## Ingest position
 
