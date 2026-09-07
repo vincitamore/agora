@@ -242,19 +242,30 @@ test("the pinned digest still describes the file it names", () => {
 });
 
 test("a specifier whose filename contains the other quote is followed, not dropped", async (t) => {
-  // A filename may legally contain a quote that is not the one delimiting it, and Node executes the
-  // import. A body class of [^"\'`] stops at the first such character and the whole statement is
-  // missed — a module dropped in silence, which is the one direction this scanner may never take.
+  // A filename may legally contain a quote that is not the one delimiting it, Node executes the
+  // import, and a body class of [^"'`] stops at the first such character so the whole statement is
+  // missed. The apostrophe case runs on every platform, because a file named with an apostrophe is
+  // creatable everywhere.
   const { root } = await repo(t);
   await mkdir(path.join(root, "src"), { recursive: true });
   await writeFile(path.join(root, "src", "it's.mjs"), "\n");
-  await writeFile(path.join(root, "src", 'say"hi.mjs'), "\n");
-  await writeFile(path.join(root, "entry.mjs"),
-    'import "./src/it\'s.mjs";\n' + "import './src/say\"hi.mjs';\n");
+  await writeFile(path.join(root, "entry.mjs"), 'import "./src/it\'s.mjs";\n');
   const quoted = importClosure({ entry: path.join(root, "entry.mjs"), root });
   assert.equal(quoted.complete, true, quoted.reason);
   assert.ok(quoted.files.has("src/it's.mjs"), "a single quote inside a double-quoted specifier dropped the module");
-  assert.ok(quoted.files.has('src/say"hi.mjs'), "a double quote inside a single-quoted specifier dropped the module");
+
+  // The opposite crossing goes through the INJECTED READ SEAM, over a file the filesystem will
+  // accept. Windows cannot create a name containing a double quote, so writing one made the gate
+  // fail on SETUP rather than on the scanner: a red that measures the filesystem and would be read
+  // as a defect in the thing under test. What has to be proven here is that the specifier is
+  // PARSED, and a named refusal proves that as well as a resolution does — the old body missed the
+  // statement entirely and reported complete.
+  const seam = importClosure({
+    entry: path.join(root, "entry.mjs"), root,
+    read: (file) => (file === path.join(root, "entry.mjs") ? 'import \'./src/say"hi.mjs\';\n' : "\n"),
+  });
+  assert.equal(seam.complete, false, "a double quote inside a single-quoted specifier was dropped in silence");
+  assert.match(String(seam.reason), /say\\?"hi\.mjs/, "the crossed specifier was not named in the refusal");
 
   // The literal twin: ordinary specifiers still resolve, so the widened body is not bought by
   // matching more than it should.
@@ -263,6 +274,25 @@ test("a specifier whose filename contains the other quote is followed, not dropp
   const plain = importClosure({ entry: path.join(root, "entry.mjs"), root });
   assert.equal(plain.complete, true, plain.reason);
   assert.deepEqual([...plain.files].sort(), ["entry.mjs", "src/plain.mjs"]);
+});
+
+test("a static import is detected wherever it stands, not only after a line break", async (t) => {
+  // `import` followed by a quoted string is a static import wherever it stands. The statement
+  // prefix the detector used to carry was a formatting assumption, not a grammar fact, and it
+  // missed a legal load sitting after a closing brace on the same line.
+  const { root } = await repo(t);
+  await mkdir(path.join(root, "src"), { recursive: true });
+  await writeFile(path.join(root, "src", "loaded.mjs"), "\n");
+  const pair = [
+    ["on the brace's line", 'export function f() {} import "./src/loaded.mjs";\n'],
+    ["on the next line", 'export function f() {}\nimport "./src/loaded.mjs";\n'],
+  ];
+  for (const [label, source] of pair) {
+    await writeFile(path.join(root, "entry.mjs"), source);
+    const c = importClosure({ entry: path.join(root, "entry.mjs"), root });
+    assert.equal(c.complete, true, `${label}: ${c.reason}`);
+    assert.ok(c.files.has("src/loaded.mjs"), `${label}: the load was not detected`);
+  }
 });
 
 test("a detected load whose specifier will not parse is reported, not dropped", async (t) => {

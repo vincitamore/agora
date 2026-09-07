@@ -331,7 +331,29 @@ export async function clearWatchMode(target, opts = {}) {
 // at the comparison is how a Linux-green measurement fails on Windows.
 
 /** Whitespace or a comment, anywhere a specifier may legally be preceded by one. */
-const GAP = "(?:\\s|/\\*[\\s\\S]*?\\*/|//[^\\n]*\\n)*";
+// Whitespace or a BLOCK comment, anywhere a specifier may legally be preceded by one.
+//
+// Deliberately not a line comment. A line comment's body is arbitrary text, so allowing it here
+// lets the word for a static load appearing in PROSE run through comment after comment until it
+// reaches some distant quote. That is not hypothetical: when the keyword detector lost its
+// statement prefix, this file's own header matched and the whole measurement went unknown. A
+// block comment is bounded and explicit, so a load with one between its keyword and its
+// specifier still resolves.
+//
+// THE FRONTIER, stated rather than papered over: a load whose keyword is followed by a LINE
+// comment and whose specifier sits on the next line is legal JavaScript this scanner does not
+// detect at all. That is not the no-skip rule failing -- a DETECTED load is still never dropped
+// -- it is where a regex stops being a parser, and it is the completeness boundary a broader
+// scanner would owe. It is vanishingly rare beside the prose false positive it prevents, and the
+// census on the real tree is what would catch it turning up.
+const GAP = "(?:\\s|/\\*[\\s\\S]*?\\*/)*";
+// The same, but at least one: a keyword wrapped in backticks as PROSE is followed IMMEDIATELY by
+// its closing mark, and with a zero-width gap that closing mark reads as the opening quote of a
+// specifier. This file's own header said so about a static load and the whole measurement went
+// unknown -- the fourth time this scanner's prose has tripped it. A real load has whitespace or a
+// comment between keyword and specifier; the no-separation spelling is legal and never written,
+// and it falls on the frontier above rather than being mis-read.
+const GAP1 = "(?:\\s|/\\*[\\s\\S]*?\\*/)+";
 /** A quoted specifier, capturing the quote so a template can be told from a string. */
 /** A quoted specifier, capturing the quote so a template can be told from a string.
  *
@@ -342,8 +364,15 @@ const GAP = "(?:\\s|/\\*[\\s\\S]*?\\*/|//[^\\n]*\\n)*";
  * since decoding it is not this scanner's job.
  */
 const SPEC = "([\"'`])((?:(?!\\1)[^\\\\]|\\\\.)*)\\1";
-const FROM_SPEC = new RegExp(`\\bfrom${GAP}${SPEC}`, "g");
-const BARE_IMPORT = new RegExp(`(?:^|[;\\n])${GAP}import${GAP}${SPEC}`, "g");
+const FROM_SPEC = new RegExp(`\\bfrom${GAP1}${SPEC}`, "g");
+/** A side-effect import, detected on the KEYWORD alone.
+ *
+ * The statement prefix this used to carry was a formatting assumption, not a grammar fact: in
+ * JavaScript `import` followed by a quoted string is a static import wherever it stands, so a
+ * legal load sitting after a closing brace on the same line was missed entirely. The prefix's
+ * only work was keeping prose out, and the `from` detector — which never had one — shows the
+ * scanner already tolerates that, over-inclusively and in the safe direction. */
+const BARE_IMPORT = new RegExp(`\\bimport${GAP1}${SPEC}`, "g");
 const DYNAMIC_CALL = new RegExp(`\\bimport${GAP}\\(`, "g");
 const DYNAMIC_SPEC = new RegExp(`\\bimport${GAP}\\(${GAP}${SPEC}${GAP}\\)`, "g");
 const REQUIRE_CALL = new RegExp(`(?<![.\\w])require${GAP}\\(`, "g");
@@ -507,8 +536,8 @@ export function importClosure(opts) {
     };
     // Only where a quote actually follows the keyword: elsewhere `from` is ordinary prose, and a
     // computed call is counted below rather than reported here.
-    unparsed(new RegExp(`\\bfrom${GAP}(?=["'\`])`, "g"));
-    unparsed(new RegExp(`(?:^|[;\n])${GAP}import${GAP}(?=["'\`])`, "g"));
+    unparsed(new RegExp(`\\bfrom${GAP1}(?=["'\`])`, "g"));
+    unparsed(new RegExp(`\\bimport${GAP1}(?=["'\`])`, "g"));
 
     /** @param {RegExp} pattern */
     const follow = (pattern) => {
