@@ -57,7 +57,7 @@ export const BILLING_FILE_FIELDS = Object.freeze(/** @type {const} */ ([
 ]));
 
 /**
- * `data/billing-contexts.json`: one entry per harness, each of the five harness-level E2a key
+ * A billing-contexts file (`data/billing-contexts.example.json` shape): one entry per harness, each of the five harness-level E2a key
  * fields either known with a source or unknown with a reason. A known field with no source is
  * refused: the whole point of the file is that the replay does not guess a billing context.
  * `modelRevision` is refused in the file because it comes from each record's retained `model`.
@@ -158,6 +158,9 @@ export function residentContextOf(record) {
   const split = Boolean(c['cache-write-5m'] || c['cache-write-1h']);
   const pooled = Boolean(c['cache-write-unknown-ttl']);
   if (!split && !pooled) return { state: 'unknown', reason: 'pool-absent:cache-write' };
+  // Both forms on one record is a contradiction of the adapter contract, not a sum: summing them
+  // would count the same writes twice into a valid-looking context.
+  if (split && pooled) return { state: 'unknown', reason: 'pool-both-forms:cache-write' };
   for (const pool of split ? ['cache-write-5m', 'cache-write-1h'] : []) {
     const r = take(pool);
     if (!r.ok) return { state: 'unknown', reason: r.reason };
@@ -479,7 +482,12 @@ export function shadowReplay(opts) {
         // Periodic ping without compaction: pings per gap from the p50 gap against the TTL.
         const gapP50 = h.status === 'estimated' && h.nextArrivalSeconds && typeof h.nextArrivalSeconds.p50 === 'number' ? h.nextArrivalSeconds.p50 : null;
         const pingsPerCall = gapP50 === null ? null : Math.max(0, Math.ceil(gapP50 / env.cacheTtlSeconds.value) - 1);
-        const onePing = pingCharge(tariff, P, env, H ?? 0, read);
+        // The forecast ping: its rereads are over the HORIZON's remaining calls, so an unknown
+        // horizon leaves the ping unknown rather than a total missing its rereads term.
+        const onePing = pingCharge(tariff, P, env, H, read);
+        // The replay's ping, for the periodic-ping baseline: rereads over the OBSERVED remaining
+        // calls of this session (calls - k), a count and never a forecast.
+        const observedPing = pingCharge(tariff, P, env, s.requests.length - k, read);
         const pingTotal = pingsPerCall === null
           ? /** @type {import('./baselines.mjs').Cost} */ ({ state: 'unknown', reason: 'next-arrival-p50-null' })
           : addCosts(continueCost, overH(scaleCost(onePing.total, pingsPerCall)));
@@ -488,7 +496,7 @@ export function shadowReplay(opts) {
           continue: { cost: continueCost, basis: 'remaining calls each read the current prefix; prefix growth assumed 0 (constant-prefix approximation)' },
           compactCold: { cost: compactCold, K: K, future: futureAfterCompaction },
           compactWarm: { cost: compactWarm, warmingPing: warmPing, K: Kwarm, future: futureAfterCompaction, note: 'warm-then-compact compared as one sequence against cold compaction' },
-          ping: { cost: pingTotal, perPing: onePing, pingsPerCall, pingsBasis: 'ceil(p50 gap / ttl) - 1', arrivalWithinTtl: arrival, benefit: reuse ? 'assumed-reuse-already-in-continue' : 'unassessable:prefix-reuse' },
+          ping: { cost: pingTotal, perPing: onePing, observedPing, pingsPerCall, pingsBasis: 'ceil(p50 gap / ttl) - 1', arrivalWithinTtl: arrival, benefit: reuse ? 'assumed-reuse-already-in-continue' : 'unassessable:prefix-reuse' },
         };
       } else {
         trajectories = {
@@ -537,10 +545,10 @@ export function shadowReplay(opts) {
       const n = Math.max(0, Math.ceil(gap / env.cacheTtlSeconds.value) - 1);
       const d = decisions[i - 1];
       if (n === 0) continue;
-      if (!d.trajectories.ping.perPing) { pingParts.push({ state: 'unknown', reason: 'resident-context-unknown' }); continue; }
-      pingParts.push(scaleCost(d.trajectories.ping.perPing.total, n));
+      if (!d.trajectories.ping.observedPing) { pingParts.push({ state: 'unknown', reason: 'resident-context-unknown' }); continue; }
+      pingParts.push(scaleCost(d.trajectories.ping.observedPing.total, n));
     }
-    const periodicPing = { cost: addCosts(neverCompact.cost, ...pingParts), basis: 'predicted: observed spend plus ceil(measured gap / ttl) - 1 pings per observed gap', latency: 'unknown', quality: 'unknown' };
+    const periodicPing = { cost: addCosts(neverCompact.cost, ...pingParts), basis: 'predicted: observed spend plus ceil(measured gap / ttl) - 1 pings per observed gap, each ping reread on the observed remaining calls of the session (never the horizon)', latency: 'unknown', quality: 'unknown' };
 
     return {
       ...base,

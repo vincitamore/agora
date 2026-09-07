@@ -297,7 +297,7 @@ const SCHEMA = {
       options: {
         "--ledger-root <path>": "E1c ledger directory to replay",
         "--rates <file>": "E2a rate table (data/rates.json shape); no default, the table priced against is named",
-        "--billing-context <file>": "data/billing-contexts.json: per-harness provider, endpoint, serviceTier, region, billingMode, each known-with-source or unknown-with-reason; modelRevision comes from each record's retained model",
+        "--billing-context <file>": "a file of the data/billing-contexts.example.json shape, written for this seat: per-harness provider, endpoint, serviceTier, region, billingMode, each known-with-source or unknown-with-reason; modelRevision comes from each record's retained model",
         "--envelope <file>": "assumed scenario dimensions, each {value, source}: summaryTokens, postCompactionTokens, recoveryTokens, pingTokens, cacheTtlSeconds; prefixReuse is refused (unassessable in E2)",
         "--verification-cost <usd>": "required, finite, >= 0; zero only as the literal and labelled explicit-zero; applied at zero future calls",
         "--epsilon <n>": "the F1 margin: a crossing needs the least-favourable continue/compact ratio above 1 + epsilon",

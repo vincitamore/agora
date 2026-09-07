@@ -272,10 +272,14 @@ export function arrivalWithinTtl(nextArrivalSeconds, ttlSeconds) {
  * applies: a ping that misses the cache paid cold), write the ping message, one output token,
  * and the future rereads of the ping message on each remaining call. Orchestration is unpriced
  * and named.
- * @param {Tariff} t @param {number} prefixTokens @param {Envelope} env @param {number} remainingCalls
+ * `remainingCalls` is the count of later calls that reread the ping message: an OBSERVED count on a
+ * replay of the past, a horizon quantile on a forecast, and `null` when neither is known, in
+ * which case the rereads and the total are unknown rather than a total missing one term.
+ * @param {Tariff} t @param {number} prefixTokens @param {Envelope} env @param {number | null} remainingCalls
  * @param {(tokens: number) => Cost} read
  */
 export function pingCharge(t, prefixTokens, env, remainingCalls, read) {
+  if (remainingCalls !== null && !(Number.isInteger(remainingCalls) && remainingCalls >= 0)) throw new BaselineInputError('remaining-calls');
   /** @type {Cost} */
   const suffixWrite = t.cacheWrite === undefined
     ? { state: 'unknown', reason: 'missing-rate:cache-write-5m' }
@@ -284,7 +288,10 @@ export function pingCharge(t, prefixTokens, env, remainingCalls, read) {
   const output = t.output === undefined
     ? { state: 'unknown', reason: 'missing-rate:output' }
     : { state: 'known', usd: usd(1, t.output) };
-  const rereads = scaleCost(read(env.pingTokens.value), remainingCalls);
+  /** @type {Cost} */
+  const rereads = remainingCalls === null
+    ? { state: 'unknown', reason: 'remaining-calls-unknown' }
+    : scaleCost(read(env.pingTokens.value), remainingCalls);
   const total = addCosts(read(prefixTokens), suffixWrite, output, rereads);
   return { prefixRead: read(prefixTokens), suffixWrite, output, rereads, orchestration: 'unpriced', total };
 }

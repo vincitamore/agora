@@ -12,7 +12,7 @@ import {
 } from '../src/economy/shadow.mjs';
 import {
   addCosts, scaleCost, leastFavourableRatio, arrivalWithinTtl, validateEnvelope, tariffFromRow,
-  prefixReadCost, BaselineInputError,
+  prefixReadCost, pingCharge, BaselineInputError,
 } from '../src/economy/baselines.mjs';
 import { closeSessionLedger, commitLedgerEvent, openSessionLedger } from '../src/usage/session-ledger.mjs';
 
@@ -62,7 +62,8 @@ function ledgerOf(sessions) {
         observedAt: iso(s.start + i * (s.gapMs ?? 60_000)), status: s.status ?? 'confirmed', digest: `sha256:${n}`,
         ...(s.model === null ? {} : { model: s.model ?? 'model-x' }),
         usage: {
-          components: s.components ?? { 'uncached-input': known(10), 'cached-input': known(prefix), 'cache-write-5m': known(0), 'cache-write-1h': known(0), 'cache-write-unknown-ttl': known(0), output: known(500) },
+          // The Claude adapter's real shape: the TTL split, never the pooled bucket beside it.
+          components: s.components ?? { 'uncached-input': known(10), 'cached-input': known(prefix), 'cache-write-5m': known(0), 'cache-write-1h': known(0), output: known(500) },
           coverage: s.coverage ?? 'complete',
         },
       };
@@ -362,6 +363,31 @@ test('(a) a null next-arrival quantile leaves the arrival probability and the pi
   assert.equal(d.trajectories.ping.arrivalWithinTtl.state, 'unknown');
 });
 
+test('(g) an unknown horizon leaves the forecast ping unknown, never a total missing its rereads; the periodic-ping baseline reads observed remaining calls and is the same number whether or not the horizon is known', () => {
+  const entries = ledgerOf(cohort((i) => 2 + (i % 8), { gapMs: 2_000_000 }));
+  const unknownH = replay(entries, { endedAfterSeconds: null });
+  const knownH = replay(entries, { endedAfterSeconds: 3600 });
+  const su = unknownH.sessions.find((/** @type {any} */ x) => x.sessionKey === 'claude-code/e3');
+  const sk = knownH.sessions.find((/** @type {any} */ x) => x.sessionKey === 'claude-code/e3');
+  for (const d of su.decisions) {
+    assert.ok(typeof d.horizon.stoppingUnavailable === 'string');
+    assert.deepEqual(d.trajectories.ping.perPing.rereads, { state: 'unknown', reason: 'remaining-calls-unknown' });
+    assert.equal(d.trajectories.ping.perPing.total.state, 'unknown');
+    assert.equal(d.trajectories.ping.cost.state, 'unknown');
+    // The replay's ping is over observed remaining calls: a known count on every decision.
+    assert.equal(d.trajectories.ping.observedPing.rereads.state, 'known');
+  }
+  assert.equal(su.baselines.periodicPing.cost.state, 'known');
+  assert.equal(sk.baselines.periodicPing.cost.state, 'known');
+  assert.ok(Math.abs(su.baselines.periodicPing.cost.usd - sk.baselines.periodicPing.cost.usd) < 1e-12, `${su.baselines.periodicPing.cost.usd} vs ${sk.baselines.periodicPing.cost.usd}`);
+  // The baseline carries the rereads term: it is strictly above the never-compact spend when pings occur.
+  assert.ok(su.baselines.periodicPing.cost.usd > su.baselines.neverCompact.cost.usd);
+  const last = su.decisions[su.decisions.length - 1];
+  assert.deepEqual(last.trajectories.ping.observedPing.rereads, { state: 'known', usd: 0 }, 'the last call has zero observed rereads, a measured zero');
+  assert.deepEqual(pingCharge(tariffFromRow(ROW), 1000, ENVELOPE, null, () => ({ state: 'known', usd: 1 })).rereads, { state: 'unknown', reason: 'remaining-calls-unknown' });
+  assert.throws(() => pingCharge(tariffFromRow(ROW), 1000, ENVELOPE, -1, () => ({ state: 'known', usd: 1 })), (e) => e instanceof BaselineInputError && e.code === 'remaining-calls');
+});
+
 test('(b) an absent remaining-calls quantile leaves the savings and ratio null: never NaN, never a false no-crossing', () => {
   const r = replay(ledgerOf(cohort((i) => 2 + (i % 8))), { endedAfterSeconds: null });
   const d = r.sessions.find((/** @type {any} */ x) => x.sessionKey === 'claude-code/e3').decisions[0];
@@ -470,12 +496,13 @@ test('billing contexts: a known field needs a source, modelRevision is per recor
   assert.equal(s.pricing.unpriced['billing-context-unknown'], 3);
 });
 
-test('resident context is the sum of the five input pools when all are known; an absent or unknown pool leaves it unknown', () => {
+test('resident context is the sum of the input pools when all are known, the writes in one of the adapter forms; an absent, unknown or doubled pool leaves it unknown', () => {
   /** @param {Record<string, any>} components */
   const rec = (components) => ({ usage: { components } });
-  assert.deepEqual(residentContextOf(rec({ 'uncached-input': known(1), 'cached-input': known(2), 'cache-write-5m': known(3), 'cache-write-1h': known(4), 'cache-write-unknown-ttl': known(5), output: known(99) })), { state: 'known', tokens: 15, basis: 'sum-of-input-pools' });
-  assert.deepEqual(residentContextOf(rec({ 'uncached-input': known(1), 'cached-input': known(2), 'cache-write-5m': known(3), 'cache-write-1h': { state: 'not-applicable' }, 'cache-write-unknown-ttl': known(5) })), { state: 'known', tokens: 11, basis: 'sum-of-input-pools' });
-  assert.deepEqual(residentContextOf(rec({ 'uncached-input': known(1), 'cached-input': known(2), 'cache-write-5m': known(3), 'cache-write-1h': { state: 'unknown' }, 'cache-write-unknown-ttl': known(5) })), { state: 'unknown', reason: 'pool-unknown:cache-write-1h' });
+  // Both write forms on one record contradict the adapter contract and are refused, never summed twice.
+  assert.deepEqual(residentContextOf(rec({ 'uncached-input': known(1), 'cached-input': known(2), 'cache-write-5m': known(3), 'cache-write-1h': known(4), 'cache-write-unknown-ttl': known(5), output: known(99) })), { state: 'unknown', reason: 'pool-both-forms:cache-write' });
+  assert.deepEqual(residentContextOf(rec({ 'uncached-input': known(1), 'cached-input': known(2), 'cache-write-5m': known(3), 'cache-write-1h': { state: 'not-applicable' } })), { state: 'known', tokens: 6, basis: 'sum-of-input-pools' });
+  assert.deepEqual(residentContextOf(rec({ 'uncached-input': known(1), 'cached-input': known(2), 'cache-write-5m': known(3), 'cache-write-1h': { state: 'unknown' } })), { state: 'unknown', reason: 'pool-unknown:cache-write-1h' });
   assert.deepEqual(residentContextOf(rec({ 'uncached-input': known(1) })), { state: 'unknown', reason: 'pool-absent:cached-input' });
   // The writes are one measurement in one of two forms (the adapter's split, or its pooled bucket): either form sums; neither is unknown.
   assert.deepEqual(residentContextOf(rec({ 'uncached-input': known(2), 'cached-input': known(26055), 'cache-write-5m': known(0), 'cache-write-1h': known(49761), output: known(130) })), { state: 'known', tokens: 75818, basis: 'sum-of-input-pools' });
@@ -483,7 +510,7 @@ test('resident context is the sum of the five input pools when all are known; an
   assert.deepEqual(residentContextOf(rec({ 'uncached-input': known(2), 'cached-input': known(3), output: known(1) })), { state: 'unknown', reason: 'pool-absent:cache-write' });
   assert.deepEqual(residentContextOf(rec({ 'uncached-input': known(2), 'cached-input': known(3), 'cache-write-5m': known(1), 'cache-write-1h': { state: 'invalid' } })), { state: 'unknown', reason: 'pool-invalid:cache-write-1h' });
   // Through the replay: an unknown pool leaves the request unpriced (context-unmeasured) and every trajectory unknown.
-  const r = replay(ledgerOf(cohort(3, { components: { 'uncached-input': known(10), 'cached-input': known(1000), 'cache-write-5m': { state: 'unknown', reason: 'fixture' }, 'cache-write-1h': known(0), 'cache-write-unknown-ttl': known(0), output: known(5) }, coverage: 'partial' })));
+  const r = replay(ledgerOf(cohort(3, { components: { 'uncached-input': known(10), 'cached-input': known(1000), 'cache-write-5m': { state: 'unknown', reason: 'fixture' }, 'cache-write-1h': known(0), output: known(5) }, coverage: 'partial' })));
   const s = r.sessions.find((/** @type {any} */ x) => x.sessionKey === 'claude-code/e3');
   assert.equal(s.pricing.unpriced['context-unmeasured'], 3);
   assert.equal(s.decisions[0].residentContext.state, 'unknown');
