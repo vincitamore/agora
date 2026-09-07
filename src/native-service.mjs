@@ -5,7 +5,8 @@ import { chmod, link, lstat, mkdir, open, readFile, realpath, rename, rm, stat }
 import net from "node:net";
 import path from "node:path";
 import { AgoraError } from "./core.mjs";
-import { NativeFrameDecoder, NATIVE_PROTOCOL, encodeNativeFrame, nativeHandshakeProof, parseNativeCursor,
+import { NativeFrameDecoder, NATIVE_FRAME_MAX, NATIVE_PROTOCOL, encodeNativeFrame, nativeFramePayloadBytes,
+  nativeHandshakeProof, parseNativeCursor,
   validateNativeEnvelope, validateNativeId, verifyNativeHandshakeProof } from "./native-protocol.mjs";
 import { NativeRoomStore } from "./native-store.mjs";
 import { MEMBER_PHASES, buildRouteBinding, buildRouteDescriptor, memberHandshakeProof, memberMayRequest,
@@ -179,6 +180,29 @@ function sendFrame(socket, value) {
   }
   socket.write(frame);
   return true;
+}
+
+/**
+ * The largest number of leading messages whose result frame still fits one native protocol frame.
+ *
+ * A batch is not a frame. The 1 MiB bound belongs to the wire's length prefix, so "how many rows
+ * fit" is a question about the encoded envelope and not about the rows: the envelope's own fields
+ * and JSON escaping mean a row's cost is not the sum of its parts, and an accumulating byte count
+ * is wrong in the direction that matters. Binary search over the real measurement instead --
+ * log2(n) encodings of a result the host was going to encode anyway.
+ *
+ * Returns 0 when not even the first message fits, which is a different failure and is named as one.
+ * @param {(count: number) => unknown} envelope @param {number} total
+ */
+function largestFittingCount(envelope, total) {
+  let low = 0;
+  let high = total;
+  while (low < high) {
+    const middle = low + Math.ceil((high - low) / 2);
+    if (nativeFramePayloadBytes(envelope(middle)) <= NATIVE_FRAME_MAX) low = middle;
+    else high = middle - 1;
+  }
+  return low;
 }
 
 /** @param {unknown} value @param {string} label */
@@ -601,10 +625,40 @@ export class NativeRoomService {
       const limit = frame.limit === undefined ? undefined : Number(frame.limit);
       if (frame.type === "read") {
         const messages = store.read({ ...(since ? { since } : {}), ...(limit !== undefined ? { limit } : {}) });
-        const sequence = messages.length ? parseNativeCursor(messages.at(-1).cursor).sequence
-          : since ? parseNativeCursor(since).sequence : store.status().committed;
-        sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "read-result", requestId: frame.requestId,
-          roomId, messages, checkpoint: store.checkpoint(sequence) });
+        /** @param {number} count */
+        const envelope = (count) => {
+          const page = count === messages.length ? messages : messages.slice(0, count);
+          const sequence = page.length ? parseNativeCursor(page.at(-1).cursor).sequence
+            : since ? parseNativeCursor(since).sequence : store.status().committed;
+          return { protocol: NATIVE_PROTOCOL, type: "read-result", requestId: frame.requestId,
+            roomId, messages: page, checkpoint: store.checkpoint(sequence) };
+        };
+        const whole = envelope(messages.length);
+        const bytes = nativeFramePayloadBytes(whole);
+        if (bytes > NATIVE_FRAME_MAX) {
+          // Refuse by the CONDITION, never by the frame's byte range. "must be 1-1048576 bytes" is
+          // the encoder describing its own length prefix; it tells a caller nothing about what it
+          // asked for, names no smaller request that would work, and reads like a corrupt stream
+          // rather than an oversized answer. The refusal below is the same event named so the
+          // caller can act: what it asked for, what that came to, the bound, and a limit that fits.
+          //
+          // Deliberately NOT a silent truncation. Returning the prefix that fits with a `truncated`
+          // marker would fix `join` today at the cost of a partial read that every existing caller
+          // reports as a whole one, since none of them read such a marker -- the exact silent
+          // default this house has been bitten by. Paging is the right answer and it is a unit with
+          // a client half; this is the floor under it, and it never lies about what it delivered.
+          const fits = largestFittingCount(envelope, messages.length);
+          if (!fits) {
+            const first = messages[0];
+            throw new AgoraError(`read-batch-refused: message ${first.cursor} alone encodes to `
+              + `${nativeFramePayloadBytes(envelope(1))} bytes and one native protocol frame holds `
+              + `${NATIVE_FRAME_MAX}; this protocol cannot deliver it (no cursor advanced)`);
+          }
+          throw new AgoraError(`read-batch-refused: ${messages.length} messages encode to ${bytes} bytes and `
+            + `one native protocol frame holds ${NATIVE_FRAME_MAX}; re-read with limit ${fits} or fewer `
+            + `(no cursor advanced)`);
+        }
+        sendFrame(socket, whole);
         return;
       }
 
@@ -617,8 +671,18 @@ export class NativeRoomService {
       if (backlogCount > 10_000)
         throw new AgoraError(`native subscription backlog has ${backlogCount} records; read forward before subscribing (no cursor advanced)`);
       const backlog = backlogCount ? store.read({ since, limit: backlogCount }) : [];
-      const replayFrames = backlog.map((message) => encodeNativeFrame({ protocol: NATIVE_PROTOCOL, type: "event",
-        requestId: message.id, roomId, message }));
+      // One event frame per message, so the batch bound above does not apply -- but a SINGLE
+      // oversized message still cannot cross, and it would surface here as the encoder's byte
+      // range with no cursor to identify it. Name it the same way the read path does.
+      const replayFrames = backlog.map((message) => {
+        const event = { protocol: NATIVE_PROTOCOL, type: "event", requestId: message.id, roomId, message };
+        const size = nativeFramePayloadBytes(event);
+        if (size > NATIVE_FRAME_MAX)
+          throw new AgoraError(`read-batch-refused: message ${message.cursor} alone encodes to ${size} bytes `
+            + `and one native protocol frame holds ${NATIVE_FRAME_MAX}; this protocol cannot deliver it `
+            + `(no cursor advanced)`);
+        return encodeNativeFrame(event);
+      });
       const resultFrame = encodeNativeFrame({ protocol: NATIVE_PROTOCOL, type: "subscribe-result",
         requestId: frame.requestId, roomId, messages: [], checkpoint: store.checkpoint(committed) });
       const replayBytes = replayFrames.reduce((sum, encoded) => sum + encoded.length, resultFrame.length);
