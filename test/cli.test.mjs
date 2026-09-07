@@ -1230,7 +1230,7 @@ test("cli: the verb is named before the room, an unknown option is a usage error
 
     let r = await agora(["frobnicate"], env);
     assert.equal(r.code, 2);
-    assert.match(r.stderr, /unknown verb "frobnicate" \(have: rooms, whoami, read, post, contest, break, room, faces, watch, cursor, who, carry, session, join, enroll, share, fetch, service, spawn, stand-down, resume, doctor, schema\)/);
+    assert.match(r.stderr, /unknown verb "frobnicate" \(have: rooms, whoami, read, post, contest, break, room, faces, watch, cursor, who, carry, session, join, enroll, share, fetch, service, spawn, stand-down, resume, doctor, schema, usage\)/);
     assert.doesNotMatch(r.stderr, /needs a room/, "a misspelled verb typed without a room used to read as a missing room");
 
     r = await agora(["read", "down", "--bogus"], env);
