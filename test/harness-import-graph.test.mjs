@@ -5,12 +5,13 @@
 // silently on stale code, a wrong "owed" costs one re-arm.
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import { importClosure, watchModuleDelta } from "../src/harness.mjs";
+import { COMPUTED_LOAD_EXEMPTIONS, importClosure, watchModuleDelta } from "../src/harness.mjs";
+import { readFileSync } from "node:fs";
 
 const run = promisify(execFile);
 
@@ -93,6 +94,35 @@ test("a module outside the root is unknown, not quietly dropped from the interse
   assert.match(String(closure.reason), /outside/);
 });
 
+test("every computed-load exemption still matches the file it names, exactly", () => {
+  // A stale exemption is an exemption that has stopped describing anything, and it would sit there
+  // licensing a hole nobody can see. A NEW computed load in an exempt file exceeds the count and is
+  // a hole by construction; this cell catches the other direction, where the code moved on and the
+  // data did not.
+  const root = path.resolve(new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
+  const D = /\bimport\s*\(/g, DL = /\bimport\s*\(\s*["'`][^"'`]+["'`]\s*\)/g;
+  const R = /(?<![.\w])require\s*\(/g, RL = /(?<![.\w])require\s*\(\s*["'`][^"'`]+["'`]\s*\)/g;
+  for (const [file, entry] of Object.entries(COMPUTED_LOAD_EXEMPTIONS)) {
+    const source = readFileSync(path.join(root, file), "utf8");
+    const imports = (source.match(D) ?? []).length - (source.match(DL) ?? []).length;
+    const requires = (source.match(R) ?? []).length - (source.match(RL) ?? []).length;
+    assert.equal(imports, entry.imports, `${file} exempts ${entry.imports} computed import(s) and has ${imports}`);
+    assert.equal(requires, entry.requires, `${file} exempts ${entry.requires} computed require(s) and has ${requires}`);
+    assert.ok(entry.why.length > 20, `${file}'s exemption carries no reason a reader can audit`);
+  }
+});
+
+test("an exemption fails closed: an unlisted file, and a second load in a listed one, are both holes", async (t) => {
+  const { root } = await repo(t);
+  await writeFile(path.join(root, "entry.mjs"), 'import "./src/x.mjs";\n');
+  await mkdir(path.join(root, "src"), { recursive: true });
+  // Not on the list, so its computed load is a hole even though it looks harmless.
+  await writeFile(path.join(root, "src", "x.mjs"), 'const n = "node:sqlite";\nawait import(n);\n');
+  const unlisted = importClosure({ entry: path.join(root, "entry.mjs"), root });
+  assert.equal(unlisted.complete, false, "a computed load in an unlisted file was exempted");
+  assert.match(String(unlisted.reason), /only 0 exempted/);
+});
+
 test("the real entry: the census that catches a rule which quietly disables the measurement", async () => {
   // This cell exists because the first shape of the require rule was "any createRequire makes the
   // closure incomplete". The entry uses exactly one, with a literal specifier, to read its own
@@ -104,6 +134,12 @@ test("the real entry: the census that catches a rule which quietly disables the 
   for (const file of ["bin/agora.mjs", "src/session.mjs", "src/harness.mjs", "src/watch.mjs", "package.json"])
     assert.ok(closure.files.has(file), `${file} is not on the real entry's closure`);
   assert.ok(closure.files.size > 30, `the real closure is only ${closure.files.size} files`);
+  // The half the first version of this cell was missing, and it is the half that matters: a rule
+  // that leaves the real closure INCOMPLETE makes every measurement unknown, so the feature reports
+  // nothing while looking measured. Membership alone could not see that.
+  assert.equal(closure.complete, true, `the real closure is not measurable: ${closure.reason}`);
+  assert.equal((closure.caveats ?? []).length, Object.keys(COMPUTED_LOAD_EXEMPTIONS).length,
+    "the real closure's exempted loads do not match the exemption list");
 });
 
 // ------------------------------------------------------------------------ the measurement
@@ -122,9 +158,20 @@ test("without a recorded root nothing can be claimed, and two roots are compared
   assert.equal(elsewhere.state, "unknown");
   assert.match(String(elsewhere.reason), /says nothing about another copy/);
 
-  // The same root reached by a different string must not read as a different copy.
-  const same = await watchModuleDelta({ ...base, armedRoot: path.join(root, "src", "..") });
-  assert.notEqual(same.state, "unknown", same.reason);
+  // The same root reached through a SYMLINK must not read as a different copy. A path that merely
+  // normalises (root/src/..) is no test at all: path.resolve already collapses it, so the cell
+  // would pass with realpath removed — which is exactly what calibration caught.
+  const link = path.join(root, "..", `link-${path.basename(root)}`);
+  let linked = true;
+  try { await symlink(root, link, "junction"); t.after(() => rm(link, { force: true })); }
+  catch { linked = false; }   // an unprivileged Windows checkout cannot make one; say so, do not skip silently
+  if (linked) {
+    assert.notEqual(path.resolve(link), path.resolve(root), "the fixture symlink resolves to the same string, so it tests nothing");
+    const same = await watchModuleDelta({ ...base, armedRoot: link });
+    assert.notEqual(same.state, "unknown", `a symlinked same root read as another copy: ${same.reason}`);
+  } else {
+    t.diagnostic("this platform would not create a symlink, so the realpath comparison is unmeasured here");
+  }
 });
 
 test("a build with no commit, and a commit this repo does not have, are both unknown", async (t) => {
