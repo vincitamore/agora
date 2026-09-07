@@ -7,6 +7,7 @@ import { parseArgs } from "node:util";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { copyFile, readFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -661,6 +662,101 @@ function envPrefix(session, bearer) {
  * @type {Set<() => Promise<void> | void>} */
 const openTransports = new Set();
 
+/**
+ * @typedef {{
+ *   verb: string,
+ *   roomAlias: string | undefined,
+ *   rest: string[],
+ *   values: Record<string, unknown>,
+ *   env: NodeJS.ProcessEnv,
+ * }} ArgumentPreflightContext
+ */
+
+/**
+ * Every verb-specific argument refusal which must win over config loading. A row owns the
+ * complete shape for one verb surface: adding a verb adds a row instead of another block at
+ * the shared `loadConfig` anchor.
+ * @type {ReadonlyArray<{
+ *   name: string,
+ *   matches: (context: ArgumentPreflightContext) => boolean,
+ *   refusal: (context: ArgumentPreflightContext) => string | undefined,
+ * }>}
+ */
+export const ARGUMENT_PREFLIGHTS = Object.freeze([
+  {
+    name: "usage-sessions",
+    matches: ({ verb }) => verb === "usage-sessions",
+    refusal: ({ values }) => {
+      if (values["ledger-root"] === undefined) return "--ledger-root is required";
+      for (const flag of ["--ledger-max-bytes", "--ledger-max-entries"]) {
+        const raw = values[flag.slice(2)];
+        if (raw === undefined) continue;
+        const text = String(raw);
+        if (!/^[0-9]+$/.test(text) || Number(text) < 1) return `${flag} must be a positive integer`;
+      }
+      return undefined;
+    },
+  },
+  {
+    name: "service-route",
+    matches: ({ verb, roomAlias }) => verb === "service" && roomAlias === "route",
+    refusal: ({ values, rest }) => {
+      const sub = rest[0];
+      if (sub !== "open" && sub !== "list" && sub !== "close")
+        return "agora service route needs open, list or close";
+      if (sub === "list") return undefined;
+      if (rest[1] === undefined) return `agora service route ${sub} needs <room>`;
+      if (!/^[a-f0-9]{32}$/.test(String(rest[1]).trim()))
+        return "native room id must be 32 lowercase hexadecimal characters";
+      if (values["allow-key"] === undefined)
+        return `agora service route ${sub} needs --allow-key <nodekey:64hex>`;
+      if (!/^nodekey:[a-f0-9]{64}$/.test(String(values["allow-key"]).trim()))
+        return "--allow-key takes the public node key as enroll prints it: nodekey: followed by 64 hex characters";
+      return undefined;
+    },
+  },
+  {
+    name: "room-add-remote",
+    matches: ({ verb, roomAlias }) => verb === "room" && roomAlias === "add-remote",
+    refusal: ({ rest }) => {
+      if (rest[0] === undefined || rest[1] === undefined)
+        return "agora room add-remote needs <alias> <descriptor-path>";
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(String(rest[0])))
+        return "a room alias starts with a letter or digit and carries letters, digits, dot, underscore or hyphen";
+      if (!String(rest[1]).trim()) return "agora room add-remote needs a descriptor path";
+      return undefined;
+    },
+  },
+  {
+    name: "watch-codex-bridge",
+    matches: ({ verb }) => verb === "watch",
+    refusal: ({ values, env }) => codexBridgeRefusal(values, env),
+  },
+  {
+    name: "economy-shadow",
+    matches: ({ verb }) => verb === "economy",
+    refusal: ({ roomAlias, values }) => {
+      if (roomAlias !== "shadow") return `economy takes one subverb: shadow (got ${JSON.stringify(roomAlias ?? "")})`;
+      try {
+        readShadowArgs(values);
+        return undefined;
+      } catch (e) {
+        return e instanceof Error ? e.message : String(e);
+      }
+    },
+  },
+]);
+
+/** Refuse a matching verb's malformed arguments before any config-bearing handler runs.
+ * @param {ArgumentPreflightContext} context */
+export function runArgumentPreflights(context) {
+  for (const row of ARGUMENT_PREFLIGHTS) {
+    if (!row.matches(context)) continue;
+    const refusal = row.refusal(context);
+    if (refusal !== undefined) throw new AgoraError(refusal, EXIT.usage);
+  }
+}
+
 /** @param {string[]} argv */
 async function main(argv) {
   /** @type {ReturnType<typeof parseArgs<{ options: typeof OPTIONS, allowPositionals: true, strict: true }>>} */
@@ -697,6 +793,8 @@ async function main(argv) {
     return EXIT.ok;
   }
 
+  runArgumentPreflights({ verb, roomAlias, rest, values, env: process.env });
+
   // Room-less: do not load config. An unknown provider is exit 2 even on a machine with no agora.json.
   if (verb === "usage") {
     const ac = new AbortController();
@@ -722,19 +820,8 @@ async function main(argv) {
   }
 
   if (verb === "usage-sessions") {
-    // Missing --ledger-root is exit 2 before loadConfig: a missing config must not steal the usage code.
-    if (values["ledger-root"] === undefined) {
-      throw new AgoraError("--ledger-root is required", EXIT.usage);
-    }
-    /** @param {string} flag @param {unknown} raw */
-    const readLimit = (flag, raw) => {
-      if (raw === undefined) return undefined;
-      const s = String(raw);
-      if (!/^[0-9]+$/.test(s) || Number(s) < 1) throw new AgoraError(`${flag} must be a positive integer`, EXIT.usage);
-      return Number(s);
-    };
-    const maxBytes = readLimit("--ledger-max-bytes", values["ledger-max-bytes"]);
-    const maxEntries = readLimit("--ledger-max-entries", values["ledger-max-entries"]);
+    const maxBytes = values["ledger-max-bytes"] === undefined ? undefined : Number(values["ledger-max-bytes"]);
+    const maxEntries = values["ledger-max-entries"] === undefined ? undefined : Number(values["ledger-max-entries"]);
     const ac = new AbortController();
     const onStop = () => { try { ac.abort(); } catch { /* already aborted */ } };
     process.once("SIGINT", onStop);
@@ -764,56 +851,10 @@ async function main(argv) {
     }
   }
 
-  // `service route` refuses its own arguments before loadConfig, like every verb this cut
-  // touched: a missing or unreadable config must not steal the usage code from a missing
-  // --allow-key or a malformed room id. Its cell pins AGORA_CONFIG at a path that does not exist.
-  if (verb === "service" && roomAlias === "route") {
-    const sub = rest[0];
-    if (sub !== "open" && sub !== "list" && sub !== "close")
-      throw new AgoraError("agora service route needs open, list or close", EXIT.usage);
-    if (sub !== "list") {
-      if (rest[1] === undefined)
-        throw new AgoraError(`agora service route ${sub} needs <room>`, EXIT.usage);
-      // Present is not the same as well formed, and a malformed argument is still the verb's own:
-      // checking only presence here let a bad --allow-key reach loadConfig and exit 1 instead of 2.
-      if (!/^[a-f0-9]{32}$/.test(String(rest[1]).trim()))
-        throw new AgoraError("native room id must be 32 lowercase hexadecimal characters", EXIT.usage);
-      if (values["allow-key"] === undefined)
-        throw new AgoraError(`agora service route ${sub} needs --allow-key <nodekey:64hex>`, EXIT.usage);
-      if (!/^nodekey:[a-f0-9]{64}$/.test(String(values["allow-key"]).trim()))
-        throw new AgoraError("--allow-key takes the public node key as enroll prints it: nodekey: followed by 64 hex characters", EXIT.usage);
-    }
-  }
-
-  // `room add-remote` refuses its own arguments before loadConfig, so a missing or unreadable
-  // config cannot steal the usage code from a missing alias or path. Present is not the same as
-  // well formed: an alias that cannot name a room is refused here too, or a malformed one would
-  // reach loadConfig and exit 1 where the rule wants 2. The twin — both arguments given, with
-  // AGORA_CONFIG at a path that does not exist — must still REACH config and exit 1, which the
-  // alias-collision check below is what makes true.
-  if (verb === "room" && roomAlias === "add-remote") {
-    if (rest[0] === undefined || rest[1] === undefined)
-      throw new AgoraError("agora room add-remote needs <alias> <descriptor-path>", EXIT.usage);
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(String(rest[0])))
-      throw new AgoraError("a room alias starts with a letter or digit and carries letters, digits, dot, underscore or hyphen", EXIT.usage);
-    if (!String(rest[1]).trim())
-      throw new AgoraError("agora room add-remote needs a descriptor path", EXIT.usage);
-  }
-
-  // A watch under a Codex session with no delivery bridge is refused before config is read: the
-  // refusal is the verb's own (env plus flags), and a missing config must not steal its code.
-  if (verb === "watch") {
-    const refusal = codexBridgeRefusal(values, process.env);
-    if (refusal) throw new AgoraError(refusal, EXIT.usage);
-  }
-
   if (verb === "economy") {
     // Room-less and config-less: every argument is refused before any file is read, so a missing
     // config can never steal the usage code, and a machine with no agora.json replays a ledger.
-    if (roomAlias !== "shadow") throw new AgoraError(`economy takes one subverb: shadow (got ${JSON.stringify(roomAlias ?? "")})`, EXIT.usage);
-    let args;
-    try { args = readShadowArgs(values); }
-    catch (e) { throw new AgoraError(e instanceof Error ? e.message : String(e), EXIT.usage); }
+    const args = readShadowArgs(values);
     try {
       process.stdout.write(await runEconomyShadowCli({ ...args, json: Boolean(values.json) }));
       return EXIT.ok;
@@ -2209,7 +2250,14 @@ async function readStdin() {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-main(process.argv.slice(2)).then(
+/** Importing this executable exposes its preflight table to the structural cell without running it. */
+function isDirectRun() {
+  if (process.argv[1] === undefined) return false;
+  try { return realpathSync(process.argv[1]) === realpathSync(entryFile); }
+  catch { return path.resolve(process.argv[1]) === path.resolve(entryFile); }
+}
+
+if (isDirectRun()) main(process.argv.slice(2)).then(
   // Let stdout/stderr drain before exit. Pipes are asynchronous on POSIX: process.exit()
   // can truncate a successful read (or its diagnostic) after the verb has finished writing.
   (code) => { process.exitCode = code; },
