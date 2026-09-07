@@ -332,18 +332,25 @@ test("a member append lands under the minted principal, and the host account is 
  * over-estimate is in the direction that strands a caller.
  * @param {any} service
  */
-async function fillPastTheFrameCap(service) {
+async function fillPastTheFrameCap(service, { descending = false } = {}) {
   const store = await service.openRoom(ROOM);
-  let written = 0;
+  /** @type {number[]} */ const sizes = [];
   let bytes = 0;
   while (bytes <= NATIVE_FRAME_MAX) {
-    const size = 4 * 1024 + written * 3 * 1024;
+    const size = 4 * 1024 + sizes.length * 3 * 1024;
+    sizes.push(size);
+    bytes += size;
+  }
+  // Both orders are exercised by the cells below. Growing puts the heavy end where the store's
+  // default read slices, so a head-measuring host OVER-estimates and strands the caller; shrinking
+  // puts it at the other end, where the same defect UNDER-estimates and merely wastes a round.
+  // Only running both shows the fix selects the right end rather than being accidentally right.
+  if (descending) sizes.reverse();
+  for (const size of sizes) {
     await store.append({ operationId: randomUUID().replaceAll("-", ""), authorName: "filler", text: "x".repeat(size) },
       { accountId: ACCOUNT });
-    bytes += size;
-    written += 1;
   }
-  return written;
+  return sizes.length;
 }
 
 /** A greeted member session on a real route with the transport faked. */
@@ -418,6 +425,52 @@ test("the limit the refusal names is a limit for the messages the CALLER will ge
   // And it is the boundary from the caller's end too, so the host is not merely being conservative.
   const over = await request({ type: "read", limit: named + 1 });
   assert.equal(over.type, "error", `limit ${named + 1} fit, so the named limit understates what a caller can ask for`);
+});
+
+test("the named limit works with the heavy end LAST and with it FIRST, so the fix is not accidentally right", async (t) => {
+  const { service, request } = await memberSession(t);
+  // The reverse of the live shape. Newest are the SMALLEST here, so a head-measuring host
+  // under-estimates instead of over-estimating: it would name a limit that works and is needlessly
+  // small, which no "does the named limit succeed" assertion can catch on its own. Running both
+  // directions is what distinguishes selecting the right end from happening to be conservative.
+  await fillPastTheFrameCap(service, { descending: true });
+
+  const refused = await request({ type: "read" });
+  assert.equal(refused.type, "error");
+  const named = Number(refused.message.match(/re-read with limit (\d+)/)?.[1]);
+  assert.ok(Number.isInteger(named) && named > 0, `no usable limit named: ${refused.message}`);
+
+  const ok = await request({ type: "read", limit: named });
+  assert.equal(ok.type, "read-result", `the named limit refused in turn: ${ok.message ?? ""}`);
+  assert.equal(ok.messages.length, named);
+
+  const over = await request({ type: "read", limit: named + 1 });
+  assert.equal(over.type, "error",
+    `limit ${named + 1} fit, so with the heavy end first the host named a needlessly small limit`);
+});
+
+test("a read WITH a cursor names a limit for the forward slice, which is the other end entirely", async (t) => {
+  const { service, request } = await memberSession(t);
+  await fillPastTheFrameCap(service);
+  const store = await service.openRoom(ROOM);
+  // native-store.mjs slices FORWARD from a cursor (:617), so here the head is the right end and the
+  // fix must not "correct" it to a suffix. The twin exists because a fix aimed at one branch is
+  // exactly how the other branch breaks silently.
+  const since = `${store.manifest.epoch}:0`;
+
+  const refused = await request({ type: "read", since });
+  assert.equal(refused.type, "error", "a full forward read fit, so this cell measures nothing");
+  const named = Number(refused.message.match(/re-read with limit (\d+)/)?.[1]);
+  assert.ok(Number.isInteger(named) && named > 0, `no usable limit named: ${refused.message}`);
+
+  const ok = await request({ type: "read", since, limit: named });
+  assert.equal(ok.type, "read-result", `the named limit refused on the forward slice: ${ok.message ?? ""}`);
+  assert.equal(ok.messages.length, named);
+  assert.equal(ok.messages[0].cursor, `${store.manifest.epoch}:1`,
+    "the forward slice did not start at the cursor, so this cell is not reading the branch it names");
+
+  const over = await request({ type: "read", since, limit: named + 1 });
+  assert.equal(over.type, "error", `limit ${named + 1} fit on the forward slice, so the named limit understates it`);
 });
 
 test("a member read leaves the cursor where it was when the batch is refused", async (t) => {
