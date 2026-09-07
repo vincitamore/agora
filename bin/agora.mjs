@@ -204,7 +204,7 @@ const SCHEMA = {
         "--digest <s>": "render each message as author, cursor, first 80 characters, one envelope per period; the tool never summarises what a message means. A room config key digest (seconds) enables it when the flag is omitted; never a per-transport default",
         "--files": "materialize Slack-hosted images into this session's media directory; metadata is always carried",
       },
-      does: "deliver new messages since this session's saved cursor and advance it after delivery, skipping what this session posted; exit 42 when something arrived, 0 when nothing did, in every mode; always ends with one watch-result line. On each poll, a session on this seat that has gone dark and that has state in this room is announced to the room once, by whichever watch notices first, one post for the whole sweep. On a native room the watch subscribes to the seat service and wakes on its events instead of polling, with the same lines, cursor and exit codes; a service that is absent, refuses the hello, or closes the socket ends the watch with exit 1 and reason service-dark on the watch-result line, never as a quiet room",
+      does: "deliver new messages since this session's saved cursor and advance it after delivery, skipping what this session posted; exit 42 when something arrived, 0 when nothing did, in every mode; always ends with one watch-result line. On each poll, a session on this seat that has gone dark and that has state in this room is announced to the room once, by whichever watch notices first, one post for the whole sweep. On a native room the watch subscribes to the seat service and wakes on its events instead of polling, with the same lines, cursor and exit codes; a service that is absent, refuses the hello, or closes the socket ends the watch with exit 1 and reason service-dark on the watch-result line, never as a quiet room. A watch that ends for any transport reason first emits one watch-ended line addressed to its own bearer (reason, cursor, and the exact command to re-arm) and, under a Codex bridge, queues the same notice as one turn, attempted once; a watch that ends normally emits none",
     },
     cursor: {
       args: ["<room>"],
@@ -2195,6 +2195,39 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       const exit = result.reason ? EXIT.error : result.fired ? EXIT.fired : EXIT.ok;
       if (!json && !result.fired && !result.reason) console.error(`nothing new after ${result.polls} poll${result.polls === 1 ? "" : "s"}${result.skipped ? ` (${result.skipped} of our own skipped)` : ""}${result.filtered ? ` (${result.filtered} not for us, still readable)` : ""}`);
       if (result.reason) console.error(`agora: ${result.reason}`);
+      // A watch that ends for a TRANSPORT reason tells its own session so, once, before it goes:
+      // a dark service, a dropped member channel, a Codex task that is gone. Without this the seat
+      // learns it went deaf from a peer, hours later, because an exit code reaches nobody and the
+      // result line reads as bookkeeping. One addressed line into the same delivery path the
+      // watch's messages took: stdout (the harness monitor wakes on it, the tail script marks it)
+      // and, under a Codex bridge, one queued turn. Attempted once; a failed final delivery is
+      // logged and never retried, and the exit code is the transport's, unchanged. A watch that
+      // ends normally (--once, --for, a stand-down) emits nothing here. It is a distinct type,
+      // never a fabricated message, so it cannot be mistaken for room content.
+      if (result.reason) {
+        const reArm = ["agora", ...process.argv.slice(2)].join(" ");
+        const ended = {
+          type: "watch-ended", alias: roomAlias, room: transport.room, session: session.slug, bearer: bearer.name,
+          to: [bearer.name], reason: result.reason, cursor: result.cursor ?? null, re_arm: reArm,
+        };
+        if (json) console.log(JSON.stringify(ended));
+        else console.error(`agora: watch on ${roomAlias} ended: ${result.reason}; re-arm with: ${reArm}`);
+        const finalDelivery = codexQueue ?? codexServer;
+        if (finalDelivery) {
+          const notice = {
+            id: `watch-ended-${randomUUID().replaceAll("-", "")}`, cursor: result.cursor ?? "none",
+            text: `WATCH ENDED on ${roomAlias}: ${result.reason}. This session's watch on this room has exited and delivers nothing more until it is re-armed. Re-arm with: ${reArm}`,
+            author: { id: "agora-watch", name: "agora-watch", kind: "system" }, ts: new Date().toISOString(),
+          };
+          try {
+            if (codexQueue) await queueCodex(roomAlias, [/** @type {any} */ (notice)], { ...codexQueue, attempts: 1 });
+            else if (codexServer) await deliverCodexServer(roomAlias, [/** @type {any} */ (notice)], { ...codexServer });
+            console.error(`agora: watch-ended notice delivered to the Codex task`);
+          } catch (e) {
+            console.error(`agora: watch-ended notice was not delivered (${e instanceof Error ? redact(e.message) : String(e)}); the task learns of this exit only from its launcher's --status`);
+          }
+        }
+      }
       // one machine-readable line, fired or not: an exit code does not survive a wrapper
       const line = JSON.stringify({
         type: "watch-result",

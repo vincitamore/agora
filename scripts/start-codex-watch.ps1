@@ -75,6 +75,14 @@ $armed = Get-ArmedWatch
 if ($Status) {
     $watcherPid = if ($armed -and $armed.pid) { [int]$armed.pid } else { $null }
     $alive = [bool]($watcherPid -and (Get-Process -Id $watcherPid -ErrorAction SilentlyContinue))
+    # A watch that ended for a transport reason wrote one watch-ended line to its stdout log; when
+    # the armed pid is gone, that line is the reason, so -Status carries it.
+    $ended = $null
+    $stdoutLog = "$LogPrefix.stdout.log"
+    if (-not $alive -and (Test-Path $stdoutLog)) {
+        $lastEnded = Select-String -Path $stdoutLog -Pattern '"type":"watch-ended"' -SimpleMatch | Select-Object -Last 1
+        if ($lastEnded) { try { $ended = $lastEnded.Line | ConvertFrom-Json } catch { $ended = $lastEnded.Line } }
+    }
     [pscustomobject]@{
         room = $Room
         session = $SessionId
@@ -82,7 +90,8 @@ if ($Status) {
         supervisorPid = $(if ($alive) { Get-SupervisorPid $watcherPid } else { $null })
         alive = $alive
         armed = $armedPath
-    } | ConvertTo-Json -Compress
+        ended = $ended
+    } | ConvertTo-Json -Compress -Depth 4
     exit 0
 }
 if ($Stop) {
