@@ -20,7 +20,13 @@ Each line is decoded through `decodeSessionUsage` and committed. A decode that i
 not `supported` is not stored as overlap `none`. `--follow` re-reads the file each
 poll and ingests only lines past the ledger's persisted position for that locator
 when the line at that offset still matches the stored fingerprint. A shorter file
-or a fingerprint mismatch is a rotation: new generation, ingest from line one. Each snapshot reports ingest counts
+or a fingerprint mismatch is a rotation: new generation, ingest from line one.
+A replacement file that still has the identical line at the persisted offset
+reads as an append (named limit; a two-position fingerprint is deferred). A
+position written before this fingerprint existed carries a synthetic value, so
+the first poll after that change opens a new generation and re-ingests the
+file once; those events return as duplicates and the ledger absorbs them.
+Each snapshot reports ingest counts
 (`ingested`, `duplicate`, `unsupported`, `malformed`) and the offsets of failed
 lines: in the JSON object, and as one stderr line in text mode.
 
