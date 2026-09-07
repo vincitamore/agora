@@ -128,6 +128,82 @@ export async function stopService(stateRoot) {
 
 const ROOM_ID_RE = /^[a-f0-9]{32}$/;
 
+/** The public node key exactly as the remote's `enroll` prints it. There is deliberately no flag
+ * anywhere that takes a private key or a bare digest: `route open` admits a principal by the key
+ * the room's enrollment record published, and the absence of any other input is the enforcement. */
+const PUBLIC_NODE_KEY_RE = /^nodekey:[a-f0-9]{64}$/;
+
+/** @param {unknown} value @param {string} flag */
+function readPublicNodeKey(value, flag) {
+  const key = value === undefined ? "" : String(value).trim();
+  if (!PUBLIC_NODE_KEY_RE.test(key))
+    throw new AgoraError(`${flag} takes the public node key as enroll prints it: nodekey: followed by 64 hex characters`, EXIT.usage);
+  return key;
+}
+
+/** @param {unknown} value */
+function readRouteRoomId(value) {
+  const roomId = value === undefined ? "" : String(value).trim();
+  if (!ROOM_ID_RE.test(roomId))
+    throw new AgoraError("native room id must be 32 lowercase hexadecimal characters", EXIT.usage);
+  return roomId;
+}
+
+/**
+ * Admit one enrolled key to one room over a Tailcat member route.
+ *
+ * The route belongs to the seat SERVICE, not to this process: its resources are fenced to the
+ * service's own lifetime, so a listener started here would die when this verb exits. This is a
+ * request to the running service, the way `service room create` is.
+ * @param {string} stateRoot @param {unknown} roomId @param {unknown} publicNodeKey
+ */
+export async function openServiceRoute(stateRoot, roomId, publicNodeKey) {
+  const room = readRouteRoomId(roomId);
+  const key = readPublicNodeKey(publicNodeKey, "--allow-key");
+  const { client } = await connectSeatService(stateRoot);
+  try {
+    return await client.request("route-open", { roomId: room, publicNodeKey: key });
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    if (/route-already-open/.test(message)) throw new AgoraError(message, EXIT.error);
+    throw e;
+  } finally {
+    client.close();
+  }
+}
+
+/** Live routes, read from the service's own registry. A service restart drops every route.
+ * @param {string} stateRoot */
+export async function listServiceRoutes(stateRoot) {
+  const { client } = await connectSeatService(stateRoot);
+  try {
+    const result = await client.request("route-list", {});
+    return Array.isArray(result.routes) ? result.routes : [];
+  } finally {
+    client.close();
+  }
+}
+
+/**
+ * Revoke one route. Nothing runs on the remote, so its copy of the secret goes stale and fails
+ * the proof by name; a reopen mints a new generation whose descriptor and secret travel by hand.
+ * @param {string} stateRoot @param {unknown} roomId @param {unknown} publicNodeKey
+ */
+export async function closeServiceRoute(stateRoot, roomId, publicNodeKey) {
+  const room = readRouteRoomId(roomId);
+  const key = readPublicNodeKey(publicNodeKey, "--allow-key");
+  const { client } = await connectSeatService(stateRoot);
+  try {
+    return await client.request("route-close", { roomId: room, publicNodeKey: key });
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    if (/route-not-open/.test(message)) throw new AgoraError(message, EXIT.error);
+    throw e;
+  } finally {
+    client.close();
+  }
+}
+
 /**
  * Mint a native room on the running service. Never writes the shared config.
  * @param {string} stateRoot

@@ -133,6 +133,9 @@ agora service start
 agora service status
 agora service room create                    # prints a 32-hex roomId; does not edit agora.json
 agora service room create --room-id <32 hex> # use this id; duplicate is exit 1
+agora service route open <room> --allow-key <nodekey:64hex> [--out <path>]
+agora service route list
+agora service route close <room> --allow-key <nodekey:64hex>
 agora service stop
 ```
 
@@ -187,6 +190,9 @@ some-script | agora post download --stdin
 agora service start                          # write native/service.json and bind the endpoint
 agora service status                         # descriptor without the nonce
 agora service room create                    # mint a 32-hex roomId; never writes agora.json
+agora service route open <room> --allow-key <nodekey:64hex> [--out <path>]  # admit one enrolled key over Tailcat; the service owns the route
+agora service route list                     # live member routes from the service's registry, not from files
+agora service route close <room> --allow-key <nodekey:64hex>  # revoke; the remote's secret goes stale and its next hello is refused
 agora service stop                           # handshake, then bounded SIGTERM/SIGKILL; reaps the pane authority
 agora spawn --file request.json              # one bounded request in, one pane out; unknown keys refused; proven hello, open carries no cmd
 agora usage --provider codex --pool-id <id> [--timeout <ms>] [--json]  # one cooperative Codex quota read; no room; unknown providers refuse; never prints credentials or provider bodies
