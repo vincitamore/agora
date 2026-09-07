@@ -544,7 +544,9 @@ test("two CONCURRENT opens for one key: one route, one named refusal, no orphan 
   const lost = both.filter((r) => r.status === "rejected");
   assert.equal(won.length, 1, "both concurrent opens were admitted");
   assert.equal(lost.length, 1, "neither open was refused");
-  assert.match(String(/** @type {PromiseRejectedResult} */ (lost[0]).reason.message), /route-already-open/);
+  // The loser arrived while the winner was a reservation, not yet a registry entry: the refusal
+  // names that state, because `route close` at that instant would say route-not-open.
+  assert.match(String(/** @type {PromiseRejectedResult} */ (lost[0]).reason.message), /route-already-open: .*that route is opening; wait for it to settle/);
   assert.equal(service.listRoutes().length, 1);
 
   // The registry can look right while a second listener is still up: the orphan is the defect,
@@ -661,7 +663,7 @@ test("route-already-open names the state: a live route says close it, a closing 
   await assert.rejects(service.closeRoute({ roomId: ROOM, publicNodeKey: KEY }), /cleanup is pending/);
   assert.equal(service.listRoutes()[0].state, "closing");
   // The key is held while the resource settles: the refusal says so, and says what to do.
-  await assert.rejects(openFakedRoute(service), /route-already-open: .*that route is closing; wait for its close to settle/);
+  await assert.rejects(openFakedRoute(service), /route-already-open: .*that route is closing; wait for it to settle/);
   release();
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
