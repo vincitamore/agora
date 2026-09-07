@@ -70,6 +70,7 @@ import { SERVICE_DARK, ServiceDarkError, openNativeSubscription, serviceDescript
 import { createServiceRoom, runService, seatAccountId, seatLabel, serviceStatus, startService, stopService } from "../src/service-cli.mjs";
 import { spawnFromFile } from "../src/spawn-cli.mjs";
 import { runUsage } from "../src/usage-cli.mjs";
+import { runUsageSessionsCli } from "../src/session-accounting.mjs";
 import { clearStandDown, clearWatchStop, completeStandDownAck, declareStandDown, listStandDowns, standDownRequested } from "../src/stand-down.mjs";
 import { FACE_ATTACHMENT_MODES, FACE_BUILT, FACE_SELECTORS, appendFaceRecord, facePolicyPath, listFaceRecords, normalizeSelectors, readFacePolicy, selectFaces, writeFacePolicy } from "../src/faces.mjs";
 
@@ -266,6 +267,19 @@ const SCHEMA = {
       },
       does: "one bounded cooperative usage read through the Codex collector. No room. Unknown providers refuse. Never prints credentials or provider bodies. The collector clock is injected, not --now",
     },
+    "usage-sessions": {
+      args: [],
+      options: {
+        "--ledger-root <path>": "E1c ledger directory (required for measured rows)",
+        "--bind <file>": "JSON object mapping session slug to {harness, sessionEpoch, sourceId}; pid and bootEpoch are refused",
+        "--room <key>": "only members with state in this cursor key",
+        "--json": "one inventory object",
+        "--follow": "emit a snapshot each interval until --for or SIGINT; a one-shot is not this mode",
+        "--interval <s>": "seconds between follow snapshots, default 1, max 60",
+        "--for <s>": "give up after this many seconds (follow)",
+      },
+      does: "list every joined member with measured session usage or an explicit unsupported reason. Never prints transcript text or credentials. Missing is not zero. SIGINT/SIGTERM abort the owned controller",
+    },
   },
 };
 
@@ -353,6 +367,9 @@ const OPTIONS = /** @type {const} */ ({
   provider: { type: "string" },
   timeout: { type: "string" },
   "pool-id": { type: "string" },
+  "ledger-root": { type: "string" },
+  bind: { type: "string" },
+  room: { type: "string" },
 });
 
 /**
@@ -635,6 +652,33 @@ async function main(argv) {
         json: Boolean(values.json),
         signal: ac.signal,
         ...(values["codex-bin"] !== undefined ? { codexPath: String(values["codex-bin"]) } : {}),
+      });
+      if (result.stdout) process.stdout.write(result.stdout);
+      if (result.stderr) process.stderr.write(result.stderr);
+      return result.exit;
+    } finally {
+      process.off("SIGINT", onStop);
+      process.off("SIGTERM", onStop);
+    }
+  }
+
+  if (verb === "usage-sessions") {
+    const ac = new AbortController();
+    const onStop = () => { try { ac.abort(); } catch { /* already aborted */ } };
+    process.once("SIGINT", onStop);
+    process.once("SIGTERM", onStop);
+    try {
+      const cfg = await loadConfig(values.config);
+      const result = await runUsageSessionsCli({
+        stateRoot: stateDir(cfg),
+        ledgerRoot: values["ledger-root"] !== undefined ? String(values["ledger-root"]) : undefined,
+        bindPath: values.bind !== undefined ? String(values.bind) : undefined,
+        roomKey: values.room !== undefined ? String(values.room) : undefined,
+        json: Boolean(values.json),
+        follow: Boolean(values.follow),
+        interval: values.interval !== undefined ? String(values.interval) : undefined,
+        forSeconds: values.for !== undefined ? String(values.for) : undefined,
+        signal: ac.signal,
       });
       if (result.stdout) process.stdout.write(result.stdout);
       if (result.stderr) process.stderr.write(result.stderr);

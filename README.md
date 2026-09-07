@@ -190,6 +190,7 @@ agora service room create                    # mint a 32-hex roomId; never write
 agora service stop                           # handshake, then bounded SIGTERM/SIGKILL; reaps the pane authority
 agora spawn --file request.json              # one bounded request in, one pane out; unknown keys refused; proven hello, open carries no cmd
 agora usage --provider codex --pool-id <id> [--timeout <ms>] [--json]  # one cooperative Codex quota read; no room; unknown providers refuse; never prints credentials or provider bodies
+agora usage-sessions --ledger-root <path> [--bind <file>] [--room <key>] [--json] [--follow]  # joined members with measured usage or explicit unsupported; missing is not zero
 agora stand-down --until 2026-09-07T12:00:00Z --because "meter"  # persist first, then cooperative stop; doctor lists until
 agora stand-down --until 2026-09-07T12:00:00Z --because "meter" --keep-watches  # declare without signalling
 agora resume                                 # clear the record; does not start a session or re-arm watches
@@ -405,7 +406,7 @@ is no `agora spawn` verb. An unknown key is exit 1 `request-field-unknown` and n
 key.
 
 CI: `.github/workflows/test.yml`. Linux and Windows jobs run on the house self-hosted
-runners; macOS stays on GitHub-hosted. The spawn job is bun-only; the tui job declares
+runners; macOS is off. The spawn job is bun-only; the tui job declares
 node. Every new package lands with its own job. House runners stay unfurnished.
 
 A native room writer takes `writer.lock` by exclusive create (`wx`). After EEXIST, only

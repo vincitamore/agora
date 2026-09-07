@@ -493,6 +493,8 @@ in the config says which lane it is.
 
 **Usage is a room-less cooperative read.** `agora usage --provider codex --pool-id <id> [--timeout <ms>] [--json]` runs one Codex collector snapshot and prints it. Unknown providers are a usage error. `--timeout` is milliseconds, not `--now` (that flag remains `cursor --now`). JSON stdout is the result only. Unsupported collector codes are exit 1. Never prints credentials or provider bodies. Not a stored pool register and not a ServiceRef.
 
+**Session accounting lists joined members.** `agora usage-sessions --ledger-root <path> [--bind <file>] [--room <key>] [--json] [--follow] [--interval <s>] [--for <s>]` prints every joined member with measured E1c usage or an explicit unsupported reason. Binding is `{harness, sessionEpoch, sourceId}` per slug; pid and bootEpoch are refused. Missing is not zero. Never prints transcript text. `--follow` is the continuous mode; a one-shot is not. SIGINT/SIGTERM abort the owned controller.
+
 **Stand-down is a session record, not a wake.** `agora stand-down --until <rfc3339> --because <text>` writes `sessions/<slug>/stand-down.json` first, then asks this session's watches to exit via a per-arm generation stop file. The running watch holds its generation in memory and returns stand-down after flushing; the ack is written only after that return, never from the guard. Resume and a new arm clear leftover stop files; a replacement generation does not inherit an old request. There is no SIGTERM. A watch that does not ack is `refused`, never `drained`. `--keep-watches` declares without asking. `agora resume` clears the record from a live session and does not start a session or re-arm watches. Nothing in agora starts a harness session; a timestamp is not a wake. The seat service descriptor carries the build it loaded; `doctor` warns `stale-service-build` when that predates the installed tool. Re-arming watches after a landing is not a service restart.
 
 **A native room's faces are its policy, and a post can override it for itself.** A face is
@@ -886,7 +888,7 @@ Details and maintainer checks: [docs/TRANSFERS.md](../../docs/TRANSFERS.md).
   gated by `test/acceptance/`; a probe that exists only as a command one bearer typed is
   not a gate. Every new package lands with its own job in `.github/workflows/test.yml`.
   Linux and Windows CI run on the house self-hosted runners (unfurnished: no assumed
-  `node`/`cmd.exe` on PATH); macOS stays on GitHub-hosted. The spawn job is bun-only
+  `node`/`cmd.exe` on PATH); macOS is off. The spawn job is bun-only
   (`setup-bun`, no `setup-node`); the tui job declares node.
 - `bin/agora.mjs` stays tracked as mode `100755`; `npm link` on macOS or Linux installs it
   as-is and refuses to run a non-executable file. A Windows checkout does not carry the
