@@ -185,6 +185,10 @@ export async function readRouteSecret(root, binding, proofRef) {
 /** @param {string} root @param {{ grantId: string, routeGeneration: string }} binding */
 export async function removeRouteSecret(root, binding) {
   const file = routeSecretPath(root, binding, routeProofRef(binding));
+  // This is the only recursive delete in the file, so it validates its own path component rather
+  // than relying on routeProofRef above having validated grantId for a different purpose. A
+  // refactor that reorders those lines must not silently widen an rm -r.
+  validateNativeIdText(binding.grantId, "grant id");
   await rm(file, { force: true });
   // close is revocation: the generation directory goes with the secret, so a reopen must mint a
   // new generation rather than reviving this one.
@@ -261,6 +265,10 @@ export function assertDescriptorDigest(value) {
  * @param {Record<string, unknown>} base
  */
 export function memberTranscript(binding, base) {
+  // The spread ORDER is the security property, not a style choice: `base` goes first and the
+  // binding's fields last, so a hostile or careless base cannot override roomId, grantId,
+  // routeGeneration or the minted principal. Reversing these two lines would let the caller
+  // choose what the proof binds to.
   // seatLabel and the host's own accountId belong to the LOCAL transcript. The remote reads both
   // from service.json, which it does not have, so including them would bind the proof to values
   // the far side has no source for; host identity is carried by serviceBootId and the grant.
