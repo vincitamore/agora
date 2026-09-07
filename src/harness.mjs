@@ -333,7 +333,15 @@ export async function clearWatchMode(target, opts = {}) {
 /** Whitespace or a comment, anywhere a specifier may legally be preceded by one. */
 const GAP = "(?:\\s|/\\*[\\s\\S]*?\\*/|//[^\\n]*\\n)*";
 /** A quoted specifier, capturing the quote so a template can be told from a string. */
-const SPEC = "([\"'`])([^\"'`]*)\\1";
+/** A quoted specifier, capturing the quote so a template can be told from a string.
+ *
+ * The body excludes only the OPENING quote, by lookahead, not all three: a filename may legally
+ * contain the other two, Node executes such an import, and a class of `[^"\'`]` stops at the first
+ * one and misses the whole statement — a module dropped in silence, which is the one direction this
+ * scanner may never take. An escape sequence is consumed as a unit here and reported downstream,
+ * since decoding it is not this scanner's job.
+ */
+const SPEC = "([\"'`])((?:(?!\\1)[^\\\\]|\\\\.)*)\\1";
 const FROM_SPEC = new RegExp(`\\bfrom${GAP}${SPEC}`, "g");
 const BARE_IMPORT = new RegExp(`(?:^|[;\\n])${GAP}import${GAP}${SPEC}`, "g");
 const DYNAMIC_CALL = new RegExp(`\\bimport${GAP}\\(`, "g");
