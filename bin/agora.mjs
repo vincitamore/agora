@@ -616,6 +616,30 @@ async function main(argv) {
     return EXIT.ok;
   }
 
+  // Room-less: do not load config. An unknown provider is exit 2 even on a machine with no agora.json.
+  if (verb === "usage") {
+    const ac = new AbortController();
+    const onStop = () => { try { ac.abort(); } catch { /* already aborted */ } };
+    process.once("SIGINT", onStop);
+    process.once("SIGTERM", onStop);
+    try {
+      const result = await runUsage({
+        provider: values.provider !== undefined ? String(values.provider) : undefined,
+        poolId: values["pool-id"] !== undefined ? String(values["pool-id"]) : undefined,
+        timeout: values.timeout !== undefined ? String(values.timeout) : undefined,
+        json: Boolean(values.json),
+        signal: ac.signal,
+        ...(values["codex-bin"] !== undefined ? { codexPath: String(values["codex-bin"]) } : {}),
+      });
+      if (result.stdout) process.stdout.write(result.stdout);
+      if (result.stderr) process.stderr.write(result.stderr);
+      return result.exit;
+    } finally {
+      process.off("SIGINT", onStop);
+      process.off("SIGTERM", onStop);
+    }
+  }
+
   const cfg = await loadConfig(values.config);
   const json = Boolean(values.json);
   const build = await installedBuild({ version, root: projectRoot, entry: entryFile });
@@ -855,29 +879,6 @@ async function main(argv) {
     else if (rec) console.log(`stand-down cleared (was until ${rec.until}). Re-arm watches from this live session; nothing started a session.`);
     else console.log("no stand-down record for this session");
     return EXIT.ok;
-  }
-
-  if (verb === "usage") {
-    const ac = new AbortController();
-    const onStop = () => { try { ac.abort(); } catch { /* already aborted */ } };
-    process.once("SIGINT", onStop);
-    process.once("SIGTERM", onStop);
-    try {
-      const result = await runUsage({
-        provider: values.provider !== undefined ? String(values.provider) : undefined,
-        poolId: values["pool-id"] !== undefined ? String(values["pool-id"]) : undefined,
-        timeout: values.timeout !== undefined ? String(values.timeout) : undefined,
-        json: Boolean(values.json),
-        signal: ac.signal,
-        ...(values["codex-bin"] !== undefined ? { codexPath: String(values["codex-bin"]) } : {}),
-      });
-      if (result.stdout) process.stdout.write(result.stdout);
-      if (result.stderr) process.stderr.write(result.stderr);
-      return result.exit;
-    } finally {
-      process.off("SIGINT", onStop);
-      process.off("SIGTERM", onStop);
-    }
   }
 
   if (verb === "rooms") {

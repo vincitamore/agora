@@ -95,8 +95,36 @@ test('collector unsupported becomes exit 1 with the bounded code', async () => {
 });
 
 test('CLI subprocess: unknown provider is usage exit 2', () => {
-  const run = spawnSync(process.execPath, [bin, 'usage', '--provider', 'nope', '--pool-id', POOL], { encoding: 'utf8' });
-  assert.equal(run.status, 2);
+  const dir = mkdtempSync(path.join(tmpdir(), 'agora-n3-usage-'));
+  const env = { ...process.env };
+  for (const name of [
+    'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_PID',
+    'GROK_SESSION_ID', 'GROK_PID', 'CODEX_THREAD_ID', 'CODEX_SESSION_ID',
+    'HERMES_SESSION_ID', 'AGORA_SESSION_PID', 'AGORA_SESSION', 'AGORA_ACTOR',
+    'AGORA_CONFIG', 'AGORA_STATE', 'AGORA_CODEX_BIN', 'HOME', 'USERPROFILE',
+  ]) delete env[name];
+  env.HOME = dir;
+  env.USERPROFILE = dir;
+  try {
+    const missing = spawnSync(process.execPath, [bin, 'usage', '--provider', 'nope', '--pool-id', POOL], {
+      encoding: 'utf8', cwd: dir, env, windowsHide: true,
+    });
+    assert.equal(missing.status, 2, missing.stderr);
+    assert.match(missing.stderr, /unsupported --provider/);
+    writeFileSync(path.join(dir, 'agora.json'), JSON.stringify({
+      actor: { name: 'n3', kind: 'agent' },
+      rooms: { down: { transport: 'local', path: path.join(dir, 'down.ndjson') } },
+    }));
+    env.AGORA_CONFIG = path.join(dir, 'agora.json');
+    env.AGORA_STATE = path.join(dir, 'state');
+    const withConfig = spawnSync(process.execPath, [bin, 'usage', '--provider', 'nope', '--pool-id', POOL], {
+      encoding: 'utf8', cwd: dir, env, windowsHide: true,
+    });
+    assert.equal(withConfig.status, 2, withConfig.stderr);
+    assert.match(withConfig.stderr, /unsupported --provider/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('CLI subprocess: schema lists usage', () => {
