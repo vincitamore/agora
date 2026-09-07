@@ -2,7 +2,12 @@
 // Synthetic Codex app-server for N3 CLI subprocess tests. No network, no credentials.
 // Speaks the measured handshake: reply to `initialize`, ignore `initialized`, reply to
 // `account/rateLimits/read`. The collector spawn is `<bin> app-server --stdio`.
+// FAKE_CODEX_HANG=1 replies to initialize only, so the collector waits until abort or timeout.
+// FAKE_CODEX_PIDFILE writes this process's pid for owned-helper cleanup checks.
+import { writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
+
+if (process.env.FAKE_CODEX_PIDFILE) writeFileSync(process.env.FAKE_CODEX_PIDFILE, String(process.pid));
 
 const reply = {
   accountId: process.env.FAKE_CODEX_ACCOUNT_ID || 'account-synthetic-0001',
@@ -32,6 +37,7 @@ rl.on('line', (line) => {
     return;
   }
   if (msg.method === 'account/rateLimits/read' && msg.id !== undefined) {
+    if (process.env.FAKE_CODEX_HANG) return;
     process.stdout.write(`${JSON.stringify({ id: msg.id, result: reply })}\n`);
   }
 });

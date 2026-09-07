@@ -858,16 +858,26 @@ async function main(argv) {
   }
 
   if (verb === "usage") {
-    const result = await runUsage({
-      provider: values.provider !== undefined ? String(values.provider) : undefined,
-      poolId: values["pool-id"] !== undefined ? String(values["pool-id"]) : undefined,
-      timeout: values.timeout !== undefined ? String(values.timeout) : undefined,
-      json: Boolean(values.json),
-      ...(values["codex-bin"] !== undefined ? { codexPath: String(values["codex-bin"]) } : {}),
-    });
-    if (result.stdout) process.stdout.write(result.stdout);
-    if (result.stderr) process.stderr.write(result.stderr);
-    return result.exit;
+    const ac = new AbortController();
+    const onStop = () => { try { ac.abort(); } catch { /* already aborted */ } };
+    process.once("SIGINT", onStop);
+    process.once("SIGTERM", onStop);
+    try {
+      const result = await runUsage({
+        provider: values.provider !== undefined ? String(values.provider) : undefined,
+        poolId: values["pool-id"] !== undefined ? String(values["pool-id"]) : undefined,
+        timeout: values.timeout !== undefined ? String(values.timeout) : undefined,
+        json: Boolean(values.json),
+        signal: ac.signal,
+        ...(values["codex-bin"] !== undefined ? { codexPath: String(values["codex-bin"]) } : {}),
+      });
+      if (result.stdout) process.stdout.write(result.stdout);
+      if (result.stderr) process.stderr.write(result.stderr);
+      return result.exit;
+    } finally {
+      process.off("SIGINT", onStop);
+      process.off("SIGTERM", onStop);
+    }
   }
 
   if (verb === "rooms") {
