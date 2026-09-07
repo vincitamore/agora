@@ -70,7 +70,22 @@ export async function atomicJson(target,data) {
  * can go between the two, and the second call quietly mints.
  * @param {string} stateRoot @param {{resolveBinary?:typeof resolveTailcatBinary, exec?:typeof exec, create?:boolean}} [deps] */
 export async function localTransferIdentity(stateRoot,deps={}) {
-  const dir=await privateDirectory(path.join(stateRoot,'tailcat'));
+  const home=path.join(stateRoot,'tailcat');
+  // A no-create read creates NOTHING, the directory included. privateDirectory mkdirs before the
+  // refusal below can fire, so a failed dial on an un-enrolled seat used to leave an empty
+  // tailcat/ behind: a side effect of a call whose whole point is to have none, and a directory a
+  // later reader would take as evidence that enrolment had been attempted.
+  let dir;
+  if(deps.create===false) {
+    dir=home;
+    try {
+      const st=await lstat(home);
+      if(!st.isDirectory() || st.isSymbolicLink()) throw new AgoraError('Transfer state must be a private directory, not a link. Select a private AGORA_STATE and retry.');
+    } catch(e) {
+      if(/** @type {NodeJS.ErrnoException} */(e).code!=='ENOENT') throw e;
+      throw new AgoraError(`enrollment-absent: this seat has no Agora transfer identity under ${home}; run \`agora enroll <room>\` on the room the descriptor came through. This call does not mint one, and has created nothing.`);
+    }
+  } else dir=await privateDirectory(home);
   const keyPath=path.join(dir,'identity.private.json');
   const runner=deps.exec ?? exec;
   try {

@@ -6,7 +6,7 @@
 // those are T3's, on two real machines. Every cell that claims a refusal asserts the NAMED reason.
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { EventEmitter } from "node:events";
@@ -112,10 +112,12 @@ async function rig(t, over = {}) {
 
   /** @type {((socket: any) => void) | undefined} */
   let accept;
+  /** Latest accept hook, so a reopened route can be wired in a cell. @type {{ fn?: (socket:any)=>void }} */
+  const hostAccept = {};
   const opened = await service.openRoute({
     roomId: ROOM, publicNodeKey: KEY,
     routeOptions: {
-      listen: async (/** @type {(socket: any) => void} */ hook) => { accept = hook; return { port: 4242, close: async () => {} }; },
+      listen: async (/** @type {(socket: any) => void} */ hook) => { accept = hook; hostAccept.fn = hook; return { port: 4242, close: async () => {} }; },
       spawn: async (/** @type {string[]} */ args, /** @type {any} */ _r, /** @type {any} */ owner) =>
         fakeChild({ exit: args[0] === "parse" ? 0 : null, signal: owner?.signal }),
       address: async () => ADDRESS,
@@ -164,7 +166,7 @@ async function rig(t, over = {}) {
     // before `ownStream` has attached an error handler — a fixture artifact, not a product path.
     hostSide.on("error", () => {});
     hostStreams.push(hostSide);
-    const wire = () => /** @type {(socket: any) => void} */ (accept)(hostSide);
+    const wire = () => /** @type {(socket: any) => void} */ (hostAccept.fn ?? accept)(hostSide);
     if (holding) held = { release: wire }; else wire();
     return { stdout: toClient, stdin: spy };
   };
@@ -204,7 +206,7 @@ async function rig(t, over = {}) {
     return made;
   };
   const room = makeRoom();
-  return { hostRoot, seatRoot, service, opened, secret, room, makeRoom, hostStreams, keyPath, gate, subscribes, spawned };
+  return { hostRoot, seatRoot, service, opened, secret, room, makeRoom, hostStreams, keyPath, gate, subscribes, spawned, hostAccept };
 }
 
 /** @param {string} root @param {any} descriptor */
@@ -265,6 +267,11 @@ test("a connect never mints an identity: the refusal is named and no key is left
   // the two observations.
   await assert.rejects(localTransferIdentity(root, { create: false }), /enrollment-absent/);
   await assert.rejects(stat(keyPath), /ENOENT/, "the no-create read minted an identity anyway");
+  // And it creates NOTHING, the directory included. The helper made its private directory before
+  // the refusal could fire, so a failed dial on an un-enrolled seat left an empty tailcat/ behind:
+  // a side effect of a call whose whole point is to have none, and a directory a later reader would
+  // take as evidence that enrolment had been attempted.
+  assert.deepEqual(await readdir(root), [], "the no-create read left something behind in the state root");
 
   // And the caller passes it. One call, and the flag is what refuses.
   /** @type {any[]} */
@@ -633,17 +640,35 @@ test("a NAMED refusal on a re-dial is not retried: one attempt, and it reports i
 });
 
 test("a client held across a route close fails by name on the next verb, and the re-dial does too", async (t) => {
-  const { room, service, opened } = await rig(t);
+  const { room, service, opened, hostAccept } = await rig(t);
   const held = await room.client();
   assert.ok((await held.request("status", { roomId: ROOM })).status, "the route was not usable before the close");
 
   await service.closeRoute({ roomId: ROOM, publicNodeKey: KEY });
 
-  // The held client must not answer a verb for a revoked route out of a live-looking socket.
-  await assert.rejects(held.request("status", { roomId: ROOM }), /./);
-  // And the next dial fails too: close is revocation, the secret and its generation are gone, so
-  // there is nothing on the host to prove against.
-  await assert.rejects(room.client(), /./);
+  // The held client must not answer a verb for a revoked route out of a socket that still looks
+  // live. Measured, not assumed: the shared request machine refuses because the socket is gone.
+  await assert.rejects(held.request("status", { roomId: ROOM }), /dark; request was not sent/);
+
+  // The next dial: close tears down the LISTENER as well as the secret, so nothing on the host is
+  // left to refuse the handshake and the remote learns of revocation as an unreachable route. That
+  // is a named end (member-channel-dark), not a proof refusal, and the docs say so in those words
+  // because a reader who knows the secret was rotated would expect the other one.
+  await assert.rejects(room.client(), /member-channel-dark/);
+
+  // Reopened: a new grant and a new generation, the remote still holding the old descriptor. The
+  // binding comparison fires BEFORE the proof, so this is a binding mismatch and not a stale-secret
+  // proof failure either. Pinned because the obvious expectation is wrong in both directions.
+  await service.openRoute({
+    roomId: ROOM, publicNodeKey: KEY,
+    routeOptions: {
+      listen: async (/** @type {(socket:any)=>void} */ hook) => { hostAccept.fn = hook; return { port: 4243, close: async () => {} }; },
+      spawn: async (/** @type {string[]} */ args, /** @type {any} */ _r, /** @type {any} */ owner) =>
+        fakeChild({ exit: args[0] === "parse" ? 0 : null, signal: owner?.signal }),
+      address: async () => ADDRESS,
+    },
+  });
+  await assert.rejects(room.client(), /member-binding-mismatch/);
   // The revocation is real on disk, which is what makes the two rejections above mean revocation
   // rather than a flaky socket.
   const { readRouteSecret } = await import("../src/native-member.mjs");
