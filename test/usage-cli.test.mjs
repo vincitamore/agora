@@ -1,8 +1,9 @@
 // @ts-check
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { existsSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { setTimeout as delay } from 'node:timers/promises';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -253,4 +254,72 @@ test('extra keys on a collector result are not serialized, and an error still pr
   assert.equal(Object.hasOwn(parsed, 'accessToken'), false);
   assert.equal(r.stdout.includes('Bearer secret'), false);
   assert.equal(r.stdout.includes('leaked'), false);
+});
+
+/** @param {number} pid */
+function pidAlive(pid) {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+test('CLI SIGINT cancels and reaps only the owned helper', { timeout: 20000 }, async (t) => {
+  if (process.platform === 'win32') {
+    t.diagnostic('win32 process.kill is TerminateProcess; SIGINT is not delivered to the CLI. Graceful AbortSignal is not exhibited here.');
+    t.skip('win32 process.kill does not deliver SIGINT');
+    return;
+  }
+  const dir = mkdtempSync(path.join(tmpdir(), 'agora-n3-cancel-'));
+  const pidfile = path.join(dir, 'helper.pid');
+  writeFileSync(path.join(dir, 'agora.json'), JSON.stringify({
+    actor: { name: 'n3', kind: 'agent' },
+    rooms: { down: { transport: 'local', path: path.join(dir, 'down.ndjson') } },
+  }));
+  writeFileSync(path.join(dir, 'down.ndjson'), '');
+  writeFileSync(path.join(dir, 'package.json'), '{"type":"module"}\n');
+  writeFileSync(path.join(dir, 'app-server.js'), readFileSync(fileURLToPath(new URL('./fixtures/usage/fake-codex-app-server.mjs', import.meta.url))));
+  const env = { ...process.env };
+  for (const name of [
+    'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_PID',
+    'GROK_SESSION_ID', 'GROK_PID', 'CODEX_THREAD_ID', 'CODEX_SESSION_ID',
+    'HERMES_SESSION_ID', 'AGORA_SESSION_PID', 'AGORA_SESSION', 'AGORA_ACTOR',
+    'AGORA_CONFIG', 'AGORA_STATE', 'AGORA_CODEX_BIN', 'FAKE_CODEX_ACCOUNT_ID',
+  ]) delete env[name];
+  env.AGORA_CONFIG = path.join(dir, 'agora.json');
+  env.AGORA_STATE = path.join(dir, 'state');
+  env.AGORA_SESSION = 'n3-usage-cancel';
+  env.FAKE_CODEX_HANG = '1';
+  env.FAKE_CODEX_PIDFILE = pidfile;
+  const child = spawn(process.execPath, [
+    bin, 'usage', '--provider', 'codex', '--pool-id', 'pool_synthetic_codex_001',
+    '--json', '--timeout', '15000', '--codex-bin', process.execPath,
+  ], { cwd: dir, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (s) => { stdout += s; });
+  child.stderr.on('data', (s) => { stderr += s; });
+  const started = Date.now();
+  try {
+    let helperPid = 0;
+    for (let i = 0; i < 80 && !helperPid; i++) {
+      await delay(50);
+      if (existsSync(pidfile)) helperPid = Number(readFileSync(pidfile, 'utf8').trim());
+    }
+    assert.ok(helperPid > 0, 'hanging helper never wrote its pid');
+    assert.equal(pidAlive(helperPid), true);
+    child.kill('SIGINT');
+    const status = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('CLI did not exit after SIGINT')), 8000);
+      child.once('close', (code) => { clearTimeout(timer); resolve(code); });
+    });
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed < 8000, `looked like timeout not cancel: ${elapsed}ms`);
+    assert.equal(status, 1, `stderr=${stderr}\nstdout=${stdout}`);
+    assert.match(stdout, /codex-cancelled/);
+    await delay(200);
+    assert.equal(pidAlive(helperPid), false, `owned helper ${helperPid} still alive`);
+  } finally {
+    try { child.kill('SIGKILL'); } catch { /* gone */ }
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
