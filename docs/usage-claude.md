@@ -78,7 +78,9 @@ numeric window arithmetic.
 
 Missing or invalid credential, 401, timeout, cancel, oversized body, malformed JSON, redirect,
 wrong origin, provider rejection, missing organization, or no represented windows: an explicit
-non-value code, never a quota of zero.
+non-value code, never a quota of zero. Body and reader `cancel()` are discarded, not awaited:
+a rejected or never-settling cancel cannot hang the collector or become an unhandled rejection
+after a bounded return.
 
 ## What this is not
 

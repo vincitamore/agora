@@ -1,6 +1,10 @@
 // @ts-check
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   collectClaudeUsage, normalizeUsageAndProfile, windowsFromUsage, resetsAtToIso, CLAUDE_ORIGIN, CLAUDE_LIMITS,
 } from '../src/usage/claude.mjs';
@@ -406,4 +410,101 @@ test('stdout JSON path never includes the token in the result object', async () 
   const dumped = JSON.stringify(result);
   assert.equal(dumped.includes('synthetic-token'), false);
   assert.equal(dumped.includes('Authorization'), false);
+});
+
+function runIsolatedCollector(/** @type {string} */ body) {
+  const collector = new URL('../src/usage/claude.mjs', import.meta.url).href;
+  const dir = mkdtempSync(join(tmpdir(), 'n4-cancel-'));
+  const file = join(dir, 'probe.mjs');
+  writeFileSync(file, [
+    "import { collectClaudeUsage } from '" + collector + "';",
+    body,
+    'await new Promise((res) => setTimeout(res, 200));',
+  ].join('\n'), 'utf8');
+  return spawnSync(process.execPath, [file], { encoding: 'utf8' });
+}
+
+test('a rejecting body.cancel on 401 does not crash the calling process', () => {
+  const run = runIsolatedCollector([
+    'const body = new ReadableStream({ cancel() { return Promise.reject(new Error("SYNTHETIC_CANCEL_REJECT")); } });',
+    'const r = await collectClaudeUsage({',
+    "  poolId: '" + POOL + "',",
+    "  producer: { producerId: '" + PRODUCER.producerId + "', generation: 1, sequence: 1 },",
+    "  now: () => new Date('2026-09-07T00:20:00.000Z'),",
+    "  readCredential: async () => 't',",
+    '  fetch: async () => ({ status: 401, body }),',
+    '});',
+    "console.log('RESULT ' + r.status + ' ' + (r.code || ''));",
+  ].join('\n'));
+  assert.equal(run.status, 0, 'a rejected cancel must not terminate the caller');
+  assert.equal(/^\s*at .*:\d+:\d+/m.test(run.stderr || ''), false, 'a raw stack reached stderr');
+  assert.match(run.stdout, /RESULT unsupported claude-unsupported-until-refresh/);
+  assert.equal((run.stdout + run.stderr).includes('SYNTHETIC_CANCEL_REJECT'), false);
+});
+
+test('a never-settling body.cancel on 401 still returns a bounded code', async () => {
+  const started = Date.now();
+  const result = await collectClaudeUsage({
+    poolId: POOL, producer: PRODUCER, now: NOW, readCredential,
+    fetch: async () => ({
+      status: 401,
+      body: { cancel() { return new Promise(() => {}); } },
+    }),
+  });
+  assert.equal(result.status, 'unsupported');
+  assert.equal(result.code, 'claude-unsupported-until-refresh');
+  assert.ok(Date.now() - started < 200);
+});
+
+test('a rejecting reader.cancel on abort does not crash the calling process', () => {
+  const run = runIsolatedCollector([
+    'const ac = new AbortController();',
+    'let pulls = 0;',
+    'const r = await collectClaudeUsage({',
+    "  poolId: '" + POOL + "',",
+    "  producer: { producerId: '" + PRODUCER.producerId + "', generation: 1, sequence: 1 },",
+    "  now: () => new Date('2026-09-07T00:20:00.000Z'),",
+    "  readCredential: async () => 't',",
+    '  signal: ac.signal, timeoutMs: 5000,',
+    '  fetch: async () => ({',
+    '    status: 200,',
+    '    body: new ReadableStream({',
+    '      pull(c) {',
+    '        pulls += 1;',
+    '        if (pulls === 1) { ac.abort(); return; }',
+    '        c.close();',
+    '      },',
+    '      cancel() { return Promise.reject(new Error("SYNTHETIC_CANCEL_REJECT")); }',
+    '    }),',
+    '  }),',
+    '});',
+    "console.log('RESULT ' + r.status + ' ' + (r.code || ''));",
+  ].join('\n'));
+  assert.equal(run.status, 0, 'a rejected reader.cancel must not terminate the caller');
+  assert.equal(/^\s*at .*:\d+:\d+/m.test(run.stderr || ''), false, 'a raw stack reached stderr');
+  assert.match(run.stdout, /RESULT unsupported claude-cancelled/);
+  assert.equal((run.stdout + run.stderr).includes('SYNTHETIC_CANCEL_REJECT'), false);
+});
+
+test('a never-settling reader.cancel on abort still returns a bounded code', async () => {
+  const ac = new AbortController();
+  let pulls = 0;
+  const started = Date.now();
+  const result = await collectClaudeUsage({
+    poolId: POOL, producer: PRODUCER, now: NOW, readCredential, signal: ac.signal, timeoutMs: 5000,
+    fetch: async () => ({
+      status: 200,
+      body: new ReadableStream({
+        pull(c) {
+          pulls += 1;
+          if (pulls === 1) { ac.abort(); return; }
+          c.close();
+        },
+        cancel() { return new Promise(() => {}); },
+      }),
+    }),
+  });
+  assert.equal(result.status, 'unsupported');
+  assert.equal(result.code, 'claude-cancelled');
+  assert.ok(Date.now() - started < 200);
 });
