@@ -826,3 +826,69 @@ test("room add-remote verifies the descriptor and PRINTS the row; it never write
     assert.match(out.stderr, /./);
   }
 });
+
+// --------------------------------------- transport lifetime: the verb that succeeded must end
+
+test("close() releases the channel: the room is closed and the next verb refuses by name", async (t) => {
+  const { room } = await rig(t);
+  const actor = /** @type {any} */ ({ name: "Opus/t2", kind: "agent" });
+  const transport = nativeRemoteTransport(/** @type {any} */ ({ transport: "native-remote" }), { actor, remote: room });
+  assert.deepEqual(await transport.whoami(), { id: room.binding.accountId, name: "Opus/t2" });
+  assert.equal(typeof transport.close, "function", "a transport that owns a child process has no close");
+  await transport.close?.();
+  await assert.rejects(transport.read(), /member-channel-dark/,
+    "the channel was still usable after close, so nothing was released");
+});
+
+test("close() is idempotent, survives a never-dialled room, and never fails the verb that succeeded", async (t) => {
+  const { room } = await rig(t);
+  const actor = /** @type {any} */ ({ name: "Opus/t2", kind: "agent" });
+  const never = nativeRemoteTransport(/** @type {any} */ ({ transport: "native-remote" }), { actor, remote: room });
+  // Asserted rather than reached through `?.`: optional chaining makes an ABSENT close pass every
+  // line below it, which is a cell that cannot see the defect it was written for.
+  assert.equal(typeof never.close, "function");
+  await never.close?.();
+  await never.close?.();
+
+  // The one that matters for the drain: it runs AFTER the exit code is settled and the answer is
+  // printed, so a teardown that throws would turn a verb that worked into a verb that failed with
+  // nowhere left to report it.
+  const angry = nativeRemoteTransport(/** @type {any} */ ({ transport: "native-remote" }), {
+    actor,
+    remote: /** @type {any} */ ({ binding: room.binding, close: async () => { throw new Error("teardown exploded"); } }),
+  });
+  assert.equal(typeof angry.close, "function");
+  await angry.close?.();
+});
+
+test("a transport that owns a handle lets the process EXIT once it is closed, and holds it open otherwise", async () => {
+  // Asserts EXIT, not output: the defect this cell exists for printed every row correctly and then
+  // sat until SIGKILL. A `setInterval` stands in for the Tailcat child's stdio pipes — any
+  // referenced handle keeps Node's loop alive, and the transport's close is what releases it.
+  const dir = await mkdtemp(path.join(tmpdir(), "agora-lifetime-"));
+  const script = (/** @type {boolean} */ close) => `
+    import { nativeRemoteTransport } from ${JSON.stringify(new URL("../src/transports/native-remote.mjs", import.meta.url).href)};
+    const handle = setInterval(() => {}, 1000);
+    const transport = nativeRemoteTransport({ transport: "native-remote" }, {
+      actor: { name: "Opus/t2", kind: "agent" },
+      remote: { binding: { roomId: "r" }, close: async () => clearInterval(handle) },
+    });
+    console.log("work done");
+    ${close ? "await transport.close();" : ""}
+  `;
+  const closing = path.join(dir, "closing.mjs");
+  const holding = path.join(dir, "holding.mjs");
+  await writeFile(closing, script(true));
+  await writeFile(holding, script(false));
+
+  const run = promisify(execFile);
+  const { stdout } = await run(process.execPath, [closing], { timeout: 10000 });
+  assert.match(stdout, /work done/, "the arm did not reach the end of its work");
+
+  await assert.rejects(
+    run(process.execPath, [holding], { timeout: 3000 }),
+    (/** @type {any} */ e) => e.killed === true,
+    "the twin exited without its close, so this cell cannot see the defect it is here for",
+  );
+  await rm(dir, { recursive: true, force: true });
+});

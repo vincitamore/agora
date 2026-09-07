@@ -92,5 +92,11 @@ export function nativeRemoteTransport(room, { actor, remote, session }) {
   // same channel instead of opening a second Tailcat child, and the watch's own branch is the only
   // consumer. Attached by assignment so the shared `Transport` type in core.mjs — which belongs to
   // every transport and not to this one — does not have to grow a field only this one has.
+  // The only transport in the tool that owns a CHILD PROCESS. Its stdio pipes are referenced
+  // handles, so without this the CLI cannot exit after a verb succeeds — not a hang in the dial,
+  // which is what three of us read off the code before anyone stamped the output: the handshake
+  // completes in about a second, every row prints, and then nothing ends. The room is closed here
+  // rather than by each verb because a verb added later cannot forget what it never had to write.
+  transport.close = async () => { try { await remote.close(); } catch { /* the answer is already printed */ } };
   return Object.assign(transport, { remote });
 }
