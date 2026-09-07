@@ -26,7 +26,8 @@ export function nativeRemoteTransport(room, { actor, remote, session }) {
   const roomId = remote.binding.roomId;
   /** @param {unknown} e */
   const dark = (e) => new AgoraError(`room-dark: ${e instanceof Error ? e.message : String(e)}; nothing was posted and no cursor was issued`);
-  return {
+  /** @type {import('../core.mjs').Transport} */
+  const transport = {
     kind: "native-remote",
     room: roomId,
     threads: false,
@@ -87,4 +88,9 @@ export function nativeRemoteTransport(room, { actor, remote, session }) {
         authorKind: actor.kind, authorName: actor.name, session: session ?? "default" } });
     },
   };
+  // The live channel rides beside the Transport rather than inside it: a watch subscribes over the
+  // same channel instead of opening a second Tailcat child, and the watch's own branch is the only
+  // consumer. Attached by assignment so the shared `Transport` type in core.mjs — which belongs to
+  // every transport and not to this one — does not have to grow a field only this one has.
+  return Object.assign(transport, { remote });
 }
