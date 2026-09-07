@@ -23,6 +23,8 @@ import {
 } from "../src/native-remote.mjs";
 import { NATIVE_PROTOCOL, NativeFrameDecoder, encodeNativeFrame, nativeCursor } from "../src/native-protocol.mjs";
 import { NativeRoomService } from "../src/native-service.mjs";
+import { nativeRemoteTransport } from "../src/transports/native-remote.mjs";
+import { ServiceDarkError } from "../src/wake/subscriber.mjs";
 import { localTransferIdentity } from "../src/tailcat.mjs";
 import { AgoraError } from "../src/core.mjs";
 
@@ -157,6 +159,10 @@ async function rig(t, over = {}) {
       toHost.write(chunk);
     });
     const hostSide = Duplex.from({ readable: toHost, writable: toClient });
+    // A real route closes its listener when the scope aborts, so no socket arrives after a close.
+    // This rig hands one to `accept` directly, and `accept` destroys a stream it will not take
+    // before `ownStream` has attached an error handler — a fixture artifact, not a product path.
+    hostSide.on("error", () => {});
     hostStreams.push(hostSide);
     const wire = () => /** @type {(socket: any) => void} */ (accept)(hostSide);
     if (holding) held = { release: wire }; else wire();
@@ -543,7 +549,10 @@ test("a refusal the host ANSWERED reports itself once; only an unanswered dial i
       // Answered on a LIVE socket: the host refused this cursor, and that is the cause a reader
       // needs. Retrying it maxReconnects times and then reporting "could not be re-dialled" would
       // replace a precise cause with a false one, which is worse than either alone.
-      throw new AgoraError("request-refused: native room cursor 9 exceeds committed sequence 0; recover explicitly without advancing");
+      // Deliberately NOT one of the named refusals: a message that matches NAMED_REFUSAL would be
+      // caught by that guard instead, and this cell would pass with the live-socket check deleted.
+      // What defines an answered refusal is that a live socket carried it, not its wording.
+      throw new AgoraError("the host declined this subscription for reasons of its own");
     },
   });
   const sub = await openRemoteSubscription({ room, since: nativeCursor(EPOCH, 0), backoffMs: 5, maxReconnects: 5 });
@@ -555,11 +564,90 @@ test("a refusal the host ANSWERED reports itself once; only an unanswered dial i
 
   // The three discriminating assertions. Without the classification the error would be the dark
   // one, the message would say could-not-be-re-dialled, and subscribes would be 6 rather than 2.
-  await assert.rejects(sub.read(), /exceeds committed sequence/);
+  await assert.rejects(sub.read(), /declined this subscription/);
   await assert.rejects(sub.read(), (e) => !/could not be re-dialled/.test(String(e && /** @type {any} */ (e).message)));
   assert.equal(subscribes, 2, `an answered refusal was retried: ${subscribes - 1} attempt(s)`);
   assert.equal(sub.dark(), undefined, "an answered refusal was reported as darkness");
   sub.close();
+});
+
+// --------------------------------------- the three silent numbers the freeze claimed and did not carry
+
+test("whoami MEASURES the channel; it does not answer from the descriptor", async (t) => {
+  const { room } = await rig(t);
+  const actor = /** @type {any} */ ({ name: "Opus/t2", kind: "agent" });
+  const live = nativeRemoteTransport(/** @type {any} */ ({ transport: "native-remote" }), { actor, remote: room });
+  assert.deepEqual(await live.whoami(), { id: room.binding.accountId, name: "Opus/t2" });
+
+  // The discriminating half. Everything whoami needs for its ANSWER is in the descriptor, so a
+  // whoami that read it would resolve here and doctor's row would report a live identity for a
+  // route that cannot be opened at all. It must reject instead.
+  const dark = nativeRemoteTransport(/** @type {any} */ ({ transport: "native-remote" }), {
+    actor,
+    remote: /** @type {any} */ ({
+      binding: room.binding,
+      client: async () => { throw new AgoraError("member-channel-dark: the host is not answering"); },
+      close: async () => {},
+    }),
+  });
+  await assert.rejects(dark.whoami(), /member-channel-dark/,
+    "whoami answered for a channel that cannot open");
+});
+
+test("a dark channel throws rather than returning an empty read that looks like a quiet room", async () => {
+  let dials = 0;
+  const room = scriptedRoom();
+  const sub = await openRemoteSubscription({ room, since: nativeCursor(EPOCH, 0), backoffMs: 5, maxReconnects: 2 });
+  // Every re-dial from here fails the way an unreachable host does: unnamed, so it is retried and
+  // then reported as darkness.
+  room.client = async () => { dials += 1; throw new AgoraError("member-channel-dark: the host is not answering"); };
+  room.socket.emit("close");
+  const deadline = Date.now() + 4000;
+  while (dials < 2 && Date.now() < deadline) await sub.wait(20);
+
+  // The whole point: [] reads as a quiet room and exits 0, and this room was not quiet, it was
+  // unreachable. It must throw, and it must throw the dark error, so the watch ends with
+  // service-dark and exit 1.
+  await assert.rejects(sub.read(), (e) => e instanceof ServiceDarkError);
+  await assert.rejects(sub.read(), /could not be re-dialled/);
+  assert.match(String(sub.dark()), /could not be re-dialled/);
+  sub.close();
+});
+
+test("a NAMED refusal on a re-dial is not retried: one attempt, and it reports itself", async () => {
+  let dials = 0;
+  const room = scriptedRoom();
+  const sub = await openRemoteSubscription({ room, since: nativeCursor(EPOCH, 0), backoffMs: 5, maxReconnects: 5 });
+  // Revocation looks like this from the far side: the secret is gone on the host, so the hello is
+  // refused by name. It is a fact, not a flaky connection.
+  room.client = async () => { dials += 1; throw new AgoraError("member-host-proof-refused: the host did not prove this route's secret"); };
+  room.socket.emit("close");
+  const deadline = Date.now() + 4000;
+  while (dials < 1 && Date.now() < deadline) await sub.wait(20);
+  await sub.wait(120);
+
+  assert.equal(dials, 1, `a named refusal was retried: ${dials} dial(s), each spawning a Tailcat child to be told the same thing`);
+  await assert.rejects(sub.read(), /member-host-proof-refused/);
+  assert.equal(sub.dark(), undefined, "a named refusal was reported as darkness");
+  sub.close();
+});
+
+test("a client held across a route close fails by name on the next verb, and the re-dial does too", async (t) => {
+  const { room, service, opened } = await rig(t);
+  const held = await room.client();
+  assert.ok((await held.request("status", { roomId: ROOM })).status, "the route was not usable before the close");
+
+  await service.closeRoute({ roomId: ROOM, publicNodeKey: KEY });
+
+  // The held client must not answer a verb for a revoked route out of a live-looking socket.
+  await assert.rejects(held.request("status", { roomId: ROOM }), /./);
+  // And the next dial fails too: close is revocation, the secret and its generation are gone, so
+  // there is nothing on the host to prove against.
+  await assert.rejects(room.client(), /./);
+  // The revocation is real on disk, which is what makes the two rejections above mean revocation
+  // rather than a flaky socket.
+  const { readRouteSecret } = await import("../src/native-member.mjs");
+  await assert.rejects(readRouteSecret(/** @type {any} */ (room).stateRoot, opened.descriptor.binding, opened.descriptor.proofRef), /./);
 });
 
 // ------------------------------------------------------------ the verb
