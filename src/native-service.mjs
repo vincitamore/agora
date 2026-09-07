@@ -13,6 +13,10 @@ import { MEMBER_PHASES, buildRouteBinding, buildRouteDescriptor, memberHandshake
   memberTranscript, mintRouteSecret, removeRouteSecret, routeKey, validatePublicNodeKey,
   verifyMemberHandshakeProof, writeRouteSecret } from "./native-member.mjs";
 import { publicNodeKeyDigest } from "./protocol/route.mjs";
+import { localTransferIdentity } from "./tailcat.mjs";
+import { AuthorityError, readAuthorityRecord, createAuthorityChallenge, verifyAuthorityProof,
+  validateAuthorityChallenge, validateAuthorityRequest } from "./authority.mjs";
+import { AuthorityJournal } from "./authority-journal.mjs";
 import { startMemberRoute } from "./tailcat-routes.mjs";
 import { parseSpawnRequest } from "./spawn/request.mjs";
 import { ensurePaneAuthority, mintSpawnId, openPane, reapPane } from "./spawn-pane.mjs";
@@ -361,7 +365,7 @@ function readHandshakeFrame(socket, timeoutMs, label) {
 }
 
 export class NativeRoomService {
-  /** @param {{ root: string, accountId: string, seatLabel: string, now?: () => Date, nonce?: string, build?: import("./harness.mjs").BuildIdentity, routeOptions?: Record<string, unknown> }} options */
+  /** @param {{ root: string, accountId: string, seatLabel: string, now?: () => Date, nonce?: string, build?: import("./harness.mjs").BuildIdentity, routeOptions?: Record<string, unknown>, authorityId?: string, readLocalIdentity?: (root: string) => Promise<{nodeKey: string}> }} options */
   constructor(options) {
     validateNativeId(options.accountId, "service account id");
     if (!options.seatLabel?.trim() || options.seatLabel.length > 120) throw new AgoraError("native service needs a bounded seat label");
@@ -379,6 +383,15 @@ export class NativeRoomService {
     // frame never carries them). Tests inject a faked listener and child here so the verbs can be
     // driven through a real client against a live service; production leaves it undefined.
     this.routeOptions = options.routeOptions;
+    this.authorityId = options.authorityId;
+    this.readLocalIdentity = options.readLocalIdentity ?? ((root) => localTransferIdentity(root, { create: false }));
+    /** @type {Awaited<ReturnType<typeof readAuthorityRecord>> | undefined} */ this.authority = undefined;
+    /** @type {AuthorityJournal | undefined} */ this.authorityJournal = undefined;
+    /** @type {string | undefined} */ this.localNodeKeyDigest = undefined;
+    /** @type {Map<string, {request: ReturnType<typeof import('./authority.mjs').validateAuthorityRequest>, challenge: ReturnType<typeof createAuthorityChallenge>}>} */
+    this.routeChallenges = new Map();
+    /** @type {Map<string, Promise<unknown>>} */ this.admissions = new Map();
+    this.draining = false;
     this.nativeDirectory = path.join(this.root, "native");
     this.descriptorPath = path.join(this.nativeDirectory, "service.json");
     /** @type {string | null} */
@@ -401,7 +414,7 @@ export class NativeRoomService {
     this.panePid = undefined;
     /** Admitted member routes, keyed roomId:allowedKeyDigest. The value owns the Tailcat
      * resource handle; a route is never identified by a stored pid.
-     * @type {Map<string, { binding: any, secret: string, proofRef: string, descriptor: any, resource: any, descriptorPath: string, secretPath: string, state: 'live' | 'closing', openedAt: string }>} */
+     * @type {Map<string, { binding: any, secret: string, proofRef: string, descriptor: any, resource: any, descriptorPath: string, secretPath: string, state: 'live' | 'closing', openedAt: string, activation: {active: boolean} }>} */
     this.routes = new Map();
     /** Keys whose open is in flight. Held from the check until the entry is registered, so two
      * concurrent opens for one key cannot both pass.
@@ -421,6 +434,15 @@ export class NativeRoomService {
     this.nativeDirectory = path.join(this.root, "native");
     this.descriptorPath = path.join(this.nativeDirectory, "service.json");
     await ensurePrivateStateDirectory(this.nativeDirectory, "state directory");
+    // Startup snapshot is a cooperative replacement-window bound, not a trust anchor.
+    // There is deliberately no authority lookup or identity mint on a request path.
+    if (this.authorityId) {
+      this.authority = await readAuthorityRecord(this.root, this.authorityId);
+      this.localNodeKeyDigest = publicNodeKeyDigest((await this.readLocalIdentity(this.root)).nodeKey);
+      if (this.authority.boundNodeKeyDigest === this.localNodeKeyDigest)
+        throw new AuthorityError('authority-self-refused');
+      this.authorityJournal = await AuthorityJournal.load(this.root, this.accountId);
+    }
     this.endpointPath = await nativeServiceEndpoint(this.root, this.accountId);
     try {
       this.server = net.createServer((socket) => this.#accept(socket));
@@ -431,6 +453,7 @@ export class NativeRoomService {
       return this.descriptor();
     } catch (e) {
       await this.#releaseFiles();
+      await this.authorityJournal?.close();
       throw e;
     }
   }
@@ -589,7 +612,8 @@ export class NativeRoomService {
     }
     if (frame.type === "route-open") {
       const result = await this.openRoute({ roomId: requiredString(frame.roomId, "room id"),
-        publicNodeKey: requiredString(frame.publicNodeKey, "member public node key") });
+        publicNodeKey: requiredString(frame.publicNodeKey, "member public node key"),
+        proof: frame.proof, attributionClaims: frame.attributionClaims });
       sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "route-open-result", requestId: frame.requestId, ...result });
       return;
     }
@@ -600,8 +624,21 @@ export class NativeRoomService {
     }
     if (frame.type === "route-close") {
       const result = await this.closeRoute({ roomId: requiredString(frame.roomId, "room id"),
-        publicNodeKey: requiredString(frame.publicNodeKey, "member public node key") });
+        publicNodeKey: requiredString(frame.publicNodeKey, "member public node key"),
+        proof: frame.proof, attributionClaims: frame.attributionClaims });
       sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "route-close-result", requestId: frame.requestId, ...result });
+      return;
+    }
+    if (frame.type === 'route-challenge') {
+      const result = await this.createRouteChallenge({ action: requiredString(frame.action, 'route action'),
+        roomId: requiredString(frame.roomId, 'room id'), publicNodeKey: requiredString(frame.publicNodeKey, 'member public node key') });
+      sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: 'route-challenge-result', requestId: frame.requestId, ...result });
+      return;
+    }
+    if (frame.type === 'route-act-status') {
+      const { journal } = this.#authorityContext();
+      sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: 'route-act-status-result', requestId: frame.requestId,
+        status: journal.status(requiredString(frame.operationId, 'operation id')) });
       return;
     }
     if (frame.type === "spawn") {
@@ -749,15 +786,108 @@ export class NativeRoomService {
    * `routeOptions` stays `any` deliberately and is not widened here — it is a different surface
    * with its own owner, and quietly typing it in a head cut for the runtime would be scope drift
    * wearing a type annotation.
-   * @param {{ roomId: string, publicNodeKey: string,
+   * @param {{ roomId: string, publicNodeKey: string, proof?: unknown, attributionClaims?: unknown,
    *  runtime?: import("./tailcat-runtime.mjs").TailcatRuntimeOverrides, routeOptions?: any }} request
    */
   async openRoute(request) {
+    const retained = { ...request };
+    return await this.#admitRoute(retained, 'room-enroll', (binding, operationId) => this.#openApprovedRoute(retained, binding, operationId));
+  }
+
+  #authorityContext() {
+    if (!this.authority || !this.authorityJournal || !this.localNodeKeyDigest)
+      throw new AuthorityError('authority-absent');
+    if (!this.running || this.draining) throw new AuthorityError('authority-service-draining');
+    return { authority: this.authority, journal: this.authorityJournal, target: this.localNodeKeyDigest };
+  }
+
+  /** Issuance has no route effect; context is owned by this service.
+   * @param {{action: string, roomId: string, publicNodeKey: string}} input */
+  async createRouteChallenge(input) {
+    const { authority, journal, target } = this.#authorityContext();
+    if (!['room-enroll', 'room-revoke'].includes(input.action)) throw new AuthorityError('operator-action-refused');
+    const publicNodeKey = validatePublicNodeKey(input.publicNodeKey);
+    const store = await this.openRoom(input.roomId);
+    this.#authorityContext();
+    journal.assertAvailable(input.roomId);
+    const key = routeKey(input.roomId, publicNodeKeyDigest(publicNodeKey));
+    const existing = this.routes.get(key);
+    if (input.action === 'room-enroll' && (existing || this.openingRoutes.has(key)))
+      throw new AuthorityError('route-already-open');
+    if (input.action === 'room-revoke' && (!existing || existing.state !== 'live'))
+      throw new AuthorityError('route-not-open');
+    const now = this.now().toISOString();
+    for (const [id, pending] of this.routeChallenges)
+      if (Date.parse(pending.challenge.act.expiresAt) <= Date.parse(now)) this.routeChallenges.delete(id);
+    if (this.routeChallenges.size >= 1024) throw new AuthorityError('operator-challenge-capacity');
+    const binding = input.action === 'room-revoke' && existing ? existing.binding : buildRouteBinding({
+      hostAccountId: this.accountId, hostAuthority: this.accountId, roomId: input.roomId,
+      roomEpoch: store.manifest.epoch, serviceBootId: this.bootEpoch, publicNodeKey });
+    const request = validateAuthorityRequest({ action: input.action, binding, targetNodeKeyDigest: target,
+      operationId: randomUUID().replaceAll('-', ''),
+      revisions: { policy: authority.policy.revision, membership: journal.revision(input.roomId) } });
+    const challenge = createAuthorityChallenge(authority, request, now);
+    const retained = { request, challenge };
+    this.routeChallenges.set(challenge.act.challengeId, structuredClone(retained));
+    return retained;
+  }
+
+  /** Serialize the whole admission/effect per room, including different member keys.
+   * @template T
+   * @param {{roomId: string, publicNodeKey?: string, allowedKeyDigest?: string, proof?: unknown, attributionClaims?: unknown}} input
+   * @param {'room-enroll'|'room-revoke'} action
+   * @param {(binding: any, operationId: string) => Promise<T>} effect */
+  #admitRoute(input, action, effect) {
+    const { authority, journal, target } = this.#authorityContext();
+    if (input.proof === undefined || input.proof === null) throw new AuthorityError('operator-proof-required');
+    const submitted = validateAuthorityChallenge(/** @type {{challenge?: unknown}} */ (input.proof).challenge);
+    const pending = this.routeChallenges.get(submitted.act.challengeId);
+    if (journal.status(submitted.act.operationId).state !== 'unknown') throw new AuthorityError('operator-act-replayed');
+    if (!pending) throw new AuthorityError('operator-challenge-absent');
+    const digest = input.allowedKeyDigest ?? publicNodeKeyDigest(validatePublicNodeKey(input.publicNodeKey));
+    if (pending.request.binding.roomId !== input.roomId || pending.request.binding.allowedKeyDigest !== digest
+      || pending.request.action !== action) throw new AuthorityError('operator-context-refused');
+    const roomId = input.roomId;
+    const envelope = structuredClone(input.proof), claims = structuredClone(input.attributionClaims);
+    const job = (this.admissions.get(roomId) ?? Promise.resolve()).catch(() => {}).then(async () => {
+      this.#authorityContext();
+      journal.assertAvailable(roomId);
+      if (journal.status(submitted.act.operationId).state !== 'unknown') throw new AuthorityError('operator-act-replayed');
+      const store = await this.openRoom(roomId);
+      const original = pending.request;
+      if (original.targetNodeKeyDigest !== target) throw new AuthorityError('operator-target-refused');
+      const current = { ...original, targetNodeKeyDigest: target,
+        binding: { ...original.binding, host: { ...original.binding.host, id: this.accountId },
+          serviceBootId: this.bootEpoch, roomEpoch: store.manifest.epoch },
+        revisions: { policy: authority.policy.revision, membership: journal.revision(roomId) } };
+      verifyAuthorityProof(envelope, authority, pending.challenge, current, this.now().toISOString());
+      if (action === 'room-revoke') {
+        const live = this.routes.get(routeKey(roomId, digest));
+        if (!live || live.binding.grantId !== original.binding.grantId
+          || live.binding.routeGeneration !== original.binding.routeGeneration || live.state !== 'live')
+          throw new AuthorityError('operator-context-refused');
+      }
+      await journal.begin(current, envelope, claims, this.now().toISOString());
+      this.routeChallenges.delete(submitted.act.challengeId);
+      try { return await effect(current.binding, current.operationId); }
+      catch (error) {
+        if (!journal.unavailable && journal.status(current.operationId).state === 'intent')
+          await journal.finish(current.operationId, 'failed', this.now().toISOString());
+        throw error;
+      }
+    });
+    this.admissions.set(roomId, job);
+    void job.finally(() => { if (this.admissions.get(roomId) === job) this.admissions.delete(roomId); }).catch(() => {});
+    return job;
+  }
+
+  /** @param {Parameters<NativeRoomService['openRoute']>[0]} request @param {any} binding @param {string} operationId */
+  async #openApprovedRoute(request, binding, operationId) {
+    const journal = /** @type {AuthorityJournal} */ (this.authorityJournal);
     if (!this.running) throw new AgoraError("native service is dark; start it explicitly before opening a route");
     const publicNodeKey = validatePublicNodeKey(request.publicNodeKey);
     const allowedKeyDigest = publicNodeKeyDigest(publicNodeKey);
     const roomId = requiredString(request.roomId, "room id");
-    const store = await this.openRoom(roomId);
     const key = routeKey(roomId, allowedKeyDigest);
     // One live route per key digest: a second grant for a live digest would leave two secrets and
     // two generations for one principal, and `route close` naming the digest would name both.
@@ -781,10 +911,7 @@ export class NativeRoomService {
     }
     this.openingRoutes.add(key);
     try {
-    const binding = buildRouteBinding({
-      hostAccountId: this.accountId, hostAuthority: this.accountId, roomId,
-      roomEpoch: store.manifest.epoch, serviceBootId: this.bootEpoch, publicNodeKey,
-    });
+    const activation = { active: false };
     const secret = mintRouteSecret();
     const { proofRef, file: secretPath } = await writeRouteSecret(this.root, binding, secret);
     if (!this.routeOwner || this.routeOwner.signal.aborted) this.routeOwner = new AbortController();
@@ -798,8 +925,8 @@ export class NativeRoomService {
       // used and before any child exists -- which is what a route open reports as a startup
       // refusal. The spread order lets a test override it and cannot drop it by accident.
       runtime: { stateRoot: this.root, ...(request.runtime ?? {}) },
-      acceptChannel: (accepted, stream, signal) => this.#acceptMember({ binding: accepted, secret }, stream, signal),
       ...(request.routeOptions ?? this.routeOptions ?? {}),
+      acceptChannel: (accepted, stream, signal) => this.#acceptMember({ binding: accepted, secret, activation }, stream, signal),
     });
     let published;
     try {
@@ -810,8 +937,10 @@ export class NativeRoomService {
       await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
       await writeAtomic(file, descriptor);
       const entry = { binding, secret, proofRef, descriptor, resource, descriptorPath: file,
-        secretPath, state: /** @type {'live' | 'closing'} */ ("live"), openedAt: this.now().toISOString() };
+        secretPath, state: /** @type {'live' | 'closing'} */ ("live"), openedAt: this.now().toISOString(), activation };
+      await journal.finish(operationId, 'committed', this.now().toISOString());
       this.routes.set(key, entry);
+      activation.active = true;
       return { descriptor, descriptorPath: file, secretRef: proofRef, secretPath };
     } catch (error) {
       // A failed descriptor write must not leave a live listener nobody has a record of.
@@ -843,9 +972,16 @@ export class NativeRoomService {
    * Close is REVOCATION. Nothing runs on the remote, so its copy of the secret simply goes stale
    * and fails the proof by name; a reopen mints a new generation whose descriptor and secret
    * travel by the operator's hand.
-   * @param {{ roomId: string, publicNodeKey?: string, allowedKeyDigest?: string }} request
+   * @param {{ roomId: string, publicNodeKey?: string, allowedKeyDigest?: string, proof?: unknown, attributionClaims?: unknown }} request
    */
   async closeRoute(request) {
+    const retained = { ...request };
+    return await this.#admitRoute(retained, 'room-revoke', (_binding, operationId) => this.#closeApprovedRoute(retained, operationId));
+  }
+
+  /** @param {Parameters<NativeRoomService['closeRoute']>[0]} request @param {string} operationId */
+  async #closeApprovedRoute(request, operationId) {
+    const journal = /** @type {AuthorityJournal} */ (this.authorityJournal);
     const roomId = requiredString(request.roomId, "room id");
     const digest = request.allowedKeyDigest
       ?? publicNodeKeyDigest(validatePublicNodeKey(request.publicNodeKey));
@@ -855,6 +991,8 @@ export class NativeRoomService {
     // Marked rather than deleted: AGORA_CLEANUP_PENDING's own message says to retain the handle,
     // and dropping the entry first would leave a child still being torn down with nothing in the
     // registry describing it. The entry stays, reported as closing, until closed settles.
+    await journal.finish(operationId, 'revoked', this.now().toISOString());
+    route.activation.active = false;
     route.state = "closing";
     let cleanupPending;
     // stop() can reject with AGORA_CLEANUP_PENDING; reporting a clean teardown we did not observe
@@ -867,6 +1005,7 @@ export class NativeRoomService {
     await removeRouteSecret(this.root, route.binding);
     await rm(route.descriptorPath, { force: true });
     if (cleanupPending) throw cleanupPending;
+    await journal.finish(operationId, 'closed', this.now().toISOString());
     return { roomId, grantId: route.binding.grantId, routeGeneration: route.binding.routeGeneration,
       accountId: route.binding.accountId, revoked: true };
   }
@@ -879,7 +1018,7 @@ export class NativeRoomService {
    * machine. A member stream is proved under the route's own secret, with the member phases, over a
    * transcript widened by the binding, and it never observes the nonce at all.
    *
-   * @param {{ binding: any, secret: string }} route
+   * @param {{ binding: any, secret: string, activation: {active: boolean} }} route
    * @param {import("node:stream").Duplex} stream
    * @param {AbortSignal} signal
    * @returns {{ ready: Promise<unknown>, closed: Promise<unknown>, stop: () => Promise<unknown> }}
@@ -912,6 +1051,11 @@ export class NativeRoomService {
         requestId: id ?? randomUUID().replaceAll("-", ""),
         reason: greeted ? "request-refused" : "member-hello-refused", code, message: message.slice(0, 500) });
     };
+    if (!route.activation.active) {
+      const error = new AuthorityError('member-route-not-active');
+      fail(error, requestId); rejectReady(error); stream.end();
+      return { ready, closed, stop: async () => { stream.destroy(); this.subscriptions.delete(stream); } };
+    }
     if (!sendFrame(/** @type {any} */ (stream), { protocol: NATIVE_PROTOCOL, type: "member-server-hello",
       ...serverTranscript, proof: memberHandshakeProof(route.secret, MEMBER_PHASES.server, serverTranscript) })) {
       rejectReady(new AgoraError("member stream closed before the host could greet it"));
@@ -925,6 +1069,7 @@ export class NativeRoomService {
       for (const raw of frames) {
         chain = chain.then(async () => {
           const frame = validateNativeEnvelope(raw);
+          if (!route.activation.active) throw new AuthorityError('member-route-not-active');
           if (!greeted) {
             // A member socket that speaks the LOCAL handshake is refused by name rather than
             // falling through to a path that would consult the nonce.
@@ -979,8 +1124,12 @@ export class NativeRoomService {
 
   async stop() {
     if (!this.server) return;
+    this.draining = true;
+    await Promise.allSettled([...this.admissions.values()]);
     this.running = false;
+    this.routeChallenges.clear();
     for (const route of this.routes.values()) {
+      route.activation.active = false;
       try { await route.resource.stop(); } catch { /* reported by closeRoute; stop() is best-effort */ }
     }
     this.routes.clear();
@@ -995,6 +1144,7 @@ export class NativeRoomService {
     await Promise.allSettled([...this.roomActivities]);
     for (const store of this.rooms.values()) await store.close();
     this.rooms.clear();
+    await this.authorityJournal?.close();
     await this.#releaseFiles();
   }
 
