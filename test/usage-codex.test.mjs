@@ -532,6 +532,25 @@ const MATRIX = [
   ['usedPercent negative',              withPrimary({ usedPercent: -5 }),   'window-fault', 'unsupported-percent-range'],
   ['usedPercent above 100',             withPrimary({ usedPercent: 150 }),  'window-fault', 'unsupported-percent-range'],
   ['usedPercent finer than a bp',       withPrimary({ usedPercent: 21.000000001 }), 'window-fault', 'unsupported-precision'],
+
+  // The cells this matrix was MISSING, and the reason it now carries them. The row above
+  // enumerated absent / null / unreadable for each field but not OUT OF RANGE for every field,
+  // so a finite-but-unconvertible epoch walked straight through a guard written to stop exactly
+  // that class. An enumeration with a hole is worse than none: it converts "not checked" into
+  // "checked" for everyone downstream, including its author. Both halves are kept -- the values
+  // that must fault, and the boundary values that must still read.
+  ['resetsAt past Date range',          withPrimary({ resetsAt: 8640000000001 }), 'window-fault', 'unsupported-reset'],
+  ['resetsAt 1e20',                     withPrimary({ resetsAt: 1e20 }),          'window-fault', 'unsupported-reset'],
+  ['resetsAt -1e20',                    withPrimary({ resetsAt: -1e20 }),         'window-fault', 'unsupported-reset'],
+  ['resetsAt 0 (epoch, valid)',         withPrimary({ resetsAt: 0 }),             'reads'],
+  ['resetsAt -1 (before epoch, valid)', withPrimary({ resetsAt: -1 }),            'reads'],
+  ['duration 1e20 (integer, absurd)',   withPrimary({ windowDurationMins: 1e20 }), 'window-fault', 'unsupported-duration'],
+  ['duration MAX_SAFE_INTEGER (valid)', withPrimary({ windowDurationMins: Number.MAX_SAFE_INTEGER }), 'reads'],
+  ['usedPercent 0 (boundary, valid)',   withPrimary({ usedPercent: 0 }),          'reads'],
+  ['usedPercent 100 (boundary, valid)', withPrimary({ usedPercent: 100 }),        'reads'],
+  ['usedPercent 100.001',               withPrimary({ usedPercent: 100.001 }),    'window-fault', 'unsupported-percent-range'],
+  ['limitId 300 chars',                 M({ limitId: 'c'.repeat(300) }),          'response-fault', 'codex-quota-shape-unsupported'],
+  ['limitId whitespace only',           M({ limitId: '   ' }),                    'response-fault', 'codex-quota-shape-unsupported'],
 ];
 
 for (const [label, snapshot, expectation, code] of MATRIX) {
@@ -558,6 +577,21 @@ for (const [label, snapshot, expectation, code] of MATRIX) {
     assert.equal(only.code, code, label);
   });
 }
+
+test('matrix: the identity row, including the range cells it was missing', async () => {
+  const map = { codex: M({}) };
+  // Blank is not an identity even though the contract's character rules permit it, and an
+  // oversized one must be refused with a code rather than thrown during validation.
+  const TAB_NEWLINE = String.fromCharCode(9, 10);
+  for (const bad of ['   ', TAB_NEWLINE, 'a'.repeat(513)]) {
+    const r = await collect({ accountId: bad, rateLimits: null, rateLimitsByLimitId: map });
+    if (r.status === 'supported') return assert.fail('accountId ' + JSON.stringify(bad.slice(0, 12)) + ' was accepted');
+    assert.equal(r.code, 'codex-account-identity-malformed');
+  }
+  // The boundary that must still work.
+  const ok = await collect({ accountId: 'a'.repeat(512), rateLimits: null, rateLimitsByLimitId: map });
+  assert.ok(ok.status === 'supported', 'a 512-character identity is within the contract and must read');
+});
 
 test('matrix: identity absent and identity unreadable are different faults', async () => {
   const map = { codex: M({}) };
