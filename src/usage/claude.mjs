@@ -159,9 +159,12 @@ export function windowReadingFrom(limitId, durationMinutes, window) {
   } catch {
     return { window: identity, available: /** @type {const} */ (false), code: 'unsupported-precision' };
   }
-  const resetsAt = resetsAtToIso(window.resets_at);
-  return { window: identity, available: /** @type {const} */ (true), value, sense: /** @type {const} */ ('used'),
-    ...(resetsAt ? { resetsAt } : {}) };
+  if (window.resets_at !== null && window.resets_at !== undefined) {
+    const resetsAt = resetsAtToIso(window.resets_at);
+    if (!resetsAt) return { window: identity, available: /** @type {const} */ (false), code: 'unsupported-reset' };
+    return { window: identity, available: /** @type {const} */ (true), value, sense: /** @type {const} */ ('used'), resetsAt };
+  }
+  return { window: identity, available: /** @type {const} */ (true), value, sense: /** @type {const} */ ('used') };
 }
 
 /**

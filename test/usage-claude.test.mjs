@@ -107,8 +107,14 @@ test('null named windows are omitted, not zero', () => {
 test('short resets_at converts; unparseable is omitted so freshness is unknown', () => {
   assert.equal(resetsAtToIso('2026-09-07T00:40Z'), '2026-09-07T00:40:00.000Z');
   assert.equal(resetsAtToIso('not-a-date'), undefined);
-  const reading = windowsFromUsage({ five_hour: { utilization: 1, resets_at: 'not-a-date' } })[0];
-  assert.equal(windowFreshness(reading, '2026-09-07T00:20:00.000Z'), 'unknown');
+  const absent = windowsFromUsage({ five_hour: { utilization: 1 } })[0];
+  assert.equal(absent.available, true);
+  if (!absent.available) return;
+  assert.equal(windowFreshness(absent, '2026-09-07T00:20:00.000Z'), 'unknown');
+  const unreadable = windowsFromUsage({ five_hour: { utilization: 1, resets_at: 'soon' } })[0];
+  assert.equal(unreadable.available, false);
+  if (unreadable.available !== false) return;
+  assert.equal(unreadable.code, 'unsupported-reset');
 });
 
 /** @param {(pathname: string, init: any) => any} script */
