@@ -2,6 +2,7 @@
 // E1d: inventory of joined members with measured session usage or explicit unsupported.
 // Membership from listRecords/sessionScope. Binding is caller-supplied and verified;
 // boot epoch plus PID is never a source identity. No provider, no transcript text.
+import { createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { hasRoomState, listRecords } from './session.mjs';
 import { decodeSessionUsage } from './usage/session-sources.mjs';
@@ -88,19 +89,31 @@ export async function ingestEnvelope(ledger, item, ingest) {
   return { status: 'ingested', committed };
 }
 
+/** @param {string} line */
+export function lineFingerprint(line) {
+  return `sha256:${createHash('sha256').update(line).digest('hex')}`;
+}
+
 /**
  * Non-empty JSONL lines, numbered from 1. Tail past a persisted locator
- * position; a shrink opens the next source generation from offset 1.
+ * position when the line at that offset still matches the stored fingerprint.
+ * A shorter file, a missing line, or a fingerprint mismatch is a rotation:
+ * new generation, ingest from line one.
  * @param {string} text
  * @param {string} locator
- * @param {{ locator: string, sourceGeneration: number, offset: number } | null} [lastIngest]
+ * @param {{ locator: string, sourceGeneration: number, offset: number, fingerprint?: string } | null} [lastIngest]
  */
 export function selectIngestLines(text, locator, lastIngest = null) {
   const raw = text.split(/\r?\n/).filter((line) => line.trim());
   let generation = 1;
   let start = 0;
   if (lastIngest && lastIngest.locator === locator) {
-    if (raw.length < lastIngest.offset) {
+    const atOffset = raw[lastIngest.offset - 1];
+    const rotated = raw.length < lastIngest.offset
+      || atOffset === undefined
+      || (typeof lastIngest.fingerprint === 'string' && lastIngest.fingerprint.length > 0
+        && lineFingerprint(atOffset) !== lastIngest.fingerprint);
+    if (rotated) {
       generation = lastIngest.sourceGeneration + 1;
       start = 0;
     } else {
@@ -161,7 +174,7 @@ export async function ingestJsonlLines(ledger, items, locator, generation) {
       locator,
       sourceGeneration: generation,
       offset: item.offset,
-      fingerprint: typeof rec.fingerprint === 'string' && rec.fingerprint.trim() ? rec.fingerprint : `ingest:${generation}:${item.offset}`,
+      fingerprint: lineFingerprint(item.line),
     });
     outcomes.push({ ...outcome, offset: item.offset });
   }
@@ -287,7 +300,12 @@ export async function collectUsageSessions(opts) {
     if (text !== undefined) {
       const snapshotBefore = readLedgerSnapshot(ledger);
       const last = snapshotBefore.ingest && snapshotBefore.ingest.locator === locator
-        ? { locator: snapshotBefore.ingest.locator, sourceGeneration: snapshotBefore.ingest.sourceGeneration, offset: snapshotBefore.ingest.offset }
+        ? {
+          locator: snapshotBefore.ingest.locator,
+          sourceGeneration: snapshotBefore.ingest.sourceGeneration,
+          offset: snapshotBefore.ingest.offset,
+          fingerprint: snapshotBefore.ingest.fingerprint,
+        }
         : null;
       const planned = selectIngestLines(text, locator, last);
       const outcomes = await ingestJsonlLines(ledger, planned.items, locator, planned.generation);
