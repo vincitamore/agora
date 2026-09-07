@@ -26,6 +26,9 @@ import { NativeRoomService } from "../src/native-service.mjs";
 import { nativeRemoteTransport } from "../src/transports/native-remote.mjs";
 import { ServiceDarkError } from "../src/wake/subscriber.mjs";
 import { localTransferIdentity } from "../src/tailcat.mjs";
+import { resolveTailcatBinary } from "../src/tailcat-runtime.mjs";
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { AgoraError } from "../src/core.mjs";
 
 const run = promisify(execFile);
@@ -98,7 +101,7 @@ function fakeChild(options = {}) {
  * straight into that route's accept hook. Every dial makes a fresh loopback pair, which is what
  * makes the reconnect cells real rather than a reuse of one socket.
  * @param {import('node:test').TestContext} t
- * @param {{ secret?: string, descriptor?: any, key?: string, deadTransport?: boolean }} [over]
+ * @param {{ secret?: string, descriptor?: any, key?: string, deadTransport?: boolean, onSpawn?: (runtime: any) => void }} [over]
  */
 async function rig(t, over = {}) {
   const hostRoot = await mkdtemp(path.join(tmpdir(), "agora-t2-host-"));
@@ -187,8 +190,9 @@ async function rig(t, over = {}) {
       descriptor: over.descriptor ?? opened.descriptor, secret, stateRoot: seatRoot, keyPath,
       nodeKey: over.key ?? KEY, timeoutMs: 4000,
       channelOptions: {
-        spawn: async (/** @type {string[]} */ args, /** @type {any} */ _r, /** @type {any} */ owner) => {
+        spawn: async (/** @type {string[]} */ args, /** @type {any} */ runtime, /** @type {any} */ owner) => {
           spawned.push(args);
+          over.onSpawn?.(runtime);
           if (args[0] === "parse") return fakeChild({ exit: 0, signal: owner?.signal });
           if (args[1] === "printpub") {
             const stdout = new PassThrough();
@@ -321,6 +325,48 @@ test("a transport that ends before the greeting fails fast AND by name", async (
   const elapsed = Date.now() - started;
   // The rig's handshake budget is 4000 ms; the point of the cell is that this does not wait for it.
   assert.ok(elapsed < 2000, `a dead transport took ${elapsed} ms to report, which is the timeout path`);
+});
+
+test("the runtime handed to the transport carries the state root the resolver needs", async (t) => {
+  // Measured at the SPAWN BOUNDARY, because that is the only place this defect is visible: the
+  // channel hands this object to spawnTailcat, which hands it to resolveTailcatBinary, which needs
+  // a state root to find the capsule. A room that keeps the root as its own field and passes {}
+  // downward reaches the resolver with nothing and dies inside the guardian with a textless status
+  // — which is exactly what a live seat reported, and exactly what no faked child can see, since a
+  // fake never reaches a resolver at all.
+  const { room, seatRoot } = await rig(t);
+  assert.equal(room.runtime.stateRoot, seatRoot, "the room's runtime carries no state root");
+
+  /** @type {any[]} */
+  const runtimes = [];
+  const probe = await rig(t, { onSpawn: (/** @type {any} */ runtime) => runtimes.push(runtime) });
+  await probe.room.client();
+  assert.ok(runtimes.length > 0, "no spawn was observed");
+  for (const runtime of runtimes)
+    assert.equal(runtime?.stateRoot, probe.seatRoot,
+      `a transport child was launched with ${JSON.stringify(runtime)}, which the binary resolver cannot use`);
+
+  // Capture is not enough, and the reason is the one L1 paid for: a dead address does not fail the
+  // launch, and the guardian's status reads the same for a bare root as for a real failure. So the
+  // captured runtime is driven through the REAL resolver, which is what the channel would reach.
+  const resolved = await resolveTailcatBinary(runtimes[0]);
+  assert.ok(resolved.path.startsWith(probe.seatRoot),
+    `the resolver placed the binary at ${resolved.path}, outside the remote's state root`);
+  assert.match(resolved.sha256, /^[a-f0-9]{64}$/);
+  assert.equal(createHash("sha256").update(await readFile(resolved.path)).digest("hex"), resolved.sha256,
+    "the resolved binary does not match the digest the resolver verified it against");
+
+  // The twin, and it is the defect itself: an empty runtime is REJECTED rather than resolving to
+  // something, and it leaves nothing behind.
+  // The cast is the finding in miniature: the resolver's own type DECLARES stateRoot required, and
+  // the room reached it with {} only because the runtime travelled as `any` through the channel.
+  await assert.rejects(resolveTailcatBinary(/** @type {any} */ ({})), /./, "an empty runtime resolved a binary anyway");
+
+  // A caller's own runtime still wins on any key it sets, so the fold is not an override.
+  const explicit = new RemoteRoom({ descriptor: probe.opened.descriptor, secret: probe.secret,
+    stateRoot: probe.seatRoot, keyPath: probe.keyPath, nodeKey: KEY, runtime: { stateRoot: "/elsewhere" } });
+  assert.equal(explicit.runtime.stateRoot, "/elsewhere");
+  await explicit.close();
 });
 
 // ------------------------------------------------------------ the handshake, against the real host

@@ -266,7 +266,14 @@ export class RemoteRoom {
     this.stateRoot = input.stateRoot;
     this.keyPath = input.keyPath;
     this.timeoutMs = input.timeoutMs ?? HANDSHAKE_TIMEOUT_MS;
-    this.runtime = input.runtime ?? {};
+    // The state root is folded INTO the runtime, not merely held beside it. The channel hands this
+    // object to spawnTailcat, which hands it to resolveTailcatBinary, which needs a state root to
+    // find the capsule — so a room that keeps the root as its own field and passes {} downward
+    // reaches the resolver with nothing and dies inside the guardian, reporting a status with no
+    // text. That is the same defect L1 fixed one file over, found here by taking its list to the
+    // next unit rather than by anything this suite could see: a faked child never reaches a
+    // resolver. A caller's own runtime still wins on any key it sets.
+    this.runtime = { stateRoot: input.stateRoot, ...(input.runtime ?? {}) };
     this.channelOptions = input.channelOptions ?? {};
     // The remote has no seat service, so it owns its own channels: a per-process boot id fences
     // every child to this process, and the owner ids are ordinary native ids.
