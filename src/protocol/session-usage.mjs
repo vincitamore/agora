@@ -305,7 +305,7 @@ export function validateMemberCoverage(value) {
  * @param {unknown} value
  */
 export function validateSessionUsageRecord(value) {
-  const v = readRecord(value, ['identity', 'observedAt', 'usage'], ['model', 'sourceReportedCost']);
+  const v = readRecord(value, ['identity', 'observedAt', 'usage'], ['model', 'sourceReportedCost', 'sourceReportedReasoning']);
   return {
     identity: validateOrderableIdentity(v.identity),
     observedAt: readTimestamp(v.observedAt, 'observedAt'),
@@ -317,6 +317,11 @@ export function validateSessionUsageRecord(value) {
     // from a source that reported one we could not use (state 'invalid' with a reason).
     ...(Object.hasOwn(v, 'sourceReportedCost')
       ? { sourceReportedCost: validateSourceReportedCost(v.sourceReportedCost) }
+      : {}),
+    // Same shape as cost: a source figure in the source's stated unit, never folded into
+    // reasoning-billed or any other component. Omitted means the source reported none.
+    ...(Object.hasOwn(v, 'sourceReportedReasoning')
+      ? { sourceReportedReasoning: validateSourceReportedCost(v.sourceReportedReasoning) }
       : {}),
   };
 }

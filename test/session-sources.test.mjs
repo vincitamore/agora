@@ -412,6 +412,23 @@ test('bravo costUsdTicks is kept as usd-ticks and is never converted to dollars'
   assert.notEqual(record.sourceReportedCost?.amount, 0.125);
 });
 
+test('sourceReportedReasoning is omitted; reasoning-billed stays unknown and is never a folded source figure', () => {
+  const claude = supported(decode('claude-code', claudeEnvelope({
+    input_tokens: 2, output_tokens: 1, cache_read_input_tokens: 10,
+    cache_creation: { ephemeral_5m_input_tokens: 1, ephemeral_1h_input_tokens: 0 },
+  }))).records[0];
+  const codex = supported(decode('codex', codexEnvelope({
+    input_tokens: 10, cached_input_tokens: 2, cache_write_input_tokens: 1, output_tokens: 1,
+  }), { context: { sourceId: 'rollout:offset:1' } })).records[0];
+  for (const record of [claude, codex]) {
+    assertContract(record);
+    assert.equal(Object.hasOwn(record, 'sourceReportedReasoning'), false);
+    const billed = component(record, 'reasoning-billed');
+    assert.equal(billed.state, 'unknown');
+    assert.equal(billed.state === 'unknown' ? billed.reason : undefined, 'reasoning-inclusion-unknown');
+  }
+});
+
 test('bravo missing prompt_id is identity-missing; empty modelUsage is unsupported', () => {
   const noPrompt = rejected(decode('amore-build', {
     timestamp: OBSERVED,

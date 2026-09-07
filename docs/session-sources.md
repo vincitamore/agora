@@ -102,6 +102,11 @@ unit `omp-cost-total` when it is a safe nonnegative integer; Amore
 `invalid`, never converted. Claude Code and Codex omit the field: they
 reported none. A cost is not a token component and is never added to one.
 
+`sourceReportedReasoning` is the same optional shape. No current adapter emits
+it: none of the four envelopes carry a sourced reasoning figure we will type.
+`reasoning-billed` stays unknown with `reasoning-inclusion-unknown`. A later
+sourced mapping writes the figure onto this field, never into a component.
+
 ## Four sources
 
 **Claude Code** (`sourceUnit: request`). Usage lives at `message.usage`. Identity

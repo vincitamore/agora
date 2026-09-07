@@ -272,6 +272,35 @@ test('cost on a record is optional and additive: OMITTED is not the same as unus
   assert.ok(refuses(() => validateSessionUsageRecord({ ...base, sourceReportedCost: { state: 'known' } })));
 });
 
+test('sourceReportedReasoning is optional, additive, and never a component', async () => {
+  const base = {
+    identity: ID,
+    observedAt: '2026-09-07T10:00:00.000Z',
+    usage: { components: { output: { state: 'known', value: 42, unit: 'tokens' }, 'reasoning-billed': { state: 'unknown', reason: 'inclusion-unknown' } }, coverage: 'partial' },
+  };
+  const without = validateSessionUsageRecord(base);
+  assert.ok(!Object.hasOwn(without, 'sourceReportedReasoning'), 'a source that reported none omits it');
+  assert.equal(without.usage.components['reasoning-billed'].state, 'unknown', 'omission does not invent a billed component');
+
+  const with_ = validateSessionUsageRecord({
+    ...base, sourceReportedReasoning: { state: 'known', amount: 17, unit: 'source-reasoning-tokens' },
+  });
+  const kept = with_.sourceReportedReasoning;
+  assert.ok(kept && kept.state === 'known');
+  assert.equal(kept.amount, 17);
+  assert.equal(kept.unit, 'source-reasoning-tokens');
+  assert.equal(with_.usage.components['reasoning-billed'].state, 'unknown', 'the figure is not folded into reasoning-billed');
+  assert.equal(with_.usage.components.output.value, 42, 'and not into output');
+
+  const bad = validateSessionUsageRecord({
+    ...base, sourceReportedReasoning: { state: 'invalid', reason: 'reasoning field was a float' },
+  });
+  assert.equal(bad.sourceReportedReasoning?.state, 'invalid');
+  assert.ok(!Object.hasOwn(bad.sourceReportedReasoning ?? {}, 'amount'));
+
+  assert.ok(refuses(() => validateSessionUsageRecord({ ...base, sourceReportedReasoning: { state: 'known' } })));
+});
+
 // --- The blank-identity class ------------------------------------------------------------------
 
 test('a string that is blank once trimmed is refused wherever it must SAY something', () => {

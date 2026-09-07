@@ -586,6 +586,7 @@ function readOmpReportedCost(usage) {
  *   inputAlreadyExclusive?: boolean,
  *   overlap: unknown,
  *   sourceReportedCost?: { state: string, amount?: number, unit?: string, reason?: string },
+ *   sourceReportedReasoning?: { state: string, amount?: number, unit?: string, reason?: string },
  * }} parts
  */
 function makeRecord(parts) {
@@ -631,5 +632,6 @@ function makeRecord(parts) {
   };
   if (parts.model !== undefined) record.model = parts.model;
   if (parts.sourceReportedCost !== undefined) record.sourceReportedCost = parts.sourceReportedCost;
+  if (parts.sourceReportedReasoning !== undefined) record.sourceReportedReasoning = parts.sourceReportedReasoning;
   return record;
 }
