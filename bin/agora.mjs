@@ -724,8 +724,14 @@ async function main(argv) {
     if (sub !== "list") {
       if (rest[1] === undefined)
         throw new AgoraError(`agora service route ${sub} needs <room>`, EXIT.usage);
+      // Present is not the same as well formed, and a malformed argument is still the verb's own:
+      // checking only presence here let a bad --allow-key reach loadConfig and exit 1 instead of 2.
+      if (!/^[a-f0-9]{32}$/.test(String(rest[1]).trim()))
+        throw new AgoraError("native room id must be 32 lowercase hexadecimal characters", EXIT.usage);
       if (values["allow-key"] === undefined)
         throw new AgoraError(`agora service route ${sub} needs --allow-key <nodekey:64hex>`, EXIT.usage);
+      if (!/^nodekey:[a-f0-9]{64}$/.test(String(values["allow-key"]).trim()))
+        throw new AgoraError("--allow-key takes the public node key as enroll prints it: nodekey: followed by 64 hex characters", EXIT.usage);
     }
   }
 

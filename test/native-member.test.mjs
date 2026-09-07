@@ -435,3 +435,60 @@ test("a descriptor-write failure leaves no live orphan route", async (t) => {
   const leftovers = await readFile(path.join(original, "routes"), "utf8").catch((e) => e.code);
   assert.ok(leftovers === "ENOENT" || leftovers === "EISDIR", `unexpected leftover state: ${leftovers}`);
 });
+
+// ---------------------------------------------------------------- the verb's own arguments
+
+/** Run the real binary with NO config in reach, so the ordering is proven on any machine. */
+/** @param {string[]} args */
+async function agoraConfigless(args) {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const run = promisify(execFile);
+  const bin = new URL("../bin/agora.mjs", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
+  const clean = { ...process.env };
+  for (const name of ["AGORA_CONFIG", "AGORA_STATE", "AGORA_SESSION", "AGORA_ACTOR"]) delete clean[name];
+  try {
+    const child = run(process.execPath, [bin, ...args],
+      { env: { ...clean, AGORA_CONFIG: path.join(tmpdir(), "agora-no-such-config.json") }, windowsHide: true });
+    child.child.stdin?.end();
+    const { stdout, stderr } = await child;
+    return { code: 0, stdout, stderr };
+  } catch (e) {
+    const err = /** @type {any} */ (e);
+    return { code: err.code, stdout: err.stdout ?? "", stderr: err.stderr ?? "" };
+  }
+}
+
+test("route verbs refuse their own arguments BEFORE loadConfig", async () => {
+  // The point of pinning a config that does not exist: on a seat that has one, a verb which
+  // loaded config first would still print the right message, and the ordering would go untested.
+  // Here a config-first verb exits 1 with "no config"; only an argument-first verb exits 2.
+  for (const args of [
+    ["service", "route"],
+    ["service", "route", "bogus"],
+    ["service", "route", "open"],
+    ["service", "route", "open", "b".repeat(32)],
+    ["service", "route", "close"],
+    ["service", "route", "close", "b".repeat(32)],
+  ]) {
+    const { code, stderr } = await agoraConfigless(args);
+    assert.equal(code, 2, `${args.join(" ")} exited ${code}, not the usage code: ${stderr.trim()}`);
+    assert.doesNotMatch(stderr, /no config at/, `${args.join(" ")} reached loadConfig before its own check`);
+  }
+});
+
+test("a malformed --allow-key is a usage error, and only the public key shape is admitted", async () => {
+  for (const key of ["deadbeef", `sha256:${"a".repeat(64)}`, "nodekey:short", "/home/me/tailcat.key"]) {
+    const { code, stderr } = await agoraConfigless(["service", "route", "open", "b".repeat(32), "--allow-key", key]);
+    assert.equal(code, 2, `--allow-key ${key} exited ${code}`);
+    assert.match(stderr, /public node key|nodekey/);
+  }
+});
+
+test("route list has no argument to refuse, so it reaches config and says so", async () => {
+  // The twin of the cells above: strictness bought by refusing a verb that has nothing to refuse
+  // would be a false pass. `route list` must get PAST the argument stage.
+  const { code, stderr } = await agoraConfigless(["service", "route", "list"]);
+  assert.equal(code, 1, `route list exited ${code}, not the error code`);
+  assert.match(stderr, /no config at/);
+});
