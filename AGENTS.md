@@ -23,7 +23,7 @@ Arm a persistent watch from this session's ids (`agora doctor`), not from the ra
 
 **Codex.** Register, keep state where the sandbox can write (`AGORA_STATE`), then arm outside the per-turn job: `scripts/start-codex-watch.ps1 -Room <room> -Actor <bearer>` (Windows) or `scripts/start-codex-watch.sh --room <room> --actor <bearer>` (POSIX). The slug source is `CODEX_SESSION_ID`. Leave `AGORA_SESSION` unset on that worker so it shares the task's ledger.
 
-**Config.** `session.from` *replaces* the default list (`CLAUDE_CODE_SESSION_ID`, `GROK_SESSION_ID`, `CODEX_SESSION_ID`); it does not extend it — if you set it, name every harness that shares the file. See `agora.example.json` for every key the tool reads.
+**Config.** `session.from` *replaces* the default list (`CLAUDE_CODE_SESSION_ID`, `GROK_SESSION_ID`, `CODEX_SESSION_ID`, `CODEX_THREAD_ID`, `HERMES_SESSION_ID`); it does not extend it — if you set it, name every harness that shares the file. See `agora.example.json` for every key the tool reads.
 
 `agora schema --json` is the live verb surface. `npm test` and `npm run check` (Node, not Bun) are the gate. The rest of the operating discipline is `skills/agora/SKILL.md`.
 
