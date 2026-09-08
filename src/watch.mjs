@@ -1,6 +1,6 @@
 // @ts-check
 import { jitter, readCursor, redact, writeCursor, sleep as defaultSleep } from "./core.mjs";
-import { acceptCarryDelivery, prepareCarryBatch } from './carry-check.mjs';
+import { acceptCarryDelivery, armCarryCapture, prepareCarryBatch } from './carry-check.mjs';
 
 /**
  * The one way a room read may end a watch without it being an error: an error carrying this
@@ -104,6 +104,11 @@ export async function watch(transport, opts) {
   const coalesceSeconds = opts.coalesceSeconds && opts.coalesceSeconds > 0 ? opts.coalesceSeconds : 0;
   const maxBatch = opts.maxBatch && opts.maxBatch > 0 ? opts.maxBatch : 0;
   const holding = coalesceSeconds > 0 || maxBatch > 0;
+  const capture = await armCarryCapture(stateDir);
+  const accept = async (/** @type {ReturnType<typeof import('./carry-check.mjs').validateCarryEvent>|undefined} */ event) => {
+    try { await acceptCarryDelivery(stateDir, event); }
+    catch (err) { if (!capture) throw err; capture.fail(); }
+  };
   let skipped = 0;
   let filtered = 0;
   let delivered = 0;
@@ -139,7 +144,10 @@ export async function watch(transport, opts) {
   const checkpointThreadCursors = new Map();
   let windowSkipped = 0;
   let windowFiltered = 0;
-  const result = () => ({ fired, cursor, polls, skipped, filtered, delivered, elapsedMs: Math.max(0, now() - start), following: followed.size, threads: perThread, ...(gap ? { gap } : {}), ...(reason ? { reason } : {}) });
+  const result = async () => {
+    await capture?.stop();
+    return { fired, cursor, polls, skipped, filtered, delivered, elapsedMs: Math.max(0, now() - start), following: followed.size, threads: perThread, ...(gap ? { gap } : {}), ...(reason ? { reason } : {}) };
+  };
 
   /** Persist safe cursors: immediately with no held delivery, otherwise only after delivery. */
   const persistPending = async () => {
@@ -181,7 +189,7 @@ export async function watch(transport, opts) {
         if (index !== next) throw new Error(`cannot checkpoint delivery ${id}: expected ${entries[next]?.m.id ?? "the end of the batch"}`);
         const point = entries[index].checkpoint;
         if (!point) throw new Error(`cannot checkpoint delivery ${id}: no cursor position was recorded`);
-        await acceptCarryDelivery(stateDir, pending.get(id));
+        await accept(pending.get(id));
         pending.delete(id);
         if (point.room !== undefined) await writeCursor(stateDir, key, point.room);
         for (const [threadId, c] of point.threads)
@@ -193,8 +201,11 @@ export async function watch(transport, opts) {
 
   // Reuse caller context; recovery capture must not introduce a network wait on
   // the delivery path. Unknown seat addressing is retained as a coverage gap.
-  const prepare = (/** @type {import('./core.mjs').Message[]} */ messages) =>
-    prepareCarryBatch(stateDir, key.split('#')[0], messages, opts.seat);
+  const prepare = async (/** @type {import('./core.mjs').Message[]} */ messages) => {
+    await capture?.begin();
+    try { return await prepareCarryBatch(stateDir, key.split('#')[0], messages, opts.seat); }
+    catch (err) { if (!capture) throw err; capture.fail(); return new Map(); }
+  };
 
   const flush = async () => {
     if (!held.length) {
@@ -207,7 +218,8 @@ export async function watch(transport, opts) {
     const n = held.length;
     const pending = await prepare(msgs);
     await onBatch(msgs, batchInfo(held, { delivered: n, skipped: windowSkipped, filtered: windowFiltered }, pending));
-    for (const event of pending.values()) await acceptCarryDelivery(stateDir, event);
+    for (const event of pending.values()) await accept(event);
+    await capture?.complete();
     delivered += n;
     for (const e of held) {
       const id = e.thread ?? e.m.thread;
@@ -356,7 +368,8 @@ export async function watch(transport, opts) {
           // without subtracting running totals itself
           const pending = await prepare(fresh.map(e => e.m));
           await onBatch(fresh.map((e) => e.m), batchInfo(fresh, { delivered: fresh.length, skipped: skippedHere, filtered: filteredHere, ...(roomMsgs.gap ? { gap: roomMsgs.gap } : {}) }, pending));
-          for (const event of pending.values()) await acceptCarryDelivery(stateDir, event);
+          for (const event of pending.values()) await accept(event);
+          await capture?.complete();
           delivered += fresh.length;
           // a message counts against a followed thread whether the thread read or the room read
           // was the one that carried it

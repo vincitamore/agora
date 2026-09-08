@@ -1,7 +1,7 @@
 // @ts-check
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFile } from 'node:fs/promises';
+import { writeFile, rename, unlink, readdir, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -242,6 +242,84 @@ test('real addressed watch delivery is prepared before the callback and acknowle
       assert.equal(checkCarryBoundary(snapshot, resumed).ok, true);
     } finally { await t.cleanup(); }
   }
+});
+
+for (const phase of ['prepare', 'prepare-later', 'accept', 'clear', 'clean']) for (const coalesceSeconds of [0, 1])
+test(`capture ${phase} failure preserves delivery and fresh-process coverage, coalesce ${coalesceSeconds}`, async () => {
+  const t = await tmp();
+  try {
+    const { boundary, actual } = fixture();
+    const dir = path.join(t.dir, 'sessions', 's1');
+    const evidence = path.join(dir, 'carry-evidence');
+    await writeRecord(dir, { slug: 's1', source: 'AGORA_SESSION', explicit: true }, { bearer: mandate.bearer });
+    const moved = evidence + '-held';
+    const block = async () => { await rename(evidence, moved); await writeFile(evidence, 'blocked'); };
+    const restore = async () => { await unlink(evidence); await rename(moved, evidence); };
+    const m = { id: 'required', cursor: '1', room: 'backroom', ts: mandate.issuedAt,
+      author: { id: 'peer', kind: /** @type {'agent'} */ ('agent') }, text: `Required\n\nto: ${mandate.bearer}` };
+    let polls = 0;
+    const transport = /** @type {import('../src/core.mjs').Transport} */ ({ kind: 'local', room: 'backroom', threads: false,
+      read: async () => {
+        polls++;
+        if (phase === 'prepare' || (phase === 'prepare-later' && polls === 2)) await block();
+        return [{ ...m, id: m.id + polls, cursor: String(polls) }];
+      } });
+    let delivered = 0;
+    await watch(transport, { stateDir: dir, key: 'backroom', mode: phase === 'prepare-later' ? 'stream' : 'once',
+      guard: () => delivered === 2 ? 'done' : undefined, sleep: async () => {}, coalesceSeconds, maxBatch: 1,
+      seat: { id: 'seat' }, onBatch: async (messages, batch) => {
+        delivered += messages.length;
+        if (phase === 'prepare' || (phase === 'prepare-later' && polls === 2)) await restore();
+        if (phase === 'accept') await block();
+        try { await batch.checkpoint(messages[0]); }
+        finally { if (phase === 'accept') await restore(); }
+        if (phase === 'clear') {
+          // A directory at the marker path makes unlink fail on every platform.
+          for (const file of (await readdir(evidence)).filter(f => f.endsWith('.pending'))) {
+            await unlink(path.join(evidence, file)); await mkdir(path.join(evidence, file));
+          }
+        }
+      } });
+    assert.equal(delivered, phase === 'prepare-later' ? 2 : 1, 'evidence failure must not stop the external delivery');
+    boundary.session.source = 'AGORA_SESSION';
+    boundary.claims = []; boundary.retractions = []; boundary.deliveries = []; boundary.watermark = []; boundary.cursors = [];
+    boundary.mandatePath = path.join(t.dir, 'mandate.json');
+    await writeFile(boundary.mandatePath, JSON.stringify(mandate));
+    const boundaryFile = path.join(t.dir, 'boundary.json');
+    await writeFile(boundaryFile, JSON.stringify(boundary));
+    const accountFile = path.join(t.dir, 'account.json');
+    await writeFile(accountFile, JSON.stringify({ version: 1, boundary: boundary.id, session: 's1', items: actual.accounted }));
+    if (phase === 'clean' || phase === 'clear')
+      await captureCarryPost(dir, 'backroom', actual.session, mandate.bearer, 'Done\n\nre: required1', { id: 'answer', cursor: '2' });
+    const config = path.join(t.dir, 'agora.json');
+    await writeFile(config, JSON.stringify({ actor: { name: 'test', kind: 'agent' }, rooms: {
+      backroom: { transport: 'local', path: path.join(t.dir, 'room.jsonl') } } }));
+    const bin = fileURLToPath(new URL('../bin/agora.mjs', import.meta.url));
+    const env = { ...process.env, AGORA_STATE: t.dir, AGORA_CONFIG: config, AGORA_SESSION: 's1' };
+    let stdout, code = 0;
+    try { ({ stdout } = await promisify(execFile)(process.execPath, [bin, 'carry', 'backroom', '--check', '--boundary', boundaryFile,
+      '--account', accountFile, '--json'], { env, timeout: 10000, windowsHide: true })); }
+    catch (error) { ({ stdout, code } = /** @type {Error & {stdout:string,code:number}} */ (error)); }
+    const result = JSON.parse(stdout);
+    assert.equal(code, phase === 'clean' || phase === 'clear' ? 0 : 1);
+    assert.equal(result.issues.some((/** @type {{code:string}} */ i) => i.code === 'delivery-coverage-unknown'),
+      phase.startsWith('prepare') || phase === 'accept');
+  } finally { await t.cleanup(); }
+});
+
+test('unwritable evidence at arm refuses by name before any read or delivery', async () => {
+  const t = await tmp();
+  try {
+    await writeRecord(t.dir, { slug: 's1', source: 'AGORA_SESSION', explicit: true }, { bearer: mandate.bearer });
+    await writeFile(path.join(t.dir, 'carry-evidence'), 'blocked');
+    let reads = 0, delivered = 0;
+    const transport = /** @type {import('../src/core.mjs').Transport} */ ({ kind: 'local', room: 'room', threads: false,
+      whoami: async () => ({ id: 'seat', name: 'Seat' }), post: async () => { throw new Error('unused'); },
+      read: async () => { reads++; return []; } });
+    await assert.rejects(watch(transport, { stateDir: t.dir, key: 'room', mode: 'once', onBatch: () => { delivered++; } }),
+      { name: 'CarryCheckError', code: 'carry-evidence-unwritable' });
+    assert.equal(reads, 0); assert.equal(delivered, 0);
+  } finally { await t.cleanup(); }
 });
 
 test('failed delivery callback keeps prepared evidence unconfirmed and does not advance the cursor', async () => {
