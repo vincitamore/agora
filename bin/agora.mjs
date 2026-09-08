@@ -511,11 +511,38 @@ function recordLine(rec, state) {
 }
 
 /**
+ * Read, and if the host refuses the batch because it will not fit one protocol frame, take the
+ * limit its refusal names — once.
+ *
+ * Bounding the COUNT is not enough: twenty individually legal 64 KiB messages encode past a 1 MiB
+ * frame, so a default of twenty is refused on a room of large posts however small that number is.
+ * The cap is on BYTES, and only the host can say how many of THESE messages fit — which, after
+ * L4-fix, it computes for the set the caller will actually receive.
+ *
+ * Exactly one retry. The host recomputes against the narrowed set, so a second refusal means it did
+ * not converge, and looping here would hide that rather than surface it. A single message larger
+ * than one frame is unpageable by construction and its refusal stands.
+ * @param {{ read: (o: any) => Promise<any[]> }} transport @param {any} options
+ */
+async function readWithinFrame(transport, options) {
+  try { return await transport.read(options); }
+  catch (error) {
+    const named = /read-batch-refused:[\s\S]*re-read with limit (\d+)/.exec(String(/** @type {any} */ (error)?.message ?? ""));
+    if (!named) throw error;
+    const fits = Number(named[1]);
+    if (!Number.isInteger(fits) || fits < 1) throw error;
+    const asked = typeof options.limit === "number" ? options.limit : undefined;
+    return await transport.read({ ...options, limit: asked === undefined ? fits : Math.min(fits, asked) });
+  }
+}
+
+/**
  * `room` stays the transport's own name for the room (a channel id, a file path); `alias` is the
  * name the caller typed and every verb takes. `type` tells a message from the typed lines a watch
  * interleaves with them, which is what a stdout consumer needs once position stops being enough.
  * @param {import('../src/core.mjs').Message[]} msgs @param {boolean} json @param {string} [alias]
  */
+
 function printMessages(msgs, json, alias) {
   for (const m of msgs) {
     const { raw: _raw, ...rest } = decorate(m);
@@ -1698,8 +1725,10 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       // so on a busy native-remote room it built a result too large for one protocol frame and was
       // refused -- while wanting twenty messages. The cursor is unaffected: a limited read returns
       // the NEWEST n (native-store slices `-limit` when there is no `since`), so the last element is
-      // the same message either way. Fewer bytes, same output, same position.
-      const msgs = await transport.read({ thread, limit });
+      // the same message either way. Fewer bytes, same output, same position. And when even that
+      // many will not fit -- twenty large posts can exceed a frame alone -- the host names a limit
+      // that does, and readWithinFrame takes it exactly once.
+      const msgs = await readWithinFrame(transport, { thread, limit });
       // An empty read is not proof of an empty room: a conditional read whose validator still
       // matches returns nothing, and writing a null position there moves the cursor BACK to the
       // start of the room and replays it. Leave the position alone and say which happened.
@@ -2474,7 +2503,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         // Only the newest message's cursor is used, so ask for one. Unbounded here meant `--now`
         // refused on exactly the rooms it was needed for -- and it is the verb a reader reaches for
         // after being told they have no cursor, so its failure misdirected twice over.
-        const msgs = await transport.read({ thread, limit: 1 });
+        const msgs = await readWithinFrame(transport, { thread, limit: 1 });
         // never a null position from an empty read: that is the explicit "from the start" value,
         // and writing it here replays the whole room on the next watch
         if (msgs.length) {
