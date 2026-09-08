@@ -534,19 +534,36 @@ export async function openRemoteSubscription(opts) {
     void reattach().finally(() => { reattaching = false; });
   };
 
+  /** One probe in flight at a time. Without this a slow probe is joined by the next tick's probe,
+   * and each one that eventually fails calls `runReattach` on its own account. */
+  let probing = false;
+
   const probe = async () => {
     if (stopped || darkReason !== undefined || failure !== undefined) { stopClock(); return; }
-    if (reattaching || current === undefined) return;
+    if (probing || reattaching || current === undefined) return;
     if (Date.now() - lastActivity < idleMs) return;
     const client = current;
+    probing = true;
     try {
       await client.request("status", { roomId });
-      touch();
-    } catch (error) {
+      // FENCED BY IDENTITY, on the success path too. A probe that was in flight while the channel
+      // was replaced belongs to the OLD generation, and its answer says nothing about the new one;
+      // touching the clock here would credit the live channel with an obsolete client's reply and
+      // postpone the next real probe by a full interval.
+      if (current === client) touch();
+    } catch {
       // Deliberately NOT markFailed: a probe that fails says the channel is gone, not that the host
       // refused anything. Let the reconnect path decide, since it already knows how to tell a
       // refusal the host ANSWERED from a channel that is simply not there.
-      if (!stopped) runReattach();
+      //
+      // And fenced the same way, which is the race Astra/reader reproduced on Windows: the close
+      // path can attach a healthy replacement WHILE this probe is still pending, and `reattaching`
+      // is already false again by the time the old probe rejects — so an obsolete failure
+      // re-subscribed a channel that was fine (three dials and three subscribes where two of each
+      // were owed). A stale client's failure is not evidence about the current one.
+      if (!stopped && current === client) runReattach();
+    } finally {
+      probing = false;
     }
   };
 
@@ -659,7 +676,13 @@ export async function openRemoteSubscription(opts) {
   // the loop is not a bound. A subscription is held by a watch that means to stay alive, so the
   // ref is also honest about what the process is for; `close()` clears it, and so does the first
   // probe after darkness.
-  idleTimer = setInterval(() => { void probe(); }, Math.max(1_000, Math.floor(idleMs / 2)));
+  // Checked twice per idle window. The floor guards against a pathological `idleMs` spinning the
+  // loop; it is 50 ms rather than 1 s because `idleMs` is a trusted local option, never a wire
+  // value, and a 1 s floor made the healthy-channel cell wait through no probes at all — it
+  // asserted nothing, which Astra/reader caught and which is the cell-that-cannot-fail shape this
+  // file already carries two instances of. Production is unchanged: the 60 s default still probes
+  // every 30 s.
+  idleTimer = setInterval(() => { void probe(); }, Math.max(50, Math.floor(idleMs / 2)));
 
   return {
     roomId,

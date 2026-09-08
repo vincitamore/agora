@@ -1161,7 +1161,7 @@ test("a FAILING close still lets the process exit, which is the risk this surfac
 
 // ------------------- L9a: a channel that stops carrying without closing its socket
 
-test("a silent dead channel is NOTICED and reported by name, with no socket close to trigger it", async () => {
+test("a silent dead channel is NOTICED and reported by name, with no socket close to trigger it", async (t) => {
   // The reproduction the investigation asked for. Before the idle clock, the only liveness signal
   // was `socket.once("close")`, so this exact shape — a relayed channel that stops carrying while
   // the socket stays open — left the watch alive, the cursor frozen and nothing reported. The cell
@@ -1179,6 +1179,10 @@ test("a silent dead channel is NOTICED and reported by name, with no socket clos
 
   const sub = await openRemoteSubscription({ room, since: nativeCursor(EPOCH, 0),
     idleMs: 120, backoffMs: 5, maxReconnects: 2 });
+  // Closes even when an assertion throws: the idle clock is REF'd, so an unclosed subscription
+  // holds the RUNNER open and a failing cell hangs instead of reporting. Measured while calibrating
+  // this file's own mutant, which timed out at 280 s rather than going red in a second.
+  t.after(() => sub.close());
 
   // The channel stops carrying. No close, no error event, no exit — exactly what was measured.
   carrying = false;
@@ -1192,27 +1196,40 @@ test("a silent dead channel is NOTICED and reported by name, with no socket clos
   assert.match(String(sub.dark()), /could not be re-dialled/,
     "the subscription stayed silent instead of reporting darkness by name");
   await assert.rejects(sub.read(), (e) => e instanceof ServiceDarkError);
-  sub.close();
 });
 
-test("the idle clock stays out of the way while the channel carries", async () => {
+test("the idle clock stays out of the way while the channel carries", async (t) => {
   // The other half, and the one that keeps the first from being satisfied by a probe that fires
   // constantly: a live channel must not be re-dialled, and a probe answered is not activity the
   // consumer sees.
   let redials = 0;
-  const room = scriptedRoom();
+  let probesSeen = 0;
+  // Counted at CONSTRUCTION: scriptedRoom binds `script.request` into the client when it is built,
+  // so assigning room.script.request afterwards is inert — a counter that would have read zero
+  // forever while looking like a measurement.
+  const room = scriptedRoom({ request: async () => { probesSeen += 1; return { status: { epoch: EPOCH, committed: 0 } }; } });
+  // idleMs 500 -> the clock ticks every 250 ms, so the window below contains SEVERAL probes that
+  // actually fire. An earlier draft used idleMs 60 against a 1 s interval floor and observed ZERO
+  // probes in 400 ms: it asserted nothing at all about the clock while reading as though it did.
+  // Astra/reader caught that (house :1586); it is the third cell-that-cannot-fail in this file and
+  // the comment stays so the next reader sizes the window against the interval, not against taste.
+  let probes = 0;
   const sub = await openRemoteSubscription({ room, since: nativeCursor(EPOCH, 0),
-    idleMs: 60, backoffMs: 5, maxReconnects: 2 });
+    idleMs: 500, backoffMs: 5, maxReconnects: 2 });
+  // Closes even when an assertion throws: the idle clock is REF'd, so an unclosed subscription
+  // holds the RUNNER open and a failing cell hangs instead of reporting. Measured while calibrating
+  // this file's own mutant, which timed out at 280 s rather than going red in a second.
+  t.after(() => sub.close());
   // Overridden AFTER the subscription is open: the first draft armed this before the initial dial
   // and the cell failed on its own fixture rather than on the code, which is the fixture-reaches-an-
   // earlier-guard shape this file already carries an instance of.
   room.client = async () => { redials += 1; throw new Error("a live channel must not be re-dialled"); };
 
   // Several idle windows with the channel answering normally.
-  await sub.wait(400);
+  await sub.wait(1600);
+  assert.ok(probesSeen >= 1, "no probe fired in the window, so this cell asserts nothing about the clock");
   assert.equal(redials, 0, `a healthy channel was re-dialled ${redials} time(s)`);
   assert.equal(sub.dark(), undefined, "a healthy channel was reported dark");
-  sub.close();
 });
 
 test("the idle clock is REF'd: a process holding nothing else still reports the dead channel", async () => {
@@ -1252,4 +1269,66 @@ test("the idle clock is REF'd: a process holding nothing else still reports the 
   assert.match(String(seen.dark), /could not be re-dialled/,
     "the child exited or stayed silent instead of reporting the dead channel: the clock is not holding the loop");
   await rm(dir, { recursive: true, force: true });
+});
+
+test("an obsolete probe's late failure does not re-subscribe the healthy channel that replaced it", async (t) => {
+  // Astra/reader's HOLD on 484b62a, reproduced here with promises rather than timing so the
+  // ordering is forced, not raced: the old probe is pending, its socket closes, the close path
+  // attaches a healthy replacement, and only THEN does the old probe reject. Before the identity
+  // fence, `reattaching` was already false again by that point, so the stale failure dialled and
+  // subscribed a third time on a channel that was fine — actual 3/3 where 2/2 is owed.
+  let calls = 0, subscriptions = 0;
+  /** @type {(e: unknown) => void} */ let rejectProbe = () => {};
+  const probeHeld = new Promise((_, reject) => { rejectProbe = reject; });
+
+  const makeClient = (/** @type {boolean} */ holds) => {
+    const socket = /** @type {any} */ (new EventEmitter());
+    socket.destroyed = false;
+    return {
+      socket,
+      // The FIRST client's status hangs until this cell rejects it; the replacement answers.
+      request: async () => (holds ? probeHeld : { status: { epoch: EPOCH, committed: 0 } }),
+      subscribe: async () => { subscriptions += 1; return { messages: [] }; },
+    };
+  };
+  const first = makeClient(true);
+  const second = makeClient(false);
+
+  const room = /** @type {any} */ ({
+    binding: { roomId: ROOM, accountId: `m-${"d".repeat(32)}`, host: { id: HOST_ACCOUNT } },
+    client: async () => { calls += 1; return calls === 1 ? first : second; },
+    close: async () => {},
+  });
+
+  const sub = await openRemoteSubscription({ room, since: nativeCursor(EPOCH, 0),
+    idleMs: 60, backoffMs: 5, maxReconnects: 3 });
+  // Closes even when an assertion throws: the idle clock is REF'd, so an unclosed subscription
+  // holds the RUNNER open and a failing cell hangs instead of reporting. Measured while calibrating
+  // this file's own mutant, which timed out at 280 s rather than going red in a second.
+  t.after(() => sub.close());
+  assert.equal(calls, 1);
+  assert.equal(subscriptions, 1);
+
+  // 1. let the clock fire so the probe is in flight on `first`, and hangs
+  const started = Date.now();
+  while (Date.now() - started < 400) await sub.wait(20);
+
+  // 2. the old socket closes: the existing close path attaches the healthy replacement
+  first.socket.emit("close");
+  const dialled = Date.now();
+  // Wait on the LAST step of the replacement, not the first. An earlier draft waited for `calls`
+  // to reach 2 and then asserted `subscriptions` in the same breath — but the dial resolves before
+  // the subscribe runs, so the cell read a half-finished reattach and failed on its own timing.
+  // Waiting on the dial and asserting the subscribe is two different moments treated as one.
+  while (subscriptions < 2 && Date.now() - dialled < 2000) await sub.wait(10);
+  assert.equal(calls, 2, "the close path did not attach a replacement");
+  assert.equal(subscriptions, 2, "the replacement did not subscribe");
+
+  // 3. NOW the obsolete probe rejects, against a channel that is already healthy
+  rejectProbe(new AgoraError("member-channel-dark: the host is not answering"));
+  await sub.wait(300);
+
+  assert.equal(calls, 2, `an obsolete probe re-dialled: ${calls} dial(s) where 2 are owed`);
+  assert.equal(subscriptions, 2, `an obsolete probe re-subscribed the healthy channel: ${subscriptions} subscribes where 2 are owed`);
+  assert.equal(sub.dark(), undefined, "a healthy channel was reported dark by a stale probe");
 });
