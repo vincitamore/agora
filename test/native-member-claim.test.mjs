@@ -11,8 +11,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
-  canonicalStateRoot, claimAlive, keyClaimPath, readKeyClaim, releaseKeyClaim, takeKeyClaim,
+  canonicalStateRoot, claimAlive, enrolledKeyDigest, keyClaimPath, readKeyClaim, releaseKeyClaim,
+  takeKeyClaim,
 } from "../src/native-member-claim.mjs";
+import { publicNodeKeyDigest } from "../src/protocol/route.mjs";
 import { bootEpoch } from "../src/session.mjs";
 
 const DIGEST_A = `sha256:${"a".repeat(64)}`;
@@ -228,4 +230,93 @@ test("the digest and the kind are validated before anything is written", async (
   // Nothing was created by either refusal.
   const wouldBe = keyClaimPath(await canonicalStateRoot(root), DIGEST_A);
   await assert.rejects(() => readFile(wouldBe, "utf8"), (error) => error.code === "ENOENT");
+});
+
+// --- the digest, read with no child ---------------------------------------------------------
+//
+// The circularity these cells pin: the claim must precede any Tailcat child, and it is keyed by the
+// enrolled key digest, but the ordinary way to learn the public node key is `printpub`, which IS a
+// child. A claim that spawns a child to decide whether it may spawn a child has already lost.
+
+const NODE_KEY = `nodekey:${"1234567890abcdef".repeat(4)}`;
+
+/** The identity file's real shape: both halves, the public one beside the private. */
+const identityFile = (extra = {}) => JSON.stringify({
+  Private: `privkey:${"9".repeat(64)}`,
+  Public: { ServerPublic: NODE_KEY, ServerDiscoPublic: `discokey:${"8".repeat(64)}` },
+  ...extra,
+});
+
+test("the enrolled digest is derived from the identity file, with no child spawned", async (t) => {
+  const root = await stateRoot(t);
+  const keyPath = path.join(root, "identity.private.json");
+  await writeFile(keyPath, identityFile(), "utf8");
+  assert.equal(await enrolledKeyDigest(keyPath), publicNodeKeyDigest(NODE_KEY));
+});
+
+test("the private half never appears in the digest, a refusal, or anything returned", async (t) => {
+  const root = await stateRoot(t);
+  const secret = `privkey:${"9".repeat(64)}`;
+  const keyPath = path.join(root, "identity.private.json");
+  await writeFile(keyPath, identityFile(), "utf8");
+
+  const digest = await enrolledKeyDigest(keyPath);
+  assert.doesNotMatch(digest, /privkey|9{16}/);
+
+  // And on the failure path, where a message is most likely to be pasted somewhere.
+  await writeFile(keyPath, JSON.stringify({ Private: secret, Public: { ServerPublic: "not-a-node-key" } }), "utf8");
+  await assert.rejects(() => enrolledKeyDigest(keyPath), (error) => {
+    assert.equal(codeOf(error), "member-key-identity-malformed");
+    assert.doesNotMatch(error.message, /privkey|9{16}/);
+    return true;
+  });
+});
+
+test("an unreadable or shapeless identity refuses by name rather than guessing a digest", async (t) => {
+  const root = await stateRoot(t);
+  await assert.rejects(
+    () => enrolledKeyDigest(path.join(root, "absent.json")),
+    (error) => codeOf(error) === "member-key-identity-unreadable",
+  );
+
+  const keyPath = path.join(root, "identity.private.json");
+  for (const body of ["{ not json", JSON.stringify({ Private: "x" }), JSON.stringify({ Public: {} }), JSON.stringify({ Public: { ServerPublic: 42 } })]) {
+    await writeFile(keyPath, body, "utf8");
+    await assert.rejects(
+      () => enrolledKeyDigest(keyPath),
+      (error) => codeOf(error) === "member-key-identity-malformed",
+      body.slice(0, 30),
+    );
+  }
+});
+
+test("the digest keys a claim end to end, so the gate and the resident contend on one file", async (t) => {
+  const root = await stateRoot(t);
+  const keyPath = path.join(root, "identity.private.json");
+  await writeFile(keyPath, identityFile(), "utf8");
+  const keyDigest = await enrolledKeyDigest(keyPath);
+
+  // The resident learns its digest from the route descriptor's binding; the gate learns it from the
+  // key file it was handed. Same key, same digest, therefore the same claim file: the gate cannot
+  // start while the resident holds it, in either order of arrival.
+  const resident = await takeKeyClaim({ stateRoot: root, keyDigest, kind: "resident", label: "house-remote" });
+  await assert.rejects(
+    () => takeKeyClaim({ stateRoot: root, keyDigest, kind: "gate", label: "probe-tailcat-live --direct" }),
+    (error) => codeOf(error) === "member-key-claim-held",
+  );
+  await resident.release();
+
+  const gate = await takeKeyClaim({ stateRoot: root, keyDigest, kind: "gate", label: "probe-tailcat-live --direct" });
+  await assert.rejects(
+    () => takeKeyClaim({ stateRoot: root, keyDigest, kind: "resident", label: "house-remote" }),
+    (error) => {
+      assert.equal(codeOf(error), "member-key-claim-held");
+      // A start refused by a transient gate must read as retry-in-seconds, which is what the kind
+      // and the label are for.
+      assert.match(error.message, /gate/);
+      assert.match(error.message, /probe-tailcat-live/);
+      return true;
+    },
+  );
+  await gate.release();
 });
