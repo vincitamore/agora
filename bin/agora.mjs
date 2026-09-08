@@ -134,7 +134,7 @@ const SCHEMA = {
     read: {
       args: ["<room>"],
       options: { "--thread <id>": "a thread inside the room", "--since <cursor>": "only what came after", "--limit <n>": "cap (default transport)", "--pages <n>": "pages of history to walk back through when --since is given (Slack, default 10 of 200 messages). A walk that does not reach the cursor returns nothing and names the gap rather than a partial window from the middle of the backlog", "--threads": "fold the room's live threads in: replies after --since, interleaved by time (Slack never shows them in a room read)", "--files": "materialize Slack-hosted images into this session's media directory; metadata is always carried" },
-      does: "print messages ascending; never touches the saved cursor",
+      does: "print messages ascending; never touches the saved cursor. On a native frame refusal, retry this invocation once at the host's fitting limit and report the shrink",
     },
     post: {
       args: ["<room>", "[text]"],
@@ -528,9 +528,10 @@ function recordLine(rec, state) {
 async function readWithinFrame(transport, options, onShrink) {
   try { return await transport.read(options); }
   catch (error) {
-    const named = /read-batch-refused:[\s\S]*re-read with limit (\d+)/.exec(String(/** @type {any} */ (error)?.message ?? ""));
+    const named = /read-batch-refused:\s*(\d+) messages[\s\S]*re-read with limit (\d+)/.exec(String(/** @type {any} */ (error)?.message ?? ""));
     if (!named) throw error;
-    const fits = Number(named[1]);
+    const selected = Number(named[1]);
+    const fits = Number(named[2]);
     if (!Number.isInteger(fits) || fits < 1) throw error;
     const asked = typeof options.limit === "number" ? options.limit : undefined;
     const took = asked === undefined ? fits : Math.min(fits, asked);
@@ -538,7 +539,8 @@ async function readWithinFrame(transport, options, onShrink) {
     // A preview that quietly shows fewer rows than asked is truncation wearing paging's name. The
     // caller REPORTS it, which is why onShrink is a required parameter rather than an option: a call
     // site that cannot say what it dropped has no business shrinking.
-    if (asked !== undefined && msgs.length < asked) onShrink(msgs.length, asked);
+    const reportedAsked = asked ?? selected;
+    if (msgs.length < reportedAsked) onShrink(msgs.length, reportedAsked);
     return msgs;
   }
 }
@@ -1928,10 +1930,11 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       if (values.threads && thread) throw new AgoraError(`--threads folds the room's live threads into the read; it cannot be combined with --thread`, EXIT.usage);
       const limit = positive(values.limit, "limit");
       const pages = positive(values.pages, "pages");
-      let msgs = await transport.read({ thread, since: values.since, limit, pages });
+      let msgs = await readWithinFrame(transport, { thread, since: values.since, limit, pages }, (shown, asked) =>
+        console.error(`agora: requested ${asked} messages; the host fit and returned ${shown} in one native frame`));
       // a read after a cursor that could not walk back to it returns NOTHING rather than a window
       // from the middle of the backlog, so the empty result must say which of the two it is
-      const gap = msgs.gap;
+      const gap = /** @type {any} */ (msgs).gap;
       if (values.threads && transport.threads) {
         // On Slack a room read never contains replies, and a parent older than the cursor is
         // not in the window even when its thread moved after it: a claim made in a thread is
