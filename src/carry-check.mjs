@@ -357,6 +357,17 @@ export async function beginCarryPost(dir, room, session, bearer, text) {
     subject: `outgoing-post-unknown:sha256:${createHash('sha256').update(text).digest('hex')}` });
 }
 
+/** Close a whole native claim/post operation only after every posted piece was
+ * captured. A board receipt alone cannot account for the outgoing commitment.
+ * @param {string} dir @param {ReturnType<typeof validateCarryEvent>} intent
+ * @param {{id:string,cursor:string}} receipt */
+export async function completeCarryPost(dir, intent, receipt) {
+  if (intent.kind !== 'gap') throw new CarryCheckError('post-intent-context-mismatch');
+  await appendCarryEvent(dir, { version: 1, id: randomUUID(), kind: 'coverage',
+    at: new Date().toISOString(), session: intent.session, bearer: intent.bearer,
+    ref: { room: intent.ref.room, id: receipt.id, cursor: receipt.cursor }, targets: [intent.id] });
+}
+
 /** Record intent to move a cursor by a non-delivery path. The write precedes the
  * cursor mutation: failure may leave a conservative gap, never an unrecorded skip.
  * @param {string} dir @param {string} key @param {{slug:string}} session
@@ -421,7 +432,12 @@ export async function prepareCarryBatch(dir, room, messages, seat) {
   /** @type {Map<string,ReturnType<typeof validateCarryEvent>>} */ const pending = new Map();
   for (const m of messages) {
     const to = parseTrailers(m.text).to;
-    if (!to.some(address => matchesAddress(address, record.bearer, seat))) continue;
+    if (!to.some(address => matchesAddress(address, record.bearer, seat))) {
+      if (to.length && !seat) await appendCarryEvent(dir, { version: 1, id: randomUUID(), kind: 'gap',
+        at: new Date().toISOString(), session: path.basename(dir), bearer: record.bearer,
+        ref: { room, id: m.id, cursor: m.cursor }, subject: 'seat-address-context-unknown' });
+      continue;
+    }
     const event = await appendCarryEvent(dir, { version: 1, id: randomUUID(), kind: 'delivery-prepared',
       at: new Date().toISOString(), session: path.basename(dir), bearer: record.bearer,
       ref: { room, id: m.id, cursor: m.cursor }, to });

@@ -77,6 +77,7 @@ export function isWatchStop(e) {
  *   mode?: 'once' | 'until-new' | 'stream', interval?: number, forSeconds?: number,
  *   onBatch: (msgs: import('./core.mjs').Message[], batch: BatchInfo) => void | Promise<void>,
  *   own?: () => Promise<Set<string>> | Set<string>,
+ *   seat?: {id?:string,name?:string},
  *   wake?: (m: import('./core.mjs').Message) => boolean,
  *   urgent?: (m: import('./core.mjs').Message) => boolean,
  *   coalesceSeconds?: number, maxBatch?: number,
@@ -190,12 +191,10 @@ export async function watch(transport, opts) {
     }));
   };
 
-  /** Resolve the seat once, not another network whoami for every delivered batch. */
-  /** @type {Promise<{id?:string,name?:string}|undefined>|undefined} */ let carrySeat;
-  const prepare = async (/** @type {import('./core.mjs').Message[]} */ messages) => {
-    carrySeat ??= transport.whoami().catch(() => undefined);
-    return prepareCarryBatch(stateDir, key.split('#')[0], messages, await carrySeat);
-  };
+  // Reuse caller context; recovery capture must not introduce a network wait on
+  // the delivery path. Unknown seat addressing is retained as a coverage gap.
+  const prepare = (/** @type {import('./core.mjs').Message[]} */ messages) =>
+    prepareCarryBatch(stateDir, key.split('#')[0], messages, opts.seat);
 
   const flush = async () => {
     if (!held.length) {
