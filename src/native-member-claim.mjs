@@ -28,11 +28,20 @@
  *     the same stale claim and create its own, and the first contender's `rm` then deletes that NEW
  *     claim before creating a second. Two live holders. Measured with real process concurrency:
  *     eight contenders against one stale claim admitted two holders, 2026-09-08 03:56Z.
- *   * rename to a tombstone: POSIX `rename(2)` atomically REPLACES an existing destination and
- *     returns success, so "exactly one renamer wins" is false there and true on Windows — a
- *     portability split in the one step ownership would rest on — and a late reclaimer's rename
- *     moves a legitimate successor's LIVE claim out of the path exactly as an unlink would delete
- *     it. The read-then-act window reappears inside the operation chosen to close it.
+ *   * rename to a tombstone: `fs.rename` REPLACES an existing destination and returns success, so
+ *     "exactly one renamer wins" is false — and a late reclaimer's rename moves a legitimate
+ *     successor's LIVE claim out of the path exactly as an unlink would delete it. The
+ *     read-then-act window reappears inside the operation chosen to close it.
+ *
+ *     Measured on both platforms rather than assumed, because the reasoning that reached this file
+ *     had it as a PORTABILITY SPLIT — POSIX `rename(2)` replacing while Windows refuses — which
+ *     would have made rename correct on one platform and a cross-platform hazard rather than a
+ *     mistake. It is not a split at the layer this code calls: `fs.renameSync` over an existing
+ *     file succeeded on ext4 AND on NTFS (Node 22, 2026-09-08), because Node's Windows rename is
+ *     `MoveFileEx` with `MOVEFILE_REPLACE_EXISTING`. The raw Win32 `MoveFile` does refuse, which is
+ *     where the split belongs and why it was believed; it is not the call available here. So the
+ *     argument against rename is simpler and stronger than the one that produced it: rename selects
+ *     no winner ANYWHERE, and no platform makes it safe.
  *
  * A unique token per acquire (the shape this file carried at `921022c`) does close the reuse (ABA)
  * question without a floor, and that is a real merit. It does not make read-and-remove atomic, so
