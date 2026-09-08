@@ -48,7 +48,7 @@ test("accepted is durable BEFORE the caller is told, so a death between them lea
   /** The caller's checkpoint never runs: this is the death between acceptance and the cursor write. */
   await assert.rejects(
     codex.queueCodex("backroom", [message("m1", "1788888888.000100")], {
-      root, thread: "t-1", bin: "codex",
+      root, thread: "t-1", bin: process.execPath,
       run: /** @type {any} */ (async (/** @type {string} */ _bin, /** @type {string[]} */ argv) => {
         queued.push(String(argv[argv.indexOf("--message") + 1])); return { stdout: "", stderr: "" }; }),
       onQueued: async () => { throw new Error("the consumer of this callback died"); },
@@ -75,7 +75,7 @@ test("absence from the pending list is reported as absent-unresolved and advance
   const run = /** @type {any} */ (async () => ({ stdout: "", stderr: "" }));
   /** @type {string[]} */ const advanced = [];
   await codex.queueCodex("backroom", [message("still-there", "1788888888.000200"), message("vanished", "1788888888.000300")], {
-    root, thread: "t-2", bin: "codex", run,
+    root, thread: "t-2", bin: process.execPath, run,
     onQueued: async (/** @type {any} */ d) => { advanced.push(d.cursor); },
   });
 

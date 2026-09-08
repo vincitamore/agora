@@ -1,6 +1,7 @@
 // @ts-check
 import { execFile, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -243,7 +244,15 @@ export function codexPrompt(room, message) {
  *   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>,
  *   onRetry?: (failure: { room: string, cursor: string, thread: string, attempt: number, attempts: number, delayMs: number, reason: string }) => void,
  *   onQueued?: (delivery: { thread: string, cursor: string, bin: string, message: import('./core.mjs').Message }) => void | Promise<void>,
+ *   root?: string,
  * }} [opts]
+ *
+ * `root` is the seat's state root and it is what turns acceptance into a DURABLE receipt: given it,
+ * each accepted delivery is recorded under `<root>/codex/<thread>.intents.json` before control
+ * reaches `onQueued`. Without it the call behaves exactly as it always did -- the queue is still
+ * called, the caller is still told -- but nothing survives a death between the two, so a re-arm
+ * replays blind. Production callers pass it; a caller that does not is choosing at-least-once with
+ * no reconciliation, and should know that is the choice it made.
  */
 export async function queueCodex(room, messages, opts = {}) {
   const env = opts.env ?? process.env;
@@ -285,10 +294,87 @@ export async function queueCodex(room, messages, opts = {}) {
         catch { throw new AgoraError(`Codex queue retry cancelled for ${room}/${message.cursor}; cursor not acknowledged`, EXIT.error); }
       }
     }
+    // The ACCEPTED receipt, durable, BEFORE control reaches the caller. This is the one receipt a
+    // queued bridge can honestly have: the queue took the item. Whether the consumer ever ran is a
+    // fact about the consumer and no callback here reports it.
+    //
+    // It is written before `onQueued` on purpose. The caller advances its cursor in that callback,
+    // so a death between the two would otherwise leave nothing at all: not the cursor (never
+    // written) and not a record of the delivery (never kept), so a re-arm replays blind with no way
+    // to tell an in-flight item from one that was never sent.
+    if (opts.root) await recordCodexIntent(opts.root, thread, message);
     // A checkpoint failure is NOT a queue failure: the effect already happened. Never retry
     // injection here; leaving the cursor behind exposes the existing at-least-once replay window.
     await opts.onQueued?.({ thread, cursor: message.cursor, bin, message });
   }
+}
+
+/** Where a thread's accepted-delivery records live. One file per thread, under the seat's state. */
+const intentsPath = (/** @type {string} */ root, /** @type {string} */ thread) =>
+  path.join(root, "codex", `${thread}.intents.json`);
+
+/**
+ * Every delivery this bridge has accepted for a thread, oldest first.
+ *
+ * The record exists because acceptance and processing are different facts and only the first is
+ * observable here. Reading it is how a re-arm distinguishes a delivery that is in flight from one
+ * that was never sent -- a distinction the cursor alone cannot carry, because the cursor is written
+ * after acceptance and a death between the two leaves it behind.
+ * @param {string} root @param {string} thread
+ * @returns {Promise<{ id: string, cursor: string, room: string, acceptedAt: string,
+ *   processedAt?: string | null, resolution?: string }[]>}
+ */
+export async function readCodexIntents(root, thread) {
+  try { return JSON.parse(await readFile(intentsPath(root, thread), "utf8")); }
+  catch (error) {
+    // A missing file is an empty history. Anything else is a real read failure and must not be
+    // laundered into "nothing was ever accepted", which is the shape that turns a broken disk into
+    // a clean slate and replays or drops a whole backlog without saying so.
+    if (/** @type {NodeJS.ErrnoException} */ (error)?.code === "ENOENT") return [];
+    throw error;
+  }
+}
+
+/** @param {string} root @param {string} thread @param {import('./core.mjs').Message} message */
+async function recordCodexIntent(root, thread, message) {
+  const file = intentsPath(root, thread);
+  await mkdir(path.dirname(file), { recursive: true });
+  const intents = await readCodexIntents(root, thread);
+  // Idempotent by message id: a retried delivery of the same id is the same acceptance, not a second
+  // one. The id is the idempotence point above the transport, so it is the key here too.
+  if (!intents.some((i) => i.id === message.id))
+    intents.push({ id: message.id, cursor: message.cursor, room: message.room,
+      acceptedAt: new Date().toISOString(), processedAt: null });
+  await writeFile(file, `${JSON.stringify(intents, null, 2)}\n`, "utf8");
+}
+
+/**
+ * Fold the accepted records against the queue's own pending list.
+ *
+ * This is the closest thing to a second receipt a one-signal bridge has, and it is deliberately not
+ * called one. An item the queue STILL LISTS demonstrably has not been consumed: that is in-flight,
+ * and re-queueing it would duplicate rather than recover. An item that is GONE is
+ * processed-OR-REMOVED -- consumed by the far side, or deleted by a purge, an expiry, or an operator
+ * clearing a stale backlog, and nothing visible from here separates those.
+ *
+ * So `processed` is always empty on this bridge and `advanceTo` is always null. Advancing a cursor
+ * on absence would turn a deletion into a completion receipt, which is the silent loss this whole
+ * unit exists to close; the honest output is accepted / in-flight / absent, with absent RETAINED so
+ * a human can see it happened. A processed witness has to come from the consumer's own lifecycle,
+ * which is the native path's to supply.
+ * @param {{ root: string, thread: string, list: () => Promise<{ id: string }[]> }} opts
+ * @returns {Promise<{ inFlight: any[], absent: any[], processed: any[], advanceTo: string | null }>}
+ */
+export async function reconcileCodexIntents({ root, thread, list }) {
+  const intents = await readCodexIntents(root, thread);
+  const pending = new Set((await list()).map((entry) => entry.id));
+  const open = intents.filter((i) => !i.processedAt);
+  const inFlight = open.filter((i) => pending.has(i.id));
+  const absent = open.filter((i) => !pending.has(i.id));
+  for (const intent of absent) intent.resolution = "absent";
+  if (absent.length)
+    await writeFile(intentsPath(root, thread), `${JSON.stringify(intents, null, 2)}\n`, "utf8");
+  return { inFlight, absent, processed: [], advanceTo: null };
 }
 
 /**
