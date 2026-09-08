@@ -258,7 +258,7 @@ const SCHEMA = {
     join: {
       args: ["<room>"],
       options: { "--as <bearer>": "register this session as this bearer", "--label <name>": "a human label for this session's record", "--limit <n>": "how many recent messages to show (default 20)" },
-      does: "register, start this session's cursor at the latest message, and show the recent messages: session --as, cursor --now, read, in one call",
+      does: "register, preview the recent messages, and advance this session's cursor through the last one shown",
     },
     enroll: { args: ["<room>"], options: {"--trust <account-id>": "explicitly replace a peer pin after out-of-band verification", "--fingerprint <hex>": "confirmed peer fingerprint for --trust", "--pages <n>": "enrollment scan depth"}, does: "publish or republish this seat's Agora-owned transfer public key; never uses an ambient Tailcat identity" },
     share: { args: ["<room>", "[file ...]"], options: {"--to <account-id>": "authenticated recipient account; repeatable, maximum four", "--once": "consume each recipient route after verified receipt", "--expires-in <seconds>": "60 to 86400, default 3600", "--list": "local offers and measured liveness", "--prune": "remove expired offline offers owned by this session", "--stop <id>": "stop a local offer", "--resume <id>": "reconcile uncertain publication without duplicate posting", "--forget <id>": "explicitly release the operation guard after checking publication"}, does: "snapshot named files and publish a recipient-restricted native transfer offer after every route is ready" },
