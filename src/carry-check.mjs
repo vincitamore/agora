@@ -132,12 +132,21 @@ export function checkCarryBoundary(expected, actual) {
     fail('delivery-coverage-unknown', event.id);
   const addressedBySuccessor = (/** @type {ReturnType<typeof validateCarryEvent>} */ e) =>
     e.session === actual.session.slug && e.bearer === actual.registeredBearer;
-  for (const claim of b.claims) {
+  const relevant = actual.evidence.filter(e => e.bearer === b.bearer && [b.session.slug, actual.session.slug].includes(e.session));
+  const released = new Set(relevant.filter(e => ['release', 'withdrawal'].includes(e.kind)).flatMap(e => e.targets));
+  const claims = new Map(b.claims.map(c => [c.eventId, c]));
+  const retractions = new Map(b.retractions.map(c => [c.eventId, c]));
+  for (const e of relevant) {
+    if (e.kind === 'claim') claims.set(e.id, { eventId: e.id, ref: e.ref });
+    if (['release', 'withdrawal'].includes(e.kind)) retractions.set(e.id, { eventId: e.id, ref: e.ref });
+  }
+  for (const claim of claims.values()) {
+    if (released.has(claim.eventId)) continue;
     const origin = events.get(claim.eventId);
     if (!origin || origin.kind !== 'claim' || carryRefKey(origin.ref) !== carryRefKey(claim.ref)) fail('claim-evidence-missing', claim.eventId);
     if (!accounted('claim', claim.eventId)) fail('claim-unaccounted', claim.eventId);
   }
-  for (const retraction of b.retractions) {
+  for (const retraction of retractions.values()) {
     const origin = events.get(retraction.eventId);
     if (!origin || !['release', 'withdrawal'].includes(origin.kind) || carryRefKey(origin.ref) !== carryRefKey(retraction.ref))
       fail('retraction-evidence-missing', retraction.eventId);
@@ -198,8 +207,47 @@ export async function checkCarryFiles(dir, boundaryFile, context) {
       });
     } catch { evidence.issues.push('carry-account-unreadable'); }
   }
-  return checkCarryBoundary(boundary, { ...context, mandate: source, cursors,
+  let successorOf;
+  try {
+    const inherited = readRecord(JSON.parse(await readFile(path.join(dir, 'carry-inherited.json'), 'utf8')), ['version', 'from', 'to']);
+    if (inherited.version === 1 && inherited.to === context.session.slug && inherited.from === boundary.session.slug)
+      successorOf = boundary.session.slug;
+  } catch { /* inheritance is explicit evidence, not inferred from matching files */ }
+  return checkCarryBoundary(boundary, { ...context, successorOf, mandate: source, cursors,
     evidence: evidence.events, evidenceIssues: evidence.issues, accounted });
+}
+
+/** Copy immutable evidence, never the predecessor's bearer registration. A marker
+ * is committed only after all copied records have been read and synced. This is
+ * an explicit succession link, not a claim that the successor registered or posted.
+ * @param {string} src @param {string} dst @param {string} from @param {string} to
+ * @param {boolean} [dryRun] */
+export async function inheritCarryEvidence(src, dst, from, to, dryRun = false) {
+  const source = await readCarryEvidence(src);
+  const corrupt = source.issues.filter(i => i !== 'delivery-coverage-unknown');
+  if (corrupt.length) throw new CarryCheckError('carry-inherit-source-corrupt');
+  const target = await readCarryEvidence(dst);
+  if (target.issues.some(i => i !== 'delivery-coverage-unknown')) throw new CarryCheckError('carry-inherit-target-corrupt');
+  const present = new Map(target.events.map(e => [e.id, JSON.stringify(e)]));
+  for (const e of source.events) if (present.has(e.id) && present.get(e.id) !== JSON.stringify(e))
+    throw new CarryCheckError('carry-inherit-conflict');
+  const missing = source.events.filter(e => !present.has(e.id));
+  if (dryRun) return { events: missing.length, issues: source.issues };
+  for (const e of missing) await appendCarryEvent(dst, e);
+  await mkdir(dst, { recursive: true });
+  // The ordinary session inheritance already refuses unrelated destination state.
+  // Refuse a second, different lineage rather than silently replacing this marker.
+  const marker = { version: 1, from, to };
+  try {
+    const handle = await open(path.join(dst, 'carry-inherited.json'), 'wx', 0o600);
+    try { await handle.writeFile(JSON.stringify(marker) + '\n'); await handle.sync(); }
+    finally { await handle.close(); }
+  } catch (err) {
+    if (/** @type {NodeJS.ErrnoException} */ (err).code !== 'EEXIST') throw err;
+    const old = JSON.parse(await readFile(path.join(dst, 'carry-inherited.json'), 'utf8'));
+    if (old.version !== 1 || old.from !== from || old.to !== to) throw new CarryCheckError('carry-inherit-lineage-conflict');
+  }
+  return { events: missing.length, issues: source.issues };
 }
 
 /** Seal current durable obligations without replacing missing historical coverage
@@ -224,7 +272,7 @@ export async function sealCarryBoundary(dir, output, context) {
       && origin.bearer === context.bearer && origin.commitmentsComplete === true;
   } catch { /* missing/corrupt historical provenance is not completeness */ }
   const boundary = validateCarryBoundary({ version: 1, id: randomUUID(), createdAt: new Date().toISOString(),
-    session: context.session, bearer: context.bearer, mandatePath: path.resolve(context.mandatePath), mandateDigest: source.digest,
+    session: { slug: context.session.slug, source: context.session.source }, bearer: context.bearer, mandatePath: path.resolve(context.mandatePath), mandateDigest: source.digest,
     cursors: context.cursors, claims: mine.filter(e => e.kind === 'claim' && !targeted.has(e.id)).map(ref),
     deliveries: mine.filter(e => e.kind === 'delivery-prepared' && !targeted.has(e.id)).map(ref),
     retractions: mine.filter(e => ['release', 'withdrawal'].includes(e.kind)).map(ref),
@@ -256,7 +304,12 @@ export async function captureCarryPost(dir, room, session, bearer, text, receipt
     finally { await handle.close(); }
   } catch (err) { if (/** @type {NodeJS.ErrnoException} */ (err).code !== 'EEXIST') throw err; }
   const evidence = await readCarryEvidence(dir);
-  const mine = evidence.events.filter(e => e.session === session.slug && e.bearer === bearer && e.ref.room === room);
+  /** @type {string|undefined} */ let inheritedFrom;
+  try {
+    const inherited = JSON.parse(await readFile(path.join(dir, 'carry-inherited.json'), 'utf8'));
+    if (inherited.version === 1 && inherited.to === session.slug && typeof inherited.from === 'string') inheritedFrom = inherited.from;
+  } catch { /* no implicit inheritance from matching bearer names */ }
+  const mine = evidence.events.filter(e => [session.slug, inheritedFrom].includes(e.session) && e.bearer === bearer && e.ref.room === room);
   const trailers = parseTrailers(text).trailers;
   const base = { version: 1, at: new Date().toISOString(), session: session.slug, bearer,
     ref: { room, id: receipt.id, cursor: receipt.cursor } };
@@ -273,6 +326,18 @@ export async function captureCarryPost(dir, room, session, bearer, text, receipt
   }
 }
 
+/** Record intent to move a cursor by a non-delivery path. The write precedes the
+ * cursor mutation: failure may leave a conservative gap, never an unrecorded skip.
+ * @param {string} dir @param {string} key @param {{slug:string}} session
+ * @param {string} bearer @param {string|undefined} next @param {string} cause */
+export async function recordCarryCursorMove(dir, key, session, bearer, next, cause) {
+  const previous = await readCursorFile(dir, key);
+  if (previous.exists && previous.cursor === next) return;
+  await appendCarryEvent(dir, { version: 1, id: randomUUID(), kind: 'gap', at: new Date().toISOString(),
+    session: session.slug, bearer, ref: { room: key.split('#')[0], id: `cursor:${key}`, cursor: next ?? '(none)' },
+    subject: JSON.stringify({ key, from: previous.cursor ?? null, to: next ?? null, cause }) });
+}
+
 /** Versioned immutable evidence events. A prepared delivery is not acknowledgement.
  * A gap remains a gap until an explicit coverage event accounts for its ID; moving a
  * cursor cannot manufacture that event. Retractions are events, never deletions.
@@ -280,16 +345,36 @@ export async function captureCarryPost(dir, room, session, bearer, text, receipt
 export function validateCarryEvent(value) {
   const v = readRecord(value, ['version', 'id', 'kind', 'at', 'session', 'bearer', 'ref'], ['targets', 'subject', 'to']);
   if (v.version !== 1) throw new CarryCheckError('carry-evidence-malformed');
-  const kind = readEnum(v.kind, 'kind', ['post', 'delivery-prepared', 'delivery-accepted', 'answer', 'claim', 'release', 'withdrawal', 'gap', 'coverage']);
+  const kind = readEnum(v.kind, 'kind', ['post', 'arrival', 'departure', 'delivery-prepared', 'delivery-accepted', 'answer', 'claim', 'release', 'withdrawal', 'gap', 'coverage']);
   const targets = v.targets === undefined ? [] : readArray(v.targets, 'targets', 4096, label);
   const subject = v.subject === undefined ? null : label(v.subject);
   const to = v.to === undefined ? [] : readArray(v.to, 'to', 4096, label);
-  if (['delivery-accepted', 'answer', 'withdrawal', 'coverage'].includes(kind) && !targets.length)
+  if (['arrival', 'departure', 'delivery-accepted', 'answer', 'withdrawal', 'coverage'].includes(kind) && !targets.length)
     throw new CarryCheckError('carry-evidence-malformed');
   if (['claim', 'release', 'gap'].includes(kind) && !subject)
     throw new CarryCheckError('carry-evidence-malformed');
   return { version: 1, id: label(v.id), kind, at: readTimestamp(v.at), session: label(v.session),
     bearer: label(v.bearer), ref: validateCarryRef(v.ref), targets, to, ...(subject ? { subject } : {}) };
+}
+
+/** A successor must have registered and posted an arrival for this exact boundary.
+ * Same-seat cooperative records, not authenticated principals. No process is killed.
+ * @param {string} stateRoot @param {string} successor @param {ReturnType<typeof validateCarryBoundary>} boundary
+ * @param {string} room */
+export async function requireCarrySuccessor(stateRoot, successor, boundary, room) {
+  if (!/^(?!\.\.?$)[A-Za-z0-9._-]{1,160}$/.test(successor) || successor === boundary.session.slug)
+    throw new CarryCheckError('successor-session-invalid');
+  const dir = path.join(stateRoot, 'sessions', successor);
+  let record;
+  try { record = JSON.parse(await readFile(path.join(dir, 'session.json'), 'utf8')); }
+  catch { throw new CarryCheckError('successor-registration-missing'); }
+  if (record.bearer !== boundary.bearer) throw new CarryCheckError('successor-registration-missing');
+  const evidence = await readCarryEvidence(dir);
+  if (evidence.issues.length) throw new CarryCheckError('successor-evidence-unreadable');
+  const arrival = evidence.events.find(e => e.kind === 'arrival' && e.session === successor
+    && e.bearer === boundary.bearer && e.ref.room === room && e.targets.includes(boundary.id));
+  if (!arrival) throw new CarryCheckError('successor-arrival-missing');
+  return arrival;
 }
 
 /** Prepared evidence precedes the external delivery. An unregistered watch has no
