@@ -220,6 +220,10 @@ if ($CodexServer) {
 }
 elseif ($CodexTokenFile) { throw '-CodexTokenFile requires -CodexServer.' }
 $commandLine = (ConvertTo-ProcessArgument $pwshPath) + ' ' + (($workerArgs | ForEach-Object { ConvertTo-ProcessArgument $_ }) -join ' ')
+# A new arm starts a new stdout log: -Status returns the last watch-ended line once the pid is
+# gone, and with an appended log that line could be an earlier arm's ending.
+New-Item -ItemType Directory -Force -Path (Split-Path $LogPrefix) | Out-Null
+[IO.File]::WriteAllText("$LogPrefix.stdout.log", '')
 $created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
     CommandLine = $commandLine
     CurrentDirectory = (Get-Location).Path
