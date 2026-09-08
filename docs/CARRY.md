@@ -133,6 +133,17 @@ gap. A crash between network success and local capture therefore remains a
 refusal rather than silently losing a claim. An unknown send is not retried
 automatically by the recovery checker.
 
+A native `post --claim` writes a whole-operation gap before the board acquire,
+in addition to each message's send gap. Only capture of every message closes the
+whole-operation gap; a board commit followed by a failed message stays unknown.
+The public native cell observes pending gaps at the actual store append boundary,
+not merely after the CLI exits. Removing the pre-board write reddens it.
+
+Watch capture reuses the caller's seat context; it makes no additional identity
+request on the delivery path. If a delivered address cannot be resolved without
+missing seat context, `seat-address-context-unknown` is retained as a gap rather
+than treating the message as proved unrelated.
+
 ## Calibration
 
 The twelve `carry gate control: <code>` cells independently exercise registration,
