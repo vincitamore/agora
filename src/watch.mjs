@@ -1,5 +1,6 @@
 // @ts-check
 import { jitter, readCursor, redact, writeCursor, sleep as defaultSleep } from "./core.mjs";
+import { acceptCarryDelivery, prepareCarryBatch } from './carry-check.mjs';
 
 /**
  * The one way a room read may end a watch without it being an error: an error carrying this
@@ -162,9 +163,10 @@ export async function watch(transport, opts) {
    * at-least-once. Calls must follow delivery order, which is the order `msgs` is handed to it.
    * @param {Array<{ m: import('./core.mjs').Message, checkpoint?: CursorCheckpoint }>} entries
    * @param {{ delivered: number, skipped: number, filtered: number, gap?: import('./core.mjs').ReadGap }} counts
+   * @param {Map<string,ReturnType<typeof import('./carry-check.mjs').validateCarryEvent>>} [pending]
    * @returns {BatchInfo}
    */
-  const batchInfo = (entries, counts) => {
+  const batchInfo = (entries, counts, pending = new Map()) => {
     let next = 0;
     const byId = new Map(entries.map((e, index) => [e.m.id, index]));
     const info = { ...counts };
@@ -178,12 +180,21 @@ export async function watch(transport, opts) {
         if (index !== next) throw new Error(`cannot checkpoint delivery ${id}: expected ${entries[next]?.m.id ?? "the end of the batch"}`);
         const point = entries[index].checkpoint;
         if (!point) throw new Error(`cannot checkpoint delivery ${id}: no cursor position was recorded`);
+        await acceptCarryDelivery(stateDir, pending.get(id));
+        pending.delete(id);
         if (point.room !== undefined) await writeCursor(stateDir, key, point.room);
         for (const [threadId, c] of point.threads)
           await writeCursor(stateDir, threads ? threads.key(threadId) : threadId, c);
         next++;
       },
     }));
+  };
+
+  /** Resolve the seat once, not another network whoami for every delivered batch. */
+  /** @type {Promise<{id?:string,name?:string}|undefined>|undefined} */ let carrySeat;
+  const prepare = async (/** @type {import('./core.mjs').Message[]} */ messages) => {
+    carrySeat ??= transport.whoami().catch(() => undefined);
+    return prepareCarryBatch(stateDir, key.split('#')[0], messages, await carrySeat);
   };
 
   const flush = async () => {
@@ -195,7 +206,9 @@ export async function watch(transport, opts) {
     }
     const msgs = held.map((e) => e.m);
     const n = held.length;
-    await onBatch(msgs, batchInfo(held, { delivered: n, skipped: windowSkipped, filtered: windowFiltered }));
+    const pending = await prepare(msgs);
+    await onBatch(msgs, batchInfo(held, { delivered: n, skipped: windowSkipped, filtered: windowFiltered }, pending));
+    for (const event of pending.values()) await acceptCarryDelivery(stateDir, event);
     delivered += n;
     for (const e of held) {
       const id = e.thread ?? e.m.thread;
@@ -342,7 +355,9 @@ export async function watch(transport, opts) {
         if (fresh.length) {
           // the counts of THIS poll, so a consumer taking one object per poll says what the poll did
           // without subtracting running totals itself
-          await onBatch(fresh.map((e) => e.m), batchInfo(fresh, { delivered: fresh.length, skipped: skippedHere, filtered: filteredHere, ...(roomMsgs.gap ? { gap: roomMsgs.gap } : {}) }));
+          const pending = await prepare(fresh.map(e => e.m));
+          await onBatch(fresh.map((e) => e.m), batchInfo(fresh, { delivered: fresh.length, skipped: skippedHere, filtered: filteredHere, ...(roomMsgs.gap ? { gap: roomMsgs.gap } : {}) }, pending));
+          for (const event of pending.values()) await acceptCarryDelivery(stateDir, event);
           delivered += fresh.length;
           // a message counts against a followed thread whether the thread read or the room read
           // was the one that carried it
