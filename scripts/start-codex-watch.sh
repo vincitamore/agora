@@ -12,6 +12,7 @@ runtime_path=
 codex_path=${AGORA_CODEX_BIN:-}
 log_prefix=
 thread_interval=120
+arming_timeout=60
 status=false
 stop=false
 force=false
@@ -35,6 +36,7 @@ while [ "$#" -gt 0 ]; do
     --codex-bin|-CodexPath) codex_path=$2; shift 2 ;;
     --log-prefix|-LogPrefix) log_prefix=$2; shift 2 ;;
     --thread-interval|-ThreadInterval) thread_interval=$2; shift 2 ;;
+    --arming-timeout|-ArmingTimeoutSeconds) arming_timeout=$2; shift 2 ;;
     --status|-Status) status=true; shift ;;
     --stop|-Stop) stop=true; shift ;;
     --force|-Force) force=true; shift ;;
@@ -47,6 +49,10 @@ case "$thread_interval" in
   ''|*[!0-9]*) printf '%s\n' '--thread-interval must be a positive integer' >&2; exit 2 ;;
 esac
 [ "$thread_interval" -gt 0 ] || { printf '%s\n' '--thread-interval must be a positive integer' >&2; exit 2; }
+case "$arming_timeout" in
+  ''|*[!0-9]*) printf '%s\n' '--arming-timeout must be a positive integer' >&2; exit 2 ;;
+esac
+[ "$arming_timeout" -gt 0 ] || { printf '%s\n' '--arming-timeout must be a positive integer' >&2; exit 2; }
 
 [ -n "$room" ] || { printf '%s\n' '--room is required' >&2; exit 2; }
 case "$session_id" in
@@ -156,8 +162,8 @@ if [ "$service_loaded" = true ]; then
 fi
 
 if [ "$status" = true ]; then
-  printf '{"room":"%s","session":"%s","watcherPid":%s,"supervisorPid":%s,"alive":%s,"armed":"%s"}\n' \
-    "$(json_string "$room")" "$(json_string "$session_id")" "${pid:-null}" "${supervisor_pid:-null}" "$alive" "$(json_string "$armed_path")"
+  printf '{"room":"%s","session":"%s","watcherPid":%s,"supervisorPid":%s,"alive":%s,"armingTimeoutSeconds":%s,"armed":"%s"}\n' \
+    "$(json_string "$room")" "$(json_string "$session_id")" "${pid:-null}" "${supervisor_pid:-null}" "$alive" "$arming_timeout" "$(json_string "$armed_path")"
   exit 0
 fi
 
@@ -283,7 +289,8 @@ fi
 
 watcher_pid=
 i=0
-while [ "$i" -lt 100 ]; do
+arming_wait_steps=$((arming_timeout * 10))
+while [ "$i" -lt "$arming_wait_steps" ]; do
   watcher_pid=$(armed_pid)
   if [ -n "$watcher_pid" ] && kill -0 "$watcher_pid" 2>/dev/null; then
     if [ "$launchd" != true ] || [ "$(launchd_pid)" = "$watcher_pid" ]; then break; fi
@@ -304,11 +311,11 @@ if [ -z "$watcher_pid" ]; then
   else
     kill "$supervisor_pid" 2>/dev/null || true
   fi
-  printf '%s\n' "Codex watch did not arm within 10 seconds. Inspect $log_prefix.stderr.log." >&2
+  printf '%s\n' "Codex watch did not publish its subscribed armed receipt within $arming_timeout seconds. Inspect $log_prefix.stderr.log." >&2
   exit 1
 fi
 if [ "$launchd" = true ]; then supervisor_pid=$watcher_pid; fi
 
-printf '{"supervisorPid":%s,"watcherPid":%s,"room":"%s","actor":"%s","session":"%s","stdout":"%s","stderr":"%s"}\n' \
+printf '{"supervisorPid":%s,"watcherPid":%s,"room":"%s","actor":"%s","session":"%s","armingTimeoutSeconds":%s,"stdout":"%s","stderr":"%s"}\n' \
   "$supervisor_pid" "$watcher_pid" "$(json_string "$room")" "$(json_string "$actor")" \
-  "$(json_string "$session_id")" "$(json_string "$log_prefix.stdout.log")" "$(json_string "$log_prefix.stderr.log")"
+  "$(json_string "$session_id")" "$arming_timeout" "$(json_string "$log_prefix.stdout.log")" "$(json_string "$log_prefix.stderr.log")"

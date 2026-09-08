@@ -1,7 +1,7 @@
 // @ts-check
 import test from "node:test";
 import assert from "node:assert/strict";
-import { access, chmod, mkdir, open, readFile, readdir, writeFile } from "node:fs/promises";
+import { access, chmod, copyFile, mkdir, open, readFile, readdir, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,6 +12,91 @@ import { tmp } from "./helpers.mjs";
 const runFile = promisify(execFile);
 const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const launcher = path.join(repoRoot, "scripts", "start-codex-watch.sh");
+const powershellLauncher = path.join(repoRoot, "scripts", "start-codex-watch.ps1");
+
+test("Codex launcher waits beyond the old ten-second clock for the subscribed armed receipt", {
+  skip: process.platform === "darwin" ? "the launchd lifecycle has its own opt-in integration cell" : false,
+  timeout: 30_000,
+}, async (t) => {
+  const fixture = await tmp();
+  const state = path.join(fixture.dir, "state");
+  const config = path.join(fixture.dir, "config.json");
+  const logPrefix = path.join(fixture.dir, "slow-watch");
+  const room = "slow-subscribe";
+  const session = `slow-subscribe-${process.pid}`;
+  const environment = {
+    ...process.env,
+    AGORA_CODEX_SERVER: "",
+    AGORA_CODEX_TOKEN_FILE: "",
+    CODEX_SESSION_ID: session,
+    CODEX_THREAD_ID: session,
+  };
+  const fixtureScripts = path.join(fixture.dir, "scripts");
+  const fixtureBin = path.join(fixture.dir, "bin");
+  const testLauncher = path.join(fixtureScripts, process.platform === "win32" ? "start-codex-watch.ps1" : "start-codex-watch.sh");
+  const fakeCodex = path.join(fixture.dir, process.platform === "win32" ? "fake-codex.cmd" : "fake-codex");
+
+  t.after(() => fixture.cleanup());
+  await mkdir(fixtureScripts, { recursive: true });
+  await mkdir(fixtureBin, { recursive: true });
+  await copyFile(process.platform === "win32" ? powershellLauncher : launcher, testLauncher);
+  await writeFile(config, "{}");
+  await writeFile(path.join(fixtureBin, "agora.mjs"), `
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import path from "node:path";
+const room = process.argv[3];
+const root = process.env.AGORA_STATE;
+const session = process.env.CODEX_SESSION_ID;
+const armed = path.join(root, "sessions", \`codex-\${session}\`, "armed", \`\${room}.json\`);
+await new Promise((resolve) => setTimeout(resolve, 12_000));
+mkdirSync(path.dirname(armed), { recursive: true });
+writeFileSync(armed, JSON.stringify({ room, pid: process.pid }) + "\\n");
+const stop = () => { rmSync(armed, { force: true }); process.exit(0); };
+process.on("SIGTERM", stop);
+process.on("SIGINT", stop);
+setInterval(() => {}, 1_000);
+`);
+  if (process.platform === "win32") {
+    await writeFile(fakeCodex, "@echo off\r\nexit /b 0\r\n");
+  } else {
+    await writeFile(fakeCodex, "#!/bin/sh\nexit 0\n");
+    await chmod(testLauncher, 0o755);
+    await chmod(fakeCodex, 0o755);
+  }
+
+  const common = process.platform === "win32"
+    ? ["-NoProfile", "-NonInteractive", "-File", testLauncher,
+      "-Room", room, "-Actor", "Codex/slow", "-SessionId", session, "-ThreadId", session,
+      "-ConfigPath", config, "-StateRoot", state, "-RuntimePath", process.execPath,
+      "-CodexPath", fakeCodex, "-LogPrefix", logPrefix]
+    : ["--room", room, "--actor", "Codex/slow", "--session-id", session, "--thread-id", session,
+      "--config", config, "--state", state, "--runtime", process.execPath,
+      "--codex-bin", fakeCodex, "--log-prefix", logPrefix];
+  const command = process.platform === "win32" ? "pwsh.exe" : testLauncher;
+  const startedAt = Date.now();
+  let result;
+  try {
+    result = await runFile(command, common, { env: environment, timeout: 25_000 });
+  } catch (error) {
+    const workerStderr = await readFile(`${logPrefix}.stderr.log`, "utf8").catch(() => "");
+    if (workerStderr && typeof error === "object" && error !== null && "message" in error) {
+      error.message += `\nWorker stderr:\n${workerStderr}`;
+    }
+    throw error;
+  }
+  const receipt = JSON.parse(result.stdout.trim());
+  assert.ok(Date.now() - startedAt >= 10_000, "the fixture crosses the retired ten-second clock");
+  assert.equal(receipt.armingTimeoutSeconds, 60, "the status line reports the bound used");
+  assert.ok(receipt.watcherPid > 0, "the subscribed watch published its armed receipt");
+
+  const stopArgs = process.platform === "win32"
+    ? ["-NoProfile", "-NonInteractive", "-File", testLauncher,
+      "-Room", room, "-SessionId", session, "-ThreadId", session,
+      "-ConfigPath", config, "-StateRoot", state, "-Stop"]
+    : ["--room", room, "--session-id", session, "--thread-id", session,
+      "--config", config, "--state", state, "--stop"];
+  await runFile(command, stopArgs, { env: environment, timeout: 10_000 });
+});
 
 test("Codex POSIX launcher gives macOS to launchd without weakening Linux detachment", async () => {
   const source = await readFile(launcher, "utf8");

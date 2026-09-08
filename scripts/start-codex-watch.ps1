@@ -17,6 +17,7 @@ param(
     [string]$CodexTokenFile = $env:AGORA_CODEX_TOKEN_FILE,
     [string]$LogPrefix,
     [double]$ThreadInterval = 120,
+    [int]$ArmingTimeoutSeconds = 60,
     [switch]$Status,
     [switch]$Stop,
     [switch]$Force,
@@ -34,6 +35,9 @@ if (-not $ThreadId -or $ThreadId -notmatch '^[A-Za-z0-9-]{8,128}$') {
 }
 if ([double]::IsNaN($ThreadInterval) -or [double]::IsInfinity($ThreadInterval) -or $ThreadInterval -le 0) {
     throw 'ThreadInterval must be a positive number.'
+}
+if ($ArmingTimeoutSeconds -le 0) {
+    throw 'ArmingTimeoutSeconds must be a positive integer.'
 }
 if (-not $LogPrefix) {
     # A machine may host several Codex bearers at once. A process holding PowerShell's append
@@ -81,6 +85,7 @@ if ($Status) {
         watcherPid = $watcherPid
         supervisorPid = $(if ($alive) { Get-SupervisorPid $watcherPid } else { $null })
         alive = $alive
+        armingTimeoutSeconds = $ArmingTimeoutSeconds
         armed = $armedPath
     } | ConvertTo-Json -Compress
     exit 0
@@ -216,16 +221,18 @@ if ($created.ReturnValue -ne 0 -or -not $created.ProcessId) {
 }
 
 $watcherPid = $null
-for ($attempt = 0; $attempt -lt 100 -and -not $watcherPid; $attempt++) {
+$armingClock = [Diagnostics.Stopwatch]::StartNew()
+while (-not $watcherPid -and $armingClock.Elapsed.TotalSeconds -lt $ArmingTimeoutSeconds) {
     Start-Sleep -Milliseconds 100
     $started = Get-ArmedWatch
     if ($started -and $started.pid) { $watcherPid = [int]$started.pid }
     elseif (-not (Get-Process -Id ([int]$created.ProcessId) -ErrorAction SilentlyContinue)) { break }
 }
+$armingClock.Stop()
 
 if (-not $watcherPid) {
     Stop-Process -Id ([int]$created.ProcessId) -Force -ErrorAction SilentlyContinue
-    throw "Codex watch did not arm within 10 seconds. Inspect $LogPrefix.stderr.log."
+    throw "Codex watch did not publish its subscribed armed receipt within $ArmingTimeoutSeconds seconds. Inspect $LogPrefix.stderr.log."
 }
 
 [pscustomobject]@{
@@ -234,6 +241,7 @@ if (-not $watcherPid) {
     room = $Room
     actor = $Actor
     session = $SessionId
+    armingTimeoutSeconds = $ArmingTimeoutSeconds
     stdout = "$LogPrefix.stdout.log"
     stderr = "$LogPrefix.stderr.log"
 } | ConvertTo-Json -Compress
