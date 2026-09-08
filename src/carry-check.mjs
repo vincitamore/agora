@@ -481,6 +481,7 @@ export async function armCarryCapture(dir) {
   let failed = false;
   /** @type {string|undefined} */ let batch;
   return {
+    bearer: record.bearer,
     async begin() {
       batch = path.join(evidence, `${randomUUID()}.pending`);
       try { await persist(batch); } catch { failed = true; }
@@ -500,11 +501,17 @@ export async function armCarryCapture(dir) {
  * bearer evidence: it writes nothing and later checks refuse unknown coverage.
  * @param {string} dir @param {string} room
  * @param {import('./core.mjs').Message[]} messages
- * @param {{id?:string,name?:string}|undefined} seat */
-export async function prepareCarryBatch(dir, room, messages, seat) {
+ * @param {{id?:string,name?:string}|undefined} seat
+ * @param {string} [expectedBearer] Registration pinned by a guarded arm. */
+export async function prepareCarryBatch(dir, room, messages, seat, expectedBearer) {
   let record;
   try { record = JSON.parse(await readFile(path.join(dir, 'session.json'), 'utf8')); }
-  catch { return new Map(); }
+  catch {
+    if (expectedBearer !== undefined) throw new CarryCheckError('carry-registration-unavailable');
+    return new Map();
+  }
+  if (expectedBearer !== undefined && record?.bearer !== expectedBearer)
+    throw new CarryCheckError('carry-registration-changed');
   if (typeof record?.bearer !== 'string') return new Map();
   /** @type {Map<string,ReturnType<typeof validateCarryEvent>>} */ const pending = new Map();
   for (const m of messages) {
