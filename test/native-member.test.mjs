@@ -488,6 +488,34 @@ test("a read WITH a cursor names a limit for the forward slice, which is the oth
   assert.equal(over.type, "error", `limit ${named + 1} fit on the forward slice, so the named limit understates it`);
 });
 
+test("the batch a verb DISPLAYS is the batch it should ask for: twenty fits where the room does not", async (t) => {
+  const { service, request } = await memberSession(t);
+  await fillPastTheFrameCap(service);
+
+  // L6's whole content, at the layer this suite can reach. `join` asked for the entire room and then
+  // printed `slice(-limit)` with limit defaulting to 20 — so on a busy room it built a result too
+  // large for one frame and was refused, while wanting twenty messages. `cursor --now` did the same
+  // for a single cursor. The fix is not a retry: it is asking for what will be used.
+  const unlimited = await request({ type: "read" });
+  assert.equal(unlimited.type, "error", "the room is not large enough for this cell to mean anything");
+  assert.match(unlimited.message, /read-batch-refused/);
+
+  // join's default, and cursor --now's one, both succeed on the same room in the same breath.
+  const twenty = await request({ type: "read", limit: 20 });
+  assert.equal(twenty.type, "read-result", `join's default batch was refused: ${twenty.message ?? ""}`);
+  assert.equal(twenty.messages.length, 20);
+
+  const one = await request({ type: "read", limit: 1 });
+  assert.equal(one.type, "read-result", `cursor --now's read was refused: ${one.message ?? ""}`);
+  assert.equal(one.messages.length, 1);
+
+  // And the position is unchanged by bounding the read, which is what makes this safe rather than
+  // merely smaller: the store slices the NEWEST n when there is no cursor, so the last element of a
+  // limited read is the same message the unlimited one would have ended on.
+  assert.equal(one.messages[0].cursor, twenty.messages.at(-1).cursor,
+    "a bounded read ended on a different message than the newest, so it would move the cursor");
+});
+
 test("a member read leaves the cursor where it was when the batch is refused", async (t) => {
   const { service, request } = await memberSession(t);
   await fillPastTheFrameCap(service);
