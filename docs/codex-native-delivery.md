@@ -30,10 +30,13 @@ agora codex status
 
 The first command starts or reuses one authenticated loopback server for the seat and launches an
 attached TUI. The second is the migration path after the old standalone TUI exits normally. The
-server process carries `AGORA_CODEX_SERVER` and `AGORA_CODEX_TOKEN_FILE`, so watch launchers run
-from any attached thread choose native delivery automatically. The capability value is supplied
-only to the attaching TUI through its named environment variable; server-side tool processes see
-the file reference, not the value. Arguments for Codex itself follow `--`.
+attached TUI receives `AGORA_CODEX_SERVER` and `AGORA_CODEX_TOKEN_FILE` as targeted shell-policy
+entries, so watch launchers run from that thread choose native delivery automatically. If a Codex
+version filters those entries, the launcher authenticates the protected seat-local descriptor and
+recovers the same references; a managed descriptor that cannot authenticate refuses instead of
+silently falling back to the legacy queue. The capability value is supplied only to the attaching
+TUI through its named environment variable; server-side tool processes see the file reference, not
+the value. Arguments for Codex itself follow `--`.
 
 Concurrent launchers serialize the complete inspect/reclaim/start transaction under the runtime's
 built-in SQLite exclusive lock in the protected state root. That authority is released by the OS

@@ -237,6 +237,30 @@ runtime_path=$(resolve_runtime)
 codex_path=$(resolve_codex)
 [ -n "$codex_path" ] || { printf '%s\n' 'Codex executable not found. Pass --codex-bin or set AGORA_CODEX_BIN.' >&2; exit 1; }
 
+# Codex filters the TUI process environment before starting model-reachable commands. If the
+# explicit connection references were filtered, recover them from Agora's protected seat-local
+# descriptor and authenticate it through the status verb. A managed descriptor must never silently
+# degrade back to the legacy queued-turn bridge.
+if [ -z "$codex_server" ] && [ -z "$codex_token_file" ] && [ -f "$state_root/codex-control/server.json" ]; then
+  if ! managed_status=$("$runtime_path" "$agora_path" codex status --json 2>/dev/null); then
+    printf '%s\n' 'A managed Codex server descriptor exists but could not be authenticated; refusing legacy queue fallback.' >&2
+    exit 1
+  fi
+  managed_connection=$(printf '%s' "$managed_status" | "$runtime_path" -e '
+let body=""; process.stdin.setEncoding("utf8"); process.stdin.on("data", chunk => body += chunk);
+process.stdin.on("end", () => { try { const value=JSON.parse(body); if (!value.running || typeof value.endpoint!=="string" || typeof value.tokenFile!=="string") process.exit(1); process.stdout.write(value.endpoint+"\n"+value.tokenFile); } catch { process.exit(1); } });
+' ) || {
+    printf '%s\n' 'The managed Codex server returned an invalid status; refusing legacy queue fallback.' >&2
+    exit 1
+  }
+  codex_server=$(printf '%s\n' "$managed_connection" | sed -n '1p')
+  codex_token_file=$(printf '%s\n' "$managed_connection" | sed -n '2p')
+  if [ -z "$codex_server" ] || [ -z "$codex_token_file" ] || [ ! -f "$codex_token_file" ]; then
+    printf '%s\n' 'A managed Codex server descriptor exists but its authenticated connection is unavailable; refusing legacy queue fallback.' >&2
+    exit 1
+  fi
+fi
+
 if [ "$worker" = true ]; then
   # The worker execs Node without changing pid, so this is the durable resident process on POSIX.
   export AGORA_ACTOR=$actor AGORA_CONFIG=$config_path AGORA_STATE=$state_root AGORA_SESSION_PID=$$ CODEX_HOME=$codex_home CODEX_SESSION_ID=$session_id

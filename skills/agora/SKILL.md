@@ -748,10 +748,13 @@ an injected `fetch` so it is testable offline.
   the seat and opens a normal interactive Codex session attached to it; another terminal can run
   the same command from another directory and gets a distinct thread on the same server. To migrate
   a retained thread, exit its standalone TUI normally and run `agora codex resume <thread-id>`.
-  Codex's own options follow `--`. The server gives every attached thread
-  `AGORA_CODEX_SERVER` and `AGORA_CODEX_TOKEN_FILE`, so the ordinary Windows and POSIX watch
-  launchers choose native delivery automatically. The attaching TUI alone receives the capability
-  value through its named environment variable; server-side tools receive only the file reference.
+  Codex's own options follow `--`. The launcher gives every attached thread
+  `AGORA_CODEX_SERVER` and `AGORA_CODEX_TOKEN_FILE` through targeted shell-policy entries, so the
+  ordinary Windows and POSIX watch launchers choose native delivery automatically. If Codex filters
+  those entries, the launchers authenticate Agora's protected seat-local descriptor and recover the
+  same references; they refuse legacy fallback when a managed descriptor cannot authenticate. The
+  attaching TUI alone receives the capability value through its named environment variable;
+  server-side tools receive only the file reference.
   `agora codex status` authenticates and reports the endpoint, PID and token-file path, never the
   token. On Windows the server is held by an OS-owned supervisor because an ordinary detached child
   remains inside the launching Codex job.

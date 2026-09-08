@@ -6,6 +6,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
+  CODEX_MANAGED_ENV,
   CODEX_REMOTE_TOKEN_ENV,
   codexAppServerArgs,
   codexAttachedArgs,
@@ -30,9 +31,14 @@ test("launch argv keeps the capability out of commands", () => {
   assert.deepEqual(codexAppServerArgs("ws://127.0.0.1:4567", tokenFile), [
     "app-server", "--listen", "ws://127.0.0.1:4567", "--ws-auth", "capability-token", "--ws-token-file", tokenFile,
   ]);
-  assert.deepEqual(codexAttachedArgs("ws://127.0.0.1:4567", ["resume", "thread-123456"]), [
-    "--remote", "ws://127.0.0.1:4567", "--remote-auth-token-env", CODEX_REMOTE_TOKEN_ENV, "resume", "thread-123456",
+  assert.deepEqual(codexAttachedArgs("ws://127.0.0.1:4567", tokenFile, ["resume", "thread-123456"]), [
+    "--remote", "ws://127.0.0.1:4567", "--remote-auth-token-env", CODEX_REMOTE_TOKEN_ENV,
+    "-c", 'shell_environment_policy.set.AGORA_CODEX_SERVER="ws://127.0.0.1:4567/"',
+    "-c", `shell_environment_policy.set.AGORA_CODEX_TOKEN_FILE=${JSON.stringify(tokenFile)}`,
+    "-c", `shell_environment_policy.set.${CODEX_MANAGED_ENV}="1"`,
+    "resume", "thread-123456",
   ]);
+  assert.equal(codexAttachedArgs("ws://127.0.0.1:4567", tokenFile).some(arg => arg.includes("private-token")), false);
   const childEnv = codexAttachedEnvironment({ KEEP: "yes" }, "ws://127.0.0.1:4567", tokenFile, "private-token");
   assert.equal(childEnv.KEEP, "yes");
   assert.equal(childEnv.AGORA_CODEX_SERVER, "ws://127.0.0.1:4567/");
