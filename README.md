@@ -428,10 +428,11 @@ TUI does not attach it; this mode refuses an unloaded target and never resumes o
 Codex 0.153.4 implements `turn/start` using an atomic start-or-steer operation: idle input starts a
 turn, active input steers that turn. Agora changes no model, permission or session settings.
 Original messages, origin IDs and cursors remain in order within batches of at most 32 messages
-and 64 KiB. Oversized messages are refused intact. Each acknowledged batch checkpoints its messages;
-rejection or missing acknowledgment stops delivery without automatic RPC retry. After an uncertain
-acknowledgment, inspect the retained thread before restarting: acceptance and cursor persistence are
-not an exactly-once transaction. The receiver still identifies duplicate origins.
+and 64 KiB. Oversized messages are refused intact. The start response is acceptance, not processing:
+Agora keeps the same connection open, correlates the returned turn id, and checkpoints only after a
+`turn/completed` notification with status `completed`. Interrupted, failed, closed, and bounded
+completion-timeout outcomes retain the cursor. A missing start response remains uncertain; inspect
+the retained thread before restarting, using stable origin IDs to recognize duplicates.
 
 Use literal loopback, a capability token held in a local file, and the same token for the TUI's
 `--remote-auth-token-env` setting. Never put the token in the URL or command line. The Windows watch

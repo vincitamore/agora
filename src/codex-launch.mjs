@@ -1,7 +1,7 @@
 // @ts-check
 import { execFile, spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { link, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -81,6 +81,34 @@ async function readDescriptor(file) {
   } catch { return undefined; }
 }
 
+/** @param {string} file */
+async function readLockOwner(file) {
+  try {
+    const value = JSON.parse(await readFile(file, "utf8"));
+    if (!Number.isInteger(value?.pid) || value.pid <= 0 || typeof value.token !== "string" ||
+        !/^[0-9a-f-]{16,64}$/i.test(value.token) || typeof value.at !== "string") return undefined;
+    return value;
+  } catch { return undefined; }
+}
+
+/** @param {string} lockFile @param {{pid:number,token:string}} owner */
+async function releaseLock(lockFile, owner) {
+  const current = await readLockOwner(lockFile);
+  if (current?.pid !== owner.pid || current.token !== owner.token) return;
+  const released = `${lockFile}.${owner.token}.released`;
+  try { await rename(lockFile, released); }
+  catch (error) { if (/** @type {NodeJS.ErrnoException} */ (error).code === "ENOENT") return; throw error; }
+  const moved = await readLockOwner(released);
+  if (moved?.pid === owner.pid && moved.token === owner.token) await rm(released, { force: true });
+  else {
+    try { await link(released, lockFile); } catch (error) {
+      if (/** @type {NodeJS.ErrnoException} */ (error).code !== "EEXIST") throw error;
+    }
+    await rm(released, { force: true });
+    throw new AgoraError("Codex app-server startup lock ownership changed before release", EXIT.error);
+  }
+}
+
 /** @param {{endpoint:string,tokenFile:string}} descriptor */
 async function probeDescriptor(descriptor) {
   try {
@@ -98,7 +126,8 @@ async function probeDescriptor(descriptor) {
  *   stateRoot:string, env?:NodeJS.ProcessEnv, codexPath?:string, timeoutMs?:number,
  *   deps?:{ probe?:(d:any)=>Promise<boolean>, reservePort?:()=>Promise<number>, spawn?:typeof spawn,
  *     run?:typeof execFileAsync, platform?:NodeJS.Platform,
- *     uuid?:()=>string, token?:()=>string, sleep?:(ms:number)=>Promise<void>, now?:()=>string }
+ *     uuid?:()=>string, token?:()=>string, sleep?:(ms:number)=>Promise<void>, now?:()=>string,
+ *     processAlive?:(pid:number)=>boolean, beforeLockPublish?:()=>Promise<void> }
  * }} options
  */
 export async function ensureCodexServer(options) {
@@ -108,25 +137,48 @@ export async function ensureCodexServer(options) {
   const probe = deps.probe ?? probeDescriptor;
   await mkdir(paths.root, { recursive: true, mode: 0o700 });
 
-  let lock;
+  /** @type {{pid:number,token:string,at:string} | undefined} */
+  let lockOwner;
   try {
-    lock = await open(paths.lock, "wx", 0o600);
-    await lock.writeFile(`${JSON.stringify({ pid: process.pid, at: new Date().toISOString() })}\n`);
+    const ownerToken = (deps.uuid ?? randomUUID)();
+    lockOwner = { pid: process.pid, token: ownerToken, at: new Date().toISOString() };
+    const candidate = `${paths.lock}.${ownerToken}.candidate`;
+    const handle = await open(candidate, "wx", 0o600);
+    try { await handle.writeFile(`${JSON.stringify(lockOwner)}\n`); await handle.sync(); }
+    finally { await handle.close(); }
+    try { await deps.beforeLockPublish?.(); await link(candidate, paths.lock); }
+    finally { await rm(candidate, { force: true }).catch(() => {}); }
   } catch (error) {
     if (/** @type {NodeJS.ErrnoException} */ (error).code !== "EEXIST") throw error;
-    let owner;
-    try { owner = JSON.parse(await readFile(paths.lock, "utf8")); } catch { /* malformed is not live evidence */ }
-    if (!processAlive(Number(owner?.pid))) {
-      await rm(paths.lock, { force: true });
-      return ensureCodexServer(options);
-    }
     const deadline = Date.now() + (options.timeoutMs ?? 15_000);
     while (Date.now() < deadline) {
       const existing = await readDescriptor(paths.descriptor);
       if (existing && await probe(existing)) return { ...existing, reused: true, descriptor: paths.descriptor };
+      const owner = await readLockOwner(paths.lock);
+      if (owner && !(deps.processAlive ?? processAlive)(owner.pid)) {
+        const stale = `${paths.lock}.${(deps.uuid ?? randomUUID)()}.stale`;
+        try { await rename(paths.lock, stale); }
+        catch (renameError) {
+          if (/** @type {NodeJS.ErrnoException} */ (renameError).code === "ENOENT") continue;
+          throw renameError;
+        }
+        const moved = await readLockOwner(stale);
+        if (moved?.pid === owner.pid && moved.token === owner.token && !(deps.processAlive ?? processAlive)(moved.pid)) {
+          await rm(stale, { force: true });
+          return ensureCodexServer(options);
+        }
+        try { await link(stale, paths.lock); } catch (linkError) {
+          const code = /** @type {NodeJS.ErrnoException} */ (linkError).code;
+          // Another contender may already have consumed this quarantine and
+          // published the winning owner. Either collision means we no longer
+          // own a restorable source; re-enter observation instead of acting on it.
+          if (code !== "EEXIST" && code !== "ENOENT") throw linkError;
+        }
+        await rm(stale, { force: true });
+      }
       await (deps.sleep ?? delay)(100);
     }
-    throw new AgoraError("another agora codex launch still holds the app-server startup lock", EXIT.error);
+    throw new AgoraError("Codex app-server startup lock remains held or has unknown ownership", EXIT.error);
   }
 
   try {
@@ -193,8 +245,7 @@ export async function ensureCodexServer(options) {
     await rm(generationDir, { recursive: true, force: true }).catch(() => {});
     throw new AgoraError("Codex app server did not accept an authenticated loopback connection before the startup deadline", EXIT.error);
   } finally {
-    try { await lock?.close(); } catch { /* close best effort; ownership is the file */ }
-    await rm(paths.lock, { force: true }).catch(() => {});
+    if (lockOwner) await releaseLock(paths.lock, lockOwner);
   }
 }
 

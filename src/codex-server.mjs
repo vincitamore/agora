@@ -51,6 +51,10 @@ export async function connectCodexServer(options) {
   const socket = factory(endpoint, { headers: { Authorization: `Bearer ${token}` } });
   /** @type {Map<number, {resolve:(value:any)=>void, reject:(error:Error)=>void, timer:ReturnType<typeof setTimeout>}>} */
   const pending = new Map();
+  /** @type {Map<string, {resolve:(value:{turnId:string,outcome:string})=>void,timer:ReturnType<typeof setTimeout>}>} */
+  const turnWaiters = new Map();
+  /** @type {Map<string, string>} */
+  const terminalTurns = new Map();
   let sequence = 0;
   let closed = false;
   /** @param {string} reason */
@@ -58,6 +62,10 @@ export async function connectCodexServer(options) {
     closed = true;
     for (const waiter of pending.values()) { clearTimeout(waiter.timer); waiter.reject(new AgoraError(reason, EXIT.error)); }
     pending.clear();
+    for (const [turnId, waiter] of turnWaiters) {
+      clearTimeout(waiter.timer); waiter.resolve({ turnId, outcome: "closed-without-completion" });
+    }
+    turnWaiters.clear();
   };
   const close = () => { fail("Codex connection closed; delivery acknowledgment may be unknown"); socket.close(); };
   socket.addEventListener("close", () => fail("Codex disconnected; delivery acknowledgment may be unknown"));
@@ -68,6 +76,18 @@ export async function connectCodexServer(options) {
     let frame;
     try { frame = JSON.parse(data); } catch { close(); return; }
     if (!frame || typeof frame !== "object") { close(); return; }
+    if (frame.method === "turn/completed" && typeof frame.params?.turn?.id === "string") {
+      const turnId = frame.params.turn.id;
+      const outcome = frame.params.turn.status === "completed" ? "completed"
+        : frame.params.turn.status === "interrupted" ? "cancelled"
+        : frame.params.turn.status === "failed" ? "failed" : undefined;
+      if (outcome) {
+        const turnWaiter = turnWaiters.get(turnId);
+        if (turnWaiter) { turnWaiters.delete(turnId); clearTimeout(turnWaiter.timer); turnWaiter.resolve({ turnId, outcome }); }
+        else terminalTurns.set(turnId, outcome);
+      }
+      return;
+    }
     const waiter = pending.get(frame.id);
     if (!waiter) return; // Notifications remain on the owning TUI; never accumulate them here.
     pending.delete(frame.id); clearTimeout(waiter.timer);
@@ -97,17 +117,30 @@ export async function connectCodexServer(options) {
     });
     await request("initialize", { clientInfo: { name: "agora-watch", version: "1" }, capabilities: { experimentalApi: true } });
     socket.send(JSON.stringify({ method: "initialized" }));
-    return { request, close };
+    /** @param {string} turnId @param {number} timeoutMs */
+    const waitForTurn = (turnId, timeoutMs) => new Promise((resolve) => {
+      const known = terminalTurns.get(turnId);
+      if (known) { terminalTurns.delete(turnId); resolve({ turnId, outcome: known }); return; }
+      if (closed) { resolve({ turnId, outcome: "closed-without-completion" }); return; }
+      const timer = setTimeout(() => {
+        turnWaiters.delete(turnId);
+        resolve({ turnId, outcome: "closed-without-completion" });
+      }, timeoutMs);
+      turnWaiters.set(turnId, { resolve, timer });
+    });
+    return { request, waitForTurn, close };
   } catch (error) { close(); throw error; }
 }
 
 /** Deliver through the server OWNING the retained TUI thread. Codex 0.153.4 turn/start
  * uses start_or_steer_turn atomically; no separate idle/busy check or cold resume is needed.
- * Acceptance is not model processing. A crash between acceptance and checkpoint can replay
- * origins, as with the queue bridge; the receiver must recognize those stable origins.
+ * Acceptance is not model processing. The cursor callback is withheld until a correlated
+ * turn/completed notification reports successful completion for the returned turn id.
  * @param {string} room @param {import('./core.mjs').Message[]} messages
  * @param {{endpoint:string,tokenFile:string,thread:string,timeoutMs?:number,socket?:SocketFactory,
- * onAccepted?:(message:import('./core.mjs').Message)=>Promise<void>}} options
+ * processedTimeoutMs?:number,
+ * onAccepted?:(message:import('./core.mjs').Message)=>Promise<void>,
+ * onProcessed?:(receipt:{id:string,outcome:'completed'|'cancelled'|'failed'|'closed-without-completion'})=>Promise<void>}} options
  */
 export async function deliverCodexServer(room, messages, options) {
   if (!/^[A-Za-z0-9-]{8,128}$/.test(options.thread)) throw new AgoraError("invalid Codex thread id", EXIT.usage);
@@ -125,7 +158,14 @@ export async function deliverCodexServer(room, messages, options) {
       });
       if (typeof result?.turn?.id !== "string" || !result.turn.id)
         throw new AgoraError("invalid Codex turn acknowledgment; delivery outcome unknown", EXIT.error);
-      for (const message of batch.messages) await options.onAccepted?.(message);
+      const terminal = await client.waitForTurn(result.turn.id, options.processedTimeoutMs ?? 30 * 60_000);
+      for (const message of batch.messages) {
+        const receipt = /** @type {{id:string,outcome:'completed'|'cancelled'|'failed'|'closed-without-completion'}} */ ({ id: message.id, outcome: terminal.outcome });
+        await options.onProcessed?.(receipt);
+        if (receipt.outcome === "completed") await options.onAccepted?.(message);
+      }
+      if (terminal.outcome !== "completed")
+        throw new AgoraError(`Codex turn ended ${terminal.outcome}; cursor retained`, EXIT.error);
     }
   } finally { client.close(); }
 }
