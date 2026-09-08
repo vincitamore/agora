@@ -1,5 +1,5 @@
 // @ts-check
-import { jitter, readCursor, redact, writeCursor, sleep as defaultSleep } from "./core.mjs";
+import { jitter, readCursor, redact, writeCursor as persistCursorFile, sleep as defaultSleep } from "./core.mjs";
 import { acceptCarryDelivery, armCarryCapture, prepareCarryBatch } from './carry-check.mjs';
 
 /**
@@ -105,6 +105,10 @@ export async function watch(transport, opts) {
   const maxBatch = opts.maxBatch && opts.maxBatch > 0 ? opts.maxBatch : 0;
   const holding = coalesceSeconds > 0 || maxBatch > 0;
   const capture = await armCarryCapture(stateDir);
+  const writeCursor = async (/** @type {string} */ dir, /** @type {string} */ cursorKey, /** @type {string} */ position) => {
+    try { await persistCursorFile(dir, cursorKey, position); }
+    catch (err) { if (!capture) throw err; capture.fail(); }
+  };
   const accept = async (/** @type {ReturnType<typeof import('./carry-check.mjs').validateCarryEvent>|undefined} */ event) => {
     try { await acceptCarryDelivery(stateDir, event); }
     catch (err) { if (!capture) throw err; capture.fail(); }

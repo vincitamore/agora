@@ -244,7 +244,7 @@ test('real addressed watch delivery is prepared before the callback and acknowle
   }
 });
 
-for (const phase of ['prepare', 'prepare-later', 'accept', 'clear', 'clean']) for (const coalesceSeconds of [0, 1])
+for (const phase of ['prepare', 'prepare-later', 'accept', 'cursor', 'clear', 'clean']) for (const coalesceSeconds of [0, 1])
 test(`capture ${phase} failure preserves delivery and fresh-process coverage, coalesce ${coalesceSeconds}`, async () => {
   const t = await tmp();
   try {
@@ -272,6 +272,7 @@ test(`capture ${phase} failure preserves delivery and fresh-process coverage, co
         delivered += messages.length;
         if (phase === 'prepare' || (phase === 'prepare-later' && polls === 2)) await restore();
         if (phase === 'accept') await block();
+        if (phase === 'cursor') await mkdir(path.join(dir, 'backroom.cursor'));
         try { await batch.checkpoint(messages[0]); }
         finally { if (phase === 'accept') await restore(); }
         if (phase === 'clear') {
@@ -304,7 +305,7 @@ test(`capture ${phase} failure preserves delivery and fresh-process coverage, co
     const result = JSON.parse(stdout);
     assert.equal(code, phase === 'clean' || phase === 'clear' ? 0 : 1);
     assert.equal(result.issues.some((/** @type {{code:string}} */ i) => i.code === 'delivery-coverage-unknown'),
-      phase.startsWith('prepare') || phase === 'accept');
+      phase.startsWith('prepare') || phase === 'accept' || phase === 'cursor');
   } finally { await t.cleanup(); }
 });
 
