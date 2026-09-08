@@ -90,6 +90,78 @@ response remains uncertain: the server may have accepted the input, so the bridg
 that RPC automatically. Inspect the retained thread before restarting after uncertainty.
 Client message IDs are correlation identifiers, not a claimed provider deduplication API.
 
+### The delivery record
+
+Every delivery leaves marks in an append-only journal at
+`<state>/codex/<thread>.intents.jsonl`, one JSON object per line. It is a journal rather than a
+document because several watch processes share one thread and one state root; a whole-file rewrite
+would let two of them overwrite each other's marks, and a reader arriving mid-write would parse a
+truncated file.
+
+A native delivery records three marks, and they are three different facts:
+
+- **intent**, written before the request. The message was handed to the bridge. Nothing has
+  acknowledged it, and this is not acceptance.
+- **accepted**, with the turn id, written when `turn/start` returns a valid id. The server holds
+  the work. This is the only state that distinguishes a running turn from a finished one, which is
+  why it exists separately.
+- **outcome**, written when the turn reaches a terminal state. `processedAt` is set only for
+  `completed`; `cancelled`, `failed` and `closed-without-completion` are recorded and kept
+  distinct, because a turn that reached the consumer and did not finish is not processed work.
+
+The queue bridge records acceptance alone. There, the queue call returning success is the queue's
+own acceptance, and nothing further about the consumer is observable.
+
+Arming a watch reports what the journal holds for that room before delivery starts:
+
+```
+agora: Codex thread <thread> for <room>: 1 accepted and unresolved, 0 handed over without
+acknowledgment, 0 absent-unresolved; completed through <cursor>. ...
+```
+
+Read those words exactly:
+
+- **accepted and unresolved** means the bridge acknowledged the message and no outcome was ever
+  recorded. It does **not** mean the delivery is still running. Proving that would need a listing
+  of the consumer's pending work, which this bridge cannot obtain, so the report states what was
+  recorded rather than inferring a live delivery from a missing mark.
+- **handed over without acknowledgment** means an intent exists with no acceptance: the process
+  died between the two, or the request never returned.
+- **absent-unresolved** means an entry was **previously observed and recorded** as having left the
+  queue without the consumer reporting an outcome. Arming cannot discover this: determining that an
+  entry left the queue needs a listing of the consumer's pending work, and neither bridge here can
+  obtain one. So this count reports what an earlier listing-backed reconciliation wrote down, never
+  a fresh observation, and a queue entry that vanishes today will not appear here. What is recorded
+  is neither retried nor counted as done: read the retained thread, and if the work was never done,
+  post the message again.
+- **completed through `<cursor>`** is the longest run of completed deliveries from the start of
+  this room's record. It stops at the first delivery that did not complete, so one failure holds
+  the line rather than being stepped over by the completions after it.
+
+### Arming APPLIES the completed prefix
+
+This is recovery, not a report. When the record shows deliveries the consumer completed and the
+saved cursor has not caught up — the window where a completion is written and the process dies
+before checkpointing — arming moves the cursor forward, and the same arm then subscribes from the
+recovered position, so the recovered deliveries are not offered again.
+
+The move is guarded, because cursors are opaque and nothing may compare two of them. The journal's
+own recorded order is the only ordering available:
+
+- It advances **only** when both the saved cursor and the target appear in this room's rows and the
+  target is later. It never moves backward.
+- If there is **no saved cursor**, it reports and moves nothing: advancing from nothing would skip
+  every message delivered before the journal existed.
+- If the saved cursor **cannot be located** in this room's rows, it says so on stderr and moves
+  nothing. A position that cannot be placed cannot be moved without risking either a replay or a
+  skip.
+
+Both refusals are visible. A silent no-op would leave you believing recovery happened.
+
+Cursors are per room, so the record is read per room. One thread carries every room a seat watches,
+and a cursor from one room is a coordinate in that room only; a completed delivery in one room
+advances nothing in another.
+
 Rollback: stop the native watch, exit the attached TUI normally, stop only its own local
 server, and resume the retained thread with ordinary `codex resume`. The existing queue
 launcher remains available. Do not reset room cursors or delete pending messages to

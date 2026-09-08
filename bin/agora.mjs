@@ -79,7 +79,7 @@ import { carryState, carryWindow, foldRoom, renderCarry } from "../src/carry.mjs
 import { decorate, human } from "../src/render.mjs";
 import { formatTrailers, matchesAddress, parseTrailers, TRAILER_VALUE_MAX, trailerValueOk } from "../src/trailers.mjs";
 import { SLACK_TEXT_MAX, chunkAtLines, encodeSlackText } from "../src/transports/slack.mjs";
-import { codexBridgeRefusal, codexLiveness, codexSpawnWarning, codexThread, queueCodex, resolveCodexBinary } from "../src/codex.mjs";
+import { codexBridgeRefusal, codexLiveness, codexSpawnWarning, codexThread, queueCodex, reconcileCodexIntents, recordCodexAccepted, recordCodexReceipt, recordCodexSubmitted, resolveCodexBinary } from "../src/codex.mjs";
 import { codexServerURL, deliverCodexServer } from "../src/codex-server.mjs";
 import { codexServerStatus, launchAttachedCodex } from "../src/codex-launch.mjs";
 import { buildLabel, buildPredates, cacheTtls, clearWatchMode, installedBuild, touchWatchMode, watchModeSentinel, watchModuleDelta } from "../src/harness.mjs";
@@ -2188,6 +2188,68 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       } : undefined;
       await identity({ typed: true });
       const seeded = await readCursorSeeded(sdir, stateRoot, key);
+
+      // Reconcile the delivery journal for THIS room before arming, and ACT on it. Reporting the
+      // completed prefix and leaving the cursor behind would leave the exact window this record
+      // exists to close still open: a completed outcome is written before the caller checkpoints,
+      // so a death between the two leaves the work done and the cursor pointing at it, and the next
+      // arm redelivers something the consumer already finished.
+      //
+      // Scoped to roomAlias because one thread carries every room this seat watches, and a cursor
+      // from another room is a coordinate in another room.
+      if (codexDelivery) {
+        const journal = await reconcileCodexIntents({
+          // `transport.room`, never the CLI alias. The journal rows are written from `message.room`,
+          // which is the TRANSPORT's identity for the room -- an absolute file path for a local
+          // room, a channel id on Slack, a room id on a native one. Filtering by the alias matches
+          // nothing at all, so the prefix is always empty and the recovery silently never fires.
+          root: stateRoot, thread: codexDelivery.thread, room: transport.room,
+        });
+        if (journal.unresolved.length || journal.unacknowledged.length || journal.absent.length)
+          console.error(`agora: Codex thread ${codexDelivery.thread} for ${roomAlias}: `
+            // "unresolved", not "in flight": no outcome was recorded, and on the legacy queue that
+            // item may already have been consumed or cleared. Observed pending is a different claim
+            // and needs a queue listing this bridge does not have.
+            + `${journal.unresolved.length} accepted and unresolved, `
+            + `${journal.unacknowledged.length} handed over without acknowledgment, `
+            + `${journal.absent.length} absent-unresolved`
+            + (journal.advanceTo ? `; completed through ${journal.advanceTo}` : "")
+            + `. An absent-unresolved row left the queue without the consumer reporting an outcome; `
+            + `it is neither retried nor counted as done, and the journal keeps it so a person can decide.`);
+
+        if (journal.advanceTo && journal.advanceTo !== seeded.cursor) {
+          // Cursors are opaque: nothing here may compare two of them. The journal's own order is the
+          // only ordering available, so a move is permitted ONLY when both the saved position and the
+          // target are found in it and the target is later. Everything else refuses and changes
+          // nothing -- a rewind would replay, and a guess would skip.
+          const at = journal.rows.findIndex((r) => r.cursor === seeded.cursor);
+          const through = journal.rows.findIndex((r) => r.cursor === journal.advanceTo);
+          if (seeded.cursor === undefined)
+            console.error(`agora: ${roomAlias} has no saved position, so the reconciled completed `
+              + `prefix is reported and not applied; advancing from nothing would skip everything `
+              + `this room delivered before the journal existed`);
+          else if (at === -1)
+            console.error(`agora: ${roomAlias}'s saved position ${seeded.cursor} is not in this `
+              + `thread's journal, so it cannot be placed relative to the completed prefix and is `
+              + `left alone; cursors are opaque and a position that cannot be located cannot be `
+              + `moved forward without risking a rewind`);
+          else if (through > at) {
+            await writeCursor(sdir, key, journal.advanceTo);
+            // The ARM has to start from the recovered position too, not just the file. Everything
+            // downstream reads this object -- the subscription's `since`, the armed record, the
+            // watch-result cursor -- so advancing the disk alone would recover the position and then
+            // immediately re-offer the very row it recovered past, which is the redelivery this
+            // whole record exists to prevent.
+            seeded.cursor = journal.advanceTo;
+            // No longer "seeded from the shared file": that diagnostic would name a superseded
+            // position and claim a provenance this value does not have.
+            seeded.seeded = false;
+            console.error(`agora: recovered ${roomAlias} to ${journal.advanceTo}: the consumer `
+              + `reported those deliveries completed and the cursor had not caught up, which is the `
+              + `accept-before-checkpoint window this journal exists to close`);
+          }
+        }
+      }
       if (seeded.seeded) console.error(`agora: no position saved for this session yet; seeded from the shared ${key}.cursor (${seeded.cursor})`);
       else if (seeded.cursor === undefined) console.error(`agora: no position saved for ${key}; reading from the start (run \`agora cursor ${roomAlias}${thread ? ` --thread ${thread}` : ""} --now\` to start from the latest message)`);
 
@@ -2421,16 +2483,41 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
             try {
               if (codexQueue) await queueCodex(roomAlias, msgs, {
                 ...codexQueue,
+                // The state root turns acceptance into a DURABLE receipt: the delivery is recorded
+                // before this callback runs, so a death between the queue call and the checkpoint
+                // below leaves a record to reconcile instead of nothing at all. Without it the
+                // cursor is the only trace, and it is written after — so that window loses the
+                // delivery silently. The next arm of this room reads these back and reports them.
+                root: stateRoot,
                 onQueued: async ({ thread: codexTarget, cursor, message }) => {
                   await batch.checkpoint(message);
                   bridged = { cursor: message.cursor, count: bridged.count + 1 };
-                  console.error(`agora: queued Codex thread ${codexTarget} delivery ${cursor}; cursor checkpointed`);
+                  // "checkpointed" is the CURSOR's fact, not the consumer's: the queue accepted it
+                  // and nothing here knows whether the far side ever took it.
+                  console.error(`agora: queued Codex thread ${codexTarget} delivery ${cursor}; accepted and cursor checkpointed (acceptance is not processing)`);
                 },
               });
-              if (codexServer) await deliverCodexServer(roomAlias, msgs, {
-                ...codexServer,
-                onAccepted: async (message) => { await batch.checkpoint(message); bridged = { cursor: message.cursor, count: bridged.count + 1 }; },
-              });
+              if (codexServer) {
+                // The intent, written BEFORE the send. A turn may run to the processed timeout, and
+                // without a row for that whole window a death inside it leaves nothing to reconcile:
+                // not the cursor, and no record that anything was ever attempted.
+                for (const message of msgs) await recordCodexSubmitted(stateRoot, codexServer.thread, message);
+                await deliverCodexServer(roomAlias, msgs, {
+                  ...codexServer,
+                  // The acknowledgment. This is the only hook that reports a turn IN FLIGHT, which is
+                  // the state the record has to be able to show; onAccepted below runs after the
+                  // outcome is already known and only when it was a completion.
+                  onTurnStarted: async (message, ack) => { await recordCodexAccepted(stateRoot, codexServer.thread, message, ack); },
+                  // The consumer's own word, for every outcome including the ones that failed. The
+                  // receipt carries an id and no cursor, so the row is written from the message this
+                  // call site already holds: an advance is not computable from the receipt alone.
+                  onProcessed: async (receipt) => {
+                    const delivered = msgs.find((m) => m.id === receipt.id);
+                    if (delivered) await recordCodexReceipt(stateRoot, codexServer.thread, delivered, receipt);
+                  },
+                  onAccepted: async (message) => { await batch.checkpoint(message); bridged = { cursor: message.cursor, count: bridged.count + 1 }; },
+                });
+              }
             } catch (e) {
               // remembered so the end path can tell an exhausted bridge from any other throw
               deliveryFailure = e;
@@ -2495,6 +2582,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
             author: { id: "agora-watch", name: "agora-watch", kind: "system" }, ts: new Date().toISOString(),
           };
           try {
+            // No `root` here on purpose: this notice is synthetic, carries no source cursor and advances nothing, so a durable intent for it would be a permanently unresolved row in a file whose meaning is that unresolved means something.
             if (codexQueue) await queueCodex(roomAlias, [/** @type {any} */ (notice)], { ...codexQueue, attempts: 1 });
             else if (codexServer) await deliverCodexServer(roomAlias, [/** @type {any} */ (notice)], { ...codexServer });
             console.error(`agora: watch-ended notice delivered to the Codex task`);
