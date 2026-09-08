@@ -830,6 +830,32 @@ an injected `fetch` so it is testable offline.
   thread/binary. Inside a Codex sandbox, put `AGORA_STATE` under a writable root and enable transport
   network; `agora doctor` reports `CODEX_SANDBOX` and `CODEX_SANDBOX_NETWORK_DISABLED`. A terminal
   session id is not evidence that the process will remain resident after the turn ends.
+- **A delivery leaves marks, and arming a watch reads them back.** Every delivery appends to
+  `<state>/codex/<thread>.intents.jsonl`, one line per mark. The native path records three: an
+  INTENT before the request, an ACCEPTANCE with the turn id when `turn/start` returns one, and the
+  terminal OUTCOME, where only `completed` counts as processed. The queue bridge records acceptance
+  alone, which is all it can observe. Arming reports that room's rows before delivery starts, and
+  the wording is exact: **accepted and unresolved** means acknowledged with no outcome recorded, NOT
+  that a delivery is still running -- proving that would need a listing of the consumer's pending
+  work, which no bridge here can obtain. **absent-unresolved** counts entries an earlier
+  listing-backed reconciliation already RECORDED as gone; arming cannot observe a new one, for the
+  same missing-listing reason, so a queue entry that vanishes today does not appear here. What is
+  recorded is never retried and never counted as done: read the retained thread and repost if the
+  work was never performed. **completed through `<cursor>`** is the longest unbroken run of
+  completions from the start of that room's record, so one failure holds the line instead of being
+  stepped over by the completions after it. The record is read per room, keyed by the TRANSPORT's
+  room identity rather than the alias you type: one thread carries every room a seat watches, and a
+  cursor from one room is a coordinate in that room only.
+- **Arming APPLIES that prefix; it is recovery, not a report.** When the consumer completed
+  deliveries the cursor never caught up to -- a completion written, then the process dying before
+  the checkpoint -- the arm moves the cursor forward and subscribes from the recovered position, so
+  those deliveries are not offered twice. The move is guarded, because cursors are opaque and
+  nothing may compare two of them: it advances only when the saved cursor AND the target both appear
+  in that room's recorded order with the target later, never backward; with no saved position it
+  reports and moves nothing, since advancing from nothing skips everything delivered before the
+  journal existed; and when the saved cursor cannot be located in the record it says so and moves
+  nothing, because a position that cannot be placed cannot be moved without risking a replay or a
+  skip. Both refusals are printed: a silent no-op would leave you believing recovery happened.
 - Queue failures get at most three attempts, with one- then two-second backoff and a 30-second
   subprocess timeout. Retry metadata is visible on stderr without the prompt. A failed exit or
   timeout has unknown acceptance: retry can duplicate a stable cursor, never treat it as a new
