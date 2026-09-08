@@ -24,6 +24,7 @@ test("Codex launcher waits beyond the old ten-second clock for the subscribed ar
   const logPrefix = path.join(fixture.dir, "slow-watch");
   const room = "slow-subscribe";
   const session = `slow-subscribe-${process.pid}`;
+  /** @type {NodeJS.ProcessEnv} */
   const environment = {
     ...process.env,
     AGORA_CODEX_SERVER: "",
@@ -98,6 +99,34 @@ setInterval(() => {}, 1_000);
     : ["--room", room, "--session-id", session, "--thread-id", session,
       "--config", config, "--state", state, "--stop"];
   await runFile(command, stopArgs, { env: environment, timeout: 10_000 });
+
+  // Assert the reported seconds bind elapsed time, not a count of probes. On
+  // POSIX, a deliberately slow sed makes the retired ten-probe loop exceed
+  // two seconds while the independent one-second deadline still refuses near
+  // the bound it reports.
+  let timeoutEnvironment = environment;
+  if (process.platform !== "win32") {
+    const shims = path.join(fixture.dir, "slow shims");
+    const sedPath = (await runFile("sh", ["-c", "command -v sed"])).stdout.trim();
+    await mkdir(shims, { recursive: true });
+    await writeFile(path.join(shims, "sed"), `#!/bin/sh\nsleep 0.2\nexec "${sedPath}" "$@"\n`);
+    await chmod(path.join(shims, "sed"), 0o755);
+    timeoutEnvironment = { ...environment, PATH: `${shims}${path.delimiter}${process.env.PATH ?? ""}` };
+  }
+  const timeoutArgs = [...common,
+    process.platform === "win32" ? "-ArmingTimeoutSeconds" : "--arming-timeout", "1"];
+  const timeoutStartedAt = Date.now();
+  await assert.rejects(runFile(command, timeoutArgs, {
+    env: timeoutEnvironment,
+    timeout: 5_000,
+  }), (/** @type {any} */ error) => {
+    assert.equal(error.code, 1);
+    assert.match(error.stderr, /subscribed armed receipt within 1 seconds/);
+    return true;
+  });
+  const timeoutElapsed = Date.now() - timeoutStartedAt;
+  assert.ok(timeoutElapsed >= 800, `one-second bound fired too early at ${timeoutElapsed} ms`);
+  assert.ok(timeoutElapsed < 2_000, `one-second bound stretched to ${timeoutElapsed} ms`);
 });
 
 test("Codex POSIX launcher gives macOS to launchd without weakening Linux detachment", async () => {
