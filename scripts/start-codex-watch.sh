@@ -10,6 +10,8 @@ state_root=${AGORA_STATE:-${HOME}/.agora/state}
 codex_home=${CODEX_HOME:-${HOME}/.codex}
 runtime_path=
 codex_path=${AGORA_CODEX_BIN:-}
+codex_server=${AGORA_CODEX_SERVER:-}
+codex_token_file=${AGORA_CODEX_TOKEN_FILE:-}
 log_prefix=
 thread_interval=120
 arming_timeout=60
@@ -34,6 +36,8 @@ while [ "$#" -gt 0 ]; do
     --codex-home) codex_home=$2; shift 2 ;;
     --runtime|-RuntimePath|-BunPath) runtime_path=$2; shift 2 ;;
     --codex-bin|-CodexPath) codex_path=$2; shift 2 ;;
+    --codex-server|-CodexServer) codex_server=$2; shift 2 ;;
+    --codex-token-file|-CodexTokenFile) codex_token_file=$2; shift 2 ;;
     --log-prefix|-LogPrefix) log_prefix=$2; shift 2 ;;
     --thread-interval|-ThreadInterval) thread_interval=$2; shift 2 ;;
     --arming-timeout|-ArmingTimeoutSeconds) arming_timeout=$2; shift 2 ;;
@@ -237,8 +241,14 @@ if [ "$worker" = true ]; then
   # The worker execs Node without changing pid, so this is the durable resident process on POSIX.
   export AGORA_ACTOR=$actor AGORA_CONFIG=$config_path AGORA_STATE=$state_root AGORA_SESSION_PID=$$ CODEX_HOME=$codex_home CODEX_SESSION_ID=$session_id
   unset AGORA_SESSION
+  if [ -n "$codex_server" ]; then
+    [ -n "$codex_token_file" ] && [ -f "$codex_token_file" ] || { printf '%s\n' '--codex-server requires an existing --codex-token-file' >&2; exit 2; }
+    exec "$runtime_path" "$agora_path" watch "$room" --stream --follow --json --wake addressed \
+      --thread-interval "$thread_interval" --coalesce 20 --max-batch 32 --codex-server "$codex_server" --codex-token-file "$codex_token_file" --codex-thread "$thread_id" >>"$log_prefix.stdout.log" 2>>"$log_prefix.stderr.log"
+  fi
+  [ -z "$codex_token_file" ] || { printf '%s\n' '--codex-token-file requires --codex-server' >&2; exit 2; }
   exec "$runtime_path" "$agora_path" watch "$room" --stream --follow --json --wake addressed \
-    --thread-interval "$thread_interval" --coalesce 20 --codex-queue --codex-thread "$thread_id" --codex-bin "$codex_path" >>"$log_prefix.stdout.log" 2>>"$log_prefix.stderr.log"
+    --thread-interval "$thread_interval" --coalesce 20 --max-batch 32 --codex-queue --codex-thread "$thread_id" --codex-bin "$codex_path" >>"$log_prefix.stdout.log" 2>>"$log_prefix.stderr.log"
 fi
 
 create_launchd_plist() {
@@ -260,6 +270,16 @@ create_launchd_plist() {
     plutil -insert "ProgramArguments.$plist_index" -string "$plist_value" "$plist_load_path"
     plist_index=$((plist_index + 1))
   done
+  if [ -n "$codex_server" ]; then
+    [ -n "$codex_token_file" ] && [ -f "$codex_token_file" ] || { printf '%s\n' '--codex-server requires an existing --codex-token-file' >&2; exit 2; }
+    for plist_value in --codex-server "$codex_server" --codex-token-file "$codex_token_file"; do
+      plutil -insert "ProgramArguments.$plist_index" -string "$plist_value" "$plist_load_path"
+      plist_index=$((plist_index + 1))
+    done
+  elif [ -n "$codex_token_file" ]; then
+    printf '%s\n' '--codex-token-file requires --codex-server' >&2
+    exit 2
+  fi
   plutil -insert RunAtLoad -bool true "$plist_load_path"
   plutil -insert KeepAlive -bool false "$plist_load_path"
   plutil -insert ProcessType -string Background "$plist_load_path"
@@ -292,9 +312,18 @@ elif [ "$platform" = Linux ]; then
     printf '%s\n' 'nohup is required to keep a Codex watch resident on Linux.' >&2
     exit 1
   }
-  nohup setsid "$script_path" --worker --room "$room" --actor "$actor" --session-id "$session_id" --thread-id "$thread_id" \
-    --config "$config_path" --state "$state_root" --runtime "$runtime_path" --codex-bin "$codex_path" \
-    --codex-home "$codex_home" --log-prefix "$log_prefix" --thread-interval "$thread_interval" >/dev/null 2>&1 &
+  if [ -n "$codex_server" ]; then
+    [ -n "$codex_token_file" ] && [ -f "$codex_token_file" ] || { printf '%s\n' '--codex-server requires an existing --codex-token-file' >&2; exit 2; }
+    nohup setsid "$script_path" --worker --room "$room" --actor "$actor" --session-id "$session_id" --thread-id "$thread_id" \
+      --config "$config_path" --state "$state_root" --runtime "$runtime_path" --codex-bin "$codex_path" \
+      --codex-home "$codex_home" --log-prefix "$log_prefix" --thread-interval "$thread_interval" \
+      --codex-server "$codex_server" --codex-token-file "$codex_token_file" >/dev/null 2>&1 &
+  else
+    [ -z "$codex_token_file" ] || { printf '%s\n' '--codex-token-file requires --codex-server' >&2; exit 2; }
+    nohup setsid "$script_path" --worker --room "$room" --actor "$actor" --session-id "$session_id" --thread-id "$thread_id" \
+      --config "$config_path" --state "$state_root" --runtime "$runtime_path" --codex-bin "$codex_path" \
+      --codex-home "$codex_home" --log-prefix "$log_prefix" --thread-interval "$thread_interval" >/dev/null 2>&1 &
+  fi
   supervisor_pid=$!
 else
   printf '%s\n' "Resident Codex watches are unsupported on platform '$platform'; supported platforms are Linux and macOS." >&2

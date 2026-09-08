@@ -81,6 +81,7 @@ import { formatTrailers, matchesAddress, parseTrailers, TRAILER_VALUE_MAX, trail
 import { SLACK_TEXT_MAX, chunkAtLines, encodeSlackText } from "../src/transports/slack.mjs";
 import { codexBridgeRefusal, codexLiveness, codexSpawnWarning, codexThread, queueCodex, resolveCodexBinary } from "../src/codex.mjs";
 import { codexServerURL, deliverCodexServer } from "../src/codex-server.mjs";
+import { codexServerStatus, launchAttachedCodex } from "../src/codex-launch.mjs";
 import { buildLabel, buildPredates, cacheTtls, clearWatchMode, installedBuild, touchWatchMode, watchModeSentinel, watchModuleDelta } from "../src/harness.mjs";
 import { SERVICE_DARK, ServiceDarkError, openNativeSubscription, serviceDescriptorStatus, validateNativeRoomId } from "../src/wake/subscriber.mjs";
 import { assertRemoteDescriptor, openRemoteSubscription, readRemoteDescriptor, resolveSeatIdentity } from "../src/native-remote.mjs";
@@ -287,6 +288,14 @@ const SCHEMA = {
       options: { "--file <path>": "the bounded spawn-request JSON; unknown keys exit 1 request-field-unknown" },
       does: "one request file in, one pane out: parse the bounded request, ask the running seat service to open a pane after a proven hello. hermes is refused. open carries no cmd. Never writes the shared config. There is no write/send/type/keys verb",
     },
+    codex: {
+      args: ["status | [resume <thread>] | [-- <codex args>]"],
+      options: {
+        "--codex-bin <path>": "Codex executable; otherwise resolve the installed native binary",
+        "--json": "with status, print the local server descriptor as JSON (never the token)",
+      },
+      does: "start or reuse one authenticated loopback Codex app server for this seat, then launch the Codex TUI attached to it. The app server gives every attached thread endpoint and token-file references so the standard watch launcher selects native in-turn delivery. The capability value appears only in the attaching TUI environment, never the command, descriptor, config or output",
+    },
     "stand-down": {
       args: [],
       options: {
@@ -299,7 +308,7 @@ const SCHEMA = {
     resume: {
       args: [],
       options: {},
-      does: "clear this session's stand-down record. Does not start a session and does not re-arm watches; a live session re-arms them itself. Named remainder: nothing in agora starts a harness session",
+      does: "clear this session's stand-down record. This verb does not start a session or re-arm watches; a live session re-arms them itself. agora codex is the separate attached-session launcher",
     },
     doctor: { args: [], options: { "--offline": "skip the identity check", "--repair-tailcat": "restore the cached runtime from its hash-verified bundled capsule" }, does: "config, token presence per room, identity per room, this session and bearer and where each came from, the harness prompt-cache TTL where this seat can read one, and the reads a minute this seat spends with the arithmetic behind the number; three preflights for a resident bearer warn when a watch is armed against a five-minute TTL (cache-ttl), when a watch polls within half to one and a half times a TTL that was read (interval-near-ttl), and when no live watch in a room wakes on all (no-all-watch). Room and watch reports are derived. Tailcat integrity is verified locally; first use expands the bundled capsule into state, and --repair-tailcat explicitly restores a corrupt cache" },
     schema: { args: [], options: { "--json": "the whole surface as JSON, protocol included" }, does: "this description" },
@@ -897,7 +906,7 @@ async function main(argv) {
   const [verb, roomAlias, ...rest] = positionals;
   // Native pipes/IPC use the supported Node >=22 runtime even when the caller runs the
   // ordinary CLI through Bun. Bun's Duplex/HTTP premature-close semantics differ on Windows.
-  if(process.versions.bun && ['doctor','enroll','share','fetch'].includes(verb)){
+  if(process.versions.bun && ['doctor','enroll','share','fetch','codex'].includes(verb)){
     return await new Promise((resolve,reject)=>{
       const child=spawn('node',[entryFile,...argv],{stdio:'inherit',windowsHide:true});
       child.once('error',()=>reject(new AgoraError('Native transfers require Agora\'s Node 22+ runtime. Install Node, then rerun the same agora command.')));
@@ -992,9 +1001,22 @@ async function main(argv) {
 
   const cfg = await loadConfig(values.config);
   const json = Boolean(values.json);
+  const stateRoot = stateDir(cfg);
+  if (verb === "codex") {
+    const args = [roomAlias, ...rest].filter((value) => value !== undefined);
+    if (args[0] === "status") {
+      if (args.length !== 1) throw new AgoraError("agora codex status takes no arguments", EXIT.usage);
+      const status = await codexServerStatus(stateRoot);
+      if (json) console.log(JSON.stringify({ type: "codex-server", ...status }));
+      else if (status.running) console.log(`Codex app server ready at ${status.endpoint} (pid ${status.pid}); token reference ${status.tokenFile}`);
+      else console.log("no usable Agora-managed Codex app server; next agora codex launch will start one");
+      return status.running ? EXIT.ok : EXIT.error;
+    }
+    const result = await launchAttachedCodex({ stateRoot, args, ...(values["codex-bin"] ? { codexPath: String(values["codex-bin"]) } : {}) });
+    return result.code;
+  }
   const build = await installedBuild({ version, root: projectRoot, entry: entryFile });
   const session = resolveSession(cfg, process.env, (line) => console.error(`agora: ${line}`));
-  const stateRoot = stateDir(cfg);
   const sdir = sessionDir(stateRoot, session);
   const processOwner = harnessPid(cfg, process.env);
   const record = verb === "session" || verb === "join" ? await readRecord(sdir) : await touchRecord(sdir, { build, ...processOwner });
@@ -1298,7 +1320,7 @@ async function main(argv) {
   if (verb === "resume") {
     const rec = await clearStandDown(sdir);
     if (json) console.log(JSON.stringify({ type: "resume", cleared: Boolean(rec), ...(rec ?? {}) }));
-    else if (rec) console.log(`stand-down cleared (was until ${rec.until}). Re-arm watches from this live session; nothing started a session.`);
+    else if (rec) console.log(`stand-down cleared (was until ${rec.until}). Re-arm watches from this live session; this resume verb did not start a session.`);
     else console.log("no stand-down record for this session");
     return EXIT.ok;
   }

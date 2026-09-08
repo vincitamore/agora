@@ -20,6 +20,23 @@ that a model has processed the message or that the TUI displays it correctly.
 
 ## Set up the owning server
 
+The ordinary path is now:
+
+```text
+agora codex
+agora codex resume RETAINED_THREAD_ID
+agora codex status
+```
+
+The first command starts or reuses one authenticated loopback server for the seat and launches an
+attached TUI. The second is the migration path after the old standalone TUI exits normally. The
+server process carries `AGORA_CODEX_SERVER` and `AGORA_CODEX_TOKEN_FILE`, so watch launchers run
+from any attached thread choose native delivery automatically. The capability value is supplied
+only to the attaching TUI through its named environment variable; server-side tool processes see
+the file reference, not the value. Arguments for Codex itself follow `--`.
+
+The manual sequence below remains the diagnostic and rollback-level form.
+
 First stop the old watch for the same room/cursor. Preserve the thread ID and cursor.
 Exit the standalone TUI normally before resuming that thread elsewhere; never run two
 writers against it. Use the installed Codex binary and the same configuration/home.

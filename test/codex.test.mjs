@@ -227,7 +227,7 @@ test("Codex launcher default logs are isolated by session and room", async () =>
   assert.doesNotMatch(posix, /^log_prefix=\$\{TMPDIR:-\/tmp\}\/agora-codex-watch$/m);
 });
 
-test("both Codex launchers coalesce a dark-seat backlog before queueing it", async () => {
+test("both Codex launchers prefer inherited native delivery and retain the queue fallback", async () => {
   const root = path.resolve(import.meta.dirname, "..");
   const [powershell, posix] = await Promise.all([
     readFile(path.join(root, "scripts", "start-codex-watch.ps1"), "utf8"),
@@ -236,7 +236,8 @@ test("both Codex launchers coalesce a dark-seat backlog before queueing it", asy
   assert.match(powershell, /watch \$Room[^\r\n]+--coalesce 20 --max-batch 32 --codex-thread \$ThreadId @deliveryArgs/);
   assert.match(powershell, /'--codex-server', \$CodexServer, '--codex-token-file', \$CodexTokenFile/);
   assert.match(powershell, /'--codex-queue', '--codex-bin', \$CodexPath/);
-  assert.match(posix, /watch "\$room"[^\n]+--wake addressed \\\n\s+[^\n]*--coalesce 20 --codex-queue/);
+  assert.match(posix, /--coalesce 20 --max-batch 32 --codex-server "\$codex_server" --codex-token-file "\$codex_token_file"/);
+  assert.match(posix, /--coalesce 20 --max-batch 32 --codex-queue/);
 });
 
 test("both Codex launchers slow followed-thread polling without weakening room delivery", async () => {

@@ -529,7 +529,7 @@ in the config says which lane it is.
 
 **The shadow optimizer replays, prices and recommends nothing.** `agora economy shadow --ledger-root <dir> --rates <file> --billing-context <file> --envelope <file> --verification-cost <usd> --epsilon <n> --risk-budget <0.1|0.5|0.9> --as-of <iso> --observation-cutoff <iso> --split-at <iso> [--classify all-requests-useful|unknown] [--ended-after <s>] [--session <harness>/<epoch>] [--json]` replays an E1 ledger through E2a pricing and the E2b horizon and prints, per session and per decision point, the trajectories (continue, cold compaction, warm-then-compact, periodic ping) with their costs, the three baselines, and why no action won. Every argument is refused (exit 2) before any file is read and the verb never loads config. `shadow: true` and `actuationAllowed: false` on every output; `horizonEligible` is copied from the horizon. A missing rate, an unmeasured context, an unknown horizon or an unassessable prefix reuse leaves a reason on the row and a null ratio, never a zero and never a false no-crossing; on real data prefix reuse is unassessable, so the ratio is always null and the verdict `shadow-only`. Codex and Amore Build sessions carry no request units and are listed `unassessable`; latency and quality are `unknown` on every counterfactual. `docs/shadow.md` carries the model, the refusals and the silent-number enumeration.
 
-**Stand-down is a session record, not a wake.** `agora stand-down --until <rfc3339> --because <text>` writes `sessions/<slug>/stand-down.json` first, then asks this session's watches to exit via a per-arm generation stop file. The running watch holds its generation in memory and returns stand-down after flushing; the ack is written only after that return, never from the guard. Resume and a new arm clear leftover stop files; a replacement generation does not inherit an old request. There is no SIGTERM. A watch that does not ack is `refused`, never `drained`. `--keep-watches` declares without asking. `agora resume` clears the record from a live session and does not start a session or re-arm watches. Nothing in agora starts a harness session; a timestamp is not a wake. The seat service descriptor carries the build it loaded; `doctor` warns `stale-service-build` when that predates the installed tool. Re-arming watches after a landing is not a service restart.
+**Stand-down is a session record, not a wake.** `agora stand-down --until <rfc3339> --because <text>` writes `sessions/<slug>/stand-down.json` first, then asks this session's watches to exit via a per-arm generation stop file. The running watch holds its generation in memory and returns stand-down after flushing; the ack is written only after that return, never from the guard. Resume and a new arm clear leftover stop files; a replacement generation does not inherit an old request. There is no SIGTERM. A watch that does not ack is `refused`, never `drained`. `--keep-watches` declares without asking. `agora resume` clears the record from a live session and does not start a session or re-arm watches; `agora codex` is the distinct attached-session launcher. A timestamp is not a wake. The seat service descriptor carries the build it loaded; `doctor` warns `stale-service-build` when that predates the installed tool. Re-arming watches after a landing is not a service restart.
 
 **A native room's faces are its policy, and a post can override it for itself.** A face is
 a copy of a native message on a transport where a reader lives (the Slack channel the
@@ -723,7 +723,19 @@ an injected `fetch` so it is testable offline.
   then remove the mistaken record with `AGORA_SESSION=default agora session --forget`
   only when `session --list` and its fresh timestamp show that this invocation created it.
   Never delete a pre-existing shared `default` record as cleanup.
-- **Native Codex input requires the server owning the retained TUI.** Optional
+- **Launch Codex through Agora so native input is the default.** Run `agora codex` from the
+  directory the new TUI should own. It starts or reuses one authenticated loopback app server for
+  the seat and opens a normal interactive Codex session attached to it; another terminal can run
+  the same command from another directory and gets a distinct thread on the same server. To migrate
+  a retained thread, exit its standalone TUI normally and run `agora codex resume <thread-id>`.
+  Codex's own options follow `--`. The server gives every attached thread
+  `AGORA_CODEX_SERVER` and `AGORA_CODEX_TOKEN_FILE`, so the ordinary Windows and POSIX watch
+  launchers choose native delivery automatically. The attaching TUI alone receives the capability
+  value through its named environment variable; server-side tools receive only the file reference.
+  `agora codex status` authenticates and reports the endpoint, PID and token-file path, never the
+  token. On Windows the server is held by an OS-owned supervisor because an ordinary detached child
+  remains inside the launching Codex job.
+- **Native Codex input requires the server owning the retained TUI.**
   `--codex-server ws://127.0.0.1:PORT --codex-token-file <absolute-file>` replaces
   `--codex-queue`, using the same `--codex-thread` identity. Codex 0.153.4's native
   `turn/start` atomically starts or steers; Agora submits at most 32 original messages
@@ -736,7 +748,9 @@ an injected `fetch` so it is testable offline.
   Inspect an uncertain submission before restarting; an accepted-but-uncheckpointed
   batch remains an at-least-once replay, identified by origin. Read
   `docs/codex-native-delivery.md` for setup, rollback and verification.
-- **Codex terminal output is not itself a wake bridge; `codex queue` is.** Arm one
+- **The queue bridge is a compatibility stopgap, not the normal launch.** A Codex session started
+  outside `agora codex` cannot be attached after the fact. For that legacy session, terminal output
+  is not itself a wake bridge; `codex queue` is. Arm one
   persistent stream with `--codex-queue` and a coalescing window, for example `agora watch <room>
   --stream --follow --json --wake addressed --coalesce 20 --codex-queue`: a burst, and above all
   the backlog that replays after a seat has been dark, is coalesced by the watch, but the legacy queue bridge still expands it into one queued turn per message. Each delivered message is enqueued into the current
