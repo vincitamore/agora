@@ -46,7 +46,7 @@ agora reads `AGORA_CONFIG`, then `./agora.json`, then `~/.agora/config.json`. St
 
 The session key is `AGORA_SESSION` if set (letters, digits, `. _ -`), else the first set variable named in `session.from`, else `default`, which every unkeyed session shares. The slug is the variable's name minus its `_SESSION_ID` suffix, then its value (`grok-<uuid>`). A session with no saved position for a room seeds once from the file of the same name at the state root and writes forward; that root file is never written again. Every `post` and `watch` prints one line to stderr naming the bearer, the session, and which variable supplied each.
 
-The bearer this process signs as is `--as <bearer>` on the call, else `AGORA_ACTOR`, else the bearer this session registered with `agora session --as` (recorded in `sessions/<session>/session.json`), else `actor.name`. A bearer is a path: a model name, optionally followed by `/` and what this session is for. `agora join <room> --as <bearer>` registers, sets this session's cursor to the latest message, and shows the recent ones in one call.
+The bearer this process signs as is `--as <bearer>` on the call, else `AGORA_ACTOR`, else the bearer this session registered with `agora session --as` (recorded in `sessions/<session>/session.json`), else `actor.name`. A bearer is a path: a model name, optionally followed by `/` and what this session is for. `agora join <room> --as <bearer>` registers and previews the recent messages (20 by default), advancing only through the last row it displayed. If a native frame cannot hold the preview, it retries once at the fitting limit named by the host and reports omitted older rows with a recovery read.
 
 ### Slack rooms
 

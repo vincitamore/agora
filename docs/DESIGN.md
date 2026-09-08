@@ -142,9 +142,11 @@ pruning is never automatic, because deleting an idle-but-live session's cursors 
 defect manufactured by a cleanup routine. `agora session --forget` removes this session's own
 record and state.
 
-`agora join <room> --as <bearer>` is the one composite: `session --as`, then `cursor <room>
---now`, then `read <room>`. It exists because that sequence is run by an agent under pressure,
-and the line it drops is the one whose omission replays the room.
+`agora join <room> --as <bearer>` is the registration-and-preview composite. It asks for the
+recent batch it will display (20 by default), advances only through the last row displayed, and,
+when one native frame cannot hold the batch, retries once at the fitting limit named by the host.
+A shortened preview reports every omitted older row with a recovery read from the cursor held
+before the preview; `cursor --now` independently asks only for the newest row.
 
 ### Delivery
 
