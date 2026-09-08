@@ -16,7 +16,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { enrolledKeyDigest, keyClaimPath, canonicalStateRoot, takeKeyClaim } from "../src/native-member-claim.mjs";
+import { enrolledKeyDigest, keyClaimFile, readKeyClaim, takeKeyClaim } from "../src/native-member-claim.mjs";
 
 const run = promisify(execFile);
 const REPO = fileURLToPath(new URL("..", import.meta.url));
@@ -160,9 +160,13 @@ test("with no resident the gate takes the claim, holds it ACROSS the child, and 
   assert.equal(attempt.took, false, "the key was claimable while the gate's own child was running");
   assert.equal(attempt.code, "member-key-claim-held");
 
-  // And the claim is gone afterwards: the gate releases its generation in a finally.
-  const claimFile = keyClaimPath(await canonicalStateRoot(stateRoot), keyDigest);
-  assert.equal(existsSync(claimFile), false, "the gate left its claim behind, fencing out every later member start");
+  // And the key is FREE afterwards: the gate releases its generation in a finally. Asserted as the
+  // property a member start actually depends on, not as the absence of a file — under the ruled
+  // scheme a released generation LEAVES its claim behind as the floor, and a cell that reads the
+  // file's absence would be measuring the wrong artifact and would red on a correct release.
+  const freed = await readKeyClaim(stateRoot, keyDigest);
+  assert.equal(freed.held, false, "the gate left its claim behind, fencing out every later member start");
+  assert.equal(existsSync(keyClaimFile(freed.dir, freed.floor, "released")), true, "and it said so, rather than vanishing");
 
   const out = lastJson(result.stdout);
   assert.equal(out.measured, true);
@@ -185,8 +189,13 @@ test("the claim is released even when the child fails, so a red probe does not f
   assert.equal(out.pass, false);
   assert.equal(out.directEndpoint, null);
 
-  const claimFile = keyClaimPath(await canonicalStateRoot(stateRoot), keyDigest);
-  assert.equal(existsSync(claimFile), false, "a failed probe left the key claimed, so no member start could ever run");
+  const freed = await readKeyClaim(stateRoot, keyDigest);
+  assert.equal(freed.held, false, "a failed probe left the key claimed, so no member start could ever run");
+  // The property stated positively, because "held: false" is what a member start reads and a
+  // successful take is what it does: both, so a release that only half-worked cannot pass.
+  const next = await takeKeyClaim({ stateRoot, keyDigest, kind: "resident", label: "the start after a red probe" });
+  assert.ok(next.generation > freed.floor - 1);
+  await next.release();
 });
 
 test("an identity whose digest cannot be derived refuses instead of spawning", async (t) => {

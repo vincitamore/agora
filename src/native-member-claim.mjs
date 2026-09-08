@@ -18,34 +18,90 @@
  * whose routes use the same key are two rooms on one client, and the alias is a room while the
  * claim is a key.
  *
+ * ## The shape, and why it is a DIRECTORY of numbered files
+ *
+ * Ruled at seam 7 of `docs/RESIDENT-MEMBER-CLIENT.md` (brief r12). The claim is not one path that
+ * is emptied and refilled. Reclaiming a stale claim is itself an ownership operation, and the two
+ * obvious ways to write it are both wrong:
+ *
+ *   * read-decide-unlink-create: between one contender's decision and its unlink, another can clear
+ *     the same stale claim and create its own, and the first contender's `rm` then deletes that NEW
+ *     claim before creating a second. Two live holders. Measured with real process concurrency:
+ *     eight contenders against one stale claim admitted two holders, 2026-09-08 03:56Z.
+ *   * rename to a tombstone: POSIX `rename(2)` atomically REPLACES an existing destination and
+ *     returns success, so "exactly one renamer wins" is false there and true on Windows — a
+ *     portability split in the one step ownership would rest on — and a late reclaimer's rename
+ *     moves a legitimate successor's LIVE claim out of the path exactly as an unlink would delete
+ *     it. The read-then-act window reappears inside the operation chosen to close it.
+ *
+ * A unique token per acquire (the shape this file carried at `921022c`) does close the reuse (ABA)
+ * question without a floor, and that is a real merit. It does not make read-and-remove atomic, so
+ * it still needs a lock, whose own residual — a reclaimer dying while holding it — is the same
+ * delayed-actor race one level up. And a unique name NEVER COLLIDES, so an `O_EXCL` create on it
+ * selects no winner at all; the create stops being a compare-and-swap and the lock becomes the
+ * whole of the exclusion.
+ *
+ * So: `<claims>/<digest>/` holds per-generation files `<n>.claim`, each created `O_EXCL`, and the
+ * holder is the creator of the highest generation present whose process is live. Four contracts
+ * make that sound, and each is pinned by a cell:
+ *
+ *   1. **The same next name.** A taker's generation is one above the highest number PRESENT, so
+ *      every taker that decided on the same record computes the SAME name and `O_EXCL` admits
+ *      exactly one. A loser gets `EEXIST`, re-reads, and finds the live holder.
+ *   2. **The spawn follows the LISTING, not the create.** After its own create succeeds a taker
+ *      lists the directory once more: a higher generation present means a faster contender already
+ *      reclaimed past it, so it removes only its own file and holds nothing. A taker that spawned
+ *      on the strength of its create would be the second Tailcat child this module exists to
+ *      prevent.
+ *   3. **A durable floor across release.** The generation is one above the highest file present
+ *      whether that file is live, dead or RELEASED: release never empties the directory — the
+ *      holder marks its own file released with an `O_EXCL` sidecar and leaves the claim — so the
+ *      highest number ever issued always survives and no number is ever reissued. Without it a
+ *      delayed taker's `2` outranks a fresh live `1` taken after a clean release, and no listing
+ *      can see the difference.
+ *   4. **Nothing is renamed, and nobody removes a file it did not create** — except the holder
+ *      pruning generations strictly below its own after the listing, which is safe because its own
+ *      file is then the floor. A delayed prune of a dead generation is harmless by construction,
+ *      and a delayed taker's late create is caught by its own post-create listing.
+ *
+ * **A live holder is never taken.** Staleness is proven death and nothing else — the pid probe plus
+ * boot epoch that armed records use, never presence and never a heartbeat timeout — so there is no
+ * "false-stale" case for a slow holder to notice later. A holder loses the key only by its own
+ * stop; an operator who wants it replaced runs `member stop` (which tears the Tailcat child down
+ * before it returns) and then `start`.
+ *
  * A concurrent loser LOSES BY NAME and does not wait, in both directions. Waiting needs a bound,
  * and a bound is a second policy to get wrong; the refusal instead names the holder's pid, boot
  * epoch and `kind`, so a start refused by a `gate` reads as retry in seconds while one refused by
- * a live `resident` reads as already running, pid N. If the resident should outrank a transient
- * gate, that is a rule about which kind may break a claim and it belongs in this file.
+ * a live `resident` reads as already running, pid N.
  */
-import { mkdir, open, readFile, realpath, rm } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, realpath, rm } from "node:fs/promises";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
 import { AgoraError } from "./core.mjs";
 import { publicNodeKeyDigest } from "./protocol/route.mjs";
 import { bootEpoch, pidAlive } from "./session.mjs";
 
-/** How many times an acquire will re-try after clearing a claim it proved stale. */
-const CLAIM_ATTEMPTS = 4;
+/** How many times an acquire will re-read and race for the next generation before giving up. */
+const CLAIM_ATTEMPTS = 8;
 
 /** The two kinds of key-bearing dialer. A third would be a third way to spawn a child. */
 export const CLAIM_KINDS = Object.freeze(["resident", "gate"]);
 
+/** The file suffixes a generation can carry. `child` is seam 8's teardown proof. */
+const CLAIM_SUFFIXES = Object.freeze(["claim", "released", "child"]);
+
+const GENERATION_FILE = /^(\d+)\.(claim|released|child)$/;
+
 /**
- * A held claim, as it sits on disk. `generation` is what a release is fenced by: a release that
- * finds another generation in the file is a release of somebody else's claim and does nothing.
+ * A held claim, as it sits on disk. `generation` is the number in its filename: it is unique for
+ * the life of the directory, because the floor guarantees no number is ever reissued, so it is
+ * also what a release is fenced by.
  * @typedef {object} KeyClaimRecord
  * @property {string} keyDigest the enrolled key digest this claim is over (`sha256:<64 hex>`)
  * @property {number} pid the process holding it
  * @property {number} bootEpoch the boot that pid belongs to; a pid outlives nothing across a reboot
  * @property {'resident' | 'gate'} kind what the holder is, so a refusal is actionable
- * @property {string} generation unique to this acquire
+ * @property {number} generation the file's number
  * @property {string} startedAt
  * @property {string} [label] free text for the refusal line (an alias, a probe name)
  */
@@ -55,16 +111,33 @@ function claimRefusal(code, detail) {
   return Object.assign(new AgoraError(`${code}: ${detail}`), { code });
 }
 
+/** @param {string} raw */
+function safeParse(raw) {
+  try { return JSON.parse(raw); } catch { return undefined; }
+}
+
 /**
- * The claim's directory and file. The digest's hex half is the filename: a `sha256:` prefix is not
- * a path segment on every filesystem, and the record carries the full digest anyway.
+ * The claim's DIRECTORY. The digest's hex half is the directory name: a `sha256:` prefix is not a
+ * path segment on every filesystem, and every record carries the full digest anyway.
  * @param {string} stateRoot a CANONICAL state root (see {@link canonicalStateRoot})
  * @param {string} keyDigest
  */
-export function keyClaimPath(stateRoot, keyDigest) {
+export function keyClaimDir(stateRoot, keyDigest) {
   const hex = /^sha256:([a-f0-9]{64})$/.exec(String(keyDigest));
   if (!hex) throw claimRefusal("member-key-claim-digest-invalid", `expected sha256:<64 hex>, got ${JSON.stringify(String(keyDigest))}`);
-  return path.join(stateRoot, "native", "member", "claims", `${hex[1]}.claim.json`);
+  return path.join(stateRoot, "native", "member", "claims", hex[1]);
+}
+
+/**
+ * One generation's file. `suffix` is `claim`, `released` or `child`.
+ * @param {string} dir @param {number} generation @param {'claim' | 'released' | 'child'} [suffix]
+ */
+export function keyClaimFile(dir, generation, suffix = "claim") {
+  if (!Number.isInteger(generation) || generation <= 0)
+    throw claimRefusal("member-key-claim-generation-invalid", `a generation is a positive integer, got ${JSON.stringify(generation)}`);
+  if (!CLAIM_SUFFIXES.includes(suffix))
+    throw claimRefusal("member-key-claim-generation-invalid", `unknown claim file suffix ${JSON.stringify(suffix)}`);
+  return path.join(dir, `${generation}.${suffix}`);
 }
 
 /**
@@ -82,7 +155,8 @@ export async function canonicalStateRoot(stateRoot) {
 function parseClaim(value) {
   if (!value || typeof value !== "object") return undefined;
   const rec = /** @type {Record<string, unknown>} */ (value);
-  if (typeof rec.keyDigest !== "string" || typeof rec.generation !== "string") return undefined;
+  if (typeof rec.keyDigest !== "string") return undefined;
+  if (!Number.isInteger(rec.generation) || Number(rec.generation) <= 0) return undefined;
   if (!Number.isInteger(rec.pid) || Number(rec.pid) <= 0) return undefined;
   if (typeof rec.kind !== "string" || !CLAIM_KINDS.includes(rec.kind)) return undefined;
   return /** @type {KeyClaimRecord} */ (rec);
@@ -93,7 +167,7 @@ function parseClaim(value) {
  * are reused, and a claim written before a reboot names a pid that now belongs to something else,
  * so a crashed resident would fence out every later start forever. This is `armedAlive`'s test,
  * deliberately: a claim is an armed record with one holder.
- * @param {KeyClaimRecord} claim
+ * @param {{ pid: number, bootEpoch?: number }} claim
  * @param {{ kill?: (pid: number, sig: 0) => void, boot?: number }} [deps]
  */
 export function claimAlive(claim, deps = {}) {
@@ -104,7 +178,146 @@ export function claimAlive(claim, deps = {}) {
 /** @param {KeyClaimRecord} claim */
 function holderDetail(claim) {
   const label = claim.label ? ` (${claim.label})` : "";
-  return `${claim.kind} pid ${claim.pid}${label}, held since ${claim.startedAt}`;
+  return `${claim.kind} pid ${claim.pid}${label}, generation ${claim.generation}, held since ${claim.startedAt}`;
+}
+
+/**
+ * @typedef {object} ClaimDirScan
+ * @property {string} dir
+ * @property {number} floor the highest generation number PRESENT under any suffix; 0 when empty.
+ *   This is the durable floor: it counts released and dead generations, so no number is reissued.
+ * @property {{ generation: number, record: KeyClaimRecord } | undefined} holder the live, unreleased
+ *   claim of the highest generation, if any
+ * @property {number[]} generations every generation number present, ascending
+ * @property {Set<number>} released generations whose holder marked them released
+ * @property {number[]} malformed generations whose `.claim` file could not be read as a claim
+ */
+
+/**
+ * Read the claim directory once. Everything else in this module is a decision on top of this.
+ *
+ * A `.claim` file that cannot be parsed is reported, never cleared and never counted as free: an
+ * unreadable claim may belong to a live process, and clearing it is how the second child gets
+ * spawned. It still counts toward the floor, because its number was issued.
+ * @param {string} dir
+ * @param {{ kill?: (pid: number, sig: 0) => void, boot?: number }} [deps]
+ * @returns {Promise<ClaimDirScan>}
+ */
+export async function scanClaimDir(dir, deps = {}) {
+  /** @type {string[]} */
+  let entries;
+  try { entries = await readdir(dir); }
+  catch (error) {
+    if (/** @type {NodeJS.ErrnoException} */ (error).code === "ENOENT")
+      return { dir, floor: 0, holder: undefined, generations: [], released: new Set(), malformed: [] };
+    throw error;
+  }
+
+  /** @type {Set<number>} */
+  const claims = new Set();
+  /** @type {Set<number>} */
+  const released = new Set();
+  /** @type {Set<number>} */
+  const all = new Set();
+  for (const name of entries) {
+    const match = GENERATION_FILE.exec(name);
+    if (!match) continue;
+    const generation = Number(match[1]);
+    if (!Number.isSafeInteger(generation) || generation <= 0) continue;
+    all.add(generation);
+    if (match[2] === "claim") claims.add(generation);
+    if (match[2] === "released") released.add(generation);
+  }
+
+  const generations = [...all].sort((a, b) => a - b);
+  const floor = generations.length ? generations[generations.length - 1] : 0;
+
+  /** @type {{ generation: number, record: KeyClaimRecord } | undefined} */
+  let holder;
+  /** @type {number[]} */
+  const malformed = [];
+  // Descending: the holder is the HIGHEST live unreleased claim. Scanning every unreleased claim
+  // rather than only the top one fails toward refusing, which is the safe direction here.
+  for (const generation of [...claims].sort((a, b) => b - a)) {
+    if (released.has(generation)) continue;
+    /** @type {string} */
+    let raw;
+    try { raw = await readFile(keyClaimFile(dir, generation), "utf8"); }
+    catch (error) {
+      // Vanished between the listing and the read: a prune or a self-removal racing us. Not ours
+      // to judge; the caller re-reads.
+      if (/** @type {NodeJS.ErrnoException} */ (error).code === "ENOENT") continue;
+      malformed.push(generation);
+      continue;
+    }
+    const record = parseClaim(safeParse(raw));
+    if (!record) { malformed.push(generation); continue; }
+    if (!holder && claimAlive(record, deps)) holder = { generation, record };
+  }
+
+  return { dir, floor, holder, generations, released, malformed: malformed.sort((a, b) => a - b) };
+}
+
+/**
+ * Remove every file of every generation strictly BELOW `generation`. Only the holder does this, and
+ * only after its post-create listing said it holds: its own file is then the floor, so the floor
+ * survives the prune. A file that vanished under us is somebody's own self-removal; `force` is the
+ * whole error handling that needs.
+ * @param {string} dir @param {number} generation
+ */
+async function pruneBelow(dir, generation) {
+  /** @type {string[]} */
+  let entries;
+  try { entries = await readdir(dir); } catch { return; }
+  for (const name of entries) {
+    const match = GENERATION_FILE.exec(name);
+    if (!match) continue;
+    if (Number(match[1]) >= generation) continue;
+    await rm(path.join(dir, name), { force: true }).catch(() => {});
+  }
+}
+
+/**
+ * Take ONE named generation: the `O_EXCL` create, then the post-create LISTING that decides whether
+ * the create won anything.
+ *
+ * This is the whole of winner selection and it is exported so a reader's twin can drive the delayed
+ * cases directly — a taker that decided on a record the world has since moved past is exactly a
+ * call with a stale `generation`, and nothing else about it is special.
+ *
+ * @param {string} dir @param {number} generation @param {KeyClaimRecord} record
+ * @param {{ kill?: (pid: number, sig: 0) => void, boot?: number }} [deps]
+ * @returns {Promise<{ outcome: 'held', path: string } | { outcome: 'taken' } | { outcome: 'lost', by: number }>}
+ *   `taken` — the name already existed, so another taker of the same record won it.
+ *   `lost` — the create succeeded but a HIGHER generation exists, so this taker removed its own
+ *   file and holds nothing. It has spawned nothing, because the spawn follows this listing.
+ */
+export async function attemptClaimGeneration(dir, generation, record, deps = {}) {
+  const file = keyClaimFile(dir, generation);
+  try {
+    const handle = await open(file, "wx", 0o600);
+    try {
+      await handle.writeFile(`${JSON.stringify(record, null, 2)}\n`, "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close().catch(() => {});
+    }
+  } catch (error) {
+    if (/** @type {NodeJS.ErrnoException} */ (error).code === "EEXIST") return { outcome: "taken" };
+    throw error;
+  }
+
+  // THE POST-CREATE LISTING. The create admits one taker of this NAME; it says nothing about a
+  // faster contender that already reclaimed past it. Spawning on the strength of the create is the
+  // second child.
+  const after = await scanClaimDir(dir, deps);
+  if (after.floor > generation) {
+    await rm(file, { force: true }).catch(() => {});
+    return { outcome: "lost", by: after.floor };
+  }
+
+  await pruneBelow(dir, generation);
+  return { outcome: "held", path: file };
 }
 
 /**
@@ -113,139 +326,80 @@ function holderDetail(claim) {
  * followed by a spawn.
  *
  * Refusals, each by `code`:
- * - `member-key-claim-held` — a live holder; the message names its kind, pid and start.
+ * - `member-key-claim-held` — a live holder; the message names its kind, pid, generation and start.
  * - `member-key-claim-malformed` — a claim file that cannot be read as a claim. It is NOT cleared:
  *   an unreadable claim may belong to a live process, and clearing it is how the second child gets
  *   spawned. This one wants a person, exactly as an unusable `writer.lock` does.
  * - `member-key-claim-digest-invalid` — the caller's digest is not a key digest.
- * - `member-key-claim-contended` — the claim was proven stale and cleared, and a competitor won
- *   every retry. A real outcome under a race, distinct from a settled holder.
+ * - `member-key-claim-contended` — every attempt lost its race. A real outcome under a race,
+ *   distinct from a settled holder.
  *
  * @param {{ stateRoot: string, keyDigest: string, kind: 'resident' | 'gate', pid?: number, label?: string }} input
  * @param {{ kill?: (pid: number, sig: 0) => void, boot?: number, now?: () => Date }} [deps]
- * @returns {Promise<{ path: string, generation: string, record: KeyClaimRecord, release: () => Promise<boolean> }>}
+ * @returns {Promise<{ dir: string, path: string, generation: number, record: KeyClaimRecord,
+ *   release: () => Promise<boolean> }>}
  */
 export async function takeKeyClaim(input, deps = {}) {
   if (!CLAIM_KINDS.includes(input.kind))
     throw claimRefusal("member-key-claim-kind-invalid", `expected one of ${CLAIM_KINDS.join(", ")}, got ${JSON.stringify(String(input.kind))}`);
   const stateRoot = await canonicalStateRoot(input.stateRoot);
-  const claimPath = keyClaimPath(stateRoot, input.keyDigest);
-  await mkdir(path.dirname(claimPath), { recursive: true });
+  const dir = keyClaimDir(stateRoot, input.keyDigest);
+  await mkdir(dir, { recursive: true, mode: 0o700 });
 
   for (let attempt = 0; attempt < CLAIM_ATTEMPTS; attempt++) {
+    const scan = await scanClaimDir(dir, deps);
+    if (scan.holder)
+      throw claimRefusal("member-key-claim-held",
+        `the enrolled key is held by ${holderDetail(scan.holder.record)}; this process spawns nothing`);
+    if (scan.malformed.length)
+      throw claimRefusal("member-key-claim-malformed",
+        `${dir} carries a claim that is not readable (generation ${scan.malformed.join(", ")}); it is not cleared automatically, `
+        + "because an unreadable claim may still belong to a live process");
+
+    const generation = scan.floor + 1;
     /** @type {KeyClaimRecord} */
     const record = {
       keyDigest: input.keyDigest,
       pid: input.pid ?? process.pid,
       bootEpoch: deps.boot ?? bootEpoch(),
       kind: input.kind,
-      generation: randomUUID().replaceAll("-", ""),
+      generation,
       startedAt: (deps.now?.() ?? new Date()).toISOString(),
       ...(input.label ? { label: String(input.label) } : {}),
     };
-    try {
-      const handle = await open(claimPath, "wx", 0o600);
-      try {
-        await handle.writeFile(`${JSON.stringify(record, null, 2)}\n`, "utf8");
-        await handle.sync();
-      } finally {
-        await handle.close().catch(() => {});
-      }
-      return {
-        path: claimPath,
-        generation: record.generation,
-        record,
-        release: () => releaseKeyClaim(claimPath, record.generation),
-      };
-    } catch (error) {
-      if (/** @type {NodeJS.ErrnoException} */ (error).code !== "EEXIST") throw error;
-    }
-
-    /** @type {KeyClaimRecord | undefined} */
-    let held;
-    try { held = parseClaim(JSON.parse(await readFile(claimPath, "utf8"))); }
-    catch (error) {
-      // A claim that vanished between the EEXIST and this read is a release racing us: retry.
-      if (/** @type {NodeJS.ErrnoException} */ (error).code === "ENOENT") continue;
-      held = undefined;
-    }
-    if (!held)
-      throw claimRefusal("member-key-claim-malformed",
-        `${claimPath} is not a readable claim; it is not cleared automatically, because an unreadable claim may still belong to a live process`);
-    if (claimAlive(held, deps))
-      throw claimRefusal("member-key-claim-held", `the enrolled key is held by ${holderDetail(held)}; this process spawns nothing`);
-
-    // Proven stale. RECLAIMING IS ITSELF AN OWNERSHIP OPERATION, and read-decide-unlink-create is
-    // not one: between one contender's decision and its unlink, another can clear the same stale
-    // claim and create its own, and the first contender's `rm` then deletes that NEW claim before
-    // creating a second. Two live holders with valid generations. Measured with real process
-    // concurrency: 8 contenders against one stale claim admitted 2 holders on 2 of 8 trials.
-    // In-process it never reproduces — the event loop walks all eight through the same await
-    // points in lockstep — so a same-process cell for this is one that cannot fail.
-    //
-    // `rename` is NOT the fix, though it looks like one. POSIX rename(2) atomically REPLACES an
-    // existing destination and returns success, so "exactly one renamer succeeds" is false there
-    // and true on Windows; and worse, a late reclaimer renaming the claim path moves a legitimate
-    // successor's LIVE claim out of it just as an unlink would delete it. The read-then-act window
-    // simply reappears in the operation chosen to close it. (Opus/architect, backroom 1788839977.)
-    //
-    // So winner selection rests ENTIRELY on the O_EXCL create, which genuinely admits exactly one,
-    // and the only process permitted to remove anything is the one holding a second O_EXCL lock:
-    //
-    //   * every deletion happens under `<claim>.reclaim`, itself taken with `wx`;
-    //   * under that lock the claim is RE-READ, and it is removed only if it is still the same
-    //     generation and still dead — a successor's claim has a different generation and aborts it;
-    //   * a claim can only appear while the path is empty, which can only follow a removal, which
-    //     requires this lock. So while the lock is held the state cannot change underneath it, and
-    //     the re-read is authoritative rather than a guess.
-    //
-    // Residual, stated rather than hidden: a reclaimer that dies holding the lock leaves it behind.
-    // It is cleared only when its own pid is dead and its boot epoch matches, and two clearers
-    // racing that window could both proceed — bounded to a crash mid-reclaim, and far narrower
-    // than the defect it replaces. A portable atomic compare-and-delete would close it outright;
-    // node:fs has none (`renameat2`/`RENAME_NOREPLACE` is Linux-only).
-    const lockPath = `${claimPath}.reclaim`;
-    /** @type {import("node:fs/promises").FileHandle | undefined} */
-    let lock;
-    try {
-      lock = await open(lockPath, "wx", 0o600);
-      await lock.writeFile(`${JSON.stringify({ pid: process.pid, bootEpoch: deps.boot ?? bootEpoch() })}\n`, "utf8");
-    } catch (error) {
-      if (/** @type {NodeJS.ErrnoException} */ (error).code !== "EEXIST") throw error;
-      // Someone else is reclaiming, or a reclaimer died holding it.
-      const owner = safeParse(await readFile(lockPath, "utf8").catch(() => ""));
-      const dead = owner && typeof owner === "object"
-        && !claimAlive(/** @type {any} */ ({ ...owner, kind: "resident", keyDigest: input.keyDigest, generation: "x" }), deps);
-      if (dead) await rm(lockPath, { force: true }).catch(() => {});
-      continue;
-    }
-    try {
-      const current = parseClaim(safeParse(await readFile(claimPath, "utf8").catch(() => "")));
-      // Still the record we judged, and still dead? Only then may it go.
-      if (current && current.generation === held.generation && !claimAlive(current, deps))
-        await rm(claimPath, { force: true });
-    } finally {
-      await lock.close().catch(() => {});
-      await rm(lockPath, { force: true }).catch(() => {});
-    }
+    const result = await attemptClaimGeneration(dir, generation, record, deps);
+    // `taken` — another taker of the same record won this name. `lost` — a faster contender is
+    // already past us. Both re-read, and the next pass names the live holder in the refusal.
+    if (result.outcome !== "held") continue;
+    return {
+      dir,
+      path: result.path,
+      generation,
+      record,
+      release: () => releaseKeyClaim(dir, generation),
+    };
   }
   throw claimRefusal("member-key-claim-contended",
-    `the enrolled key's claim was cleared as stale and re-taken by another process ${CLAIM_ATTEMPTS} times`);
+    `the enrolled key's claim was re-taken by another process on every one of ${CLAIM_ATTEMPTS} attempts`);
 }
 
 /**
- * Release a claim, fenced by generation: a file that carries a different generation belongs to a
- * later holder, and unlinking it would hand the key to a third process while that holder still has
- * a child. Never throws — a release runs in a `finally`, and a teardown that throws hides what it
- * was tearing down.
- * @param {string} claimPath @param {string} generation
- * @returns {Promise<boolean>} true when this call removed this generation's claim
+ * Release a claim by marking its own generation released and LEAVING the claim file in place.
+ *
+ * This is contract 3, the durable floor. Emptying the directory would let a delayed taker's stale
+ * `2` outrank a fresh live `1`, and no listing could tell the two apart. Leaving the number behind
+ * costs one small file per acquire, and the next holder prunes everything below itself.
+ *
+ * Never throws — a release runs in a `finally`, and a teardown that throws hides what it was
+ * tearing down.
+ * @param {string} dir @param {number} generation
+ * @returns {Promise<boolean>} true when this call marked this generation released
  */
-export async function releaseKeyClaim(claimPath, generation) {
+export async function releaseKeyClaim(dir, generation) {
   try {
-    const held = parseClaim(JSON.parse(await readFile(claimPath, "utf8")));
-    if (!held || held.generation !== generation) return false;
-    await rm(claimPath, { force: true });
+    const handle = await open(keyClaimFile(dir, generation, "released"), "wx", 0o600);
+    try { await handle.writeFile(`${JSON.stringify({ at: new Date().toISOString() })}\n`, "utf8"); }
+    finally { await handle.close().catch(() => {}); }
     return true;
   } catch {
     return false;
@@ -262,27 +416,32 @@ export async function releaseKeyClaim(claimPath, generation) {
  * fails toward refusing rather than toward dialing.
  * @param {string} stateRoot @param {string} keyDigest
  * @param {{ kill?: (pid: number, sig: 0) => void, boot?: number }} [deps]
- * @returns {Promise<{ path: string, held: boolean | 'unknown', stale?: boolean, claim?: KeyClaimRecord }>}
+ * @returns {Promise<{ dir: string, path: string, held: boolean | 'unknown', floor: number,
+ *   stale?: boolean, claim?: KeyClaimRecord }>}
  */
 export async function readKeyClaim(stateRoot, keyDigest, deps = {}) {
-  const claimPath = keyClaimPath(await canonicalStateRoot(stateRoot), keyDigest);
-  /** @type {string} */
-  let raw;
-  try { raw = await readFile(claimPath, "utf8"); }
-  catch (error) {
-    if (/** @type {NodeJS.ErrnoException} */ (error).code === "ENOENT") return { path: claimPath, held: false };
-    return { path: claimPath, held: "unknown" };
-  }
-  const claim = parseClaim(safeParse(raw));
-  if (!claim) return { path: claimPath, held: "unknown" };
-  return claimAlive(claim, deps)
-    ? { path: claimPath, held: true, claim }
-    : { path: claimPath, held: false, stale: true, claim };
-}
+  const dir = keyClaimDir(await canonicalStateRoot(stateRoot), keyDigest);
+  /** @type {ClaimDirScan} */
+  let scan;
+  try { scan = await scanClaimDir(dir, deps); }
+  catch { return { dir, path: dir, held: "unknown", floor: 0 }; }
 
-/** @param {string} raw */
-function safeParse(raw) {
-  try { return JSON.parse(raw); } catch { return undefined; }
+  if (scan.holder)
+    return { dir, path: keyClaimFile(dir, scan.holder.generation), held: true, floor: scan.floor, claim: scan.holder.record };
+  if (scan.malformed.length)
+    return { dir, path: keyClaimFile(dir, scan.malformed[scan.malformed.length - 1]), held: "unknown", floor: scan.floor };
+  if (!scan.floor) return { dir, path: dir, held: false, floor: 0 };
+
+  // A floor with no live holder: either every generation was released cleanly, or the last holder
+  // died. Only the second is STALE, and the difference is what an operator needs.
+  const top = scan.floor;
+  if (scan.released.has(top)) return { dir, path: keyClaimFile(dir, top), held: false, floor: scan.floor };
+  /** @type {KeyClaimRecord | undefined} */
+  let record;
+  try { record = parseClaim(safeParse(await readFile(keyClaimFile(dir, top), "utf8"))); } catch { record = undefined; }
+  return record
+    ? { dir, path: keyClaimFile(dir, top), held: false, floor: scan.floor, stale: true, claim: record }
+    : { dir, path: keyClaimFile(dir, top), held: false, floor: scan.floor };
 }
 
 /**

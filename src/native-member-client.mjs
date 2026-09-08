@@ -44,7 +44,7 @@ function requiredString(value, label) {
 export class MemberClientService {
   /**
    * @param {{ stateRoot: string, alias: string, descriptorPath: string, keyDigest: string,
-   *  claim?: { path: string, generation: string }, build?: import("./harness.mjs").BuildIdentity,
+   *  claim?: { dir?: string, path: string, generation: number }, build?: import("./harness.mjs").BuildIdentity,
    *  nonce?: string, seatLabel?: string, timeoutMs?: number,
    *  channelOptions?: any, identity?: any }} options
    */

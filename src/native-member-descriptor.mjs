@@ -54,7 +54,7 @@ export function memberStartLine(alias) {
  * @property {string} bootEpoch
  * @property {number} [pid]
  * @property {string} [startedAt]
- * @property {{ path: string, generation: string }} [claim] where this client's ownership claim is,
+ * @property {{ dir?: string, path: string, generation: number }} [claim] where this client's ownership claim is,
  *   so `status` can show the two artifacts together and `stop` can refuse to stop a client that
  *   does not hold the claim it names. A readiness descriptor without it is readable and routable;
  *   it simply cannot corroborate ownership, which is the honest reading.
@@ -124,7 +124,7 @@ export async function readMemberDescriptor(stateRoot, alias) {
  * pid still answers. Never the nonce — it is the seat-local service secret and it does not leave
  * this machine, this file included.
  * @param {string} stateRoot @param {string} alias
- * @returns {Promise<{ descriptor: string, present: boolean, alias: string, pid?: number, pidAlive?: boolean, roomId?: string, keyDigest?: string, accountId?: string, seatLabel?: string, bootEpoch?: string, startedAt?: string, endpoint?: string, claim?: { path: string, generation: string }, build?: import("./harness.mjs").BuildIdentity, error?: string }>}
+ * @returns {Promise<{ descriptor: string, present: boolean, alias: string, pid?: number, pidAlive?: boolean, roomId?: string, keyDigest?: string, accountId?: string, seatLabel?: string, bootEpoch?: string, startedAt?: string, endpoint?: string, claim?: { dir?: string, path: string, generation: number }, build?: import("./harness.mjs").BuildIdentity, error?: string }>}
  */
 export async function memberDescriptorStatus(stateRoot, alias) {
   /** @type {string} */

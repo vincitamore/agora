@@ -58,7 +58,7 @@ export async function runMemberClient(options) {
   });
   const service = new MemberClientService({
     stateRoot: options.stateRoot, alias: options.alias, descriptorPath: options.descriptorPath,
-    keyDigest, claim: { path: claim.path, generation: claim.generation },
+    keyDigest, claim: { dir: claim.dir, path: claim.path, generation: claim.generation },
     ...(options.build ? { build: options.build } : {}),
     ...(options.seatLabel ? { seatLabel: options.seatLabel } : {}),
     ...(options.channelOptions ? { channelOptions: options.channelOptions } : {}),
@@ -71,12 +71,12 @@ export async function runMemberClient(options) {
   } catch (error) {
     // The channel or the bind failed, so nothing is resident and the key must go back. Releasing
     // our own generation only: a competitor that took the key after us keeps it.
-    await releaseKeyClaim(claim.path, claim.generation);
+    await releaseKeyClaim(claim.dir, claim.generation);
     throw error;
   }
   const halt = async () => {
     await service.stop();
-    await releaseKeyClaim(claim.path, claim.generation);
+    await releaseKeyClaim(claim.dir, claim.generation);
     process.exitCode = 0;
   };
   process.on("SIGTERM", () => { void halt(); });
