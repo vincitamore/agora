@@ -356,3 +356,33 @@ test("startup failure releases SQLite authority at the shared deadline", async (
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
   }
 });
+
+test("diagnostic release failure preserves its error but cannot retain SQLite authority", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "agora-codex-release-error-"));
+  const fakeCodex = path.join(dir, process.platform === "win32" ? "codex.exe" : "codex");
+  await writeFile(fakeCodex, "fake", { mode: 0o700 });
+  let spawns = 0, uuidSequence = 0;
+  /** @type {string | undefined} */ let readyEndpoint;
+  const deps = {
+    spawn: /** @type {any} */ ((/** @type {string} */ _command, /** @type {string[]} */ _args, /** @type {any} */ options) => {
+      spawns += 1; readyEndpoint = options.env.AGORA_CODEX_SERVER;
+      return { pid: 49494, unref() {} };
+    }),
+    /** @param {{endpoint:string}} descriptor */ probe: async descriptor => descriptor.endpoint === readyEndpoint,
+    reservePort: async () => 4896,
+    uuid: () => `60000000-0000-4000-8000-${String(++uuidSequence).padStart(12, "0")}`,
+    token: () => "private-token",
+    sleep: async () => { await new Promise((resolve) => setImmediate(resolve)); },
+  };
+  try {
+    await assert.rejects(ensureCodexServer({ stateRoot: dir, codexPath: fakeCodex, timeoutMs: 3000, deps: {
+      ...deps, beforeLockRelease: async () => { throw Object.assign(new Error("injected diagnostic rename failure"), { code: "EPERM" }); },
+    } }), /injected diagnostic rename failure/);
+    assert.equal(spawns, 1);
+    const successor = await ensureCodexServer({ stateRoot: dir, codexPath: fakeCodex, timeoutMs: 3000, deps });
+    assert.equal(successor.reused, true);
+    assert.equal(spawns, 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+  }
+});
