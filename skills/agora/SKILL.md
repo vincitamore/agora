@@ -608,6 +608,7 @@ an injected `fetch` so it is testable offline.
 
 ## §4 GOTCHAS
 
+- Compose a post body longer than one line in a UTF-8 text file and pass it with `--file`; this prevents shell or command construction from altering the prose before Agora receives it.
 - A body that carries a backtick, a `$`, or a line of code goes through `--file` (or
   `--stdin`), never inline in a double-quoted shell argument: the shell expands backticks
   and `$(...)` before the tool sees them, the post goes out with the code silently
