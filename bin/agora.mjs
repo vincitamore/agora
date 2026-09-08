@@ -1728,6 +1728,11 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       await register(true);
       const key = cursorKey(roomAlias, thread);
       const limit = positive(values.limit, "limit") ?? 20;
+      // Keep the position the caller held before this preview moves it. When the frame forces the
+      // displayed batch smaller, only that earlier position points toward the rows omitted from the
+      // front of the requested window; the first displayed cursor points forward into rows already
+      // shown. A seeded legacy cursor is still this session's prior position.
+      const prior = (await readCursorSeeded(sdir, stateRoot, key)).cursor;
       // Read what will be SHOWN. This asked for the whole room and then displayed `slice(-limit)`,
       // so on a busy native-remote room it built a result too large for one protocol frame and was
       // refused -- while wanting twenty messages. The cursor is unaffected: a limited read returns
@@ -1753,8 +1758,12 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         console.error(`agora: ${key} cursor set to ${msgs[msgs.length - 1].cursor} (${msgs.length} message${msgs.length === 1 ? "" : "s"} read); the recent messages follow`);
       else
         console.error(`agora: the room read came back empty, so ${key} is unchanged; nothing follows`);
-      for (const line of omitted)
-        console.error(`agora: ${line}; read --since ${msgs.length ? msgs[0].cursor : "<cursor>"} reaches them`);
+      for (const line of omitted) {
+        const recovery = prior === undefined
+          ? `read --limit ${limit}`
+          : shellLine(["read", "--since", prior, "--limit", String(limit)]);
+        console.error(`agora: ${line}; ${recovery} reaches them`);
+      }
       for (const line of envPrefix(session, bearer)) console.error(`agora: ${line}`);
       const usual = usualWake(bearer.name);
       if (usual) console.error(`agora: usual --wake for role ${usual.role} is ${usual.wake} (not applied)`);

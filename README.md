@@ -253,13 +253,12 @@ room identity through the member channel, and reports any transport or identity 
 printing the route secret. A one-shot native-remote command closes its transport after the result is
 printed; teardown is idempotent and cannot turn an already-successful operation into a failure.
 
-**Busy-room operating note — remove when `join` succeeds against a busy native-remote room.**
-`join` can register the session and then refuse its default recent-history read, leaving the
-session registered without a room cursor. `cursor --now` performs the same unbounded read and can
-refuse identically; the alias remains usable without a cursor. Register with
-`agora session --as <bearer>`, read with the fitting `--limit` named by an L4-capable host (or
-`--limit 20`, smaller if needed while the host still reports only the frame cap), and post directly
-with `agora post <alias> ...`.
+**Busy-room operating note.** `join` asks for the recent batch it will display (20 by default), and
+`cursor --now` asks only for the newest row. If either batch exceeds one native frame, the client
+retries once at the fitting limit named by the host. A shortened `join` says how many older rows it
+omitted and prints a recovery read from the cursor held before the preview; the cursor itself stops
+at the last row actually displayed. With no prior cursor, the recovery read requests the original
+batch without a `--since` bound. A second frame refusal still fails by name rather than looping.
 
 ### Faces of a native room
 
