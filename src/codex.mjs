@@ -436,18 +436,40 @@ export async function recordCodexReceipt(root, thread, message, receipt) {
  * `processed` and `advanceTo` come only from a real consumer witness, which the native server path
  * supplies and the queue path cannot. On a thread with no witness they stay empty and null exactly
  * as before.
- * @param {{ root: string, thread: string, list: () => Promise<{ id: string }[]> }} opts
- * @returns {Promise<{ inFlight: any[], absent: any[], processed: any[], advanceTo: string | null }>}
+ * @param {{ root: string, thread: string, room?: string,
+ *   list?: () => Promise<{ id: string }[]> }} opts
+ * @returns {Promise<{ inFlight: any[], unresolved: any[], absent: any[], unacknowledged: any[],
+ *   processed: any[], advanceTo: string | null }>}
  */
-export async function reconcileCodexIntents({ root, thread, list }) {
-  const intents = await readCodexIntents(root, thread);
-  const pending = new Set((await list()).map((entry) => entry.id));
+export async function reconcileCodexIntents({ root, thread, room, list }) {
+  const all = await readCodexIntents(root, thread);
+  // One Codex thread receives deliveries from every room this seat watches, so one journal holds
+  // rows from several rooms. Scope first: a row from another room answers no question about this one.
+  const intents = room ? all.filter((/** @type {any} */ i) => i.room === room) : all;
   const open = intents.filter((/** @type {any} */ i) => !i.processedAt);
   // A row the consumer has spoken about is never "absent". Absence is what this bridge says when it
   // does NOT know what happened; an outcome is knowing, even when the outcome is a failure.
   const unwitnessed = open.filter((/** @type {any} */ i) => !i.outcome);
-  const inFlight = unwitnessed.filter((/** @type {any} */ i) => pending.has(i.id));
-  const absent = unwitnessed.filter((/** @type {any} */ i) => !pending.has(i.id));
+  /** @type {any[]} */ let inFlight;
+  /** @type {any[]} */ let absent;
+  if (list) {
+    const pending = new Set((await list()).map((/** @type {any} */ entry) => entry.id));
+    inFlight = unwitnessed.filter((/** @type {any} */ i) => pending.has(i.id));
+    absent = unwitnessed.filter((/** @type {any} */ i) => !pending.has(i.id));
+  } else {
+    // No queue listing was offered and none is invented. Without one, NOTHING is observed pending:
+    // an acknowledged row with no terminal mark proves only that no outcome was recorded, and on the
+    // legacy queue that item may already have been consumed or cleared by a hand. Calling it
+    // in-flight would assert a live delivery from the absence of a record, which is the same
+    // inference the second receipt exists to refuse.
+    inFlight = [];
+    absent = unwitnessed.filter((/** @type {any} */ i) => i.resolution === "absent");
+  }
+  // Inferred from the marks, never observed: acknowledged, no terminal, no recorded absence.
+  const unresolved = list ? [] : unwitnessed.filter(
+    (/** @type {any} */ i) => i.acceptedAt && i.resolution !== "absent");
+  const unacknowledged = unwitnessed.filter(
+    (/** @type {any} */ i) => !i.acceptedAt && i.resolution !== "absent");
   for (const intent of absent) {
     // Already recorded on an earlier reconcile: appending again would grow the journal on every poll
     // and say nothing new.
@@ -459,12 +481,15 @@ export async function reconcileCodexIntents({ root, thread, list }) {
   // The advance is the longest COMPLETED PREFIX in recorded order. Stopping at the first gap is the
   // whole point: a later completion must never carry the cursor past an earlier delivery that
   // failed, because that retires the failed one with a receipt saying it succeeded.
+  // The advance is a cursor, and a cursor is a coordinate in ONE room: opaque, and ascending only
+  // within it. With no room named there is no coordinate system to advance in, so none is produced
+  // -- handing back the last completed row would give one room a position minted in another.
   let advanceTo = null;
-  for (const intent of intents) {
+  if (room) for (const intent of intents) {
     if (!intent.processedAt) break;
     advanceTo = intent.cursor;
   }
-  return { inFlight, absent, processed, advanceTo };
+  return { inFlight, unresolved, absent, unacknowledged, processed, advanceTo };
 }
 
 /**

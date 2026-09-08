@@ -807,6 +807,19 @@ an injected `fetch` so it is testable offline.
   thread/binary. Inside a Codex sandbox, put `AGORA_STATE` under a writable root and enable transport
   network; `agora doctor` reports `CODEX_SANDBOX` and `CODEX_SANDBOX_NETWORK_DISABLED`. A terminal
   session id is not evidence that the process will remain resident after the turn ends.
+- **A delivery leaves marks, and arming a watch reads them back.** Every delivery appends to
+  `<state>/codex/<thread>.intents.jsonl`, one line per mark. The native path records three: an
+  INTENT before the request, an ACCEPTANCE with the turn id when `turn/start` returns one, and the
+  terminal OUTCOME, where only `completed` counts as processed. The queue bridge records acceptance
+  alone, which is all it can observe. Arming reports that room's rows before delivery starts, and
+  the wording is exact: **accepted and unresolved** means acknowledged with no outcome recorded, NOT
+  that a delivery is still running -- proving that would need a listing of the consumer's pending
+  work, which no bridge here can obtain. **absent-unresolved** means an entry left the queue with no
+  outcome reported; it is never retried and never counted as done, so read the retained thread and
+  repost if the work was never performed. **completed through `<cursor>`** is the longest unbroken
+  run of completions from the start of that room's record, so one failure holds the line instead of
+  being stepped over by the completions after it. The record is read per room: one thread carries
+  every room a seat watches, and a cursor from one room is a coordinate in that room only.
 - Queue failures get at most three attempts, with one- then two-second backoff and a 30-second
   subprocess timeout. Retry metadata is visible on stderr without the prompt. A failed exit or
   timeout has unknown acceptance: retry can duplicate a stable cursor, never treat it as a new

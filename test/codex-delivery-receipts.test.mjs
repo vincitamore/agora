@@ -19,7 +19,7 @@
 // never seen red is a repair nobody can check.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFile as execFileCb } from "node:child_process";
@@ -127,6 +127,84 @@ test("absence from the pending list is reported as absent-unresolved and advance
 // message the call site already holds: an advance computed from the receipt alone is not computable
 // at all.
 
+// ---------------------------------------------------------------------------
+// The advance is per ROOM, and the production path has to call this at all.
+//
+// One Codex thread receives deliveries from every room a seat watches, so one journal holds rows
+// from several rooms. Cursors are opaque and ascending only WITHIN a room, so a completed row from
+// room B carries no information about room A's position -- and handing B's cursor to A is not an
+// approximation, it is a different room's coordinate.
+
+test("the completed prefix is scoped to ONE room; a sibling room's cursor never crosses", async (t) => {
+  const root = await stateRoot(t);
+  const a1 = { ...message("a1", "1788888888.001100"), room: "room-a" };
+  const b1 = { ...message("b1", "1788888888.001200"), room: "room-b" };
+  await codex.recordCodexSubmitted(root, "t-rooms", a1);
+  await codex.recordCodexAccepted(root, "t-rooms", a1, { turnId: "turn-a" });
+  await codex.recordCodexReceipt(root, "t-rooms", b1, { id: "b1", outcome: "completed" });
+
+  // room-a's only row is accepted and unfinished; room-b's is complete and much later.
+  const a = await codex.reconcileCodexIntents({ root, thread: "t-rooms", room: "room-a" });
+  assert.equal(a.advanceTo, null,
+    "room-a has completed nothing, so it advances nothing -- room-b's later cursor is a coordinate "
+    + "in a different room and carrying it here would retire room-a's unfinished delivery");
+  assert.deepEqual(a.processed.map((/** @type {any} */ i) => i.id), [],
+    "processed is scoped too: a sibling room's completion is not this room's");
+
+  const b = await codex.reconcileCodexIntents({ root, thread: "t-rooms", room: "room-b" });
+  assert.equal(b.advanceTo, "1788888888.001200", "room-b advances on its own completed row");
+  assert.deepEqual(b.inFlight.map((/** @type {any} */ i) => i.id), [],
+    "room-a's unfinished row is not room-b's in-flight work");
+});
+
+test("with no room named, the advance is REFUSED rather than computed across rooms", async (t) => {
+  const root = await stateRoot(t);
+  const a1 = { ...message("a1", "1788888888.001300"), room: "room-a" };
+  const b1 = { ...message("b1", "1788888888.001400"), room: "room-b" };
+  await codex.recordCodexReceipt(root, "t-noroom", a1, { id: "a1", outcome: "completed" });
+  await codex.recordCodexReceipt(root, "t-noroom", b1, { id: "b1", outcome: "completed" });
+
+  const state = await codex.reconcileCodexIntents({ root, thread: "t-noroom" });
+  assert.equal(state.advanceTo, null,
+    "an advance across rooms has no meaning, so it is not produced: returning the last completed "
+    + "row here would hand one room a cursor minted in another, which is the failure this refusal exists to make impossible");
+  assert.equal(state.processed.length, 2,
+    "the rows are still readable without a room -- reporting is fine, it is the ADVANCE that is refused");
+});
+
+test("the production arm path reconciles the journal and says so, through the real command", async (t) => {
+  const root = await stateRoot(t);
+  const delivered = { ...message("armed-1", "1788888888.001500"), room: "cli-room" };
+  await codex.recordCodexSubmitted(root, "t-cli", delivered);
+  await codex.recordCodexAccepted(root, "t-cli", delivered, { turnId: "turn-cli" });
+
+  // The actual CLI, not the helper: seven cells passed over a function the product never called,
+  // so this one runs the command and reads what a user would see.
+  // A real config with a local room: without it the CLI exits before it ever arms, and a red from
+  // that proves nothing about the arm path -- the trap this whole cell exists to close.
+  const roomFile = path.join(root, "cli-room.ndjson");
+  await writeFile(roomFile, "", "utf8");
+  await writeFile(path.join(root, "agora.json"), JSON.stringify({
+    actor: { name: "Opus/test", kind: "agent" },
+    rooms: { "cli-room": { transport: "local", path: roomFile } },
+  }), "utf8");
+
+  const cli = new URL("../bin/agora.mjs", import.meta.url);
+  let stderr = "";
+  try {
+    await execFile(process.execPath, [cli.pathname.replace(/^\/([A-Za-z]:)/, "$1"), "watch", "cli-room",
+      "--once", "--codex-queue", "--codex-thread", "t-cli"], {
+      env: { ...process.env, AGORA_STATE: root, AGORA_CONFIG: path.join(root, "agora.json") },
+    });
+  } catch (error) { stderr = String(/** @type {any} */ (error)?.stderr ?? ""); }
+
+  assert.match(stderr, /1 accepted and unresolved/,
+    "the arm must report what the journal holds for this room before it starts delivering. The word "
+    + "is UNRESOLVED, not in-flight: no outcome was recorded, and on the legacy queue that row may "
+    + "already have been consumed or cleared by hand, so calling it live would assert a delivery "
+    + "from the absence of a record");
+});
+
 test("two INDEPENDENT writer processes on one thread lose no mark", async (t) => {
   const root = await stateRoot(t);
   const moduleURL = new URL("../src/codex.mjs", import.meta.url).href;
@@ -199,7 +277,7 @@ test("a turn that fails before acceptance leaves the intent unacknowledged, neve
     + "an acceptance would report the server holding work it never received");
   assert.equal(row.processedAt ?? null, null, "and nothing was processed");
 
-  const state = await codex.reconcileCodexIntents({ root, thread: "t-6", list: async () => [] });
+  const state = await codex.reconcileCodexIntents({ root, thread: "t-6", room: "backroom", list: async () => [] });
   assert.equal(state.advanceTo, null, "an unacknowledged intent advances no cursor");
 });
 
@@ -240,7 +318,7 @@ test("advanceTo is the longest COMPLETED PREFIX, so one failure stops the advanc
   await codex.recordCodexReceipt(root, "t-4", third, { id: "third", outcome: "completed" });
 
   // Nothing is left in the queue: every turn reached a terminal state.
-  const state = await codex.reconcileCodexIntents({ root, thread: "t-4", list: async () => [] });
+  const state = await codex.reconcileCodexIntents({ root, thread: "t-4", room: "backroom", list: async () => [] });
 
   assert.deepEqual(state.processed.map((/** @type {any} */ i) => i.id), ["first", "third"],
     "both completed turns are processed facts, and staying honest about the third is what makes the "

@@ -79,7 +79,7 @@ import { carryState, carryWindow, foldRoom, renderCarry } from "../src/carry.mjs
 import { decorate, human } from "../src/render.mjs";
 import { formatTrailers, matchesAddress, parseTrailers, TRAILER_VALUE_MAX, trailerValueOk } from "../src/trailers.mjs";
 import { SLACK_TEXT_MAX, chunkAtLines, encodeSlackText } from "../src/transports/slack.mjs";
-import { codexBridgeRefusal, codexLiveness, codexSpawnWarning, codexThread, queueCodex, recordCodexAccepted, recordCodexReceipt, recordCodexSubmitted, resolveCodexBinary } from "../src/codex.mjs";
+import { codexBridgeRefusal, codexLiveness, codexSpawnWarning, codexThread, queueCodex, reconcileCodexIntents, recordCodexAccepted, recordCodexReceipt, recordCodexSubmitted, resolveCodexBinary } from "../src/codex.mjs";
 import { codexServerURL, deliverCodexServer } from "../src/codex-server.mjs";
 import { codexServerStatus, launchAttachedCodex } from "../src/codex-launch.mjs";
 import { buildLabel, buildPredates, cacheTtls, clearWatchMode, installedBuild, touchWatchMode, watchModeSentinel, watchModuleDelta } from "../src/harness.mjs";
@@ -2186,6 +2186,27 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         }
         return undefined;
       } : undefined;
+      // Read the delivery journal for THIS room before arming. A record nothing consumes is a record
+      // that does not exist: the marks below were written by earlier arms of this thread, and a
+      // re-arm that cannot see them re-delivers blind past work the consumer may still be holding.
+      // Scoped to roomAlias because one thread carries every room this seat watches, and a cursor
+      // from another room is a coordinate in another room.
+      if (codexDelivery) {
+        const journal = await reconcileCodexIntents({
+          root: stateRoot, thread: codexDelivery.thread, room: roomAlias,
+        });
+        if (journal.unresolved.length || journal.unacknowledged.length || journal.absent.length)
+          console.error(`agora: Codex thread ${codexDelivery.thread} for ${roomAlias}: `
+            // "unresolved", not "in flight": no outcome was recorded, and on the legacy queue that
+            // item may already have been consumed or cleared. Observed pending is a different claim
+            // and needs a queue listing this bridge does not have.
+            + `${journal.unresolved.length} accepted and unresolved, `
+            + `${journal.unacknowledged.length} handed over without acknowledgment, `
+            + `${journal.absent.length} absent-unresolved`
+            + (journal.advanceTo ? `; completed through ${journal.advanceTo}` : "")
+            + `. An absent-unresolved row left the queue without the consumer reporting an outcome; `
+            + `it is neither retried nor counted as done, and the journal keeps it so a person can decide.`);
+      }
       await identity({ typed: true });
       const seeded = await readCursorSeeded(sdir, stateRoot, key);
       if (seeded.seeded) console.error(`agora: no position saved for this session yet; seeded from the shared ${key}.cursor (${seeded.cursor})`);
@@ -2425,7 +2446,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
                 // before this callback runs, so a death between the queue call and the checkpoint
                 // below leaves a record to reconcile instead of nothing at all. Without it the
                 // cursor is the only trace, and it is written after — so that window loses the
-                // delivery silently. `agora codex reconcile` is what reads these back.
+                // delivery silently. The next arm of this room reads these back and reports them.
                 root: stateRoot,
                 onQueued: async ({ thread: codexTarget, cursor, message }) => {
                   await batch.checkpoint(message);
