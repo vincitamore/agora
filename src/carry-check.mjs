@@ -237,6 +237,16 @@ export async function checkCarryFiles(dir, boundaryFile, context) {
  * @param {string} src @param {string} dst @param {string} from @param {string} to
  * @param {boolean} [dryRun] */
 export async function inheritCarryEvidence(src, dst, from, to, dryRun = false) {
+  // Inspect lineage before both the dry-run return and any copied evidence.
+  // The exclusive marker write below still checks for a concurrent creator.
+  try {
+    const old = JSON.parse(await readFile(path.join(dst, 'carry-inherited.json'), 'utf8'));
+    if (old.version !== 1 || old.from !== from || old.to !== to)
+      throw new CarryCheckError('carry-inherit-lineage-conflict');
+  } catch (err) {
+    if (/** @type {NodeJS.ErrnoException} */ (err).code !== 'ENOENT')
+      throw new CarryCheckError('carry-inherit-lineage-conflict');
+  }
   const source = await readCarryEvidence(src);
   const corrupt = source.issues.filter(i => i !== 'delivery-coverage-unknown');
   if (corrupt.length) throw new CarryCheckError('carry-inherit-source-corrupt');

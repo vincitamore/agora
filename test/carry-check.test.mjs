@@ -10,7 +10,7 @@ import { writeCursor } from '../src/core.mjs';
 import { inheritSession, readRecord, writeRecord } from '../src/session.mjs';
 import { watch } from '../src/watch.mjs';
 import { NativeRoomService } from '../src/native-service.mjs';
-import { appendCarryEvent, beginCarryPost, captureCarryPost, carryRefKey, checkCarryBoundary, mandateDigest, readCarryEvidence, readMandate, recordCarryCursorMove, requireCarrySuccessor, sealCarryBoundary, validateCarryEvent, validateMandate } from '../src/carry-check.mjs';
+import { appendCarryEvent, beginCarryPost, captureCarryPost, carryRefKey, checkCarryBoundary, inheritCarryEvidence, mandateDigest, readCarryEvidence, readMandate, recordCarryCursorMove, requireCarrySuccessor, sealCarryBoundary, validateCarryEvent, validateMandate } from '../src/carry-check.mjs';
 import { tmp } from './helpers.mjs';
 
 const mandate = { version: 1, id: 'campaign-c1', bearer: 'Bruno/uber-wizard', role: 'builder',
@@ -502,4 +502,20 @@ test('carry delivery capture makes no identity request and retains unknown seat 
     const evidence = (await readCarryEvidence(t.dir)).events;
     assert.deepEqual(evidence.map(e => [e.kind, e.subject]), [['gap', 'seat-address-context-unknown']]);
   } finally { await t.cleanup(); }
+});
+
+test('inheritance refuses an incompatible lineage in dry-run and before copying any evidence', async () => {
+  const source = await tmp(), target = await tmp();
+  try {
+    await appendCarryEvent(source.dir, { version: 1, id: 'source-claim', kind: 'claim',
+      at: mandate.issuedAt, session: 's1', bearer: mandate.bearer,
+      ref: { room: 'backroom', id: 'claim', cursor: '1' }, subject: 'C1' });
+    await writeFile(path.join(target.dir, 'carry-inherited.json'), JSON.stringify({ version: 1, from: 'unrelated', to: 's2' }));
+    const before = await readCarryEvidence(target.dir);
+    for (const dryRun of [true, false]) {
+      await assert.rejects(() => inheritCarryEvidence(source.dir, target.dir, 's1', 's2', dryRun),
+        { name: 'CarryCheckError', code: 'carry-inherit-lineage-conflict' });
+      assert.deepEqual(await readCarryEvidence(target.dir), before, 'refusal did not copy source evidence');
+    }
+  } finally { await source.cleanup(); await target.cleanup(); }
 });
