@@ -1740,9 +1740,9 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       // the same message either way. Fewer bytes, same output, same position. And when even that
       // many will not fit -- twenty large posts can exceed a frame alone -- the host names a limit
       // that does, and readWithinFrame takes it exactly once.
-      /** @type {string[]} */ const omitted = [];
+      /** @type {{ shown: number, asked: number }[]} */ const omitted = [];
       const msgs = await readWithinFrame(transport, { thread, limit }, (shown, asked) =>
-        omitted.push(`newest ${shown} of ${asked} requested shown; ${asked - shown} older omitted`));
+        omitted.push({ shown, asked }));
       // An empty read is not proof of an empty room: a conditional read whose validator still
       // matches returns nothing, and writing a null position there moves the cursor BACK to the
       // start of the room and replays it. Leave the position alone and say which happened.
@@ -1758,11 +1758,14 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         console.error(`agora: ${key} cursor set to ${msgs[msgs.length - 1].cursor} (${msgs.length} message${msgs.length === 1 ? "" : "s"} read); the recent messages follow`);
       else
         console.error(`agora: the room read came back empty, so ${key} is unchanged; nothing follows`);
-      for (const line of omitted) {
-        const recovery = prior === undefined
-          ? `read --limit ${limit}`
-          : shellLine(["read", "--since", prior, "--limit", String(limit)]);
-        console.error(`agora: ${line}; ${recovery} reaches them`);
+      for (const { shown, asked } of omitted) {
+        // A recovery command is part of the protocol surface: it must itself fit the frame. Start
+        // at the caller's old position, or at sequence zero when this native room had no position,
+        // and use the size the host just proved it can serve. If the gap needs more than one frame,
+        // the same command advances from the last row returned without skipping any intervening row.
+        const start = prior ?? msgs[0].cursor.replace(/:[0-9]+$/, ":0");
+        const recovery = shellLine(["read", "--since", start, "--limit", String(shown)]);
+        console.error(`agora: newest ${shown} of ${asked} requested shown; ${asked - shown} older omitted; ${recovery} is the first recovery page; repeat from its last returned cursor until the omitted window is reached`);
       }
       for (const line of envPrefix(session, bearer)) console.error(`agora: ${line}`);
       const usual = usualWake(bearer.name);
