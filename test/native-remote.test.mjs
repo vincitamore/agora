@@ -102,7 +102,7 @@ function fakeChild(options = {}) {
  * straight into that route's accept hook. Every dial makes a fresh loopback pair, which is what
  * makes the reconnect cells real rather than a reuse of one socket.
  * @param {import('node:test').TestContext} t
- * @param {{ secret?: string, descriptor?: any, key?: string, deadTransport?: boolean, onSpawn?: (runtime: any) => void }} [over]
+ * @param {{ secret?: string, descriptor?: any, key?: string, deadTransport?: boolean, timeoutMs?: number, onSpawn?: (runtime: any) => void }} [over]
  */
 async function rig(t, over = {}) {
   const hostRoot = await mkdtemp(path.join(tmpdir(), "agora-t2-host-"));
@@ -190,7 +190,7 @@ async function rig(t, over = {}) {
   const makeRoom = () => {
     const made = new RemoteRoom({
       descriptor: over.descriptor ?? opened.descriptor, secret, stateRoot: seatRoot, keyPath,
-      nodeKey: over.key ?? KEY, timeoutMs: 4000,
+      nodeKey: over.key ?? KEY, timeoutMs: over.timeoutMs ?? 4000,
       channelOptions: {
         spawn: async (/** @type {string[]} */ args, /** @type {any} */ runtime, /** @type {any} */ owner) => {
           spawned.push(args);
@@ -1331,4 +1331,44 @@ test("an obsolete probe's late failure does not re-subscribe the healthy channel
   assert.equal(calls, 2, `an obsolete probe re-dialled: ${calls} dial(s) where 2 are owed`);
   assert.equal(subscriptions, 2, `an obsolete probe re-subscribed the healthy channel: ${subscriptions} subscribes where 2 are owed`);
   assert.equal(sub.dark(), undefined, "a healthy channel was reported dark by a stale probe");
+});
+
+test("a probe failure invalidates the REAL cached client, so the reattach dials instead of re-subscribing a corpse", async (t) => {
+  // Bruno/reader's measured HOLD on r1's repair (backroom 1788832062), rebuilt on the real rig:
+  // a real RemoteRoom and a real NativeServiceClient, no substituted `room.client`. The channel is
+  // made silent WITHOUT closing — the host stream stops reading — which is the only case that
+  // reaches the cache, since a close would clear it.
+  //
+  // Measured before the fix: dials 1, subscribes 2, same cached client, socket.destroyed false,
+  // dark null, and `read()` throwing an uncoded request timeout. The "reconnect" re-subscribed the
+  // connection that had just failed its probe.
+  const { room, hostStreams } = await rig(t, { timeoutMs: 80 });
+  const sub = await openRemoteSubscription({ room, since: nativeCursor(EPOCH, 0),
+    idleMs: 50, backoffMs: 5, maxReconnects: 2 });
+  t.after(() => sub.close());
+
+  const before = room.dials;
+  const first = await room.client();
+
+  // Silent-open: the host holds the stream and answers nothing. No close, no destroy.
+  hostStreams[0].pause();
+  // Snapshotted HERE, not after the wait: the repair itself closes the failed client, so reading
+  // `destroyed` at the end measures the fix rather than the precondition. An earlier draft asserted
+  // it afterwards and failed on its own guard — the cell was right about what it needed and wrong
+  // about when to look.
+  const openWhenSilenced = first.socket.destroyed === false;
+
+  const deadline = Date.now() + 6000;
+  while (room.dials === before && sub.dark() === undefined && Date.now() < deadline) await sub.wait(20);
+
+  assert.equal(openWhenSilenced, true,
+    "the socket was already closed when the channel was silenced, so this cell did not exercise the cached-client path");
+  // Either outcome satisfies the lift; what must NOT happen is silently re-subscribing the corpse.
+  if (sub.dark() === undefined) {
+    assert.ok(room.dials > before, `no real redial: dials stayed at ${room.dials}`);
+    const second = await room.client();
+    assert.notEqual(second, first, "the room handed back the same cached client after its probe failed");
+  } else {
+    assert.match(String(sub.dark()), /could not be re-dialled/, "darkness was reported without a name");
+  }
 });
