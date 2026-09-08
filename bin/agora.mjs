@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // @ts-check
 import { tailcatDoctor } from "../src/tailcat-runtime.mjs";
-import { appendCarryEvent, captureCarryPost, carryArgumentRefusal, checkCarryFiles, recordCarryCursorMove, requireCarrySuccessor, sealCarryBoundary, validateCarryBoundary } from "../src/carry-check.mjs";
+import { appendCarryEvent, beginCarryPost, captureCarryPost, carryArgumentRefusal, checkCarryFiles, recordCarryCursorMove, requireCarrySuccessor, sealCarryBoundary, validateCarryBoundary } from "../src/carry-check.mjs";
 import { decodeTransfer, encodeTransfer, localTransferIdentity, requireAuthenticatedTransport, trustTransferPeer } from "../src/tailcat.mjs";
 import { shareFiles, fetchFiles, listOffers, stopOffer, resumeOffer, forgetOffer, pruneOffers } from "../src/tailcat-offers.mjs";
 import { parseArgs } from "node:util";
@@ -1752,8 +1752,9 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
           : values.handoff ? `Predecessor ${session.slug} signs off to registered successor ${values.handoff}; arrival ${arrival?.ref.id}.`
           : `Session ${session.slug} declares boundary ${boundary.id}; re-address pending work explicitly.`;
         const message = sign(`${line}\n\nboundary: ${boundary.id}\nto: *`, cfg.actor);
+        const intent = await beginCarryPost(sdir, roomAlias, session, bearer.name, message);
         const receipt = await transport.post(message);
-        await captureCarryPost(sdir, roomAlias, session, bearer.name, message, receipt);
+        await captureCarryPost(sdir, roomAlias, session, bearer.name, message, receipt, intent);
         if (values.arrive || values.handoff) await appendCarryEvent(sdir, { version: 1, id: randomUUID(),
           kind: values.arrive ? 'arrival' : 'departure', at: new Date().toISOString(), session: session.slug,
           bearer: bearer.name, ref: { room: roomAlias, id: receipt.id, cursor: receipt.cursor }, targets: [boundary.id] });
@@ -1968,8 +1969,9 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       const ids = [];
       try {
         for (const piece of pieces) {
+          const intent = await beginCarryPost(sdir, roomAlias, session, bearer.name, payload(piece));
           last = await transport.post(payload(piece), { thread, ...(wireChoice === undefined ? {} : { face: wireChoice }) });
-          await captureCarryPost(sdir, roomAlias, session, bearer.name, payload(piece), last);
+          await captureCarryPost(sdir, roomAlias, session, bearer.name, payload(piece), last, intent);
           await appendPosted(sdir, last.id);
           ids.push(last.id);
         }
