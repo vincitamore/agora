@@ -142,7 +142,7 @@ export function checkCarryBoundary(expected, actual) {
   for (const id of b.watermark) if (!events.has(id)) fail('evidence-missing', id);
   for (const item of [...b.gaps, ...actual.evidenceIssues]) fail('delivery-coverage-unknown', item);
   for (const event of actual.evidence) if (event.kind === 'gap' && !actual.evidence.some(e =>
-    e.kind === 'coverage' && e.targets.includes(event.id) && e.session === event.session && e.ref.room === event.ref.room))
+    e.kind === 'coverage' && e.targets.includes(event.id) && e.session === event.session && e.bearer === event.bearer && e.ref.room === event.ref.room))
     fail('delivery-coverage-unknown', event.id);
   const addressedBySuccessor = (/** @type {ReturnType<typeof validateCarryEvent>} */ e) =>
     e.session === actual.session.slug && e.bearer === actual.registeredBearer;
@@ -304,8 +304,9 @@ export async function sealCarryBoundary(dir, output, context) {
  * existing appendPosted, so the very first post can establish a fresh origin.
  * Existing/rotated ledgers deliberately start with unknown pre-C1 history.
  * @param {string} dir @param {string} room @param {{slug:string}} session
- * @param {string} bearer @param {string} text @param {{id:string,cursor:string}} receipt */
-export async function captureCarryPost(dir, room, session, bearer, text, receipt) {
+ * @param {string} bearer @param {string} text @param {{id:string,cursor:string}} receipt
+ * @param {ReturnType<typeof validateCarryEvent>} [intent] */
+export async function captureCarryPost(dir, room, session, bearer, text, receipt, intent) {
   await mkdir(dir, { recursive: true });
   let previousPosts = false;
   for (const file of ['posted.jsonl', 'posted.1.jsonl']) {
@@ -338,6 +339,22 @@ export async function captureCarryPost(dir, room, session, bearer, text, receipt
       if (targets.length) await appendCarryEvent(dir, { ...base, id: randomUUID(), kind: trailer.key === 're' ? 'answer' : 'withdrawal', targets });
     }
   }
+  if (intent) {
+    if (intent.kind !== 'gap' || intent.session !== session.slug || intent.bearer !== bearer || intent.ref.room !== room)
+      throw new CarryCheckError('post-intent-context-mismatch');
+    await appendCarryEvent(dir, { ...base, id: randomUUID(), kind: 'coverage', targets: [intent.id] });
+  }
+}
+
+/** Write ahead of the external post: even a crash before the success receipt has
+ * been captured leaves unknown outcome visible. Only a payload digest is stored.
+ * @param {string} dir @param {string} room @param {{slug:string}} session
+ * @param {string} bearer @param {string} text */
+export async function beginCarryPost(dir, room, session, bearer, text) {
+  const id = randomUUID();
+  return appendCarryEvent(dir, { version: 1, id, kind: 'gap', at: new Date().toISOString(),
+    session: session.slug, bearer, ref: { room, id, cursor: '(pending-post)' },
+    subject: `outgoing-post-unknown:sha256:${createHash('sha256').update(text).digest('hex')}` });
 }
 
 /** Record intent to move a cursor by a non-delivery path. The write precedes the
