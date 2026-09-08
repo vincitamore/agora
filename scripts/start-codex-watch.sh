@@ -288,9 +288,11 @@ else
 fi
 
 watcher_pid=
-i=0
-arming_wait_steps=$((arming_timeout * 10))
-while [ "$i" -lt "$arming_wait_steps" ]; do
+# Keep the deadline independent of the work in each probe. Counting probes made
+# a nominal 60-second bound take longer as sed and process checks accumulated.
+sleep "$arming_timeout" &
+arming_timer_pid=$!
+while kill -0 "$arming_timer_pid" 2>/dev/null; do
   watcher_pid=$(armed_pid)
   if [ -n "$watcher_pid" ] && kill -0 "$watcher_pid" 2>/dev/null; then
     if [ "$launchd" != true ] || [ "$(launchd_pid)" = "$watcher_pid" ]; then break; fi
@@ -302,8 +304,9 @@ while [ "$i" -lt "$arming_wait_steps" ]; do
     kill -0 "$supervisor_pid" 2>/dev/null || break
   fi
   sleep 0.1
-  i=$((i + 1))
 done
+kill "$arming_timer_pid" 2>/dev/null || true
+wait "$arming_timer_pid" 2>/dev/null || true
 if [ -z "$watcher_pid" ]; then
   if [ "$launchd" = true ]; then
     launchctl bootout "$launchd_domain/$launchd_label" >/dev/null 2>&1 || true
