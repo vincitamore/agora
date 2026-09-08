@@ -152,9 +152,8 @@ not take the subject; the receipt names the holder's expiry beside its cursor.
 the native service forwards the caller's authorKind, as it does for chat, and the
 store refuses only an agent-labelled request. The event records the requesting
 session (the resolved slug, not AGORA_SESSION-or-default) and bearer name beside
-that label; a relabel is a lie on the log. The board's human label remains
-cooperative: the enrolled counter-seat authority described below governs member-route
-mutations, not board claims, contests or breaks.
+that label; a relabel is a lie on the log. Admitted
+human authority is the enrolled-key seam; until it lands this is the trust model.
 
 **Resolving a crossed claim crosses too.** The retraction and the release are ordinary
 messages in the same poll window that produced the collision, so both parties can cede
