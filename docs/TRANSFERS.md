@@ -140,6 +140,14 @@ Redaction precedes truncation; the emitted stderr tail is at most 2048 UTF-8 byt
 The gate does not read the private key's contents. For a paired capture, stamp the client start and retain both machines'
 logs; a local-machine pass does not establish traversal across two routers.
 
+Run this standalone gate only when no other Tailcat client is using its node key.
+Concurrent clients sharing a node key can interfere with peer endpoint selection;
+a relay-only ping in that configuration does not isolate a network failure.
+Post-restart direct-path acceptance while a resident member client owns the key is
+deferred to the resident-client integration: it must provide a probe through that
+client or refuse a competing probe by name. This standalone script does not yet
+enforce that ownership boundary.
+
 Runtime upgrades use the manual `vendor-tailcat` workflow only. Normal PR CI never
 rebuilds Go. Pin upstream with `<tag>^{commit}` and pin build actions to full commits.
 Collect the workflow artifacts with `node scripts/vendor-tailcat.mjs collect <dir>`;
