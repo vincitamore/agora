@@ -48,6 +48,9 @@ export function memberStartLine(alias) {
  * @property {string} roomId from the route descriptor's binding, the one source the digest covers
  * @property {string} keyDigest the enrolled key this client holds the CLAIM over
  * @property {string} accountId the minted member principal `m-<32hex>`
+ * @property {string} seatLabel this client's label. It is part of the local handshake TRANSCRIPT,
+ *   so a descriptor without it cannot be connected to at all — the seat service's descriptor
+ *   carries it for the same reason, and omitting it here is a dark client, not a cosmetic gap.
  * @property {string} bootEpoch
  * @property {number} [pid]
  * @property {string} [startedAt]
@@ -109,6 +112,10 @@ export async function readMemberDescriptor(stateRoot, alias) {
     throw new ServiceDarkError(`member client descriptor ${file} does not describe an endpoint. ${memberStartLine(alias)}`);
   if (typeof parsed.roomId !== "string" || typeof parsed.keyDigest !== "string")
     throw new ServiceDarkError(`member client descriptor ${file} names no room binding or enrolled key. ${memberStartLine(alias)}`);
+  // seatLabel and accountId ride the handshake transcript, so a descriptor missing either cannot be
+  // connected to. Refusing here names the file; letting it through would fail as a proof mismatch.
+  if (typeof parsed.accountId !== "string" || typeof parsed.seatLabel !== "string")
+    throw new ServiceDarkError(`member client descriptor ${file} is missing the handshake identity it must carry. ${memberStartLine(alias)}`);
   return parsed;
 }
 
@@ -117,7 +124,7 @@ export async function readMemberDescriptor(stateRoot, alias) {
  * pid still answers. Never the nonce — it is the seat-local service secret and it does not leave
  * this machine, this file included.
  * @param {string} stateRoot @param {string} alias
- * @returns {Promise<{ descriptor: string, present: boolean, alias: string, pid?: number, pidAlive?: boolean, roomId?: string, keyDigest?: string, accountId?: string, bootEpoch?: string, startedAt?: string, endpoint?: string, claim?: { path: string, generation: string }, build?: import("./harness.mjs").BuildIdentity, error?: string }>}
+ * @returns {Promise<{ descriptor: string, present: boolean, alias: string, pid?: number, pidAlive?: boolean, roomId?: string, keyDigest?: string, accountId?: string, seatLabel?: string, bootEpoch?: string, startedAt?: string, endpoint?: string, claim?: { path: string, generation: string }, build?: import("./harness.mjs").BuildIdentity, error?: string }>}
  */
 export async function memberDescriptorStatus(stateRoot, alias) {
   /** @type {string} */
@@ -131,6 +138,7 @@ export async function memberDescriptorStatus(stateRoot, alias) {
       ...(typeof d.pid === "number" ? { pid: d.pid, pidAlive: pidAlive(d.pid) } : {}),
       roomId: d.roomId, keyDigest: d.keyDigest,
       ...(d.accountId ? { accountId: d.accountId } : {}),
+      ...(d.seatLabel ? { seatLabel: d.seatLabel } : {}),
       bootEpoch: d.bootEpoch,
       ...(d.startedAt ? { startedAt: d.startedAt } : {}),
       endpoint: d.path,
