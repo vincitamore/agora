@@ -11,6 +11,20 @@ export class CarryCheckError extends AgoraError {
   /** @param {string} code */
   constructor(code) { super(code); this.name = 'CarryCheckError'; this.code = code; }
 }
+
+/** Config-less argument shape. Kept in the exported table's one carry row.
+ * @param {Record<string,unknown>} values */
+export function carryArgumentRefusal(values) {
+  const modes = ['check', 'seal', 'announce', 'arrive', 'handoff'].filter(k => Boolean(values[k]));
+  if (!modes.length) return values.boundary || values.account || values.mandate
+    ? 'carry --boundary/--account/--mandate requires a boundary operation' : undefined;
+  if (modes.length !== 1) return 'carry takes exactly one of --check, --seal, --announce, --arrive or --handoff';
+  if (!values.boundary || !String(values.boundary).trim()) return `carry --${modes[0]} needs --boundary <file>`;
+  if (modes[0] === 'seal' && (!values.mandate || !String(values.mandate).trim())) return 'carry --seal needs --mandate <file>';
+  if (modes[0] !== 'seal' && values.mandate) return '--mandate belongs to carry --seal';
+  if (modes[0] !== 'check' && values.account) return '--account belongs to carry --check';
+  return undefined;
+}
 /** @param {unknown} value */
 const label = (value) => readString(value, 'label', { min: 1, max: 512, controls: true });
 /** @param {unknown} value */
@@ -68,7 +82,7 @@ export const carryRefKey = (ref) => JSON.stringify([ref.room, ref.id, ref.cursor
  * post-boundary room fold. Receipt IDs name the independent durable ledger.
  * @param {unknown} value */
 export function validateCarryBoundary(value) {
-  const v = readRecord(value, ['version', 'id', 'createdAt', 'session', 'bearer', 'mandatePath', 'mandateDigest',
+  const v = readRecord(value, ['version', 'id', 'session', 'bearer', 'mandatePath', 'mandateDigest',
     'cursors', 'claims', 'deliveries', 'retractions', 'watermark', 'gaps']);
   if (v.version !== 1) throw new CarryCheckError('carry-boundary-version');
   const s = readRecord(v.session, ['slug', 'source']);
@@ -80,7 +94,7 @@ export function validateCarryBoundary(value) {
     const e = readRecord(item, ['eventId', 'ref']);
     return { eventId: label(e.eventId), ref: validateCarryRef(e.ref) };
   });
-  return { version: 1, id: label(v.id), createdAt: readTimestamp(v.createdAt),
+  return { version: 1, id: label(v.id),
     session: { slug: label(s.slug), source: label(s.source) }, bearer: label(v.bearer),
     mandatePath: label(v.mandatePath), mandateDigest: label(v.mandateDigest), cursors,
     claims: refs(v.claims), deliveries: refs(v.deliveries), retractions: refs(v.retractions),
@@ -271,7 +285,7 @@ export async function sealCarryBoundary(dir, output, context) {
     completeOrigin = origin.version === 1 && origin.session === context.session.slug
       && origin.bearer === context.bearer && origin.commitmentsComplete === true;
   } catch { /* missing/corrupt historical provenance is not completeness */ }
-  const boundary = validateCarryBoundary({ version: 1, id: randomUUID(), createdAt: new Date().toISOString(),
+  const boundary = validateCarryBoundary({ version: 1, id: randomUUID(),
     session: { slug: context.session.slug, source: context.session.source }, bearer: context.bearer, mandatePath: path.resolve(context.mandatePath), mandateDigest: source.digest,
     cursors: context.cursors, claims: mine.filter(e => e.kind === 'claim' && !targeted.has(e.id)).map(ref),
     deliveries: mine.filter(e => e.kind === 'delivery-prepared' && !targeted.has(e.id)).map(ref),
