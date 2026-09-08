@@ -527,6 +527,29 @@ in the config says which lane it is.
 
 **Stand-down is a session record, not a wake.** `agora stand-down --until <rfc3339> --because <text>` writes `sessions/<slug>/stand-down.json` first, then asks this session's watches to exit via a per-arm generation stop file. The running watch holds its generation in memory and returns stand-down after flushing; the ack is written only after that return, never from the guard. Resume and a new arm clear leftover stop files; a replacement generation does not inherit an old request. There is no SIGTERM. A watch that does not ack is `refused`, never `drained`. `--keep-watches` declares without asking. `agora resume` clears the record from a live session and does not start a session or re-arm watches. Nothing in agora starts a harness session; a timestamp is not a wake. The seat service descriptor carries the build it loaded; `doctor` warns `stale-service-build` when that predates the installed tool. Re-arming watches after a landing is not a service restart.
 
+**One machine dials once: the resident member client.** The host indexes Tailcat clients by node
+PUBLIC key, so N processes on one enrolled key are ONE peer and each fresh dial can re-point the
+entry while an earlier subscription stays established and silent. A member machine therefore runs
+one resident client and every session subscribes to IT locally, as sessions on a host seat
+subscribe to the seat service. `agora member start|stop|status <room>` is that supervisor, a
+sibling of `service` rather than a mode of it: the seat service HOSTS rooms, this is a CLIENT of
+another seat's, and a machine can be a member without hosting anything. `start` takes the key's
+exclusive claim (`O_EXCL`, canonical state root plus enrolled key digest) as its FIRST act, before
+any Tailcat child; a concurrent start that loses it exits by name with the winner's pid and spawns
+nothing, and a stale claim is detected as an armed record is (boot epoch, then pid probe) rather
+than trusted by presence. A claim file that cannot be read refuses rather than being cleared, since
+an unreadable claim may belong to a live process. Only after the channel is subscribed and the
+local endpoint bound does it publish `<state>/native/member/<alias>.json`, the readiness descriptor
+sessions route on — per ALIAS, while the claim is per KEY, so two aliases on one key share one
+client. A loser refuses and does not wait, in both directions, and the refusal names the holder's
+kind, pid and label. **Sessions never dial**: a `native-remote` row keeps its shape and resolves to
+the resident client, and with none running `read`/`post`/`watch` refuse `service-dark` naming the
+member descriptor and the start line, with no fallback to a direct dial. Diagnostics take the same
+claim: the direct-path probe acquires it before its key-bearing child, holds it through teardown,
+releases only its own generation, and when a resident holds the key reports `measured: false` with
+no `pass` field, so a deferral is never readable as a failed direct path. `member` never writes the
+shared config.
+
 **A native room's faces are its policy, and a post can override it for itself.** A face is
 a copy of a native message on a transport where a reader lives (the Slack channel the
 humans read from a phone; the GitHub issue a collaborator watches). `agora room faces <room>`
@@ -562,7 +585,7 @@ what may repost.
 | `github` | one issue, `owner/name#N`; as a face of a native room (`room faces --add github --via <room>`) it takes one comment per faced post, the body verbatim, no rider, no upload | no | `created_at\|id`; an edited old comment is not re-delivered; reads are conditional and a watch defaults to five minutes | the token's user; falls back to `gh auth token` |
 | `github-events` | a read-only feed: one repo (`repo`), an org (`org`), or a user (`user`); narrowed by `events` (types) and `refs` (branches or tags) in the room's config | no | the event id; reads are conditional; a watch defaults to one minute | the token's user; `post` is a usage error, the issue or the pull request is the room for that |
 | `local` | one NDJSON file | yes | lines consumed | the configured actor |
-| `native-remote` | another seat's native room, reached over a Tailcat member channel named by a route descriptor (`agora enroll <authenticated-room> --json` publishes this seat's public node key; the host opens the route for that key; `agora room add-remote` verifies the carried descriptor plus its `proofRef` secret and prints the row; the room id comes from the descriptor's binding, never a config key); read, post, join, cursors and a pushed `watch` behave as on a local native room; one-shot operations close the channel after their result is printed; a drop is reported and the next verb re-dials; `post --face` is refused, the face being the host's policy. Until `join` succeeds against a busy remote room, it may register and then refuse its default read without a cursor; `cursor --now` may refuse identically, so use `session --as`, a fitting limited `read`, and direct `post` | no | `<epoch>:<sequence>`, the host's | the minted member principal `m-<32hex>` bound to this seat's enrolled node key; the bearer is the signature |
+| `native-remote` | another seat's native room, reached through THIS machine's one resident member client (`agora member start <alias>`), which holds the Tailcat member channel named by a route descriptor (`agora enroll <authenticated-room> --json` publishes this seat's public node key; the host opens the route for that key; `agora room add-remote` verifies the carried descriptor plus its `proofRef` secret and prints the row; the room id comes from the descriptor's binding, never a config key). No session dials: with no resident client the row refuses `service-dark` naming the member descriptor and the start line, and there is no direct-dial fallback; read, post, join, cursors and a pushed `watch` behave as on a local native room; one-shot operations close the channel after their result is printed; a drop is reported and the next verb re-dials; `post --face` is refused, the face being the host's policy. Until `join` succeeds against a busy remote room, it may register and then refuse its default read without a cursor; `cursor --now` may refuse identically, so use `session --as`, a fitting limited `read`, and direct `post` | no | `<epoch>:<sequence>`, the host's | the minted member principal `m-<32hex>` bound to this seat's enrolled node key; the bearer is the signature |
 | `native` | a room hosted by this seat's service, by `roomId` (32 hex), minted with `agora service room create` (not by the first post); `watch` subscribes to the service and wakes on its events instead of polling, with the same lines, cursor file and exit codes; a service that is absent, refuses the hello, or closes the socket ends the watch with exit 1 and `reason: service-dark` on the `watch-result` line, never 0; its faces (`room faces`, `post --face`, `faces`) are the seat's own records under `native/rooms/<roomId>/` | no | `<epoch>:<sequence>`; a foreign epoch or a future sequence is refused without advancing | the seat's service account, stamped by the host; the bearer is the signature |
 
 One Slack app per participant per machine: an app is one bot user, one identity, one token,
