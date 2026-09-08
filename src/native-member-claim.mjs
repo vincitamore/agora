@@ -29,6 +29,7 @@ import { mkdir, realpath } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { AgoraError } from "./core.mjs";
+import { publicNodeKeyDigest } from "./protocol/route.mjs";
 import { bootEpoch, pidAlive } from "./session.mjs";
 
 /** How many times an acquire will re-try after clearing a claim it proved stale. */
@@ -231,4 +232,40 @@ export async function readKeyClaim(stateRoot, keyDigest, deps = {}) {
 /** @param {string} raw */
 function safeParse(raw) {
   try { return JSON.parse(raw); } catch { return undefined; }
+}
+
+/**
+ * The enrolled key's digest, read from the identity file and NOTHING ELSE.
+ *
+ * This exists because of a circularity the seams do not mention. The claim must be taken before any
+ * Tailcat child, and it is keyed by the enrolled key digest; but the ordinary way to learn this
+ * seat's public node key is `tailcat --key=<path> printpub`, which IS a Tailcat child. A claim that
+ * spawns a child to decide whether it may spawn a child has already lost the argument.
+ *
+ * The identity file carries both halves — `{ Private, Public: { ServerPublic, ServerDiscoPublic } }`
+ * — so `Public.ServerPublic` is the same `nodekey:<64 hex>` that `printpub` prints, and the digest
+ * is a pure file read. Verified against live state 2026-09-08: the digest computed here equalled the
+ * `binding.allowedKeyDigest` in this seat's issued route descriptor exactly.
+ *
+ * The private half is read into memory and never returned, logged, digested or included in any
+ * refusal. Only `Public.ServerPublic` leaves this function, and only as a digest.
+ *
+ * @param {string} keyPath the identity file (`<state>/tailcat/identity.private.json`)
+ * @returns {Promise<string>} `sha256:<64 hex>` over the public node key
+ */
+export async function enrolledKeyDigest(keyPath) {
+  /** @type {string} */
+  let raw;
+  try { raw = await readFile(keyPath, "utf8"); }
+  catch (error) {
+    const code = /** @type {NodeJS.ErrnoException} */ (error).code;
+    throw claimRefusal("member-key-identity-unreadable",
+      `the enrolled identity at ${keyPath} could not be read (${code ?? String(error)}); a key-bearing child must not start before its key is known`);
+  }
+  const parsed = safeParse(raw);
+  const publicKey = parsed && typeof parsed === "object" ? /** @type {any} */ (parsed).Public?.ServerPublic : undefined;
+  if (typeof publicKey !== "string" || !/^nodekey:[a-f0-9]{64}$/.test(publicKey))
+    throw claimRefusal("member-key-identity-malformed",
+      `the enrolled identity at ${keyPath} carries no usable public node key; the digest cannot be derived without spawning a Tailcat child, which is what the claim exists to prevent`);
+  return publicNodeKeyDigest(publicKey);
 }
