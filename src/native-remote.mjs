@@ -422,6 +422,33 @@ export class RemoteRoom {
    * `closeFailure` stays undefined on the ordinary path, so a reader can tell zero failures from an
    * unreported one — which a bare counter cannot.
    */
+  /**
+   * Drop a client this room handed out, when its CONSUMER has evidence the channel is gone and the
+   * socket has not closed to say so.
+   *
+   * The cache is cleared by exactly two things today — the socket's `close` handler and `close()` —
+   * and a silent-open channel triggers neither, so `client()` keeps handing back the connection
+   * that just failed. Measured by Astra/reader against the real cache: dials 1, subscribes 2, same
+   * client, `socket.destroyed` false. The "reconnect" re-subscribed the corpse.
+   *
+   * Fenced by identity: a caller that arrives late, after a replacement was already attached,
+   * must not drop the healthy one. Never throws — this runs on a failure path.
+   * @param {NativeServiceClient} client
+   */
+  async dropClient(client) {
+    const attempt = this.dialling;
+    if (!attempt) return;
+    /** @type {{ client: NativeServiceClient, resource: any } | undefined} */
+    let held;
+    try { held = await attempt; }
+    catch { if (this.dialling === attempt) this.dialling = undefined; return; }
+    if (held.client !== client) return;
+    if (this.dialling === attempt) this.dialling = undefined;
+    this.drops += 1;
+    try { held.client.close(); } catch { /* a corpse does not close cleanly and need not */ }
+    try { await held.resource.stop(); } catch { /* teardown of a channel already gone */ }
+  }
+
   async close() {
     this.closed = true;
     const attempt = this.dialling;
@@ -561,7 +588,14 @@ export async function openRemoteSubscription(opts) {
       // is already false again by the time the old probe rejects — so an obsolete failure
       // re-subscribed a channel that was fine (three dials and three subscribes where two of each
       // were owed). A stale client's failure is not evidence about the current one.
-      if (!stopped && current === client) runReattach();
+      if (!stopped && current === client) {
+        // Invalidate the generation that failed, through its OWNER, before asking for another.
+        // Without this the room hands back the same cached client and the "reconnect" re-subscribes
+        // the channel that just failed its probe — no dial, no recovery, and darkness only after
+        // the budget runs out against a corpse.
+        await room.dropClient?.(client);
+        if (!stopped) runReattach();
+      }
     } finally {
       probing = false;
     }
