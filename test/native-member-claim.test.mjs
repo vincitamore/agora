@@ -21,6 +21,7 @@ const DIGEST_A = `sha256:${"a".repeat(64)}`;
 const DIGEST_B = `sha256:${"b".repeat(64)}`;
 
 /** A state root that is cleaned up with the test. */
+/** @param {import('node:test').TestContext} t */
 async function stateRoot(t) {
   const root = await mkdtemp(path.join(tmpdir(), "agora-claim-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -28,7 +29,7 @@ async function stateRoot(t) {
 }
 
 /** The refusal code, which is what every caller branches on. */
-const codeOf = (error) => /** @type {{ code?: string }} */ (error)?.code;
+const codeOf = (/** @type {any} */ error) => /** @type {{ code?: string }} */ (error)?.code;
 
 test("a second acquire on one key is refused by name, and the refusal is actionable", async (t) => {
   const root = await stateRoot(t);
@@ -36,7 +37,7 @@ test("a second acquire on one key is refused by name, and the refusal is actiona
 
   await assert.rejects(
     () => takeKeyClaim({ stateRoot: root, keyDigest: DIGEST_A, kind: "gate", label: "direct-path gate" }),
-    (error) => {
+    (/** @type {any} */ error) => {
       assert.equal(codeOf(error), "member-key-claim-held");
       // A refusal that does not name the holder sends the operator to `ps`. The three facts that
       // make it actionable are the kind, the pid, and the label.
@@ -59,7 +60,7 @@ test("the claim is keyed by the key, not the alias: two aliases on one key conte
   const first = await takeKeyClaim({ stateRoot: root, keyDigest: DIGEST_A, kind: "resident", label: "house-remote" });
   await assert.rejects(
     () => takeKeyClaim({ stateRoot: root, keyDigest: DIGEST_A, kind: "resident", label: "other-room" }),
-    (error) => codeOf(error) === "member-key-claim-held",
+    (/** @type {any} */ error) => codeOf(error) === "member-key-claim-held",
   );
   await first.release();
 });
@@ -77,10 +78,10 @@ test("a claim whose process is gone is re-taken; a live one is not", async (t) =
   const root = await stateRoot(t);
   const claimPath = keyClaimPath(await canonicalStateRoot(root), DIGEST_A);
   await mkdir(path.dirname(claimPath), { recursive: true });
-  const dead = {
+  const dead = /** @type {import('../src/native-member-claim.mjs').KeyClaimRecord} */ ({
     keyDigest: DIGEST_A, pid: 999_999_999, bootEpoch: bootEpoch(), kind: "resident",
     generation: "deadgeneration", startedAt: new Date().toISOString(),
-  };
+  });
   await writeFile(claimPath, `${JSON.stringify(dead)}\n`, "utf8");
 
   const taken = await takeKeyClaim({ stateRoot: root, keyDigest: DIGEST_A, kind: "resident" });
@@ -96,10 +97,10 @@ test("a claim from a previous boot is stale even though its pid answers", async 
   await mkdir(path.dirname(claimPath), { recursive: true });
   // This process's own pid, so a pid probe alone says LIVE. Only the boot epoch separates them,
   // and without it a reboot that reused the pid fences every later start out forever.
-  const previousBoot = {
+  const previousBoot = /** @type {import('../src/native-member-claim.mjs').KeyClaimRecord} */ ({
     keyDigest: DIGEST_A, pid: process.pid, bootEpoch: bootEpoch() - 100_000, kind: "resident",
     generation: "beforethereboot", startedAt: new Date(0).toISOString(),
-  };
+  });
   await writeFile(claimPath, `${JSON.stringify(previousBoot)}\n`, "utf8");
   assert.equal(claimAlive(previousBoot), false);
 
@@ -116,7 +117,7 @@ test("a malformed claim refuses by name and is NOT cleared", async (t) => {
 
   await assert.rejects(
     () => takeKeyClaim({ stateRoot: root, keyDigest: DIGEST_A, kind: "resident" }),
-    (error) => {
+    (/** @type {any} */ error) => {
       assert.equal(codeOf(error), "member-key-claim-malformed");
       assert.match(error.message, /not cleared automatically/);
       return true;
@@ -136,7 +137,7 @@ test("a claim missing a required field is malformed, not free", async (t) => {
   await writeFile(claimPath, `${JSON.stringify({ keyDigest: DIGEST_A, pid: process.pid, generation: "g" })}\n`, "utf8");
   await assert.rejects(
     () => takeKeyClaim({ stateRoot: root, keyDigest: DIGEST_A, kind: "resident" }),
-    (error) => codeOf(error) === "member-key-claim-malformed",
+    (/** @type {any} */ error) => codeOf(error) === "member-key-claim-malformed",
   );
 });
 
@@ -212,7 +213,7 @@ test("one state root reached by two paths is one claim", async (t) => {
   const held = await takeKeyClaim({ stateRoot: real, keyDigest: DIGEST_A, kind: "resident" });
   await assert.rejects(
     () => takeKeyClaim({ stateRoot: link, keyDigest: DIGEST_A, kind: "gate" }),
-    (error) => codeOf(error) === "member-key-claim-held",
+    (/** @type {any} */ error) => codeOf(error) === "member-key-claim-held",
   );
   await held.release();
 });
@@ -221,15 +222,15 @@ test("the digest and the kind are validated before anything is written", async (
   const root = await stateRoot(t);
   await assert.rejects(
     () => takeKeyClaim({ stateRoot: root, keyDigest: "not-a-digest", kind: "resident" }),
-    (error) => codeOf(error) === "member-key-claim-digest-invalid",
+    (/** @type {any} */ error) => codeOf(error) === "member-key-claim-digest-invalid",
   );
   await assert.rejects(
     () => takeKeyClaim({ stateRoot: root, keyDigest: DIGEST_A, kind: /** @type {any} */ ("supervisor") }),
-    (error) => codeOf(error) === "member-key-claim-kind-invalid",
+    (/** @type {any} */ error) => codeOf(error) === "member-key-claim-kind-invalid",
   );
   // Nothing was created by either refusal.
   const wouldBe = keyClaimPath(await canonicalStateRoot(root), DIGEST_A);
-  await assert.rejects(() => readFile(wouldBe, "utf8"), (error) => error.code === "ENOENT");
+  await assert.rejects(() => readFile(wouldBe, "utf8"), (/** @type {any} */ error) => error.code === "ENOENT");
 });
 
 // --- the digest, read with no child ---------------------------------------------------------
@@ -265,7 +266,7 @@ test("the private half never appears in the digest, a refusal, or anything retur
 
   // And on the failure path, where a message is most likely to be pasted somewhere.
   await writeFile(keyPath, JSON.stringify({ Private: secret, Public: { ServerPublic: "not-a-node-key" } }), "utf8");
-  await assert.rejects(() => enrolledKeyDigest(keyPath), (error) => {
+  await assert.rejects(() => enrolledKeyDigest(keyPath), (/** @type {any} */ error) => {
     assert.equal(codeOf(error), "member-key-identity-malformed");
     assert.doesNotMatch(error.message, /privkey|9{16}/);
     return true;
@@ -276,7 +277,7 @@ test("an unreadable or shapeless identity refuses by name rather than guessing a
   const root = await stateRoot(t);
   await assert.rejects(
     () => enrolledKeyDigest(path.join(root, "absent.json")),
-    (error) => codeOf(error) === "member-key-identity-unreadable",
+    (/** @type {any} */ error) => codeOf(error) === "member-key-identity-unreadable",
   );
 
   const keyPath = path.join(root, "identity.private.json");
@@ -284,7 +285,7 @@ test("an unreadable or shapeless identity refuses by name rather than guessing a
     await writeFile(keyPath, body, "utf8");
     await assert.rejects(
       () => enrolledKeyDigest(keyPath),
-      (error) => codeOf(error) === "member-key-identity-malformed",
+      (/** @type {any} */ error) => codeOf(error) === "member-key-identity-malformed",
       body.slice(0, 30),
     );
   }
@@ -302,14 +303,14 @@ test("the digest keys a claim end to end, so the gate and the resident contend o
   const resident = await takeKeyClaim({ stateRoot: root, keyDigest, kind: "resident", label: "house-remote" });
   await assert.rejects(
     () => takeKeyClaim({ stateRoot: root, keyDigest, kind: "gate", label: "probe-tailcat-live --direct" }),
-    (error) => codeOf(error) === "member-key-claim-held",
+    (/** @type {any} */ error) => codeOf(error) === "member-key-claim-held",
   );
   await resident.release();
 
   const gate = await takeKeyClaim({ stateRoot: root, keyDigest, kind: "gate", label: "probe-tailcat-live --direct" });
   await assert.rejects(
     () => takeKeyClaim({ stateRoot: root, keyDigest, kind: "resident", label: "house-remote" }),
-    (error) => {
+    (/** @type {any} */ error) => {
       assert.equal(codeOf(error), "member-key-claim-held");
       // A start refused by a transient gate must read as retry-in-seconds, which is what the kind
       // and the label are for.
