@@ -23,9 +23,12 @@ so a remote principal owns its own authorship on the host. Two principals never 
 ## Verbs
 
 ```
-agora service route open  <room> --allow-key <nodekey:64hex> [--out <path>]
+agora service route challenge <room> --allow-key <nodekey:64hex> --act <room-enroll|room-revoke> --out <path>
+agora authority sign --file <challenge> --out <proof>
+agora service route open  <room> --allow-key <nodekey:64hex> --proof-file <proof> [--out <path>]
+agora service route close <room> --allow-key <nodekey:64hex> --proof-file <proof>
+agora service route act-status <operation-id>
 agora service route list
-agora service route close <room> --allow-key <nodekey:64hex>
 ```
 
 `--allow-key` takes the **public** node key as `enroll` prints it. There is deliberately no flag
@@ -165,15 +168,15 @@ observed, the duplicate carries its original message id, and the persisted curso
 backwards. A consumer that must not surface a duplicate dedups **by message id, above the
 transport** — that is the idempotence point.
 
-## Admission is human-labelled, not yet an operator act
+## Admission is a retained counter-seat operator act
 
-`route open` and `route close` are ordinary verbs carrying the board's cooperative human label, the
-way `break` does. The protocol defines an operator act (`room-enroll`, `room-revoke`) with an
-authority id, a challenge and a proof reference, but nothing in the tool issues or consumes one
-today, and three of those fields have no defined source. Wrapping admission in a real operator act
-— an authority record, challenge issuance and consumption, and proof-reference ownership — is its
-own unit. Until it lands, admission carries the same trust model as the rest of the cooperative
-board: it is labelled, recorded, and not cryptographically bound to a human.
+`route open` and `route close` refuse without a detached proof for the matching `room-enroll` or
+`room-revoke` act. The target service issues and retains a bounded challenge, a separately enrolled
+counter-seat authority signs it, and the target independently verifies and consumes the proof before
+the route effect. A replay performs no second effect. After an unknown response,
+`route act-status <operation-id>` reads the authority journal's recorded outcome. Authority policy
+is a service-start snapshot; rotation requires a restart. The full bootstrap, expiry, delegation,
+and refusal contract is in `docs/HUMAN-AUTHORITY.md`.
 
 ## What the tests prove, and what they do not
 
