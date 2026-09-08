@@ -1,9 +1,9 @@
 # Carry recovery contract, version 1
 
-This branch is implementing C1. The checker, immutable delivery evidence, mandate
-reader, boundary announcement, successor ordering and cursor-gap capture exist.
-Final composition/calibration and historical reconciliation remain incomplete;
-this is not a shipped or frozen guarantee. Ordinary `agora carry <room>` remains a bounded, read-only report. It
+The explicit recovery gate combines immutable delivery evidence, a mandate
+reader, boundary announcement, successor ordering and cursor-gap capture.
+Historical reconciliation and harness interception are outside this contract;
+unknown coverage refuses. Ordinary `agora carry <room>` remains a bounded, read-only report. It
 is not a readiness proof and its later-thread-speech heuristic is not a discharge.
 
 ## Mandate: the assigner's record
@@ -153,6 +153,8 @@ refusal in turn reddens its own cell; restoring it greens the control set.
 Removing preparation on either watch path, removing the cross-boundary union,
 and bypassing the public handoff's successor check each redden the named
 integration cell without changing its fixture or making the module fail to load.
+The inheritance conflict cell refuses both dry-run and execution before copying
+evidence from an incompatible predecessor; it was red on the late-check form.
 
 ## Explicit remaining seams
 
