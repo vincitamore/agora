@@ -4,20 +4,12 @@ import { fileURLToPath } from 'node:url';
 import { finished } from 'node:stream/promises';
 import { addAbortListener } from 'node:events';
 import { resolveTailcatBinary } from './tailcat-runtime.mjs';
-import { AgoraError, redact } from './core.mjs';
+import { AgoraError } from './core.mjs';
+import { redactTailcatDiagnostics } from './tailcat-diagnostics.mjs';
 import { prepareRuntimeLifetime, runtimeExpiryDelay, runtimeCancelled } from './tailcat-lifetime.mjs';
 
 const STDERR_TAIL_BYTES=512;
 const STDERR_CAPTURE_BYTES=2048;
-
-/** Tailcat is a verified third-party binary, but its stderr is still foreign input. Agora gives it
- * only a private-key PATH (never the route secret), yet a future upstream diagnostic could echo
- * the key it read. Redact the house credential shapes and Tailcat private/auth key shapes before
- * any retained bytes leave this child boundary. The larger private capture keeps a credential's
- * prefix available when the public 512-byte tail is cut. @param {string} value */
-function safeStderr(value){
-  return redact(value).replace(/\b(?:privkey|tskey-[a-z]+)[:_-][A-Za-z0-9+/_=-]{16,}/gi,'[redacted]');
-}
 
 /** @param {Buffer} previous @param {Buffer|string} chunk */
 function appendStderrTail(previous,chunk){
@@ -27,7 +19,8 @@ function appendStderrTail(previous,chunk){
 
 /** @param {Buffer} captured */
 function publicStderrTail(captured){
-  const safe=Buffer.from(safeStderr(captured.toString('utf8')));
+  // Keep the credential prefix in the private capture until redaction, then cut the public tail.
+  const safe=Buffer.from(redactTailcatDiagnostics(captured.toString('utf8')));
   return (safe.length<=STDERR_TAIL_BYTES?safe:safe.subarray(safe.length-STDERR_TAIL_BYTES)).toString('utf8');
 }
 
