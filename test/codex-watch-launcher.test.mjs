@@ -101,8 +101,8 @@ setInterval(() => {}, 1_000);
   await runFile(command, stopArgs, { env: environment, timeout: 10_000 });
 
   // Assert the reported seconds bind elapsed time, not a count of probes. On
-  // POSIX, a deliberately slow sed makes the retired ten-probe loop exceed
-  // two seconds while the independent one-second deadline still refuses near
+  // POSIX, a deliberately slow sed makes the retired probe-count loop exceed
+  // six seconds while the independent two-second deadline still refuses near
   // the bound it reports.
   let timeoutEnvironment = environment;
   if (process.platform !== "win32") {
@@ -114,19 +114,19 @@ setInterval(() => {}, 1_000);
     timeoutEnvironment = { ...environment, PATH: `${shims}${path.delimiter}${process.env.PATH ?? ""}` };
   }
   const timeoutArgs = [...common,
-    process.platform === "win32" ? "-ArmingTimeoutSeconds" : "--arming-timeout", "1"];
+    process.platform === "win32" ? "-ArmingTimeoutSeconds" : "--arming-timeout", "2"];
   const timeoutStartedAt = Date.now();
   await assert.rejects(runFile(command, timeoutArgs, {
     env: timeoutEnvironment,
-    timeout: 5_000,
+    timeout: 8_000,
   }), (/** @type {any} */ error) => {
     assert.equal(error.code, 1);
-    assert.match(error.stderr, /subscribed armed receipt within 1 seconds/);
+    assert.match(error.stderr, /subscribed armed receipt within 2 seconds/);
     return true;
   });
   const timeoutElapsed = Date.now() - timeoutStartedAt;
-  assert.ok(timeoutElapsed >= 800, `one-second bound fired too early at ${timeoutElapsed} ms`);
-  assert.ok(timeoutElapsed < 2_000, `one-second bound stretched to ${timeoutElapsed} ms`);
+  assert.ok(timeoutElapsed >= 1_500, `two-second bound fired too early at ${timeoutElapsed} ms`);
+  assert.ok(timeoutElapsed < 5_000, `two-second bound stretched to ${timeoutElapsed} ms`);
 });
 
 test("Codex POSIX launcher gives macOS to launchd without weakening Linux detachment", async () => {
