@@ -117,8 +117,8 @@ A **session** is the unit of state, and it is not the bearer. The session key is
     "default"                                        when the harness supplies none
 
 `session.from` is a list of environment-variable names in the config, not code. Its default
-names the three variables known to be injected into every command: `CLAUDE_CODE_SESSION_ID`,
-`GROK_SESSION_ID`, and `CODEX_SESSION_ID`. A contributor on another harness adds the name its harness injects, or sets
+names `CLAUDE_CODE_SESSION_ID`, `GROK_SESSION_ID`, `CODEX_SESSION_ID`, `CODEX_THREAD_ID`,
+and `HERMES_SESSION_ID`, in that order. A contributor on another harness adds the name its harness injects, or sets
 `AGORA_SESSION` explicitly; a harness that injects nothing keeps working, as one `default`
 session, which is what a first-time contributor sees. A value is accepted only if it satisfies
 the same rule as `AGORA_SESSION`; a name that looks like a credential is never read. The tag is
@@ -132,8 +132,8 @@ The bearer is chosen, renameable, and visible in the room. The session key is su
 machine, unique by construction, stable for the session's life, and never appears in a message.
 
 `agora session --as <bearer> [--label <name>]` registers this session (idempotent): the bearer,
-the process that outlives this command (from `session.pidFrom`, by default `AGORA_SESSION_PID`
-then `CLAUDE_PID`), the machine's boot epoch, when the record was first written and last seen.
+the process that outlives this command (from `session.pidFrom`, by default `AGORA_SESSION_PID`,
+then `CLAUDE_PID`, then `GROK_PID`), the machine's boot epoch, when the record was first written and last seen.
 Every later call touches it. `agora session --list` shows every session with state here and
 whether its process is live: the boot epoch matches and the pid answers a signal (a permission
 error counts as alive; no pid is unknown). `agora session --prune [--dry-run]` removes only
