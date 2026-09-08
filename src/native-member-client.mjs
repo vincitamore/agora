@@ -258,3 +258,45 @@ export class MemberClientService {
     this.room = undefined;
   }
 }
+
+/**
+ * A `RemoteRoom`-shaped handle onto the RESIDENT client, for the transport to use in place of its
+ * own dial. Seam 5: a `native-remote` row resolves to the resident client when its readiness
+ * descriptor is present, and refuses with the start line when it is not.
+ *
+ * This is where per-session direct dialing leaves the product. It is not discouraged here, it is
+ * absent: there is no branch that falls back to `openRemoteRoom` when the descriptor is missing,
+ * because a fallback is the defect returning under the name of robustness. A session with no
+ * resident client gets a refusal that tells it to start one.
+ *
+ * The surface is exactly what `nativeRemoteTransport` consumes — `binding.roomId`,
+ * `binding.accountId`, `client()`, `close()`, `closeFailure` — so the transport above it does not
+ * change and cannot tell which side it is talking to.
+ * @param {string} stateRoot @param {string} alias
+ * @param {{ connect?: any, timeoutMs?: number }} [deps]
+ */
+export async function openResidentMemberRoom(stateRoot, alias, deps = {}) {
+  const { readMemberDescriptor } = await import("./native-member-descriptor.mjs");
+  // Throws ServiceDarkError naming the descriptor AND the start line when there is no resident
+  // client. That refusal is the whole of seam 5's "refuse with the start line".
+  const descriptor = await readMemberDescriptor(stateRoot, alias);
+  const { NativeServiceClient } = await import("./native-service.mjs");
+  const connect = deps.connect ?? NativeServiceClient.connect;
+  /** @type {any} */
+  let cached;
+  return {
+    binding: { roomId: descriptor.roomId, accountId: descriptor.accountId },
+    descriptor,
+    /** @type {unknown} */
+    closeFailure: undefined,
+    async client() {
+      if (cached && !cached.socket?.destroyed) return cached;
+      cached = await connect({ ...descriptor, ...(deps.timeoutMs ? { timeoutMs: deps.timeoutMs } : {}) });
+      return cached;
+    },
+    async close() {
+      try { cached?.close(); } catch { /* a teardown that throws hides what it tore down */ }
+      cached = undefined;
+    },
+  };
+}

@@ -91,6 +91,7 @@ import { closeServiceRoute, createServiceRoom, listServiceRoutes, openServiceRou
   signSeatAuthorityEnrollment, completeSeatAuthorityEnrollment, signSeatRouteAct,
   challengeServiceRoute, statusServiceRouteAct } from "../src/service-cli.mjs";
 import { spawnFromFile } from "../src/spawn-cli.mjs";
+import { memberClientStatus, runMemberClient, startMemberClient, stopMemberClient } from "../src/native-member-supervisor.mjs";
 import { runUsage } from "../src/usage-cli.mjs";
 import { runUsageSessionsCli } from "../src/session-accounting.mjs";
 import { readShadowArgs, runEconomyShadowCli, ShadowInputError } from "../src/economy/shadow.mjs";
@@ -263,6 +264,11 @@ const SCHEMA = {
     enroll: { args: ["<room>"], options: {"--trust <account-id>": "explicitly replace a peer pin after out-of-band verification", "--fingerprint <hex>": "confirmed peer fingerprint for --trust", "--pages <n>": "enrollment scan depth"}, does: "publish or republish this seat's Agora-owned transfer public key; never uses an ambient Tailcat identity" },
     share: { args: ["<room>", "[file ...]"], options: {"--to <account-id>": "authenticated recipient account; repeatable, maximum four", "--once": "consume each recipient route after verified receipt", "--expires-in <seconds>": "60 to 86400, default 3600", "--list": "local offers and measured liveness", "--prune": "remove expired offline offers owned by this session", "--stop <id>": "stop a local offer", "--resume <id>": "reconcile uncertain publication without duplicate posting", "--forget <id>": "explicitly release the operation guard after checking publication"}, does: "snapshot named files and publish a recipient-restricted native transfer offer after every route is ready" },
     fetch: { args: ["<room>","<offer-id>"], options: {"--into <directory>": "destination; existing files are never overwritten", "--pages <n>": "offer discovery depth"}, does: "explicitly receive, verify and commit files before acknowledging; receiving an offer never executes or fetches automatically" },
+    member: {
+      args: ["start|stop|status <room>"],
+      options: {},
+      does: "the resident member client for a native-remote room: ONE process per machine holds the enrolled key's member channel to the host and every session on the machine subscribes to it locally. start takes the key's exclusive claim as its first act, before any Tailcat child, so a second start spawns nothing and says who holds the key; stop is bounded and handshakes before it signals; status reports the readiness descriptor and, beside it, the key claim, which answers a different question. Never writes the shared config",
+    },
     service: {
       args: ["start|stop|status|room create|route open/list/close/challenge/act-status"],
       options: {
@@ -800,6 +806,22 @@ export const ARGUMENT_PREFLIGHTS = Object.freeze([
     },
   },
   {
+    name: 'member-subverb',
+    matches: ({ verb }) => verb === 'member',
+    // Both halves are the verb's OWN arguments, so both refuse before config loads and the ordering
+    // is provable on a machine with no config at all. Whether the alias names a configured
+    // native-remote room is a different question and needs config, so it stays in the handler.
+    refusal: ({ roomAlias, rest, values, env }) => {
+      if (values.daemon) {
+        return (roomAlias || env.AGORA_MEMBER_ALIAS) ? undefined
+          : 'agora member --daemon needs the room alias';
+      }
+      if (!roomAlias || !['start', 'stop', 'status'].includes(roomAlias))
+        return 'agora member needs start, stop or status';
+      return rest[0] ? undefined : `agora member ${roomAlias} needs the room alias`;
+    },
+  },
+  {
     name: 'service-authority',
     matches: ({ verb, roomAlias }) => verb === 'service' && roomAlias === 'start',
     refusal: ({ values }) => values.authority !== undefined && !/^a-[a-f0-9]{64}$/.test(String(values.authority))
@@ -1234,6 +1256,56 @@ async function main(argv) {
       throw new AgoraError(`agora service route needs open, list or close`, EXIT.usage);
     }
     throw new AgoraError(`agora service needs start, stop, status, room create or route open/list/close`, EXIT.usage);
+  }
+
+  if (verb === "member") {
+    // The resident member client. A sibling of `service`, not a mode of it: the seat service hosts
+    // rooms, this is a client of ANOTHER seat's service, and a machine can be a member without ever
+    // hosting anything. `docs/RESIDENT-MEMBER-CLIENT.md` seam 3.
+    const action = values.daemon ? "daemon" : (roomAlias ?? "");
+    const aliasOf = (/** @type {string | undefined} */ given) => {
+      const alias = given || (values.daemon ? String(process.env.AGORA_MEMBER_ALIAS ?? "") : "");
+      if (!alias) throw new AgoraError(`agora member ${action} needs the room alias`, EXIT.usage);
+      const row = /** @type {any} */ (cfg.rooms?.[alias]);
+      if (!row) throw new AgoraError(`room "${alias}" is not configured`, EXIT.usage);
+      if (row.transport !== "native-remote")
+        throw new AgoraError(`room "${alias}" is a ${row.transport} room; a resident member client serves a native-remote room`, EXIT.usage);
+      if (typeof row.descriptor !== "string" || !row.descriptor)
+        throw new AgoraError(`room "${alias}": a native-remote room needs a descriptor`, EXIT.usage);
+      return { alias, descriptorPath: resolvePath(row.descriptor) };
+    };
+
+    if (action === "daemon") {
+      const { alias, descriptorPath } = aliasOf(roomAlias);
+      await runMemberClient({ stateRoot, alias, descriptorPath, build, seatLabel: seatLabel() });
+      await new Promise(() => {});
+      return EXIT.ok;
+    }
+    if (action === "start") {
+      const { alias, descriptorPath } = aliasOf(rest[0]);
+      const started = await startMemberClient({ root: stateRoot, entry: entryFile, execPath: process.execPath, alias, descriptorPath });
+      if (json) console.log(JSON.stringify({ type: "member", action: "start", ...started }));
+      else console.log(`resident member client for ${alias} started pid ${started.pid ?? "unknown"} room ${started.roomId ?? "unknown"}`);
+      return EXIT.ok;
+    }
+    if (action === "stop") {
+      const { alias } = aliasOf(rest[0]);
+      const stopped = await stopMemberClient(stateRoot, alias);
+      if (json) console.log(JSON.stringify({ type: "member", action: "stop", ...stopped }));
+      else console.log(`resident member client for ${alias} stopped`);
+      return EXIT.ok;
+    }
+    if (action === "status") {
+      const { alias, descriptorPath } = aliasOf(rest[0]);
+      const status = await memberClientStatus(stateRoot, alias, descriptorPath);
+      if (json) console.log(JSON.stringify({ type: "member", action: "status", ...status }));
+      else if (status.present)
+        console.log(`resident member client for ${alias} pid ${status.pid ?? "unknown"} `
+          + `(${status.pidAlive ? "alive" : "PROCESS GONE"}) room ${status.roomId} build ${buildLabel(status.build)}`);
+      else console.log(`no resident member client for ${alias}: ${status.error ?? "absent"}`);
+      return EXIT.ok;
+    }
+    throw new AgoraError(`agora member needs start, stop or status`, EXIT.usage);
   }
 
   if (verb === "spawn") {
