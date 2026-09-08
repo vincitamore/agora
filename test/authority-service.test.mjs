@@ -407,7 +407,13 @@ test('hand-carried bootstrap keeps signing key on counter-seat, proves possessio
   const signerRoot = await mkdtemp(path.join(tmpdir(), 'agora-signer-')); t.after(() => rm(signerRoot, { recursive: true, force: true }));
   const targetRoot = await mkdtemp(path.join(tmpdir(), 'agora-target-')); t.after(() => rm(targetRoot, { recursive: true, force: true }));
   const signerIdentity = async () => ({ nodeKey: PEER }), targetIdentity = async () => ({ nodeKey: LOCAL });
-  const record = await generateSeatAuthority(signerRoot, f.record.policy, 'counter-seat', signerIdentity);
+  // This cell exercises the real CLI helpers, whose clocks are intentionally not injectable.
+  // Give their fixture a window relative to execution instead of expiring it on a calendar date.
+  const wallNow = Date.now();
+  const livePolicy = { ...f.record.policy,
+    validFrom: new Date(wallNow - 60_000).toISOString(),
+    expiresAt: new Date(wallNow + 3_600_000).toISOString() };
+  const record = await generateSeatAuthority(signerRoot, livePolicy, 'counter-seat', signerIdentity);
   assert.ok(!('privateKey' in record)); assert.equal(record.boundNodeKeyDigest, publicNodeKeyDigest(PEER));
   const privatePath = path.join(signerRoot, 'native/authority-key.json');
   if (process.platform !== 'win32') assert.equal((await stat(privatePath)).mode & 0o777, 0o600);

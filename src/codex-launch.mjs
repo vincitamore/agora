@@ -15,6 +15,7 @@ const DESCRIPTOR_VERSION = 1;
 const execFileAsync = promisify(execFile);
 const windowsLauncher = fileURLToPath(new URL("../scripts/start-codex-app-server.ps1", import.meta.url));
 export const CODEX_REMOTE_TOKEN_ENV = "AGORA_CODEX_REMOTE_AUTH_TOKEN";
+export const CODEX_MANAGED_ENV = "AGORA_CODEX_MANAGED";
 
 /** @param {string} stateRoot */
 export function codexControlPaths(stateRoot) {
@@ -27,9 +28,24 @@ export function codexAppServerArgs(endpoint, tokenFile) {
   return ["app-server", "--listen", codexServerURL(endpoint).replace(/\/$/, ""), "--ws-auth", "capability-token", "--ws-token-file", path.resolve(tokenFile)];
 }
 
-/** @param {string} endpoint @param {string[]} args */
-export function codexAttachedArgs(endpoint, args = []) {
-  return ["--remote", codexServerURL(endpoint).replace(/\/$/, ""), "--remote-auth-token-env", CODEX_REMOTE_TOKEN_ENV, ...args];
+/** @param {string} value */
+function tomlString(value) { return JSON.stringify(value); }
+
+/** @param {string} endpoint @param {string} tokenFile @param {string[]} args */
+export function codexAttachedArgs(endpoint, tokenFile, args = []) {
+  const server = codexServerURL(endpoint);
+  const capabilityFile = path.resolve(tokenFile);
+  return [
+    "--remote", server.replace(/\/$/, ""),
+    "--remote-auth-token-env", CODEX_REMOTE_TOKEN_ENV,
+    // Codex constructs tool environments from its shell policy rather than blindly inheriting
+    // the TUI process environment. Set only the two non-secret connection references and a
+    // provenance marker; the capability value remains unavailable to model-reachable commands.
+    "-c", `shell_environment_policy.set.AGORA_CODEX_SERVER=${tomlString(server)}`,
+    "-c", `shell_environment_policy.set.AGORA_CODEX_TOKEN_FILE=${tomlString(capabilityFile)}`,
+    "-c", `shell_environment_policy.set.${CODEX_MANAGED_ENV}=\"1\"`,
+    ...args,
+  ];
 }
 
 /** @param {NodeJS.ProcessEnv} env @param {string} endpoint @param {string} tokenFile @param {string} token @returns {NodeJS.ProcessEnv} */
@@ -279,7 +295,7 @@ export async function launchAttachedCodex(options) {
   const server = await ensureCodexServer({ stateRoot: options.stateRoot, env, ...(options.codexPath ? { codexPath: options.codexPath } : {}) });
   const token = (await readFile(server.tokenFile, "utf8")).trim();
   const childEnv = codexAttachedEnvironment(env, server.endpoint, server.tokenFile, token);
-  const child = (options.spawn ?? spawn)(server.codexPath, codexAttachedArgs(server.endpoint, options.args), {
+  const child = (options.spawn ?? spawn)(server.codexPath, codexAttachedArgs(server.endpoint, server.tokenFile, options.args), {
     stdio: "inherit", windowsHide: false, cwd: process.cwd(), env: childEnv,
   });
   const code = await new Promise((resolve, reject) => {

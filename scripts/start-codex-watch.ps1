@@ -170,6 +170,29 @@ if ($env:LOCALAPPDATA) {
 }
 $CodexPath = Resolve-ExecutablePath -Explicit $CodexPath -Names @('codex.exe') -Candidates $codexCandidates -Label 'Codex CLI'
 
+# Codex applies its shell-environment policy to model-reachable commands, so a retained TUI may
+# preserve CODEX_THREAD_ID while omitting the app-server references inherited by the TUI process.
+# The protected seat-local descriptor is the authoritative fallback. Authenticate it through the
+# Agora status verb; never fall back to the legacy queue while a managed descriptor is present.
+if (-not $CodexServer -and -not $CodexTokenFile) {
+    $managedDescriptor = Join-Path $StateRoot 'codex-control\server.json'
+    if (Test-Path -LiteralPath $managedDescriptor -PathType Leaf) {
+        $managedStatusText = & $RuntimePath $agoraPath codex status --json 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            throw 'A managed Codex server descriptor exists but could not be authenticated; refusing legacy queue fallback.'
+        }
+        try { $managedStatus = $managedStatusText | ConvertFrom-Json }
+        catch { throw 'The managed Codex server returned an invalid status; refusing legacy queue fallback.' }
+        if (-not $managedStatus.running -or -not $managedStatus.endpoint -or -not $managedStatus.tokenFile -or
+            -not [IO.Path]::IsPathRooted([string]$managedStatus.tokenFile) -or
+            -not (Test-Path -LiteralPath ([string]$managedStatus.tokenFile) -PathType Leaf)) {
+            throw 'A managed Codex server descriptor exists but its authenticated connection is unavailable; refusing legacy queue fallback.'
+        }
+        $CodexServer = [string]$managedStatus.endpoint
+        $CodexTokenFile = [string]$managedStatus.tokenFile
+    }
+}
+
 if ($Worker) {
     $env:AGORA_ACTOR = $Actor
     $env:AGORA_CONFIG = $ConfigPath
