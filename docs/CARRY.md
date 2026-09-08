@@ -1,9 +1,9 @@
 # Carry recovery contract, version 1
 
-This branch is implementing C1. The checker, immutable delivery evidence and
-mandate reader exist; boundary announcement, successor ordering, cursor-gap
-integration and historical reconciliation are still integration work, not shipped
-guarantees. Ordinary `agora carry <room>` remains a bounded, read-only report. It
+This branch is implementing C1. The checker, immutable delivery evidence, mandate
+reader, boundary announcement, successor ordering and cursor-gap capture exist.
+Final composition/calibration and historical reconciliation remain incomplete;
+this is not a shipped or frozen guarantee. Ordinary `agora carry <room>` remains a bounded, read-only report. It
 is not a readiness proof and its later-thread-speech heuristic is not a discharge.
 
 ## Mandate: the assigner's record
@@ -14,10 +14,10 @@ The work assigner, not the human operator, writes one JSON file per mandate:
 {
   "version": 1,
   "id": "campaign-c1",
-  "bearer": "Astra/uber-wizard",
+  "bearer": "Astra/builder-session",
   "role": "builder",
   "units": [{"id": "C1-BUILD", "exhibit": "backroom:1788832779.357259"}],
-  "issuedBy": "Fable/orchestration",
+  "issuedBy": "Fable/orchestrator",
   "issuedAt": "2026-09-08T02:00:00.000Z"
 }
 ```
@@ -111,11 +111,23 @@ Pre-C1 commitment history stays a named gap. A first captured successful post
 can establish a fresh origin only when neither current nor rotated posted ledger
 exists. Merely creating the new evidence directory does not establish historical
 coverage. Cursor `--set`/`--now` must not be mistaken for acknowledgement; the
-cursor-gap and inherited-boundary integration remains unfinished on this branch.
+cursor-gap record precedes each set/reset/now or join cursor write. Inheritance
+copies immutable evidence without copying registration, and records explicit
+lineage. A changed cursor's explicit account does not clear an unresolved gap.
+
+## Announced boundary and ordered succession
+
+After sealing, `carry <room> --announce --boundary <file>` posts one boundary line
+addressed to everyone, so peers can re-address rather than assume continuity.
+For a new session, register the same assigned bearer there, then run
+`carry <room> --arrive --boundary <file>`. Only after that successful post can the
+predecessor run `carry <room> --handoff <successor-session> --boundary <file>`.
+The verb checks the successor's registration and durable arrival for that exact
+boundary and room before posting signoff. A generic earlier post does not count.
+These verbs do not stop processes or transfer an authenticated principal.
 
 ## Explicit remaining seams
 
-Boundary announcement and register/post-before-signoff ordering are not yet wired.
 No automatic before-first-act enforcement or per-harness compaction hook is
 claimed. Claude's existing hooks may call this surface after integration; Codex,
 Cursor and Hermes hooks remain named integration seams. Horizon telemetry and
