@@ -226,6 +226,56 @@ process.on("SIGTERM", stop); process.on("SIGINT", stop); setInterval(() => {}, 1
   assert.equal(observed.remoteToken, null);
 });
 
+test("managed Codex launchers refuse legacy queue fallback when the attachment is lost", {
+  skip: process.platform === "darwin" ? "covered by the opt-in launchd lifecycle on macOS" : false,
+}, async (t) => {
+  const fixture = await tmp();
+  const state = path.join(fixture.dir, "state");
+  const config = path.join(fixture.dir, "config.json");
+  const scripts = path.join(fixture.dir, "scripts");
+  const bin = path.join(fixture.dir, "bin");
+  const invoked = path.join(fixture.dir, "agora-invoked");
+  const session = `managed-missing-${process.pid}`;
+  const testLauncher = path.join(scripts, process.platform === "win32" ? "start-codex-watch.ps1" : "start-codex-watch.sh");
+  const fakeCodex = path.join(fixture.dir, process.platform === "win32" ? "fake-codex.cmd" : "fake-codex");
+
+  t.after(() => fixture.cleanup());
+  await mkdir(scripts, { recursive: true });
+  await mkdir(bin, { recursive: true });
+  await copyFile(process.platform === "win32" ? powershellLauncher : launcher, testLauncher);
+  await writeFile(config, "{}\n");
+  await writeFile(path.join(bin, "agora.mjs"), `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(invoked)}, process.argv.join("\\n"));\n`);
+  if (process.platform === "win32") await writeFile(fakeCodex, "@echo off\r\nexit /b 0\r\n");
+  else {
+    await writeFile(fakeCodex, "#!/bin/sh\nexit 0\n");
+    await chmod(testLauncher, 0o755);
+    await chmod(fakeCodex, 0o755);
+  }
+
+  const command = process.platform === "win32" ? "pwsh.exe" : testLauncher;
+  const args = process.platform === "win32"
+    ? ["-NoProfile", "-NonInteractive", "-File", testLauncher, "-Room", "managed-missing", "-Actor", "Codex/test",
+      "-SessionId", session, "-ThreadId", session, "-ConfigPath", config, "-StateRoot", state,
+      "-RuntimePath", process.execPath, "-CodexPath", fakeCodex]
+    : ["--room", "managed-missing", "--actor", "Codex/test", "--session-id", session, "--thread-id", session,
+      "--config", config, "--state", state, "--runtime", process.execPath, "--codex-bin", fakeCodex];
+  const environment = {
+    ...process.env,
+    AGORA_CODEX_MANAGED: "1",
+    AGORA_CODEX_SERVER: "",
+    AGORA_CODEX_TOKEN_FILE: "",
+    CODEX_SESSION_ID: session,
+    CODEX_THREAD_ID: session,
+  };
+
+  await assert.rejects(runFile(command, args, { env: environment, timeout: 10_000 }), (/** @type {any} */ error) => {
+    assert.equal(error.code, 1);
+    assert.match(error.stderr, /session is managed[\s\S]*refusing legacy queue fallback/i);
+    return true;
+  });
+  await assert.rejects(access(invoked), { code: "ENOENT" });
+});
+
 test("Codex POSIX launcher refuses an unsupported platform and Linux without setsid", {
   skip: process.platform === "win32" ? "requires a POSIX executable-script boundary" : false,
 }, async (t) => {

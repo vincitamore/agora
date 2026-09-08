@@ -191,6 +191,9 @@ if (-not $CodexServer -and -not $CodexTokenFile) {
         $CodexServer = [string]$managedStatus.endpoint
         $CodexTokenFile = [string]$managedStatus.tokenFile
     }
+    elseif ($env:AGORA_CODEX_MANAGED -eq '1') {
+        throw 'This Codex session is managed, but its authenticated connection references and server descriptor are unavailable; refusing legacy queue fallback.'
+    }
 }
 
 if ($Worker) {
