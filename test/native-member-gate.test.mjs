@@ -62,7 +62,7 @@ async function preload(dir, { marker, claimAttempt, stateRoot, keyDigest, stdout
   const helper = path.join(dir, "claim-attempt.mjs");
   await writeFile(helper, `
 import { writeFile } from "node:fs/promises";
-import { takeKeyClaim } from ${JSON.stringify(path.join(REPO, "src", "native-member-claim.mjs"))};
+import { takeKeyClaim } from ${JSON.stringify(pathToFileURL(path.join(REPO, "src", "native-member-claim.mjs")).href)};
 let outcome;
 try {
   const held = await takeKeyClaim({ stateRoot: ${JSON.stringify(stateRoot)}, keyDigest: ${JSON.stringify(keyDigest)}, kind: "gate", label: "the child itself" });
@@ -82,7 +82,7 @@ cp.spawnSync = (binary, args) => {
   if (!args.includes('ping')) throw Error('unexpected child invocation');
   writeFileSync(${JSON.stringify(marker)}, args.join(' ') + '\\n', 'utf8');
   // A real second process, started with the real spawnSync, while the gate holds the claim.
-  realSpawnSync(process.execPath, [${JSON.stringify(helper)}], { encoding: 'utf8', timeout: 20000 });
+  realSpawnSync(process.execPath, [${JSON.stringify(helper)}], { encoding: 'utf8', timeout: 20000, windowsHide: true });
   return { status: 0, signal: null, error: undefined, stdout: ${JSON.stringify(stdout)}, stderr: '' };
 };
 syncBuiltinESMExports();
