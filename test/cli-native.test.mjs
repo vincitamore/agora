@@ -93,8 +93,8 @@ test("cli: join pages when its own DEFAULT batch is too large, and a smaller bat
   }
 
   /** Execute the literal first-page instruction, then its stated continuation until every omitted id returns.
-   * @param {{ label: string, prior: boolean, prefix?: number[], rows: number[] }} input */
-  async function omittedCase({ label, prior, prefix = [], rows }) {
+   * @param {{ label: string, prior: boolean, prefix?: number[], rows: number[], expectRecoveryShrink?: boolean }} input */
+  async function omittedCase({ label, prior, prefix = [], rows, expectRecoveryShrink = false }) {
     const { service, fable, cursorFile } = await fixture(t);
     const store = await service.openRoom(ROOM);
     let anchor;
@@ -121,6 +121,7 @@ test("cli: join pages when its own DEFAULT batch is too large, and a smaller bat
     const omitted = requested.filter((m) => !shownIds.has(m.id));
     assert.ok(omitted.length > 0, `${label}: fixture did not force the default batch to omit rows`);
     const recoveredIds = new Set();
+    let recoveryShrank = false;
     let since = hint[1];
     const previewCursor = shown.at(-1).cursor;
     for (let page = 0; page < 30 && since !== previewCursor; page += 1) {
@@ -128,11 +129,13 @@ test("cli: join pages when its own DEFAULT batch is too large, and a smaller bat
       assert.equal(recovered.code, 0, `${label}: emitted recovery page refused: ${recovered.stderr}`);
       const pageRows = typed(recovered.stdout);
       assert.ok(pageRows.length, `${label}: recovery stopped before reaching every omitted row`);
+      if (/requested \d+ messages; the host fit and returned \d+/.test(recovered.stderr)) recoveryShrank = true;
       for (const row of pageRows) recoveredIds.add(row.id);
       since = pageRows.at(-1).cursor;
     }
     assert.equal(since, previewCursor, `${label}: repeated recovery pages did not reach the preview cursor`);
     assert.ok(omitted.every((m) => recoveredIds.has(m.id)), `${label}: paged hint skipped omitted rows`);
+    if (expectRecoveryShrink) assert.ok(recoveryShrank, `${label}: no recovery page reported a host-sized retry`);
     assert.equal(JSON.parse(await readFile(cursorFile, "utf8")).cursor, shown.at(-1).cursor,
       `${label}: recovery read or join advanced the saved cursor past delivery`);
   }
@@ -140,6 +143,22 @@ test("cli: join pages when its own DEFAULT batch is too large, and a smaller bat
   await omittedCase({ label: "few-large with prior", prior: true, rows: Array(20).fill(64 * 1024) });
   await omittedCase({ label: "few-large without prior", prior: false, prefix: Array(6).fill(256), rows: Array(20).fill(64 * 1024) });
   await omittedCase({ label: "multi-page omitted window", prior: true, rows: Array(20).fill(256 * 1024) });
+  await omittedCase({ label: "large-prefix small-tail with prior", prior: true,
+    rows: [...Array(20).fill(256 * 1024), ...Array(10).fill(256)], expectRecoveryShrink: true });
+  await omittedCase({ label: "large-prefix small-tail without prior", prior: false,
+    rows: [...Array(20).fill(256 * 1024), ...Array(10).fill(256)], expectRecoveryShrink: true });
+
+  {
+    const { service, fable } = await fixture(t);
+    const store = await service.openRoom(ROOM);
+    await appendSizes(store, Array(20).fill(64 * 1024), "default-read");
+    const read = await agora(["read", "nat", "--json"], fable);
+    assert.equal(read.code, 0, `default native read did not use the host-sized retry: ${read.stderr}`);
+    const returned = typed(read.stdout);
+    assert.ok(returned.length > 0 && returned.length < 20, "default native read did not shrink its oversized page");
+    assert.match(read.stderr, new RegExp(`requested 20 messages; the host fit and returned ${returned.length}`),
+      "default native read did not report its host-sized retry");
+  }
 
   /** @param {string} label @param {number[]} sizes */
   async function fittingCase(label, sizes) {
