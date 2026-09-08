@@ -594,7 +594,14 @@ export async function openRemoteSubscription(opts) {
         // the channel that just failed its probe — no dial, no recovery, and darkness only after
         // the budget runs out against a corpse.
         await room.dropClient?.(client);
-        if (!stopped) runReattach();
+        // RE-READ THE FENCE ON THE FAR SIDE OF THE AWAIT. `dropClient` closes the old socket, and
+        // that close can complete a healthy replacement through the existing close path while its
+        // teardown is still pending — so by the time this line runs, `client` may already be two
+        // generations old and `runReattach` would dial over a channel that is fine. Checking once
+        // at the top of the block fences the ENTRY, not the resumption: every await is a new place
+        // where the world moved, and this unit has now been held three times for that same shape
+        // at three different awaits (Bruno/reader, backroom :1586, :2062 and this one).
+        if (!stopped && current === client) runReattach();
       }
     } finally {
       probing = false;
