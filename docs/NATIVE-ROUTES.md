@@ -91,6 +91,29 @@ module generates neither kind of receipt and does not publish attachments itself
 
 ## Acceptance boundaries
 
+Direct transport requires a reachable UDP endpoint in both directions. On a
+network with multiple WANs, check the public source address and port of packets
+sent to the actual peer: a successful STUN query describes that query's path,
+which can differ from the peer's route or source-NAT mapping. Relay connectivity
+can remain healthy while those direct packets use an unreachable or unexpected
+public endpoint.
+
+In particular, a peer address inside a WAN interface's subnet can select that
+interface's connected route instead of the default Internet route. Check that
+source NAT on the selected path presents the public endpoint the peer learned
+through STUN; changing the default route alone need not change this path.
+
+Use the [paired direct-path gate](TRANSFERS.md) to require an observed direct IP
+endpoint and a clean ping exit. Preserve the actual path in the result: outbound
+discovery logs, NIC packets, router counters and a successful relay ping do not
+individually establish a completed direct exchange. This ping gate does not
+establish native admission, live subscription delivery or committed file bytes.
+
+The direct-path investigation used a
+[logging-only diagnostic fork](https://git.golden-vernier.ts.net/amoyer/tailcat/commit/1052fd684ce5bb1cc471e211c57e3aa535c348cc).
+The bundled runtime remains upstream `ce6fedcabc220bab3b94d470ab330219111eeae8`;
+the observed direct-path repair required network configuration, not that fork.
+
 Local fixtures exercise resource ownership and stream custody. They do not exhibit
 physical cross-seat transfer, DERP-only connectivity, simultaneous routes sharing a
 client key, authenticated P1 hello/admission, or filesystem immutability inside P1.
