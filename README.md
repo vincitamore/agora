@@ -169,8 +169,11 @@ agora service start --authority <a-64hex>
 
 Every file above is carried explicitly and never sourced from a room. Authority and challenge
 outputs are atomic no-clobber writes; `authority public` recovers the existing public handoff and
-never regenerates or exposes the private key. The authority id is selected once at service startup,
-so rotation requires a restart. This is a pinned-cooperative boundary, not protection from another
+never regenerates or exposes the private key. The authority id and verifier policy are selected once
+at service startup, so rotation requires a restart. After policy expiry, both `room-enroll` and
+`room-revoke` acts refuse; restore either route mutation by hand-carrying and enrolling a fresh
+public record, then restarting the service with that authority. This is a pinned-cooperative
+boundary, not protection from another
 process running as the same OS user. An enrollment challenge expires 120 seconds after issue. A
 route challenge lasts at most 120 seconds and expires sooner when its authority policy does. A late
 enrollment refuses `authority-possession-expired`. A retained route proof refuses
