@@ -253,6 +253,7 @@ test(`capture ${phase} failure preserves delivery and fresh-process coverage, co
     const evidence = path.join(dir, 'carry-evidence');
     await writeRecord(dir, { slug: 's1', source: 'AGORA_SESSION', explicit: true }, { bearer: mandate.bearer });
     const moved = evidence + '-held';
+    await mkdir(evidence);
     const block = async () => { await rename(evidence, moved); await writeFile(evidence, 'blocked'); };
     const restore = async () => { await unlink(evidence); await rename(moved, evidence); };
     const m = { id: 'required', cursor: '1', room: 'backroom', ts: mandate.issuedAt,
