@@ -30,6 +30,19 @@ import {
 import { TRANSPORTS, createTransport, tokenSource } from "../src/transports/index.mjs";
 import { asBoardSubject } from "../src/board-subject.mjs";
 import { watch } from "../src/watch.mjs";
+
+/** the watch ended because every attempt to hand a delivery to the task's bridge failed */
+const DELIVERY_EXHAUSTED = "delivery-exhausted";
+
+/**
+ * One line a person can paste into a POSIX shell: each argument that carries anything beyond the
+ * plain-word characters is single-quoted (an embedded quote closes, escapes and reopens). A display
+ * form only; the argv array beside it is the machine half.
+ * @param {string[]} argv
+ */
+function shellLine(argv) {
+  return argv.map((a) => (/^[A-Za-z0-9_@%+=:,.\/-]+$/.test(a) ? a : `'${a.replaceAll("'", "'\\''")}'`)).join(" ");
+}
 import {
   ageHours,
   appendPosted,
@@ -204,7 +217,7 @@ const SCHEMA = {
         "--digest <s>": "render each message as author, cursor, first 80 characters, one envelope per period; the tool never summarises what a message means. A room config key digest (seconds) enables it when the flag is omitted; never a per-transport default",
         "--files": "materialize Slack-hosted images into this session's media directory; metadata is always carried",
       },
-      does: "deliver new messages since this session's saved cursor and advance it after delivery, skipping what this session posted; exit 42 when something arrived, 0 when nothing did, in every mode; always ends with one watch-result line. On each poll, a session on this seat that has gone dark and that has state in this room is announced to the room once, by whichever watch notices first, one post for the whole sweep. On a native room the watch subscribes to the seat service and wakes on its events instead of polling, with the same lines, cursor and exit codes; a service that is absent, refuses the hello, or closes the socket ends the watch with exit 1 and reason service-dark on the watch-result line, never as a quiet room. A watch that ends for any transport reason first emits one watch-ended line addressed to its own bearer (reason, cursor, and the exact command to re-arm) and, under a Codex bridge, queues the same notice as one turn, attempted once; a watch that ends normally emits none",
+      does: "deliver new messages since this session's saved cursor and advance it after delivery, skipping what this session posted; exit 42 when something arrived, 0 when nothing did, in every mode; always ends with one watch-result line. On each poll, a session on this seat that has gone dark and that has state in this room is announced to the room once, by whichever watch notices first, one post for the whole sweep. On a native room the watch subscribes to the seat service and wakes on its events instead of polling, with the same lines, cursor and exit codes; a service that is absent, refuses the hello, or closes the socket ends the watch with exit 1 and reason service-dark on the watch-result line, never as a quiet room. A watch that ends for any transport reason, or because its delivery bridge is exhausted, first emits one watch-ended line addressed to its own bearer (reason, cursor, ts, pid, the re-arm command as an argv array and as a shell-quoted string) and, under a Codex bridge, queues the same notice as one turn, attempted once; a watch that ends normally emits none",
     },
     cursor: {
       args: ["<room>"],
@@ -1966,6 +1979,11 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       };
       /** @type {Awaited<ReturnType<typeof watch>> | undefined} */
       let result;
+      /** the bridge's last acknowledged delivery, so an exhausted bridge can still name its cursor */
+      let bridged = { cursor: /** @type {string | undefined} */ (undefined), count: 0 };
+      /** @type {unknown} */
+      let deliveryFailure;
+      const watchStartedAt = Date.now();
       /**
        * A native room is not polled: this process subscribes to the seat service from this session's
        * cursor and the service pushes each committed event. The predicate, the ledger, coalescing and
@@ -2169,19 +2187,38 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
             } else {
               for (const m of msgs) countedLog(human(decorate(m)) + "\n");
             }
-            if (codexQueue) await queueCodex(roomAlias, msgs, {
-              ...codexQueue,
-              onQueued: async ({ thread: codexTarget, cursor, message }) => {
-                await batch.checkpoint(message);
-                console.error(`agora: queued Codex thread ${codexTarget} delivery ${cursor}; cursor checkpointed`);
-              },
-            });
-            if (codexServer) await deliverCodexServer(roomAlias, msgs, {
-              ...codexServer,
-              onAccepted: async (message) => { await batch.checkpoint(message); },
-            });
+            try {
+              if (codexQueue) await queueCodex(roomAlias, msgs, {
+                ...codexQueue,
+                onQueued: async ({ thread: codexTarget, cursor, message }) => {
+                  await batch.checkpoint(message);
+                  bridged = { cursor: message.cursor, count: bridged.count + 1 };
+                  console.error(`agora: queued Codex thread ${codexTarget} delivery ${cursor}; cursor checkpointed`);
+                },
+              });
+              if (codexServer) await deliverCodexServer(roomAlias, msgs, {
+                ...codexServer,
+                onAccepted: async (message) => { await batch.checkpoint(message); bridged = { cursor: message.cursor, count: bridged.count + 1 }; },
+              });
+            } catch (e) {
+              // remembered so the end path can tell an exhausted bridge from any other throw
+              deliveryFailure = e;
+              throw e;
+            }
           },
         });
+      } catch (e) {
+        if (deliveryFailure === undefined || e !== deliveryFailure) throw e;
+        // The bridge is exhausted, not the transport: every attempt to hand a delivery to the task
+        // failed, and the throw used to leave the session with no watch-ended and no watch-result
+        // line at all, which is the silence this unit exists to end. Routed through the same end
+        // path as a dark transport: reason delivery-exhausted, cursor the last acknowledged one, so
+        // a re-arm replays the pending suffix. The exit code is unchanged (1).
+        console.error(`agora: ${redact(e instanceof Error ? e.message : String(e))}`);
+        result = {
+          fired: bridged.count > 0, cursor: bridged.cursor ?? seeded.cursor, polls: 0, skipped: 0, filtered: 0,
+          delivered: bridged.count, elapsedMs: Date.now() - watchStartedAt, following: 0, threads: {}, reason: DELIVERY_EXHAUSTED,
+        };
         await completeStandDownAck(result, sdir, key, generation);
       } finally {
         subscription?.close();
@@ -2196,19 +2233,26 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       if (!json && !result.fired && !result.reason) console.error(`nothing new after ${result.polls} poll${result.polls === 1 ? "" : "s"}${result.skipped ? ` (${result.skipped} of our own skipped)` : ""}${result.filtered ? ` (${result.filtered} not for us, still readable)` : ""}`);
       if (result.reason) console.error(`agora: ${result.reason}`);
       // A watch that ends for a TRANSPORT reason tells its own session so, once, before it goes:
-      // a dark service, a dropped member channel, a Codex task that is gone. Without this the seat
+      // a dark service, a dropped member channel, a Codex task that is gone, a delivery bridge that
+      // is exhausted (routed here by the catch above, never a bare throw). Without this the seat
       // learns it went deaf from a peer, hours later, because an exit code reaches nobody and the
       // result line reads as bookkeeping. One addressed line into the same delivery path the
       // watch's messages took: stdout (the harness monitor wakes on it, the tail script marks it)
       // and, under a Codex bridge, one queued turn. Attempted once; a failed final delivery is
       // logged and never retried, and the exit code is the transport's, unchanged. A watch that
       // ends normally (--once, --for, a stand-down) emits nothing here. It is a distinct type,
-      // never a fabricated message, so it cannot be mistaken for room content.
+      // never a fabricated message, so it cannot be mistaken for room content. The command travels
+      // as the argv ARRAY (re_arm_argv: re-exec it, nothing to parse) beside a shell-quoted display
+      // string (re_arm): a plain join loses quoting, and the seats this line is for arm with paths
+      // that carry spaces. ts and pid are on the object so a log that spans several arms can be
+      // read: the launchers' --status is for THIS arm's line, never an earlier one's.
       if (result.reason) {
-        const reArm = ["agora", ...process.argv.slice(2)].join(" ");
+        const reArmArgv = ["agora", ...process.argv.slice(2)];
+        const reArm = shellLine(reArmArgv);
         const ended = {
-          type: "watch-ended", alias: roomAlias, room: transport.room, session: session.slug, bearer: bearer.name,
-          to: [bearer.name], reason: result.reason, cursor: result.cursor ?? null, re_arm: reArm,
+          type: "watch-ended", ts: new Date().toISOString(), pid: process.pid,
+          alias: roomAlias, room: transport.room, session: session.slug, bearer: bearer.name,
+          to: [bearer.name], reason: result.reason, cursor: result.cursor ?? null, re_arm: reArm, re_arm_argv: reArmArgv,
         };
         if (json) console.log(JSON.stringify(ended));
         else console.error(`agora: watch on ${roomAlias} ended: ${result.reason}; re-arm with: ${reArm}`);

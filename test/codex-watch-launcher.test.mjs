@@ -318,3 +318,66 @@ appendFileSync(${JSON.stringify(queueCapture)}, JSON.stringify(process.argv.slic
   assert.equal(bridgeStopped.json.stopped, true);
   assert.equal(bridgeStopped.json.watcherPid, bridge.json.watcherPid);
 });
+
+test("Linux launcher: --status reports this arm's ending only, never an earlier arm's line from the appended log", {
+  skip: process.platform !== "linux" ? "the nohup/setsid path is Linux" : false,
+  timeout: 60_000,
+}, async (t) => {
+  const fixture = await tmp();
+  const helpers = path.join(fixture.dir, "runtime & helpers");
+  const state = path.join(fixture.dir, "state");
+  const codexHome = path.join(fixture.dir, "codex home");
+  const logs = path.join(fixture.dir, "logs");
+  const config = path.join(fixture.dir, "config.toml");
+  const codex = path.join(helpers, "fake codex");
+  const session = `twicetest-${process.pid}`;
+  const thread = `thread-${process.pid}`;
+  const room = "twice";
+  const actor = "Codex/twice";
+  const logPrefix = path.join(logs, "watch");
+  const environment = { ...process.env, CODEX_HOME: codexHome, CODEX_SESSION_ID: session, CODEX_THREAD_ID: thread };
+  await mkdir(helpers, { recursive: true });
+  await writeFile(config, "[rooms]\n");
+  await writeFile(codex, "#!/bin/sh\nexit 0\n");
+  await chmod(codex, 0o755);
+  // A fake runtime that arms, prints the line named by RUNTIME_LINE to stdout, lingers long enough
+  // for the launcher to see it alive, and exits: arm one ends "dark", arm two ends normally.
+  const runtime = path.join(helpers, "fake runtime");
+  await writeFile(runtime, `#!${process.execPath}
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import path from "node:path";
+const room = process.argv[4];
+const armed = path.join(process.env.AGORA_STATE, "sessions", \`codex-\${process.env.CODEX_SESSION_ID}\`, "armed", \`\${room}.json\`);
+mkdirSync(path.dirname(armed), { recursive: true });
+writeFileSync(armed, JSON.stringify({ room, pid: process.pid }, null, 2) + "\\n");
+process.stdout.write(process.env.RUNTIME_LINE + "\\n");
+setTimeout(() => { rmSync(armed, { force: true }); process.exit(1); }, 1500);
+`);
+  await chmod(runtime, 0o755);
+  const lifecycleArgs = ["--room", room, "--state", state];
+  const armArgs = [...lifecycleArgs, "--actor", actor, "--config", config, "--runtime", runtime, "--codex-bin", codex, "--log-prefix", logPrefix, "--thread-interval", "137"];
+  /** @param {string[]} args @param {Record<string, string>} extra */
+  const run = async (args, extra = {}) => {
+    const result = await runFile(launcher, args, { env: { ...environment, ...extra }, timeout: 20_000 });
+    return JSON.parse(result.stdout.trim());
+  };
+  t.after(async () => {
+    await runFile(launcher, [...lifecycleArgs, "--stop"], { env: environment, timeout: 10_000 }).catch(() => {});
+    await fixture.cleanup();
+  });
+  const dark = JSON.stringify({ type: "watch-ended", reason: "service-dark", re_arm: "agora watch twice", pid: 0 });
+  const one = await run(armArgs, { RUNTIME_LINE: dark });
+  await new Promise((r) => setTimeout(r, 2500));
+  const afterOne = await run([...lifecycleArgs, "--log-prefix", logPrefix, "--status"]);
+  assert.equal(afterOne.alive, false);
+  assert.equal(afterOne.ended?.reason, "service-dark", "arm one ended dark and --status says so");
+  const normal = JSON.stringify({ type: "watch-result", exit: 0 });
+  const two = await run(armArgs, { RUNTIME_LINE: normal });
+  assert.notEqual(two.watcherPid, one.watcherPid);
+  await new Promise((r) => setTimeout(r, 2500));
+  const afterTwo = await run([...lifecycleArgs, "--log-prefix", logPrefix, "--status"]);
+  assert.equal(afterTwo.alive, false);
+  assert.equal(afterTwo.ended, null, `arm two ended normally; a stale line from arm one must not be reported: ${JSON.stringify(afterTwo.ended)}`);
+  const log = await readFile(`${logPrefix}.stdout.log`, "utf8");
+  assert.doesNotMatch(log, /service-dark/, "the log was truncated at the second arm");
+});

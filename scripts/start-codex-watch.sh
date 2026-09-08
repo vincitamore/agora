@@ -199,6 +199,12 @@ if [ "$worker" != true ] && [ "$alive" = false ] && [ -f "$armed_path" ]; then
   # Do not let the spawn loop mistake a dead record for the watcher being started now.
   rm -f -- "$armed_path"
 fi
+if [ "$worker" != true ]; then
+  # A new arm starts a new stdout log. --status returns the last watch-ended line once the pid is
+  # gone, and with an appended log that line could be an EARLIER arm's ending, handed to a task
+  # whose current watch ended normally or was stopped on purpose.
+  mkdir -p -- "$(dirname -- "$log_prefix")" && : >"$log_prefix.stdout.log"
+fi
 
 resolve_runtime() {
   if [ -n "$runtime_path" ]; then

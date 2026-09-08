@@ -23,7 +23,7 @@ function agora(args, env) {
     let stderr = "";
     child.stdout.on("data", (d) => { stdout += d; });
     child.stderr.on("data", (d) => { stderr += d; });
-    child.on("close", (code) => resolve({ code, stdout, stderr }));
+    child.on("close", (code) => resolve({ code, stdout, stderr, pid: child.pid }));
   });
 }
 
@@ -150,4 +150,79 @@ test("a final delivery that fails is logged once and does not change the exit co
   const result = typed(r.stdout).at(-1);
   assert.equal(result.type, "watch-result");
   assert.equal(result.exit, 1);
+});
+
+test("the re-arm command travels as an argv array beside a shell-quoted display string, with ts and pid", {
+  skip: process.platform === "win32" ? "the fake Codex binary is a POSIX executable script" : false,
+}, async () => {
+  const { dir, env } = await seat();
+  // The seats this line is for arm with paths that carry spaces; a join would split them.
+  const spaced = path.join(dir, "Program Files", "fake codex");
+  await mkdir(path.dirname(spaced), { recursive: true });
+  await writeFile(spaced, "#!/bin/sh\nexit 0\n");
+  await chmod(spaced, 0o755);
+  const codexHome = path.join(dir, "codex-home");
+  const thread = "ended-thread-000003";
+  const sessions = path.join(codexHome, "sessions", "2026", "09", "07");
+  await mkdir(sessions, { recursive: true });
+  await writeFile(path.join(sessions, `rollout-2026-09-07T00-00-00-${thread}.jsonl`), "");
+  const args = ["watch", "nat", "--once", "--json", "--codex-queue", "--codex-bin", spaced, "--codex-thread", thread];
+  const r = await agora(args, { ...env, CODEX_HOME: codexHome });
+  assert.equal(r.code, 1, r.stderr);
+  const ended = typed(r.stdout).find((l) => l.type === "watch-ended");
+  assert.ok(ended, `no watch-ended line in ${r.stdout}`);
+  assert.deepEqual(ended.re_arm_argv, ["agora", ...args], "the array reproduces the watch, spaces and all");
+  assert.equal(ended.re_arm, `agora watch nat --once --json --codex-queue --codex-bin '${spaced}' --codex-thread ${thread}`);
+  assert.equal(ended.pid, r.pid, "pid is the watch process, so a log spanning arms can be read");
+  assert.ok(!Number.isNaN(Date.parse(ended.ts)), `ts is a timestamp: ${ended.ts}`);
+});
+
+test("an exhausted delivery bridge ends the watch through the same path: one watch-ended line, reason delivery-exhausted, then the result line, exit 1", {
+  skip: process.platform === "win32" ? "the fake Codex binary is a POSIX executable script" : process.platform === "darwin" ? "holds the writer lock with flock" : false,
+}, async () => {
+  const { dir, env } = await seat();
+  // A room with one message from a peer waiting, a live-looking task, and a bridge that always fails.
+  const post = await agora(["post", "down", "hello from a peer"], { ...env, AGORA_SESSION: "peer", AGORA_ACTOR: "Peer/one" });
+  assert.equal(post.code, 0, post.stderr);
+  const record = path.join(dir, "codex-calls.log");
+  const fake = path.join(dir, "codex");
+  await writeFile(fake, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(record)}\nexit 3\n`);
+  await chmod(fake, 0o755);
+  const codexHome = path.join(dir, "codex-home");
+  const thread = "ended-thread-000004";
+  const sessions = path.join(codexHome, "sessions", "2026", "09", "07");
+  await mkdir(sessions, { recursive: true });
+  await writeFile(path.join(sessions, `rollout-2026-09-07T00-00-00-${thread}.jsonl`), "");
+  // a live task holds its writer lock with flock; the local room is polled, so the guard runs first
+  const locks = path.join(codexHome, "thread-writer-locks");
+  await mkdir(locks, { recursive: true });
+  const lock = path.join(locks, `${thread}.lock`);
+  await writeFile(lock, "");
+  const holder = spawn("flock", ["-x", lock, "sleep", "120"], { stdio: "ignore" });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  let r;
+  try {
+    r = await agora(["watch", "down", "--once", "--json", "--codex-queue", "--codex-bin", fake, "--codex-thread", thread],
+      { ...env, CODEX_HOME: codexHome });
+  } finally {
+    holder.kill("SIGKILL");
+  }
+  assert.equal(r.code, 1, r.stderr);
+  const lines = typed(r.stdout);
+  const ended = lines.find((l) => l.type === "watch-ended");
+  assert.ok(ended, `no watch-ended line in ${r.stdout}`);
+  assert.equal(ended.reason, "delivery-exhausted");
+  assert.equal(ended.cursor, null, "nothing was acknowledged, so a re-arm replays from the start");
+  const result = lines.at(-1);
+  assert.equal(result.type, "watch-result");
+  assert.equal(result.reason, "delivery-exhausted");
+  assert.equal(result.exit, 1);
+  assert.equal(result.delivered, 0);
+  // the message's attempts, then exactly one more for the notice
+  const calls = await readFile(record, "utf8");
+  const queued = calls.split("\n").filter((l) => l.startsWith("queue --thread"));
+  assert.ok(queued.length >= 2, `attempts: ${JSON.stringify(queued)}`);
+  assert.match(calls, /WATCH ENDED on down: delivery-exhausted/);
+  assert.match(r.stderr, /could not queue delivery down\/1 into Codex task/);
+  assert.match(r.stderr, /watch-ended notice was not delivered/);
 });

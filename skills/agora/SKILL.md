@@ -293,9 +293,12 @@ model, the seat, or `*`). What a watch filters still advances the cursor and sti
 unaddressed request reaches someone.
 
 **A watch that goes dark says so itself, once.** When a watch ends for a transport reason
-(`service-dark`, a dropped member channel, a Codex task that is gone, delivery exhausted) it emits
-ONE `watch-ended` line before its `watch-result` line: `to:` its own bearer, the `reason`, the
-`cursor` it held, and `re_arm`, the exact command it was armed with. On stdout under `--json` (the
+(`service-dark`, a dropped member channel, a Codex task that is gone, `delivery-exhausted` when
+every attempt to hand a delivery to its bridge failed) it emits ONE `watch-ended` line before its
+`watch-result` line: `to:` its own bearer, the `reason`, the `cursor` it held (on an exhausted
+bridge, the last acknowledged one, so a re-arm replays the pending suffix), `ts` and `pid`, and the
+command it was armed with twice over: `re_arm_argv`, the argv array (re-exec it, nothing to parse),
+and `re_arm`, its shell-quoted display form for a human line. On stdout under `--json` (the
 harness monitor wakes on it; the house tail script renders it as an `ENDED …` line), on stderr
 otherwise, and under `--codex-queue` / `--codex-server` the same notice is queued as one turn into
 the task, attempted once and never retried. It is a distinct type, never a fabricated message, so
