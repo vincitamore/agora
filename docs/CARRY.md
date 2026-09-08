@@ -79,6 +79,12 @@ actions, not proof that a model comprehended them:
 }
 ```
 
+Withdrawing a named answer reopens its delivery obligation; a replacement named
+answer is required. Withdrawing a release reopens its claim obligation. Both
+the original effect and its withdrawal remain in evidence, and the retractions
+must be accounted for even after a replacement. Withdrawals target claims,
+releases and answers, not other withdrawals; reinstatement uses a new post.
+
 Kinds currently accepted are role, unit, claim, retraction and cursor. Claim and
 retraction IDs are evidence-event IDs, not free prose. Every row needs a nonempty
 exhibit. The account cannot discharge a delivery: that requires a successful

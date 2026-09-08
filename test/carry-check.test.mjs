@@ -301,6 +301,49 @@ test('only a successful named own post discharges a durable delivery; unrelated 
   } finally { await t.cleanup(); }
 });
 
+for (const kind of ['answer', 'release']) test(`captured ${kind} withdrawal reopens its obligation until replacement`, async () => {
+  const t = await tmp();
+  try {
+    const { actual, boundary } = fixture();
+    if (kind === 'answer') actual.evidence = actual.evidence.filter(e => e.kind !== 'answer');
+    else actual.accounted = actual.accounted.filter(a => a.kind !== 'claim');
+    for (const event of actual.evidence) await appendCarryEvent(t.dir, event);
+    const refresh = async () => { actual.evidence = (await readCarryEvidence(t.dir)).events; };
+    const post = async (/** @type {string} */ trailer, /** @type {string} */ id) => {
+      await captureCarryPost(t.dir, 'backroom', actual.session, mandate.bearer,
+        `Update\n\n${trailer}\n\n-- ${mandate.bearer}`, { id, cursor: id });
+      await refresh();
+    };
+    const accountRetractions = () => {
+      for (const e of actual.evidence.filter(e => ['release', 'withdrawal'].includes(e.kind)))
+        actual.accounted.push({ kind: 'retraction', id: e.id, exhibit: 'read:' + e.ref.id });
+    };
+    const failure = kind === 'answer' ? 'delivery-unanswered' : 'claim-unaccounted';
+    assert.ok(checkCarryBoundary(boundary, actual).issues.some(i => i.code === failure));
+    const trailer = kind === 'answer' ? 're: m1' : 'release: C1-BUILD';
+    await post(trailer, 'original');
+    accountRetractions();
+    assert.equal(checkCarryBoundary(boundary, actual).ok, true, 'live effect');
+    const original = actual.evidence.find(e => e.kind === kind && e.ref.id === 'original');
+    assert.ok(original);
+    await post('withdraws: original', 'withdrawn');
+    assert.ok(actual.evidence.some(e => e.kind === 'withdrawal' && e.targets.includes(original.id)), 'withdrawal retained');
+    assert.ok(checkCarryBoundary(boundary, actual).issues.some(i => i.code === 'retraction-unaccounted'));
+    accountRetractions();
+    assert.deepEqual(checkCarryBoundary(boundary, actual).issues.map(i => i.code), [failure], 'withdrawn effect earns no credit');
+    const mandatePath = path.join(t.dir, 'mandate.json');
+    await writeFile(mandatePath, JSON.stringify(mandate));
+    const sealed = await sealCarryBoundary(t.dir, path.join(t.dir, 'boundary.json'), {
+      session: actual.session, bearer: mandate.bearer, mandatePath, cursors: boundary.cursors });
+    assert.ok((kind === 'answer' ? sealed.deliveries : sealed.claims).some(e => e.eventId === (kind === 'answer' ? 'd1' : 'claim1')),
+      'a fresh boundary also retains the reopened obligation');
+    await post(trailer, 'replacement');
+    accountRetractions();
+    assert.equal(checkCarryBoundary(boundary, actual).ok, true, 'replacement effect');
+    assert.ok(actual.evidence.some(e => e.id === original.id), 'history is not deleted');
+  } finally { await t.cleanup(); }
+});
+
 test('cursor movement leaves a durable gap even if a later snapshot or account lists the new cursor', async () => {
   const t = await tmp();
   try {
