@@ -5,6 +5,7 @@ if(process.versions.bun){const result=spawnSync('node',[fileURLToPath(import.met
 import { parseArgs } from 'node:util';
 import { isIP } from 'node:net';
 import { createHash } from 'node:crypto';
+import { redactTailcatDiagnostics } from '../src/tailcat-diagnostics.mjs';
 import assert from 'node:assert/strict';
 import {mkdtemp,realpath,mkdir,writeFile,readFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';import path from 'node:path';import {setTimeout as delay}from'node:timers/promises';
@@ -38,7 +39,14 @@ if (options.direct) {
   `--timeout=${timeout}ms`, address], {
   encoding: 'utf8', windowsHide: true, timeout: timeout + 5000, maxBuffer: 8 * 1024 * 1024,
  });
- const pongs = (child.stdout ?? '').split(/\r?\n/).filter(line => /^pong in .+ via .+$/.test(line));
+ const privateValues = [address, keyPath, options['key-file']];
+ const safeStdout = redactTailcatDiagnostics(child.stdout ?? '', privateValues);
+ const safeStderr = Buffer.from(redactTailcatDiagnostics(child.stderr ?? '', privateValues));
+ // Redact the entire captured buffer first: cutting a token can remove its identifying prefix.
+ let tailStart = Math.max(0, safeStderr.length - 2048);
+ while (tailStart < safeStderr.length && (safeStderr[tailStart] & 0xc0) === 0x80) tailStart++;
+ const stderr = safeStderr.subarray(tailStart).toString('utf8');
+ const pongs = safeStdout.split(/\r?\n/).filter(line => /^pong in .+ via .+$/.test(line));
  const directEndpoint = pongs.map(line => line.slice(line.lastIndexOf(' via ') + 5)).find(endpoint => {
   const match = /^(?:\[([^\]]+)\]|([^:]+)):(\d+)$/.exec(endpoint);
   return match && isIP(match[1] ?? match[2]) && Number(match[3]) > 0 && Number(match[3]) <= 65535;
@@ -48,7 +56,7 @@ if (options.direct) {
  console.log(JSON.stringify({ pass, binarySha256: createHash('sha256').update(await readFile(binary)).digest('hex'),
   started: new Date(started).toISOString(), elapsedMs: Date.now() - started,
   exit: child.status, signal: child.signal, error: child.error?.code ?? null,
-  directEndpoint, pongs, stderr: child.stderr ?? '' }));
+  directEndpoint, pongs, stderr }));
  process.exit(pass ? 0 : 1);
 }
 if (options.binary || options['address-file'] || options['key-file']) {

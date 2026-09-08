@@ -134,8 +134,10 @@ The gate prints a JSON record with the binary hash, start time, elapsed time,
 pongs, direct endpoint and child exit status. It exits 0 only when the child
 reports a direct IP endpoint **and exits 0**. Relay pongs alone fail this gate;
 they can still demonstrate working relay transport. The outer process bound is
-the requested timeout plus five seconds. The address and private key are not
-printed. For a paired capture, stamp the client start and retain both machines'
+the requested timeout plus five seconds. Child output is redacted for the exact
+address token, supplied/resolved key paths and recognized credential shapes.
+Redaction precedes truncation; the emitted stderr tail is at most 2048 UTF-8 bytes.
+The gate does not read the private key's contents. For a paired capture, stamp the client start and retain both machines'
 logs; a local-machine pass does not establish traversal across two routers.
 
 Runtime upgrades use the manual `vendor-tailcat` workflow only. Normal PR CI never
