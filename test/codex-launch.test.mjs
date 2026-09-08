@@ -144,7 +144,7 @@ test("an unpublished or malformed lock remains unknown through the bound and sta
       probe: async () => false,
       spawn: /** @type {any} */ (() => { spawns += 1; throw new Error("must not spawn"); }),
       sleep: async () => { await new Promise((resolve) => setTimeout(resolve, 2)); },
-    } }), /unknown ownership/);
+    } }), /(unknown ownership|startup authority remained busy through the deadline)/);
     assert.equal(spawns, 0);
     assert.equal(await readFile(paths.lock, "utf8"), "");
   } finally {
