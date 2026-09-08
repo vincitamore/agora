@@ -2,6 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { promisify } from "node:util";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -80,6 +81,30 @@ async function fixture(t) {
   const sol = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "sol", AGORA_ACTOR: "Sol/codex" };
   return { root, service, fable, sol, cursorFile: path.join(root, "sessions", "fable", "nat.cursor"), armedFile: path.join(root, "sessions", "fable", "armed", "nat.json") };
 }
+
+test("cli: join asks for the batch it prints, so a room too large for one frame still joins", { timeout: 60000 }, async (t) => {
+  const { service, fable } = await fixture(t);
+  // THE WIRE, not the ends. The service honouring a limit and join slicing for display were both
+  // already covered, and reverting the line that PASSES the limit left every one of those green —
+  // measured, on this cell's first draft. So the assertion has to be the CLI verb succeeding on a
+  // room whose unbounded read cannot cross one protocol frame.
+  const store = await service.openRoom(ROOM);
+  let bytes = 0;
+  for (let n = 0; bytes <= 1024 * 1024; n += 1) {
+    const size = 4 * 1024 + n * 3 * 1024;
+    await store.append({ operationId: randomUUID().replaceAll("-", ""), authorName: "filler", text: "x".repeat(size) },
+      { accountId: ACCOUNT });
+    bytes += size;
+  }
+
+  const joined = await agora(["join", "nat", "--as", "Opus/e2c"], fable);
+  assert.equal(joined.code, 0, `join failed on a busy room: ${joined.stderr}`);
+  assert.match(joined.stderr, /cursor set to/, "join did not set a cursor");
+
+  // and cursor --now, which reads only to learn the newest position and refused for the same reason
+  const now = await agora(["cursor", "nat", "--now"], fable);
+  assert.equal(now.code, 0, `cursor --now failed on a busy room: ${now.stderr}`);
+});
 
 test("cli: a watch on a native room rides the seat service and prints the poller's lines", { timeout: 60000 }, async (t) => {
   const { fable, sol, cursorFile } = await fixture(t);
