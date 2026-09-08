@@ -53,7 +53,7 @@ The boundary schema is validated in `src/carry-check.mjs`:
 
 | Field | Why it changes the successor's next action | Admission/discriminator |
 | --- | --- | --- |
-| `version`, `id`, `createdAt` | Select the format and identify this boundary rather than a previous recovery. | Wrong version refuses; an account must name this boundary. |
+| `version`, `id` | Select the format and identify this boundary rather than a previous recovery. | Wrong version refuses; an account must name this boundary. |
 | `session.slug`, `session.source` | Recover the session key and its provenance, not a new default directory. | Wrong key or source refuses; default source is missing provenance. |
 | `bearer` | Match this session's actual registration. | Other or absent registration refuses. |
 | `mandatePath`, `mandateDigest` | Locate role and assigned units and detect a changed mandate. | Unreadable source and changed digest refuse. |
