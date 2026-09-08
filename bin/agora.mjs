@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // @ts-check
 import { tailcatDoctor } from "../src/tailcat-runtime.mjs";
+import { captureCarryPost, checkCarryFiles, sealCarryBoundary } from "../src/carry-check.mjs";
 import { decodeTransfer, encodeTransfer, localTransferIdentity, requireAuthenticatedTransport, trustTransferPeer } from "../src/tailcat.mjs";
 import { shareFiles, fetchFiles, listOffers, stopOffer, resumeOffer, forgetOffer, pruneOffers } from "../src/tailcat-offers.mjs";
 import { parseArgs } from "node:util";
@@ -26,6 +27,7 @@ import {
   sign,
   stateDir,
   writeCursor,
+  readCursorFile,
 } from "../src/core.mjs";
 import { TRANSPORTS, createTransport, tokenSource } from "../src/transports/index.mjs";
 import { asBoardSubject } from "../src/board-subject.mjs";
@@ -235,6 +237,11 @@ const SCHEMA = {
     carry: {
       args: ["<room>"],
       options: {
+        "--check": "check a separately saved version-1 boundary against this session's registration, mandate, cursors and durable evidence; exit 1 naming all unaccounted items, not a fresh room fold",
+        "--boundary <file>": "the pre-boundary expectation envelope consumed by --check",
+        "--account <file>": "version-1 explicit role/unit/claim/retraction/cursor account, bound to this boundary and resumed session",
+        "--seal": "save an independent version-1 boundary to --boundary (no clobber); missing historical coverage stays a gap",
+        "--mandate <file>": "assigner-authored version-1 mandate selected at --seal and pinned by digest",
         "--limit <n>": "how many recent messages to fold this session's own posts out of (default 200)",
         "--no-threads": "read the room alone. The room's live threads are folded into the window by default, as `read --threads` does, because on a transport whose room read omits replies a release posted in a thread would leave the claim it closed standing in the envelope; this buys one read back and accepts that",
       },
@@ -367,6 +374,11 @@ const OPTIONS = /** @type {const} */ ({
   split: { type: "boolean", default: false },
   "no-sign": { type: "boolean", default: false },
   "no-threads": { type: "boolean", default: false },
+  check: { type: "boolean", default: false },
+  boundary: { type: "string" },
+  account: { type: "string" },
+  seal: { type: "boolean", default: false },
+  mandate: { type: "string" },
   fyi: { type: "boolean", default: false },
   follow: { type: "boolean", default: false },
   "thread-interval": { type: "string" },
@@ -1713,6 +1725,26 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       return EXIT.ok;
     }
     case "carry": {
+      if (values.seal) {
+        if (values.check || !values.boundary || !values.mandate || values.account)
+          throw new AgoraError('carry --seal needs --boundary <new-file> --mandate <file>, without --check/--account', EXIT.usage);
+        const scope = await sessionScope(sdir);
+        const cursors = await Promise.all(scope.rooms.map(async key => ({ key, cursor: (await readCursorFile(sdir, key)).cursor ?? null })));
+        const result = await sealCarryBoundary(sdir, path.resolve(values.boundary), { session, bearer: bearer.name,
+          mandatePath: path.resolve(values.mandate), cursors });
+        console.log(JSON.stringify({ type: 'carry-boundary', ...result }));
+        return EXIT.ok;
+      }
+      if (values.check) {
+        if (!values.boundary) throw new AgoraError('carry --check needs --boundary <file>', EXIT.usage);
+        const result = await checkCarryFiles(sdir, path.resolve(values.boundary), {
+          session, registeredBearer: record?.bearer ?? null, accountFile: values.account && path.resolve(values.account),
+        });
+        console.log(json ? JSON.stringify(result) : result.ok ? `carry check ${result.boundary}: ready`
+          : result.issues.map(i => `${i.code}: ${i.item}`).join('\n'));
+        return result.ok ? EXIT.ok : 1;
+      }
+      if (values.boundary || values.account || values.mandate) throw new AgoraError('--boundary/--account/--mandate require carry --check or --seal', EXIT.usage);
       // Nothing here is written. The positions, follow set and armed registrations are read off the
       // files that already exist, and the room is read once with no cursor, which moves nothing.
       const limit = positive(values.limit, "limit") ?? 200;
@@ -1901,6 +1933,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       try {
         for (const piece of pieces) {
           last = await transport.post(payload(piece), { thread, ...(wireChoice === undefined ? {} : { face: wireChoice }) });
+          await captureCarryPost(sdir, roomAlias, session, bearer.name, payload(piece), last);
           await appendPosted(sdir, last.id);
           ids.push(last.id);
         }
