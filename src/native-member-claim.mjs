@@ -24,8 +24,7 @@
  * a live `resident` reads as already running, pid N. If the resident should outrank a transient
  * gate, that is a rule about which kind may break a claim and it belongs in this file.
  */
-import { open, readFile, rm } from "node:fs/promises";
-import { mkdir, realpath } from "node:fs/promises";
+import { mkdir, open, readFile, realpath, rm } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { AgoraError } from "./core.mjs";
@@ -175,8 +174,60 @@ export async function takeKeyClaim(input, deps = {}) {
         `${claimPath} is not a readable claim; it is not cleared automatically, because an unreadable claim may still belong to a live process`);
     if (claimAlive(held, deps))
       throw claimRefusal("member-key-claim-held", `the enrolled key is held by ${holderDetail(held)}; this process spawns nothing`);
-    // Proven stale: the holder's pid is gone, or the claim predates this boot. Only now.
-    await rm(claimPath, { force: true }).catch(() => {});
+
+    // Proven stale. RECLAIMING IS ITSELF AN OWNERSHIP OPERATION, and read-decide-unlink-create is
+    // not one: between one contender's decision and its unlink, another can clear the same stale
+    // claim and create its own, and the first contender's `rm` then deletes that NEW claim before
+    // creating a second. Two live holders with valid generations. Measured with real process
+    // concurrency: 8 contenders against one stale claim admitted 2 holders on 2 of 8 trials.
+    // In-process it never reproduces — the event loop walks all eight through the same await
+    // points in lockstep — so a same-process cell for this is one that cannot fail.
+    //
+    // `rename` is NOT the fix, though it looks like one. POSIX rename(2) atomically REPLACES an
+    // existing destination and returns success, so "exactly one renamer succeeds" is false there
+    // and true on Windows; and worse, a late reclaimer renaming the claim path moves a legitimate
+    // successor's LIVE claim out of it just as an unlink would delete it. The read-then-act window
+    // simply reappears in the operation chosen to close it. (Opus/architect, backroom 1788839977.)
+    //
+    // So winner selection rests ENTIRELY on the O_EXCL create, which genuinely admits exactly one,
+    // and the only process permitted to remove anything is the one holding a second O_EXCL lock:
+    //
+    //   * every deletion happens under `<claim>.reclaim`, itself taken with `wx`;
+    //   * under that lock the claim is RE-READ, and it is removed only if it is still the same
+    //     generation and still dead — a successor's claim has a different generation and aborts it;
+    //   * a claim can only appear while the path is empty, which can only follow a removal, which
+    //     requires this lock. So while the lock is held the state cannot change underneath it, and
+    //     the re-read is authoritative rather than a guess.
+    //
+    // Residual, stated rather than hidden: a reclaimer that dies holding the lock leaves it behind.
+    // It is cleared only when its own pid is dead and its boot epoch matches, and two clearers
+    // racing that window could both proceed — bounded to a crash mid-reclaim, and far narrower
+    // than the defect it replaces. A portable atomic compare-and-delete would close it outright;
+    // node:fs has none (`renameat2`/`RENAME_NOREPLACE` is Linux-only).
+    const lockPath = `${claimPath}.reclaim`;
+    /** @type {import("node:fs/promises").FileHandle | undefined} */
+    let lock;
+    try {
+      lock = await open(lockPath, "wx", 0o600);
+      await lock.writeFile(`${JSON.stringify({ pid: process.pid, bootEpoch: deps.boot ?? bootEpoch() })}\n`, "utf8");
+    } catch (error) {
+      if (/** @type {NodeJS.ErrnoException} */ (error).code !== "EEXIST") throw error;
+      // Someone else is reclaiming, or a reclaimer died holding it.
+      const owner = safeParse(await readFile(lockPath, "utf8").catch(() => ""));
+      const dead = owner && typeof owner === "object"
+        && !claimAlive(/** @type {any} */ ({ ...owner, kind: "resident", keyDigest: input.keyDigest, generation: "x" }), deps);
+      if (dead) await rm(lockPath, { force: true }).catch(() => {});
+      continue;
+    }
+    try {
+      const current = parseClaim(safeParse(await readFile(claimPath, "utf8").catch(() => "")));
+      // Still the record we judged, and still dead? Only then may it go.
+      if (current && current.generation === held.generation && !claimAlive(current, deps))
+        await rm(claimPath, { force: true });
+    } finally {
+      await lock.close().catch(() => {});
+      await rm(lockPath, { force: true }).catch(() => {});
+    }
   }
   throw claimRefusal("member-key-claim-contended",
     `the enrolled key's claim was cleared as stale and re-taken by another process ${CLAIM_ATTEMPTS} times`);

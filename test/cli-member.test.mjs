@@ -53,7 +53,9 @@ test("a complete argument list REACHES config, so the refusals above prove an or
   // cell above while proving nothing about when config is loaded.
   const result = await agora(["member", "start", "house-remote"]);
   assert.equal(result.code, 1);
-  assert.match(result.stderr, /no config at \/nonexistent\/agora\.json/);
+  // Separator-agnostic: Windows renders the same path as C:\nonexistent\agora.json, and a POSIX
+  // regex here fails on the runner while passing on every developer machine.
+  assert.match(result.stderr, /no config at .*agora\.json/);
 });
 
 test("the verb is declared where the schema and the help both read it", async () => {
