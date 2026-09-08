@@ -140,7 +140,8 @@ export async function connectCodexServer(options) {
  * @param {{endpoint:string,tokenFile:string,thread:string,timeoutMs?:number,socket?:SocketFactory,
  * processedTimeoutMs?:number,
  * onAccepted?:(message:import('./core.mjs').Message)=>Promise<void>,
- * onProcessed?:(receipt:{id:string,outcome:'completed'|'cancelled'|'failed'|'closed-without-completion'})=>Promise<void>}} options
+ * onProcessed?:(receipt:{id:string,outcome:'completed'|'cancelled'|'failed'|'closed-without-completion'})=>Promise<void>,
+ * onTurnStarted?:(message:import('./core.mjs').Message, ack:{turnId:string})=>Promise<void>}} options
  */
 export async function deliverCodexServer(room, messages, options) {
   if (!/^[A-Za-z0-9-]{8,128}$/.test(options.thread)) throw new AgoraError("invalid Codex thread id", EXIT.usage);
@@ -158,6 +159,12 @@ export async function deliverCodexServer(room, messages, options) {
       });
       if (typeof result?.turn?.id !== "string" || !result.turn.id)
         throw new AgoraError("invalid Codex turn acknowledgment; delivery outcome unknown", EXIT.error);
+      // The ACCEPTANCE mark, and the only moment it is true: the server acknowledged the turn and has
+      // not yet finished it. It fires here rather than beside onAccepted below because that one runs
+      // after the terminal outcome and only on completion, so it can never report a turn in flight --
+      // and a record that cannot show accepted-but-not-processed cannot tell a running turn from a
+      // dead one. A throw above this line means no acknowledgment ever existed, so no mark is written.
+      for (const message of batch.messages) await options.onTurnStarted?.(message, { turnId: result.turn.id });
       const terminal = await client.waitForTurn(result.turn.id, options.processedTimeoutMs ?? 30 * 60_000);
       for (const message of batch.messages) {
         const receipt = /** @type {{id:string,outcome:'completed'|'cancelled'|'failed'|'closed-without-completion'}} */ ({ id: message.id, outcome: terminal.outcome });

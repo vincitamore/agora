@@ -1,7 +1,7 @@
 // @ts-check
 import { execFile, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -309,9 +309,26 @@ export async function queueCodex(room, messages, opts = {}) {
   }
 }
 
-/** Where a thread's accepted-delivery records live. One file per thread, under the seat's state. */
+/**
+ * Where a thread's delivery marks live: an append-only JOURNAL, one line per mark, under the seat's
+ * state.
+ *
+ * It is a journal rather than a document because the normal launcher shape arms several watch
+ * processes against one thread and one state root. A read-modify-write of a whole file lets two of
+ * them read the same rows, append different ones, and overwrite each other -- and the mark that
+ * disappears is an ACCEPTANCE, so the record ends up reporting a delivery nobody attempted. It is
+ * also worse than loss in practice: a reader that arrives mid-write parses a truncated file and
+ * THROWS, inside the watch's delivery path. One line, one append, no read first.
+ */
 const intentsPath = (/** @type {string} */ root, /** @type {string} */ thread) =>
-  path.join(root, "codex", `${thread}.intents.json`);
+  path.join(root, "codex", `${thread}.intents.jsonl`);
+
+/** @param {string} root @param {string} thread @param {Record<string, unknown>} mark */
+async function appendCodexMark(root, thread, mark) {
+  const file = intentsPath(root, thread);
+  await mkdir(path.dirname(file), { recursive: true });
+  await appendFile(file, `${JSON.stringify(mark)}\n`, "utf8");
+}
 
 /**
  * Every delivery this bridge has accepted for a thread, oldest first.
@@ -320,12 +337,18 @@ const intentsPath = (/** @type {string} */ root, /** @type {string} */ thread) =
  * observable here. Reading it is how a re-arm distinguishes a delivery that is in flight from one
  * that was never sent -- a distinction the cursor alone cannot carry, because the cursor is written
  * after acceptance and a death between the two leaves it behind.
+ * The queue path writes `acceptedAt` alone; the native server path writes `intentAt`, then
+ * `acceptedAt` with its `turnId`, then `outcome` and `processedAt`. Every mark is optional because
+ * a row is read at every stage of its life, including the stage where almost nothing is known yet.
  * @param {string} root @param {string} thread
- * @returns {Promise<{ id: string, cursor: string, room: string, acceptedAt: string,
- *   processedAt?: string | null, resolution?: string }[]>}
+ * @returns {Promise<{ id: string, cursor: string, room: string, acceptedAt?: string | null,
+ *   intentAt?: string | null, turnId?: string, processedAt?: string | null,
+ *   outcome?: 'completed'|'cancelled'|'failed'|'closed-without-completion',
+ *   resolution?: string }[]>}
  */
 export async function readCodexIntents(root, thread) {
-  try { return JSON.parse(await readFile(intentsPath(root, thread), "utf8")); }
+  let raw;
+  try { raw = await readFile(intentsPath(root, thread), "utf8"); }
   catch (error) {
     // A missing file is an empty history. Anything else is a real read failure and must not be
     // laundered into "nothing was ever accepted", which is the shape that turns a broken disk into
@@ -333,48 +356,115 @@ export async function readCodexIntents(root, thread) {
     if (/** @type {NodeJS.ErrnoException} */ (error)?.code === "ENOENT") return [];
     throw error;
   }
+  // Project the journal: fold each mark onto its row, in recorded order. First appearance fixes a
+  // row's position, which is what the longest-completed-prefix advance reads.
+  /** @type {Map<string, any>} */
+  const rows = new Map();
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    let mark;
+    // A corrupt line fails loudly for the same reason a read error does: skipping it would turn a
+    // damaged journal into a shorter history that looks complete.
+    try { mark = JSON.parse(line); }
+    catch { throw new AgoraError(`Codex delivery journal for thread ${thread} has an unreadable line`, EXIT.error); }
+    const row = rows.get(mark.id) ?? { id: mark.id, cursor: mark.cursor, room: mark.room, processedAt: null };
+    for (const [key, value] of Object.entries(mark)) {
+      if (key === "type" || value === undefined) continue;
+      // An earlier mark of the same kind wins: a replayed submission must not move the original
+      // intent's clock, and a re-acknowledged turn must not restate its acceptance time.
+      if ((key === "intentAt" || key === "acceptedAt") && row[key]) continue;
+      row[key] = value;
+    }
+    rows.set(mark.id, row);
+  }
+  return [...rows.values()];
 }
 
 /** @param {string} root @param {string} thread @param {import('./core.mjs').Message} message */
 async function recordCodexIntent(root, thread, message) {
-  const file = intentsPath(root, thread);
-  await mkdir(path.dirname(file), { recursive: true });
-  const intents = await readCodexIntents(root, thread);
   // Idempotent by message id: a retried delivery of the same id is the same acceptance, not a second
-  // one. The id is the idempotence point above the transport, so it is the key here too.
-  if (!intents.some((i) => i.id === message.id))
-    intents.push({ id: message.id, cursor: message.cursor, room: message.room,
-      acceptedAt: new Date().toISOString(), processedAt: null });
-  await writeFile(file, `${JSON.stringify(intents, null, 2)}\n`, "utf8");
+  // one. The id is the idempotence point above the transport, so it is the key here too, and the
+  // projection keeps the FIRST acceptedAt for exactly that reason -- no read is needed to enforce it.
+  await appendCodexMark(root, thread, { type: "accepted", id: message.id, cursor: message.cursor,
+    room: message.room, acceptedAt: new Date().toISOString() });
+}
+
+// The native server path carries THREE marks, because three different things happen and no one word
+// covers them. The queue path above keeps `acceptedAt` alone, and rightly: there, the queue call
+// returning success IS the queue's acceptance, and nothing further is observable.
+
+/** We handed this message to the emitter. Nothing has acknowledged anything yet -- this is an
+ * INTENT, not an acceptance. It exists so that a turn running to the processed timeout leaves a
+ * durable row while it runs, instead of a window in which a death leaves no record at all.
+ * @param {string} root @param {string} thread @param {import('./core.mjs').Message} message */
+export async function recordCodexSubmitted(root, thread, message) {
+  await appendCodexMark(root, thread, { type: "intent", id: message.id, cursor: message.cursor,
+    room: message.room, intentAt: new Date().toISOString() });
+}
+
+/** turn/start returned an id: the server holds the work. Distinct from the intent before it and from
+ * the outcome after it, and it is the state a reader needs to tell a RUNNING turn from a finished one.
+ * @param {string} root @param {string} thread
+ * @param {import('./core.mjs').Message} message @param {{turnId: string}} ack */
+export async function recordCodexAccepted(root, thread, message, ack) {
+  await appendCodexMark(root, thread, { type: "accepted", id: message.id, cursor: message.cursor,
+    room: message.room, acceptedAt: new Date().toISOString(), turnId: ack.turnId });
+}
+
+/** The consumer's own word about its own work. `processedAt` is set ONLY on `completed`: a cancelled,
+ * failed or closed-without-completion turn reached the consumer and did not finish, and stamping it
+ * processed would launder an interruption into a completion.
+ * @param {string} root @param {string} thread @param {import('./core.mjs').Message} message
+ * @param {{id: string, outcome: 'completed'|'cancelled'|'failed'|'closed-without-completion'}} receipt */
+export async function recordCodexReceipt(root, thread, message, receipt) {
+  await appendCodexMark(root, thread, { type: "receipt", id: message.id, cursor: message.cursor,
+    room: message.room, outcome: receipt.outcome,
+    ...(receipt.outcome === "completed" ? { processedAt: new Date().toISOString() } : {}) });
 }
 
 /**
- * Fold the accepted records against the queue's own pending list.
+ * Fold the delivery records against the queue's own pending list and any consumer witness on them.
  *
- * This is the closest thing to a second receipt a one-signal bridge has, and it is deliberately not
- * called one. An item the queue STILL LISTS demonstrably has not been consumed: that is in-flight,
- * and re-queueing it would duplicate rather than recover. An item that is GONE is
- * processed-OR-REMOVED -- consumed by the far side, or deleted by a purge, an expiry, or an operator
- * clearing a stale backlog, and nothing visible from here separates those.
+ * On a queue-only thread this is the closest thing to a second receipt a one-signal bridge has, and
+ * it is deliberately not called one. An item the queue STILL LISTS demonstrably has not been
+ * consumed: that is in-flight, and re-queueing it would duplicate rather than recover. An item that
+ * is GONE is processed-OR-REMOVED -- consumed by the far side, or deleted by a purge, an expiry, or
+ * an operator clearing a stale backlog, and nothing visible from there separates those. Advancing on
+ * absence would turn a deletion into a completion receipt, which is the silent loss this unit exists
+ * to close, so absence is RETAINED and surfaced instead.
  *
- * So `processed` is always empty on this bridge and `advanceTo` is always null. Advancing a cursor
- * on absence would turn a deletion into a completion receipt, which is the silent loss this whole
- * unit exists to close; the honest output is accepted / in-flight / absent, with absent RETAINED so
- * a human can see it happened. A processed witness has to come from the consumer's own lifecycle,
- * which is the native path's to supply.
+ * `processed` and `advanceTo` come only from a real consumer witness, which the native server path
+ * supplies and the queue path cannot. On a thread with no witness they stay empty and null exactly
+ * as before.
  * @param {{ root: string, thread: string, list: () => Promise<{ id: string }[]> }} opts
  * @returns {Promise<{ inFlight: any[], absent: any[], processed: any[], advanceTo: string | null }>}
  */
 export async function reconcileCodexIntents({ root, thread, list }) {
   const intents = await readCodexIntents(root, thread);
   const pending = new Set((await list()).map((entry) => entry.id));
-  const open = intents.filter((i) => !i.processedAt);
-  const inFlight = open.filter((i) => pending.has(i.id));
-  const absent = open.filter((i) => !pending.has(i.id));
-  for (const intent of absent) intent.resolution = "absent";
-  if (absent.length)
-    await writeFile(intentsPath(root, thread), `${JSON.stringify(intents, null, 2)}\n`, "utf8");
-  return { inFlight, absent, processed: [], advanceTo: null };
+  const open = intents.filter((/** @type {any} */ i) => !i.processedAt);
+  // A row the consumer has spoken about is never "absent". Absence is what this bridge says when it
+  // does NOT know what happened; an outcome is knowing, even when the outcome is a failure.
+  const unwitnessed = open.filter((/** @type {any} */ i) => !i.outcome);
+  const inFlight = unwitnessed.filter((/** @type {any} */ i) => pending.has(i.id));
+  const absent = unwitnessed.filter((/** @type {any} */ i) => !pending.has(i.id));
+  for (const intent of absent) {
+    // Already recorded on an earlier reconcile: appending again would grow the journal on every poll
+    // and say nothing new.
+    if (intent.resolution === "absent") continue;
+    intent.resolution = "absent";
+    await appendCodexMark(root, thread, { type: "resolution", id: intent.id, resolution: "absent" });
+  }
+  const processed = intents.filter((/** @type {any} */ i) => i.processedAt);
+  // The advance is the longest COMPLETED PREFIX in recorded order. Stopping at the first gap is the
+  // whole point: a later completion must never carry the cursor past an earlier delivery that
+  // failed, because that retires the failed one with a receipt saying it succeeded.
+  let advanceTo = null;
+  for (const intent of intents) {
+    if (!intent.processedAt) break;
+    advanceTo = intent.cursor;
+  }
+  return { inFlight, absent, processed, advanceTo };
 }
 
 /**

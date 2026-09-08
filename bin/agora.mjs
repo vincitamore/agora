@@ -79,7 +79,7 @@ import { carryState, carryWindow, foldRoom, renderCarry } from "../src/carry.mjs
 import { decorate, human } from "../src/render.mjs";
 import { formatTrailers, matchesAddress, parseTrailers, TRAILER_VALUE_MAX, trailerValueOk } from "../src/trailers.mjs";
 import { SLACK_TEXT_MAX, chunkAtLines, encodeSlackText } from "../src/transports/slack.mjs";
-import { codexBridgeRefusal, codexLiveness, codexSpawnWarning, codexThread, queueCodex, resolveCodexBinary } from "../src/codex.mjs";
+import { codexBridgeRefusal, codexLiveness, codexSpawnWarning, codexThread, queueCodex, recordCodexAccepted, recordCodexReceipt, recordCodexSubmitted, resolveCodexBinary } from "../src/codex.mjs";
 import { codexServerURL, deliverCodexServer } from "../src/codex-server.mjs";
 import { codexServerStatus, launchAttachedCodex } from "../src/codex-launch.mjs";
 import { buildLabel, buildPredates, cacheTtls, clearWatchMode, installedBuild, touchWatchMode, watchModeSentinel, watchModuleDelta } from "../src/harness.mjs";
@@ -2435,10 +2435,27 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
                   console.error(`agora: queued Codex thread ${codexTarget} delivery ${cursor}; accepted and cursor checkpointed (acceptance is not processing)`);
                 },
               });
-              if (codexServer) await deliverCodexServer(roomAlias, msgs, {
-                ...codexServer,
-                onAccepted: async (message) => { await batch.checkpoint(message); bridged = { cursor: message.cursor, count: bridged.count + 1 }; },
-              });
+              if (codexServer) {
+                // The intent, written BEFORE the send. A turn may run to the processed timeout, and
+                // without a row for that whole window a death inside it leaves nothing to reconcile:
+                // not the cursor, and no record that anything was ever attempted.
+                for (const message of msgs) await recordCodexSubmitted(stateRoot, codexServer.thread, message);
+                await deliverCodexServer(roomAlias, msgs, {
+                  ...codexServer,
+                  // The acknowledgment. This is the only hook that reports a turn IN FLIGHT, which is
+                  // the state the record has to be able to show; onAccepted below runs after the
+                  // outcome is already known and only when it was a completion.
+                  onTurnStarted: async (message, ack) => { await recordCodexAccepted(stateRoot, codexServer.thread, message, ack); },
+                  // The consumer's own word, for every outcome including the ones that failed. The
+                  // receipt carries an id and no cursor, so the row is written from the message this
+                  // call site already holds: an advance is not computable from the receipt alone.
+                  onProcessed: async (receipt) => {
+                    const delivered = msgs.find((m) => m.id === receipt.id);
+                    if (delivered) await recordCodexReceipt(stateRoot, codexServer.thread, delivered, receipt);
+                  },
+                  onAccepted: async (message) => { await batch.checkpoint(message); bridged = { cursor: message.cursor, count: bridged.count + 1 }; },
+                });
+              }
             } catch (e) {
               // remembered so the end path can tell an exhausted bridge from any other throw
               deliveryFailure = e;
