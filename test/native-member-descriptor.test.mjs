@@ -34,6 +34,7 @@ const descriptorFor = (extra = {}) => ({
   roomId: ROOM_ID,
   keyDigest: KEY_DIGEST,
   accountId: `m-${"c".repeat(32)}`,
+  seatLabel: "amore-dev-laptop",
   bootEpoch: "d".repeat(32),
   pid: process.pid,
   startedAt: new Date().toISOString(),
@@ -67,6 +68,10 @@ test("every unreadable shape refuses with the start line, not just the absent on
     ["not valid JSON", "{ not json\n"],
     ["no endpoint", `${JSON.stringify({ alias: ALIAS, roomId: ROOM_ID, keyDigest: KEY_DIGEST })}\n`],
     ["no room binding", `${JSON.stringify({ path: "/tmp/s.sock", nonce: "f".repeat(32) })}\n`],
+    // seatLabel and accountId ride the handshake transcript, so a descriptor without them is a
+    // client nothing can connect to; it must refuse by name here rather than fail as a proof
+    // mismatch three frames into a handshake.
+    ["no handshake identity", `${JSON.stringify({ path: "/tmp/s.sock", nonce: "f".repeat(32), roomId: ROOM_ID, keyDigest: KEY_DIGEST })}\n`],
   ];
   for (const [name, body] of shapes) {
     await writeFile(file, body, "utf8");

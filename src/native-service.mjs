@@ -249,15 +249,19 @@ function requiredString(value, label) {
  * is seat-global: account identity belongs in its authenticated descriptor,
  * not in the exclusion endpoint, or two accounts can own one root at once.
  * @param {string} root @param {string} accountId @param {NodeJS.Platform} [platform] @param {string} [posixRuntimeBase]
+  * @param {string} [name] the endpoint's own name under the seat's runtime directory. Defaults to
+ *   `service`, which is byte-identical to what this helper has always returned; a resident MEMBER
+ *   client passes its own name so it binds a sibling endpoint under the same private, length-bounded
+ *   runtime path rather than duplicating these ownership and sun_path checks somewhere else.
  */
-export async function nativeServiceEndpoint(root, accountId, platform = process.platform, posixRuntimeBase = "/tmp") {
+export async function nativeServiceEndpoint(root, accountId, platform = process.platform, posixRuntimeBase = "/tmp", name = "service") {
   validateNativeId(accountId, "service account id");
   await ensurePrivateStateDirectory(path.resolve(root), "state root");
   const physicalRoot = await realpath(path.resolve(root));
   await ensurePrivateStateDirectory(physicalRoot, "state root");
   if (platform === "win32") {
     const seat = createHash("sha256").update(physicalRoot.toLowerCase()).digest("hex").slice(0, 32);
-    return `\\\\.\\pipe\\agora-${seat}`;
+    return name === "service" ? `\\\\.\\pipe\\agora-${seat}` : `\\\\.\\pipe\\agora-${seat}-${name}`;
   }
   const nativeDirectory = path.join(physicalRoot, "native");
   await ensurePrivateStateDirectory(nativeDirectory, "state directory");
@@ -275,7 +279,7 @@ export async function nativeServiceEndpoint(root, accountId, platform = process.
   const seat = createHash("sha256").update(rootIdentity).digest("hex").slice(0, 32);
   const runtimeDirectory = path.join(runtimeRoot, seat);
   await ensurePrivateRuntimeDirectory(runtimeDirectory, "runtime directory");
-  const endpoint = path.join(runtimeDirectory, "service.sock");
+  const endpoint = path.join(runtimeDirectory, `${name}.sock`);
   if (Buffer.byteLength(endpoint, "utf8") > MAX_PORTABLE_UNIX_SOCKET_PATH_BYTES)
     throw new AgoraError(`native service endpoint exceeds the portable Unix-socket path bound: ${endpoint}`);
   return endpoint;
