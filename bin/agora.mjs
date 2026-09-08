@@ -492,8 +492,9 @@ function recordLine(rec, state) {
  * not converge, and looping here would hide that rather than surface it. A single message larger
  * than one frame is unpageable by construction and its refusal stands.
  * @param {{ read: (o: any) => Promise<any[]> }} transport @param {any} options
+ * @param {(shown: number, asked: number) => void} onShrink
  */
-async function readWithinFrame(transport, options) {
+async function readWithinFrame(transport, options, onShrink) {
   try { return await transport.read(options); }
   catch (error) {
     const named = /read-batch-refused:[\s\S]*re-read with limit (\d+)/.exec(String(/** @type {any} */ (error)?.message ?? ""));
@@ -501,7 +502,13 @@ async function readWithinFrame(transport, options) {
     const fits = Number(named[1]);
     if (!Number.isInteger(fits) || fits < 1) throw error;
     const asked = typeof options.limit === "number" ? options.limit : undefined;
-    return await transport.read({ ...options, limit: asked === undefined ? fits : Math.min(fits, asked) });
+    const took = asked === undefined ? fits : Math.min(fits, asked);
+    const msgs = await transport.read({ ...options, limit: took });
+    // A preview that quietly shows fewer rows than asked is truncation wearing paging's name. The
+    // caller REPORTS it, which is why onShrink is a required parameter rather than an option: a call
+    // site that cannot say what it dropped has no business shrinking.
+    if (asked !== undefined && msgs.length < asked) onShrink(msgs.length, asked);
+    return msgs;
   }
 }
 
@@ -1692,16 +1699,23 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       // the same message either way. Fewer bytes, same output, same position. And when even that
       // many will not fit -- twenty large posts can exceed a frame alone -- the host names a limit
       // that does, and readWithinFrame takes it exactly once.
-      const msgs = await readWithinFrame(transport, { thread, limit });
+      /** @type {string[]} */ const omitted = [];
+      const msgs = await readWithinFrame(transport, { thread, limit }, (shown, asked) =>
+        omitted.push(`newest ${shown} of ${asked} requested shown; ${asked - shown} older omitted`));
       // An empty read is not proof of an empty room: a conditional read whose validator still
       // matches returns nothing, and writing a null position there moves the cursor BACK to the
       // start of the room and replays it. Leave the position alone and say which happened.
+      // The cursor lands on the last DELIVERED message. A preview never promised history, so it is
+      // never advanced past something the caller did not receive, and an append after this write is
+      // simply the next batch rather than a gap.
       if (msgs.length) await writeCursor(sdir, key, msgs[msgs.length - 1].cursor);
       await identity();
       if (msgs.length)
         console.error(`agora: ${key} cursor set to ${msgs[msgs.length - 1].cursor} (${msgs.length} message${msgs.length === 1 ? "" : "s"} read); the recent messages follow`);
       else
         console.error(`agora: the room read came back empty, so ${key} is unchanged; nothing follows`);
+      for (const line of omitted)
+        console.error(`agora: ${line}; read --since ${msgs.length ? msgs[0].cursor : "<cursor>"} reaches them`);
       for (const line of envPrefix(session, bearer)) console.error(`agora: ${line}`);
       const usual = usualWake(bearer.name);
       if (usual) console.error(`agora: usual --wake for role ${usual.role} is ${usual.wake} (not applied)`);
@@ -2345,7 +2359,8 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         // Only the newest message's cursor is used, so ask for one. Unbounded here meant `--now`
         // refused on exactly the rooms it was needed for -- and it is the verb a reader reaches for
         // after being told they have no cursor, so its failure misdirected twice over.
-        const msgs = await readWithinFrame(transport, { thread, limit: 1 });
+        const msgs = await readWithinFrame(transport, { thread, limit: 1 }, (shown, asked) =>
+          console.error(`agora: newest ${shown} of ${asked} requested shown; ${asked - shown} older omitted`));
         // never a null position from an empty read: that is the explicit "from the start" value,
         // and writing it here replays the whole room on the next watch
         if (msgs.length) await writeCursor(sdir, key, msgs[msgs.length - 1].cursor);

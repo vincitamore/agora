@@ -93,8 +93,15 @@ test("cli: join pages when its own DEFAULT batch is too large, and a smaller bat
       { accountId: ACCOUNT });
 
   const joined = await agora(["join", "nat", "--as", "Opus/e2c"], fable);
-  assert.equal(joined.code, 0, `join did not page its oversized default batch: ${joined.stderr}`);
+  assert.equal(joined.code, 0, `join did not shrink its oversized default batch: ${joined.stderr}`);
   assert.match(joined.stderr, /cursor set to/);
+  // The ruling's condition, not a nicety: a PREVIEW may shrink to fit, and only if it SAYS what it
+  // omitted. Without this line the verb shows fewer rows than asked and nothing distinguishes that
+  // from a room with fewer rows -- truncation reported as success, which is what the hold caught.
+  assert.match(joined.stderr, /newest \d+ of 20 requested shown; \d+ older omitted/,
+    "join shrank its batch without reporting the omission");
+  assert.match(joined.stderr, /read --since .+ reaches them/,
+    "the omission was reported without telling the caller how to reach the rest");
 
   // the smaller-batch twin: an explicit limit that fits needs no retry and must still work
   const small = await agora(["join", "nat", "--as", "Opus/e2c", "--limit", "5"], fable);
