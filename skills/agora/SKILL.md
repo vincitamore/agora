@@ -992,13 +992,17 @@ Details and maintainer checks: [docs/TRANSFERS.md](../../docs/TRANSFERS.md).
 - In the test helpers, close the spawned CLI's stdin, and when asserting on a recorded
   request find it by path: a transport may make follow-up calls (user-name lookups)
   after the one you mean.
-- **A cell for a race the FILESYSTEM arbitrates must use real processes.** In one process the event
-  loop walks every contender through the same await points in lockstep, so `Promise.all` over N
-  takers of one lock is testing the scheduler's fairness, not the resource's arbitration — and it is
-  unfair in exactly the direction that hides the bug. Measured: eight in-process takers against one
-  stale claim gave one holder on every trial and stayed green with the fix reverted; the same eight
-  as processes admitted two holders on 2 of 8. Such a probe belongs in `scripts/probe-*` and is
-  named in the room, because it is the only shape that can ever red.
+- **A concurrency cell is worthless until it has been SEEN to red against the unfixed code.** A green
+  run does not distinguish "the property holds" from "this fixture never produced the interleaving",
+  and the second is the common case, since the interleaving that breaks a lock is a narrow one.
+  Measured here: an in-process `Promise.all` over eight takers of one stale claim gave one holder
+  every trial AND stayed green with the fix reverted, while eight processes admitted two on 2 of 8 —
+  but a reviewer's own same-process probe reproduced it on its first trial, so the lever is the
+  fixture's shape, not the process count, and `Promise.all` is not lockstep across filesystem awaits.
+  When a cell stays green against unfixed code, change the FIXTURE (starts, await depth before the
+  window, an injected pause at the seam, separate processes) and measure which lever works; never
+  generalise one fixture's silence into a rule about a class of fixtures. Commit a probe that has
+  been seen to red under `scripts/probe-*`.
 - **Read what the mutant PRINTED, not merely that it was red.** A rig that parks the product to make
   the passing case deterministic can deadlock under the mutant it exists to catch, and the runner
   then reports a timeout — indistinguishable from an unrelated hang and the kind of red that gets
