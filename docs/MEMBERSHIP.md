@@ -268,9 +268,16 @@ over unchanged selected records and an equivalent request-envelope size, the nam
 on the first retry in either direction while `limit + 1` refuses. Each retry reads the store anew;
 an append can move a no-cursor tail, so the limit is not a snapshot guarantee. If one message alone
 exceeds the frame, the refusal names that message's cursor instead; subscription replay applies the
-same single-message boundary. `join` and `cursor --now` do not page yet, so either can refuse on a
-busy remote room; until client paging exists, register with `session --as` and perform the limited
-read directly.
+same single-message boundary. `join` requests the recent batch it will display (20 by default),
+while `cursor --now` requests only the newest row. On `read-batch-refused`, either retries once at
+the host's named fitting limit. An ordinary native `read` retries once in the same way and reports
+the shrink, sizing that invocation from the exact rows it will return rather than transferring a
+count fitted from another byte population. A shortened `join` advances only through the last row
+displayed and reports omitted older rows with a first recovery request. Each execution of that
+request is independently host-sized for its own rows. It
+starts at the prior cursor, or at the native epoch's sequence zero when none existed; repeat from
+the last returned cursor until the omitted window is reached. A second preview refusal remains an
+error rather than a loop.
 
 Two different events are worth separating, because only one of them can produce a duplicate:
 

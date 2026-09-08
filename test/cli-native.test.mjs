@@ -2,6 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { promisify } from "node:util";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -80,6 +81,127 @@ async function fixture(t) {
   const sol = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "sol", AGORA_ACTOR: "Sol/codex" };
   return { root, service, fable, sol, cursorFile: path.join(root, "sessions", "fable", "nat.cursor"), armedFile: path.join(root, "sessions", "fable", "armed", "nat.json") };
 }
+
+test("cli: join pages when its own DEFAULT batch is too large, and a smaller batch still works", { timeout: 180000 }, async (t) => {
+  /** @param {any} store @param {number[]} sizes @param {string} author */
+  async function appendSizes(store, sizes, author) {
+    /** @type {{ id: string, cursor: string }[]} */ const rows = [];
+    for (const [n, size] of sizes.entries())
+      rows.push(await store.append({ operationId: randomUUID().replaceAll("-", ""), authorName: author, text: `${n}:`.padEnd(size, "x") },
+        { accountId: ACCOUNT }));
+    return rows;
+  }
+
+  /** Execute the literal first-page instruction, then its stated continuation until every omitted id returns.
+   * @param {{ label: string, prior: boolean, prefix?: number[], rows: number[], expectRecoveryShrink?: boolean }} input */
+  async function omittedCase({ label, prior, prefix = [], rows, expectRecoveryShrink = false }) {
+    const { service, fable, cursorFile } = await fixture(t);
+    const store = await service.openRoom(ROOM);
+    let anchor;
+    if (prior) {
+      anchor = await store.append({ operationId: randomUUID().replaceAll("-", ""), authorName: "anchor", text: "prior" },
+        { accountId: ACCOUNT });
+      const positioned = await agora(["cursor", "nat", "--set", anchor.cursor], fable);
+      assert.equal(positioned.code, 0, `${label}: ${positioned.stderr}`);
+    }
+    const afterPrior = [
+      ...await appendSizes(store, prefix, "small"),
+      ...await appendSizes(store, rows, "large"),
+    ];
+    const joined = await agora(["join", "nat", "--as", "Opus/e2c", "--json"], fable);
+    assert.equal(joined.code, 0, `${label}: join did not shrink its oversized default batch: ${joined.stderr}`);
+    const hint = /read --since (\S+) --limit (\d+) is the first recovery page/.exec(joined.stderr);
+    assert.ok(hint, `${label}: omission report has no executable first page: ${joined.stderr}`);
+    assert.equal(hint[1], anchor?.cursor ?? `${EPOCH}:0`, `${label}: recovery did not start before every omitted row`);
+    assert.ok(Number(hint[2]) < 20, `${label}: recovery reused the requested count instead of the frame-fit count`);
+
+    const shown = typed(joined.stdout);
+    const requested = afterPrior.slice(-20);
+    const shownIds = new Set(shown.map((m) => m.id));
+    const omitted = requested.filter((m) => !shownIds.has(m.id));
+    assert.ok(omitted.length > 0, `${label}: fixture did not force the default batch to omit rows`);
+    const recoveredIds = new Set();
+    let recoveryShrank = false;
+    let since = hint[1];
+    const previewCursor = shown.at(-1).cursor;
+    for (let page = 0; page < 30 && since !== previewCursor; page += 1) {
+      const recovered = await agora(["read", "nat", "--since", since, "--limit", hint[2], "--json"], fable);
+      assert.equal(recovered.code, 0, `${label}: emitted recovery page refused: ${recovered.stderr}`);
+      const pageRows = typed(recovered.stdout);
+      assert.ok(pageRows.length, `${label}: recovery stopped before reaching every omitted row`);
+      if (/requested \d+ messages; the host fit and returned \d+/.test(recovered.stderr)) recoveryShrank = true;
+      for (const row of pageRows) recoveredIds.add(row.id);
+      since = pageRows.at(-1).cursor;
+    }
+    assert.equal(since, previewCursor, `${label}: repeated recovery pages did not reach the preview cursor`);
+    assert.ok(omitted.every((m) => recoveredIds.has(m.id)), `${label}: paged hint skipped omitted rows`);
+    if (expectRecoveryShrink) assert.ok(recoveryShrank, `${label}: no recovery page reported a host-sized retry`);
+    assert.equal(JSON.parse(await readFile(cursorFile, "utf8")).cursor, shown.at(-1).cursor,
+      `${label}: recovery read or join advanced the saved cursor past delivery`);
+  }
+
+  await omittedCase({ label: "few-large with prior", prior: true, rows: Array(20).fill(64 * 1024) });
+  await omittedCase({ label: "few-large without prior", prior: false, prefix: Array(6).fill(256), rows: Array(20).fill(64 * 1024) });
+  await omittedCase({ label: "multi-page omitted window", prior: true, rows: Array(20).fill(256 * 1024) });
+  await omittedCase({ label: "large-prefix small-tail with prior", prior: true,
+    rows: [...Array(20).fill(256 * 1024), ...Array(10).fill(256)], expectRecoveryShrink: true });
+  await omittedCase({ label: "large-prefix small-tail without prior", prior: false,
+    rows: [...Array(20).fill(256 * 1024), ...Array(10).fill(256)], expectRecoveryShrink: true });
+
+  {
+    const { service, fable } = await fixture(t);
+    const store = await service.openRoom(ROOM);
+    await appendSizes(store, Array(20).fill(64 * 1024), "default-read");
+    const read = await agora(["read", "nat", "--json"], fable);
+    assert.equal(read.code, 0, `default native read did not use the host-sized retry: ${read.stderr}`);
+    const returned = typed(read.stdout);
+    assert.ok(returned.length > 0 && returned.length < 20, "default native read did not shrink its oversized page");
+    assert.match(read.stderr, new RegExp(`requested 20 messages; the host fit and returned ${returned.length}`),
+      "default native read did not report its host-sized retry");
+  }
+
+  /** @param {string} label @param {number[]} sizes */
+  async function fittingCase(label, sizes) {
+    const { service, fable, cursorFile } = await fixture(t);
+    const store = await service.openRoom(ROOM);
+    const rows = await appendSizes(store, sizes, label);
+    const joined = await agora(["join", "nat", "--as", "Opus/e2c", "--json"], fable);
+    assert.equal(joined.code, 0, `${label}: ${joined.stderr}`);
+    assert.equal(typed(joined.stdout).length, 20, `${label}: a fitting default preview was shortened`);
+    assert.doesNotMatch(joined.stderr, /older omitted|first recovery page/, `${label}: fitting preview emitted recovery`);
+    const last = rows.at(-1);
+    assert.ok(last, `${label}: fixture appended no rows`);
+    assert.equal(JSON.parse(await readFile(cursorFile, "utf8")).cursor, last.cursor, `${label}: cursor missed last delivery`);
+  }
+
+  await fittingCase("small-first one-under", [...Array(5).fill(256), ...Array(15).fill(64 * 1024)]);
+  await fittingCase("reverse-mixed one-under", [...Array(15).fill(64 * 1024), ...Array(5).fill(256)]);
+  await fittingCase("many-small", Array(1100).fill(1024));
+});
+
+test("cli: join asks for the batch it prints, so a room too large for one frame still joins", { timeout: 60000 }, async (t) => {
+  const { service, fable } = await fixture(t);
+  // THE WIRE, not the ends. The service honouring a limit and join slicing for display were both
+  // already covered, and reverting the line that PASSES the limit left every one of those green —
+  // measured, on this cell's first draft. So the assertion has to be the CLI verb succeeding on a
+  // room whose unbounded read cannot cross one protocol frame.
+  const store = await service.openRoom(ROOM);
+  let bytes = 0;
+  for (let n = 0; bytes <= 1024 * 1024; n += 1) {
+    const size = 4 * 1024 + n * 3 * 1024;
+    await store.append({ operationId: randomUUID().replaceAll("-", ""), authorName: "filler", text: "x".repeat(size) },
+      { accountId: ACCOUNT });
+    bytes += size;
+  }
+
+  const joined = await agora(["join", "nat", "--as", "Opus/e2c"], fable);
+  assert.equal(joined.code, 0, `join failed on a busy room: ${joined.stderr}`);
+  assert.match(joined.stderr, /cursor set to/, "join did not set a cursor");
+
+  // and cursor --now, which reads only to learn the newest position and refused for the same reason
+  const now = await agora(["cursor", "nat", "--now"], fable);
+  assert.equal(now.code, 0, `cursor --now failed on a busy room: ${now.stderr}`);
+});
 
 test("cli: a watch on a native room rides the seat service and prints the poller's lines", { timeout: 60000 }, async (t) => {
   const { fable, sol, cursorFile } = await fixture(t);
