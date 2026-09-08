@@ -183,6 +183,15 @@ test("two local consumers on ONE resident client both receive a message appended
   assert.ok(texts[0].some((t2) => t2.includes("one client, two consumers")), `first consumer saw ${JSON.stringify(texts[0])}`);
   assert.ok(texts[1].some((t2) => t2.includes("one client, two consumers")), `second consumer saw ${JSON.stringify(texts[1])}`);
 
+  // A plain request THROUGH the proxy against a healthy upstream. This is the cell that was
+  // missing: `subscribe`'s reply is built by hand, so it correlated correctly while every other
+  // verb's did not — the upstream envelope's own requestId was spread over the local one and the
+  // caller waited out its timeout against a perfectly healthy host. (Astra/verifier, 1788839927.)
+  const statusResult = /** @type {any} */ (await locals[0].request("status", { roomId }));
+  assert.ok(statusResult?.status, `status through the resident client returned ${JSON.stringify(statusResult)}`);
+  const readResult = /** @type {any} */ (await locals[1].request("read", { roomId, since: nativeCursor(EPOCH, 0) }));
+  assert.ok(Array.isArray(readResult?.messages), "read through the resident client returned no messages array");
+
   // And still ONE channel after both subscriptions: the fan-out is local, not a second dial.
   const after = spawned.filter((args) => args[0] !== "parse" && args[1] !== "printpub");
   assert.equal(after.length, 1, "a local subscribe opened a second member channel");

@@ -9,12 +9,12 @@
 // property under test is about process ordering and cannot be observed from inside the module.
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { enrolledKeyDigest, keyClaimPath, canonicalStateRoot, takeKeyClaim } from "../src/native-member-claim.mjs";
 
@@ -44,42 +44,61 @@ async function rig(t) {
 }
 
 /**
- * A fake tailcat that records that it ran, and — the point of the whole file — tries to take the
- * key claim itself while it is running. If the gate took the claim BEFORE spawning and holds it
- * through teardown, this attempt must be refused. If the gate spawned first, or released early,
- * this child takes the claim and the exhibit says so.
+ * The fake Tailcat, as a PRELOAD that replaces the gate's own child call.
+ *
+ * The obvious rig — write a `#!/usr/bin/env node` script, chmod +x, and pass it as `--binary` —
+ * works on POSIX and silently does nothing on Windows, which cannot execute a `.mjs` by shebang.
+ * The cell then reports "the gate spawned no child" on the one platform where that is a fixture
+ * artifact rather than the property. Measured on the house Windows runner.
+ *
+ * So `--binary` is `process.execPath` and the child call is stubbed in-process, which is the
+ * technique the inherited probe cell already uses. The stub keeps the REAL `spawnSync` captured
+ * before it replaces it, and uses it to run a helper that attempts the key claim while the gate
+ * holds it — so the TOCTOU proof stays a genuine second process rather than becoming an
+ * in-process assertion about a variable.
+ * @param {string} dir @param {{ marker: string, claimAttempt: string, stateRoot: string, keyDigest: string, stdout?: string }} opts
  */
-/**
- * @param {string} dir
- * @param {{ marker: string, claimAttempt: string, stateRoot: string, keyDigest: string, stdout?: string }} opts
- */
-async function fakeTailcat(dir, { marker, claimAttempt, stateRoot, keyDigest, stdout = "pong in 3ms via 198.51.100.7:41641\n" }) {
-  const file = path.join(dir, "fake-tailcat.mjs");
-  await writeFile(file, `#!/usr/bin/env node
+async function preload(dir, { marker, claimAttempt, stateRoot, keyDigest, stdout = "pong in 3ms via 198.51.100.7:41641\n" }) {
+  const helper = path.join(dir, "claim-attempt.mjs");
+  await writeFile(helper, `
 import { writeFile } from "node:fs/promises";
 import { takeKeyClaim } from ${JSON.stringify(path.join(REPO, "src", "native-member-claim.mjs"))};
-await writeFile(${JSON.stringify(marker)}, process.argv.slice(2).join(" ") + "\\n", "utf8");
 let outcome;
 try {
   const held = await takeKeyClaim({ stateRoot: ${JSON.stringify(stateRoot)}, keyDigest: ${JSON.stringify(keyDigest)}, kind: "gate", label: "the child itself" });
   outcome = { took: true, generation: held.generation };
   await held.release();
-} catch (error) {
-  outcome = { took: false, code: error?.code ?? null };
-}
+} catch (error) { outcome = { took: false, code: error?.code ?? null }; }
 await writeFile(${JSON.stringify(claimAttempt)}, JSON.stringify(outcome), "utf8");
-process.stdout.write(${JSON.stringify(stdout)});
 `, "utf8");
-  await chmod(file, 0o755);
+
+  const file = path.join(dir, "child-fixture.mjs");
+  await writeFile(file, `
+import cp from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+const realSpawnSync = cp.spawnSync;
+cp.spawnSync = (binary, args) => {
+  if (!args.includes('ping')) throw Error('unexpected child invocation');
+  writeFileSync(${JSON.stringify(marker)}, args.join(' ') + '\\n', 'utf8');
+  // A real second process, started with the real spawnSync, while the gate holds the claim.
+  realSpawnSync(process.execPath, [${JSON.stringify(helper)}], { encoding: 'utf8', timeout: 20000 });
+  return { status: 0, signal: null, error: undefined, stdout: ${JSON.stringify(stdout)}, stderr: '' };
+};
+syncBuiltinESMExports();
+`, "utf8");
   return file;
 }
 
-/** Run the gate; it exits non-zero on refusal and on a failed probe, so never throw on status. */
-/** @param {{ stateRoot: string, binary: string, addressFile: string, keyPath: string }} opts */
-async function gate({ stateRoot, binary, addressFile, keyPath }) {
+/**
+ * Run the gate; it exits non-zero on refusal and on a failed probe, so never throw on status.
+ * @param {{ stateRoot: string, fixture: string, addressFile: string, keyPath: string }} opts
+ */
+async function gate({ stateRoot, fixture, addressFile, keyPath }) {
+  const args = ["--import", pathToFileURL(fixture).href, GATE, "--direct",
+    "--binary", process.execPath, "--address-file", addressFile, "--key-file", keyPath, "--timeout-ms", "2000"];
   try {
-    const { stdout, stderr } = await run(process.execPath,
-      [GATE, "--direct", "--binary", binary, "--address-file", addressFile, "--key-file", keyPath, "--timeout-ms", "2000"],
+    const { stdout, stderr } = await run(process.execPath, args,
       { env: { ...process.env, AGORA_STATE: stateRoot }, timeout: 30_000 });
     return { code: 0, stdout, stderr };
   } catch (error) {
@@ -88,8 +107,6 @@ async function gate({ stateRoot, binary, addressFile, keyPath }) {
   }
 }
 
-/** The gate's last stdout line is its result record. A gate that printed nothing is a failure
- * worth naming here rather than a `JSON.parse(undefined)` three frames down. */
 const lastJson = (/** @type {string} */ stdout) => {
   const line = stdout.trim().split(/\r?\n/).filter(Boolean).at(-1);
   assert.ok(line, `the gate printed no result line; stdout was ${JSON.stringify(stdout)}`);
@@ -101,12 +118,12 @@ test("while a resident holds the key the gate refuses and spawns NOTHING", async
   const keyDigest = await enrolledKeyDigest(keyPath);
   const marker = path.join(root, "ran.txt");
   const claimAttempt = path.join(root, "child-claim.json");
-  const binary = await fakeTailcat(root, { marker, claimAttempt, stateRoot, keyDigest });
+  const fixture = await preload(root, { marker, claimAttempt, stateRoot, keyDigest });
 
   const resident = await takeKeyClaim({ stateRoot, keyDigest, kind: "resident", label: "house-remote" });
   t.after(() => resident.release());
 
-  const result = await gate({ stateRoot, binary, addressFile, keyPath });
+  const result = await gate({ stateRoot, fixture, addressFile, keyPath });
   assert.equal(result.code, 1);
 
   // The whole property: no child ever ran.
@@ -128,9 +145,9 @@ test("with no resident the gate takes the claim, holds it ACROSS the child, and 
   const keyDigest = await enrolledKeyDigest(keyPath);
   const marker = path.join(root, "ran.txt");
   const claimAttempt = path.join(root, "child-claim.json");
-  const binary = await fakeTailcat(root, { marker, claimAttempt, stateRoot, keyDigest });
+  const fixture = await preload(root, { marker, claimAttempt, stateRoot, keyDigest });
 
-  const result = await gate({ stateRoot, binary, addressFile, keyPath });
+  const result = await gate({ stateRoot, fixture, addressFile, keyPath });
 
   // The child ran, and it ran with the key.
   assert.equal(existsSync(marker), true);
@@ -159,9 +176,9 @@ test("the claim is released even when the child fails, so a red probe does not f
   const marker = path.join(root, "ran.txt");
   const claimAttempt = path.join(root, "child-claim.json");
   // No pong line: the probe fails its own assertion, which is the common case on a broken path.
-  const binary = await fakeTailcat(root, { marker, claimAttempt, stateRoot, keyDigest, stdout: "no route to host\n" });
+  const fixture = await preload(root, { marker, claimAttempt, stateRoot, keyDigest, stdout: "no route to host\n" });
 
-  const result = await gate({ stateRoot, binary, addressFile, keyPath });
+  const result = await gate({ stateRoot, fixture, addressFile, keyPath });
   assert.equal(result.code, 1);
   const out = lastJson(result.stdout);
   assert.equal(out.measured, true, "a failed probe DID measure; only a refusal did not");
@@ -176,12 +193,12 @@ test("an identity whose digest cannot be derived refuses instead of spawning", a
   const { root, stateRoot, keyPath, addressFile } = await rig(t);
   const marker = path.join(root, "ran.txt");
   const claimAttempt = path.join(root, "child-claim.json");
-  const binary = await fakeTailcat(root, { marker, claimAttempt, stateRoot, keyDigest: `sha256:${"0".repeat(64)}` });
+  const fixture = await preload(root, { marker, claimAttempt, stateRoot, keyDigest: `sha256:${"0".repeat(64)}` });
   // A key file the gate cannot read a public half out of: it cannot know which key the child would
   // use, so it cannot claim, so it must not spawn. Refusing is the safe direction.
   await writeFile(keyPath, JSON.stringify({ Private: "privkey:whatever" }), "utf8");
 
-  const result = await gate({ stateRoot, binary, addressFile, keyPath });
+  const result = await gate({ stateRoot, fixture, addressFile, keyPath });
   assert.equal(result.code, 1);
   assert.equal(existsSync(marker), false, "the gate spawned a child under a key it could not identify");
 });

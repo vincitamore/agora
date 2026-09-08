@@ -19,7 +19,7 @@ import { rm } from "node:fs/promises";
 import { AgoraError } from "./core.mjs";
 import {
   NATIVE_PROTOCOL, NativeFrameDecoder, encodeNativeFrame, nativeHandshakeProof,
-  validateNativeEnvelope, validateNativeId, verifyNativeHandshakeProof,
+  parseNativeCursor, validateNativeEnvelope, validateNativeId, verifyNativeHandshakeProof,
 } from "./native-protocol.mjs";
 import { nativeServiceEndpoint } from "./native-service.mjs";
 import { openRemoteRoom } from "./native-remote.mjs";
@@ -77,6 +77,7 @@ export class MemberClientService {
     this.room = undefined;
     this.endpointPath = "";
     this.running = false;
+    this.stopping = false;
     this.startedAt = "";
   }
 
@@ -196,7 +197,9 @@ export class MemberClientService {
       }
     });
     socket.on("error", () => {});
-    socket.on("close", () => { this.sockets.delete(socket); this.subscriptions.delete(socket); });
+    socket.on("close", () => {
+      this.sockets.delete(socket); this.subscriptions.delete(socket);
+    });
   }
 
   /**
@@ -221,10 +224,17 @@ export class MemberClientService {
     if (frame.type === "subscribe") {
       const since = requiredString(frame.since, "cursor");
       this.subscriptions.get(socket)?.add(roomId);
+      // KNOWN GAP, owed to r2 and NOT papered over: this attaches a listener to the client object
+      // that exists NOW, so when the member channel drops and RemoteRoom re-dials, every local
+      // consumer is silently attached to a dead client — the room is live, the host is appending,
+      // and nobody downstream hears anything again. Brief r8 seam 2 requires attaching through
+      // `openRemoteSubscription`, which owns reconnect, the idle clock and the dedup-on-id
+      // contract. Exhibited by Astra/verifier (backroom 1788839927): close the upstream socket,
+      // re-dial, append — dials 2 and neither consumer receives the new message. The rewrite is
+      // started and is not green (the pump attaches but receives nothing), so it is NOT shipped
+      // half-done: the defect stands, named, with its exhibit, rather than being replaced by a
+      // second defect that looks like a fix.
       const result = await client.subscribe(roomId, since, (message) => {
-        // One remote subscription per local subscriber for now: the host serialises appends and the
-        // consumer dedups on message id, so a fan-out that shares one upstream subscription is an
-        // optimisation, not a correctness property, and it is not one this slice claims.
         sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "event",
           requestId: /** @type {any} */ (message).id, roomId, message });
       });
@@ -236,8 +246,16 @@ export class MemberClientService {
     const fields = { ...frame };
     delete fields.protocol; delete fields.type; delete fields.requestId;
     const result = await client.request(frame.type, fields);
-    sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: `${frame.type}-result`, requestId: frame.requestId,
-      ...(result && typeof result === "object" ? result : {}) });
+    // The upstream envelope carries the UPSTREAM `requestId`. Spreading it after the local one
+    // overwrites the correlation the local caller is waiting on, and its request then times out
+    // against a perfectly healthy host — a proxy that forwards the answer to nobody. So the
+    // upstream envelope's own frame fields are stripped and the local correlation is written LAST.
+    // (Found by Astra/verifier on the frozen head, backroom 1788839927: `status` timed out at 5 s
+    // while `subscribe` worked, because subscribe's reply was built by hand and never spread.)
+    const payload = result && typeof result === "object" ? { ...(/** @type {any} */ (result)) } : {};
+    delete payload.protocol; delete payload.type; delete payload.requestId;
+    sendFrame(socket, { protocol: NATIVE_PROTOCOL, ...payload,
+      type: `${frame.type}-result`, requestId: frame.requestId });
   }
 
   /**
@@ -248,6 +266,7 @@ export class MemberClientService {
    */
   async stop() {
     this.running = false;
+    this.stopping = true;
     await removeMemberDescriptor(this.stateRoot, this.alias).catch(() => {});
     for (const socket of this.sockets) { try { socket.destroy(); } catch {} }
     this.sockets.clear();
