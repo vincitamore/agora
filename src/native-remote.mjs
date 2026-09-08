@@ -472,7 +472,7 @@ export async function openRemoteRoom(input) {
  * transport — a consumer that must not surface a duplicate dedups on `id`, and this subscription's
  * own floor is not that guarantee, it is only what keeps the common case quiet.
  * @param {{ room: RemoteRoom, since?: string, window?: number, maxReconnects?: number,
- *  backoffMs?: number }} opts
+ *  backoffMs?: number, idleMs?: number }} opts
  * @returns {Promise<import("./wake/subscriber.mjs").NativeSubscription>}
  */
 export async function openRemoteSubscription(opts) {
@@ -495,6 +495,61 @@ export async function openRemoteSubscription(opts) {
   let failure;
   const markFailed = (/** @type {unknown} */ error) => { failure ??= error; wake(); };
 
+  /** THE IDLE CLOCK, and the defect it exists for.
+   *
+   * Before this, the ONLY liveness signal a live subscription had was `socket.once("close")`. Every
+   * recovery below it — the reconnect loop, the `maxReconnects` budget, `markDark` — sits
+   * downstream of that one event, and a MEMBER route is a relayed path that is under no obligation
+   * to emit it. When the channel stopped carrying without closing, nothing in this file ran again:
+   * the watch process stayed alive, the cursor froze, no `watch-result` was written and no error
+   * was raised, so silence was indistinguishable from a quiet room. Measured on one seat three
+   * times in one evening; twice nobody noticed until a human said the room looked dead.
+   *
+   * So the subscription gets a clock of its own that no wire event can fail to start: if nothing
+   * has arrived within `idleMs`, ask the host something cheap. An answer is proof the channel
+   * carries and resets the clock; a failure IS the close that never came, and enters the existing
+   * reconnect path rather than a second one, so darkness still reports exactly as designed.
+   *
+   * The probe doubles as traffic, which is worth naming because it may be why the channel dies:
+   * if an idle relay or listener is reaping quiet sessions, a request per interval prevents the
+   * death as well as detecting it. Preventing is better and neither is claimed here — what is
+   * claimed is that a channel which stops carrying is now NOTICED. */
+  const idleMs = opts.idleMs && opts.idleMs > 0 ? opts.idleMs : 60_000;
+  let lastActivity = Date.now();
+  const touch = () => { lastActivity = Date.now(); };
+  /** The client the probe must speak on: the newest one `attach` accepted, never `first`, which a
+   * reconnect replaces. */
+  let current = /** @type {NativeServiceClient | undefined} */ (undefined);
+  let reattaching = false;
+  /** @type {ReturnType<typeof setInterval> | undefined} */
+  let idleTimer;
+  const stopClock = () => { if (idleTimer !== undefined) { clearInterval(idleTimer); idleTimer = undefined; } };
+
+  /** One reconnect at a time. The socket-close path and the probe path can both fire for one
+   * failure — a close observed just as a probe times out — and two concurrent loops would dial the
+   * host twice and spend the retry budget at double rate. */
+  const runReattach = () => {
+    if (reattaching || stopped) return;
+    reattaching = true;
+    void reattach().finally(() => { reattaching = false; });
+  };
+
+  const probe = async () => {
+    if (stopped || darkReason !== undefined || failure !== undefined) { stopClock(); return; }
+    if (reattaching || current === undefined) return;
+    if (Date.now() - lastActivity < idleMs) return;
+    const client = current;
+    try {
+      await client.request("status", { roomId });
+      touch();
+    } catch (error) {
+      // Deliberately NOT markFailed: a probe that fails says the channel is gone, not that the host
+      // refused anything. Let the reconnect path decide, since it already knows how to tell a
+      // refusal the host ANSWERED from a channel that is simply not there.
+      if (!stopped) runReattach();
+    }
+  };
+
   const push = (/** @type {any[]} */ messages) => {
     let added = false;
     for (const raw of messages) {
@@ -508,7 +563,7 @@ export async function openRemoteSubscription(opts) {
       queue.push(m);
       added = true;
     }
-    if (added) { queue.sort((a, b) => parseNativeCursor(a.cursor).sequence - parseNativeCursor(b.cursor).sequence); wake(); }
+    if (added) { touch(); queue.sort((a, b) => parseNativeCursor(a.cursor).sequence - parseNativeCursor(b.cursor).sequence); wake(); }
   };
 
   let since = opts.since;
@@ -542,8 +597,12 @@ export async function openRemoteSubscription(opts) {
 
   /** @param {NativeServiceClient} client @param {string} from */
   const attach = async (client, from) => {
-    client.socket.once("close", () => { if (!stopped) void reattach(); });
+    client.socket.once("close", () => { if (!stopped) runReattach(); });
     const result = await client.subscribe(roomId, from, (message) => push([message]));
+    // Only after the subscribe RESOLVES: a client that failed to subscribe is not the one a probe
+    // should speak on, and a successful subscribe is itself proof the channel carries.
+    current = client;
+    touch();
     push(Array.isArray(result?.messages) ? result.messages : []);
   };
 
@@ -595,6 +654,13 @@ export async function openRemoteSubscription(opts) {
 
   await attach(first, since);
 
+  // NOT unref'd, and that is the L7 r1 lesson applied rather than cited: this is the only timer
+  // that can notice a dead channel, and a timer whose firing depends on some other handle holding
+  // the loop is not a bound. A subscription is held by a watch that means to stay alive, so the
+  // ref is also honest about what the process is for; `close()` clears it, and so does the first
+  // probe after darkness.
+  idleTimer = setInterval(() => { void probe(); }, Math.max(1_000, Math.floor(idleMs / 2)));
+
   return {
     roomId,
     seat: { id: room.binding.accountId, seatLabel: `remote route to ${room.binding.host.id}` },
@@ -626,6 +692,6 @@ export async function openRemoteSubscription(opts) {
       });
     },
     dark: () => darkReason,
-    close() { stopped = true; void room.close(); },
+    close() { stopped = true; stopClock(); void room.close(); },
   };
 }
