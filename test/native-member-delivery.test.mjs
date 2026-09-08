@@ -102,11 +102,15 @@ async function rig(t) {
   /** Every Tailcat argv the resident client asked for. */
   /** @type {string[][]} */
   const spawned = [];
+  /** Every member channel the resident opened, so a cell can BREAK one and watch it recover.
+   *  @type {{ hostSide: any, toHost: any, toClient: any }[]} */
+  const dials = [];
   const dial = () => {
     const toHost = new PassThrough();
     const toClient = new PassThrough();
     const hostSide = Duplex.from({ readable: toHost, writable: toClient });
     hostSide.on("error", () => {});
+    dials.push({ hostSide, toHost, toClient });
     /** @type {(socket: any) => void} */ (accept)(hostSide);
     return { stdout: toClient, stdin: toHost };
   };
@@ -124,7 +128,7 @@ async function rig(t) {
     },
   };
 
-  return { service, seatRoot, descriptorPath, keyPath, channelOptions, spawned,
+  return { service, seatRoot, descriptorPath, keyPath, channelOptions, spawned, dials,
     identity: async () => ({ keyPath, nodeKey: KEY }), roomId: ROOM };
 }
 
@@ -195,4 +199,83 @@ test("two local consumers on ONE resident client both receive a message appended
   // And still ONE channel after both subscriptions: the fan-out is local, not a second dial.
   const after = spawned.filter((args) => args[0] !== "parse" && args[1] !== "printpub");
   assert.equal(after.length, 1, "a local subscribe opened a second member channel");
+
+  // Stop the client HERE rather than leaving it to the after hooks. Those run in registration
+  // order, so the HOST would stop first and this client would then spend its whole reconnect
+  // budget dialling a host that is gone — thirty seconds of process-exit delay that reads as a
+  // hang and tells nobody anything. `stop` is idempotent, so the hook below stays as the net.
+  await client.stop();
+});
+
+test("the upstream is lost while two consumers stay subscribed: it re-dials and BOTH still receive", async (t) => {
+  const { service, seatRoot, descriptorPath, channelOptions, spawned, dials, identity, roomId } = await rig(t);
+
+  const client = new MemberClientService({
+    stateRoot: seatRoot, alias: "house-remote", descriptorPath,
+    keyDigest: `sha256:${"e".repeat(64)}`, seatLabel: "amore-dev-laptop",
+    channelOptions, identity,
+    // Small enough that the cell measures the mechanism rather than waiting out a production
+    // default, and the idle clock is what NOTICES a channel that stopped carrying: a member route
+    // is a relayed path under no obligation to emit a close, which is the whole reason that clock
+    // exists. Setting it here means the cell passes whether or not the close event arrives.
+    idleMs: 200, maxReconnects: 5, backoffMs: 20,
+  });
+  await client.start();
+
+  const descriptor = await readMemberDescriptor(seatRoot, "house-remote");
+  const since = nativeCursor(EPOCH, 0);
+  /** @type {any[][]} */
+  const received = [[], []];
+  /** @type {any[]} */
+  const locals = [];
+  for (const [index] of [[0], [1]]) {
+    const local = await NativeServiceClient.connect({ ...descriptor, timeoutMs: 5000 });
+    locals.push(local);
+    t.after(() => local.close());
+    await local.subscribe(roomId, since, (message) => { received[index].push(message); });
+  }
+
+  const dialsBefore = spawned.filter((args) => args[0] !== "parse" && args[1] !== "printpub").length;
+  assert.equal(dialsBefore, 1);
+
+  // THE LOSS. The member channel dies under the resident while both local consumers stay exactly
+  // where they are. The defect this replaces attached each consumer's listener to the client object
+  // that existed at subscribe time, so after the re-dial the room was live, the host was appending,
+  // and neither consumer ever heard anything again: dials 2, deliveries 0.
+  dials[0].toClient.destroy();
+
+  const redialled = Date.now() + 5000;
+  while (Date.now() < redialled
+    && spawned.filter((args) => args[0] !== "parse" && args[1] !== "printpub").length <= dialsBefore)
+    await new Promise((r) => setTimeout(r, 20));
+  const dialsAfter = spawned.filter((args) => args[0] !== "parse" && args[1] !== "printpub").length;
+  assert.ok(dialsAfter > dialsBefore, "the resident never re-dialled after the channel was destroyed");
+
+  // A message appended on the host AFTER the recovery, through the host's own protocol so the
+  // service broadcasts it. Reaching both consumers is the property; the re-dial alone is not.
+  const hostLocal = await NativeServiceClient.connect(
+    /** @type {any} */ ({ ...service.descriptor(), timeoutMs: 5000 }));
+  t.after(() => hostLocal.close());
+  const ack = /** @type {any} */ (await hostLocal.request("append", { roomId, operation: {
+    operationId: "l12redial".padEnd(32, "0"), authorName: "host", authorKind: "agent",
+    text: "after the re-dial" } }));
+  assert.ok(ack?.id ?? ack?.cursor, `the host did not accept the append: ${JSON.stringify(ack)}`);
+
+  const deadline = Date.now() + 5000;
+  const sawIt = (/** @type {any[]} */ batch) => batch.some((m) => String(m.text).includes("after the re-dial"));
+  while (Date.now() < deadline && !(sawIt(received[0]) && sawIt(received[1])))
+    await new Promise((r) => setTimeout(r, 25));
+
+  assert.ok(sawIt(received[0]), `the first consumer never saw the post-redial message: ${JSON.stringify(received[0].map((m) => m.text))}`);
+  assert.ok(sawIt(received[1]), `the second consumer never saw the post-redial message: ${JSON.stringify(received[1].map((m) => m.text))}`);
+
+  // Cursors stay monotone per consumer, which is the half of the at-least-once contract a
+  // duplicate does not excuse: a replay may repeat a message by id, never reorder the room.
+  for (const batch of received) {
+    const sequences = batch.map((m) => Number(String(m.cursor).split(":")[1]));
+    const sorted = [...sequences].sort((a, b) => a - b);
+    assert.deepEqual(sequences, sorted, `a consumer received cursors out of order: ${JSON.stringify(sequences)}`);
+  }
+
+  await client.stop();
 });

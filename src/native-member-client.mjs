@@ -23,7 +23,7 @@ import {
   parseNativeCursor, validateNativeEnvelope, validateNativeId, verifyNativeHandshakeProof,
 } from "./native-protocol.mjs";
 import { nativeServiceEndpoint } from "./native-service.mjs";
-import { openRemoteRoom } from "./native-remote.mjs";
+import { openRemoteRoom, openRemoteSubscription } from "./native-remote.mjs";
 import { writeMemberDescriptor, removeMemberDescriptor } from "./native-member-descriptor.mjs";
 import { clearClaimChildren, recordClaimChildren } from "./native-member-claim.mjs";
 import { spawnTailcat } from "./tailcat-process.mjs";
@@ -48,7 +48,8 @@ export class MemberClientService {
   /**
    * @param {{ stateRoot: string, alias: string, descriptorPath: string, keyDigest: string,
    *  claim?: { dir?: string, path: string, generation: number }, build?: import("./harness.mjs").BuildIdentity,
-   *  nonce?: string, seatLabel?: string, timeoutMs?: number,
+   *  nonce?: string, seatLabel?: string, timeoutMs?: number, subscribeWindow?: number, idleMs?: number,
+   *  maxReconnects?: number, backoffMs?: number,
    *  channelOptions?: any, identity?: any }} options
    */
   constructor(options) {
@@ -65,6 +66,13 @@ export class MemberClientService {
     // seam of its own invention would prove its own wiring, not this one.
     this.channelOptions = options.channelOptions;
     this.identity = options.identity;
+    this.subscribeWindow = options.subscribeWindow;
+    this.idleMs = options.idleMs;
+    // The reconnect budget is the bound on DARK PROPAGATION: when it is spent every local
+    // subscription ends `service-dark`, so a cell that means to measure that bound must be able
+    // to set it rather than wait out the production default.
+    this.maxReconnects = options.maxReconnects;
+    this.backoffMs = options.backoffMs;
     // The seat-local service secret. It authenticates local sessions to this process and NEVER
     // travels: not to the host, not into the descriptor's public projection, not into a log.
     this.nonce = options.nonce ?? randomUUID().replaceAll("-", "");
@@ -78,6 +86,17 @@ export class MemberClientService {
     this.subscriptions = new Map();
     /** @type {import("./native-remote.mjs").RemoteRoom | undefined} */
     this.room = undefined;
+    /** The ONE upstream subscription this process holds for the room, fanned out to every local
+     *  consumer. @type {any} */
+    this.upstream = undefined;
+    /** In-flight start of that subscription, so two sockets subscribing in one tick open one.
+     *  @type {Promise<any> | undefined} */
+    this.starting = undefined;
+    /** Local consumers attached to the fan-out. `pending` is an array while that consumer's own
+     *  backfill is still on the wire, and null once it is live. @type {Map<net.Socket, { pending: any[] | null }>} */
+    this.liveSockets = new Map();
+    /** Why the upstream gave up, once it has. @type {string | undefined} */
+    this.darkReason = undefined;
     /** Tailcat children this process has spawned and not seen exit. Recorded beside the claim so
      *  a replacement can PROVE they are gone rather than assume a dead holder tore them down. */
     /** @type {Set<number>} */
@@ -130,6 +149,87 @@ export class MemberClientService {
     });
     this.running = true;
     return { endpoint: this.endpointPath, roomId, alias: this.alias, pid: process.pid };
+  }
+
+  /**
+   * The ONE upstream subscription for this client's room, started on the first local subscriber and
+   * shared by every later one. `openRemoteSubscription` owns everything a watch should never have
+   * owned: the dial, the reconnect budget, the backoff, the idle clock that notices a channel which
+   * stopped carrying without closing, and the dedup-on-id contract.
+   *
+   * Started once, under a promise, because two local sockets subscribing in the same tick would
+   * otherwise open two member subscriptions on one channel.
+   * @param {string} since the first subscriber's cursor; later ones backfill through `read`
+   */
+  async #upstream(since) {
+    if (this.upstream) return this.upstream;
+    if (!this.starting) {
+      this.starting = (async () => {
+        const room = this.room;
+        if (!room) throw new AgoraError("the resident member client has no member channel");
+        const subscription = await openRemoteSubscription({ room, since,
+          ...(this.subscribeWindow ? { window: this.subscribeWindow } : {}),
+          ...(this.idleMs ? { idleMs: this.idleMs } : {}),
+          ...(this.maxReconnects !== undefined ? { maxReconnects: this.maxReconnects } : {}),
+          ...(this.backoffMs !== undefined ? { backoffMs: this.backoffMs } : {}) });
+        this.upstream = subscription;
+        void this.#pump(subscription);
+        return subscription;
+      })().finally(() => { this.starting = undefined; });
+    }
+    return this.starting;
+  }
+
+  /**
+   * Drain the upstream and hand each message to every local consumer. This is the only reader of
+   * the subscription, which is why the fan-out lives here: `read` drains, so a second reader would
+   * silently take messages the first will never see.
+   * @param {any} subscription
+   */
+  async #pump(subscription) {
+    while (this.running && this.upstream === subscription) {
+      /** @type {any[]} */
+      let batch;
+      try { batch = /** @type {any} */ (await subscription.read({})); }
+      catch (error) {
+        // The reconnect budget is spent, or the host refused. Either way this client can no longer
+        // carry the room, and every local subscription must learn it — as DARKNESS, the same
+        // `service-dark` a session gets from a seat service that stopped, because that is what a
+        // subscriber's watch already knows how to end on.
+        this.#goDark(error);
+        return;
+      }
+      if (!batch.length) { await subscription.wait(250); continue; }
+      for (const message of batch) this.#fanOut(message);
+    }
+  }
+
+  /** @param {any} message */
+  #fanOut(message) {
+    const roomId = this.room?.binding.roomId;
+    if (!roomId) return;
+    for (const [socket, state] of this.liveSockets) {
+      // A consumer still inside its backfill holds the message rather than receiving it early; the
+      // subscribe path flushes what it held, in cursor order, once the backfill is on the wire.
+      if (state.pending) { state.pending.push(message); continue; }
+      sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "event", requestId: message.id, roomId, message });
+    }
+  }
+
+  /**
+   * The upstream gave up. Destroying each local subscriber's socket is what turns that into
+   * `service-dark` on their side: a session's `NativeServiceClient` reports a closed socket exactly
+   * as it does for a seat service that stopped, and its watch ends `service-dark` with exit 1
+   * rather than 0 — never a quiet room.
+   * @param {unknown} error
+   */
+  #goDark(error) {
+    this.darkReason = error instanceof Error ? error.message : String(error);
+    const subscription = this.upstream;
+    this.upstream = undefined;
+    try { subscription?.close(); } catch { /* a corpse does not close cleanly and need not */ }
+    for (const [socket] of this.liveSockets) { try { socket.destroy(); } catch { /* already gone */ } }
+    this.liveSockets.clear();
   }
 
   /**
@@ -238,7 +338,7 @@ export class MemberClientService {
     });
     socket.on("error", () => {});
     socket.on("close", () => {
-      this.sockets.delete(socket); this.subscriptions.delete(socket);
+      this.sockets.delete(socket); this.subscriptions.delete(socket); this.liveSockets.delete(socket);
     });
   }
 
@@ -264,22 +364,55 @@ export class MemberClientService {
     if (frame.type === "subscribe") {
       const since = requiredString(frame.since, "cursor");
       this.subscriptions.get(socket)?.add(roomId);
-      // KNOWN GAP, owed to r2 and NOT papered over: this attaches a listener to the client object
-      // that exists NOW, so when the member channel drops and RemoteRoom re-dials, every local
-      // consumer is silently attached to a dead client — the room is live, the host is appending,
-      // and nobody downstream hears anything again. Brief r8 seam 2 requires attaching through
-      // `openRemoteSubscription`, which owns reconnect, the idle clock and the dedup-on-id
-      // contract. Exhibited by Astra/verifier (backroom 1788839927): close the upstream socket,
-      // re-dial, append — dials 2 and neither consumer receives the new message. The rewrite is
-      // started and is not green (the pump attaches but receives nothing), so it is NOT shipped
-      // half-done: the defect stands, named, with its exhibit, rather than being replaced by a
-      // second defect that looks like a fix.
-      const result = await client.subscribe(roomId, since, (message) => {
-        sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "event",
-          requestId: /** @type {any} */ (message).id, roomId, message });
-      });
+
+      // Seam 2. This process owns the member channel's lifetime, so it attaches through
+      // `openRemoteSubscription` — which owns the dial, the reconnect budget, the idle clock and
+      // the dedup-on-id contract — and NEVER through a raw `client.subscribe`.
+      //
+      // The defect that shape had: a listener registered on the client object that exists NOW is
+      // silently attached to a dead client the moment the member channel drops and `RemoteRoom`
+      // re-dials. The room is live, the host is appending, and nobody downstream hears anything
+      // again. Reproduced by destroying the upstream socket and appending: two dials, and neither
+      // local consumer received the new message, because recovery was owned by nobody.
+      //
+      // ONE upstream subscription per room, fanned out to every local consumer, because the
+      // subscription's `read` DRAINS its queue and advances one `drained` cursor — two consumers
+      // reading it directly would each take half the room and neither would know.
+      const state = { pending: /** @type {any[] | null} */ ([]) };
+      this.liveSockets.set(socket, state);
+      /** @type {any} */
+      let upstream;
+      try { upstream = await this.#upstream(since); }
+      catch (error) { this.liveSockets.delete(socket); throw error; }
+
+      // The BACKFILL is this consumer's alone: the live stream starts wherever the first consumer
+      // put it, and a later one asking for an earlier cursor must be served from the host. It runs
+      // through the host's own `read`, which is one of the four requests a member may make.
+      const backlog = /** @type {any} */ (await client.request("read", { roomId, since }));
+      const replayed = Array.isArray(backlog?.messages) ? backlog.messages : [];
+      /** @type {Set<string>} */
+      const seen = new Set();
+      let floor = parseNativeCursor(since).sequence;
+      for (const message of replayed) {
+        seen.add(message.id);
+        floor = Math.max(floor, parseNativeCursor(message.cursor).sequence);
+        sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "event", requestId: message.id, roomId, message });
+      }
+      // Anything the live stream produced WHILE that read was in flight is held rather than
+      // dropped, then flushed in cursor order behind the backfill: delivery stays at-least-once as
+      // the consumer sees it, cursors stay monotone, and an overlap is a duplicate by id — which is
+      // the contract, not a defect. Dropping the window instead is how a message goes missing
+      // exactly once per subscribe, which is the hardest kind to ever see again.
+      const held = state.pending ?? [];
+      state.pending = null;
+      const flush = held
+        .filter((message) => !seen.has(message.id) && parseNativeCursor(message.cursor).sequence > floor)
+        .sort((a, b) => parseNativeCursor(a.cursor).sequence - parseNativeCursor(b.cursor).sequence);
+      for (const message of flush)
+        sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "event", requestId: message.id, roomId, message });
+
       sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "subscribe-result", requestId: frame.requestId,
-        roomId, messages: [], checkpoint: /** @type {any} */ (result)?.checkpoint });
+        roomId, messages: [], checkpoint: backlog?.checkpoint });
       return;
     }
 
@@ -313,6 +446,9 @@ export class MemberClientService {
     this.subscriptions.clear();
     if (this.server?.listening) await new Promise((resolve) => this.server?.close(() => resolve(undefined)));
     if (this.endpointPath && process.platform !== "win32") await rm(this.endpointPath, { force: true }).catch(() => {});
+    try { this.upstream?.close(); } catch { /* a teardown that throws hides what it tore down */ }
+    this.upstream = undefined;
+    this.liveSockets.clear();
     try { await this.room?.close(); } catch {}
     this.room = undefined;
     // Teardown is finished only when no child this process started is still answering. Clearing

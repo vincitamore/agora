@@ -49,6 +49,7 @@ export async function routeKeyDigest(descriptorPath) {
  * key away while the child still held it.
  * @param {{ stateRoot: string, alias: string, descriptorPath: string,
  *  build?: import("./harness.mjs").BuildIdentity, seatLabel?: string,
+ *  subscribeWindow?: number, idleMs?: number, maxReconnects?: number, backoffMs?: number,
  *  channelOptions?: any, identity?: any }} options
  */
 export async function runMemberClient(options) {
@@ -63,6 +64,10 @@ export async function runMemberClient(options) {
     ...(options.seatLabel ? { seatLabel: options.seatLabel } : {}),
     ...(options.channelOptions ? { channelOptions: options.channelOptions } : {}),
     ...(options.identity ? { identity: options.identity } : {}),
+    ...(options.subscribeWindow !== undefined ? { subscribeWindow: options.subscribeWindow } : {}),
+    ...(options.idleMs !== undefined ? { idleMs: options.idleMs } : {}),
+    ...(options.maxReconnects !== undefined ? { maxReconnects: options.maxReconnects } : {}),
+    ...(options.backoffMs !== undefined ? { backoffMs: options.backoffMs } : {}),
   });
   /** @type {any} */
   let started;
