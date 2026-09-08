@@ -285,7 +285,12 @@ The order inside `start` is the whole point and is enforced rather than document
    that loses it exits by name reporting the winner's pid and **spawns nothing**. A stale claim is
    detected as an armed record is (boot epoch, then pid probe), never trusted by presence, and a
    claim file that cannot be read refuses rather than being cleared: an unreadable claim may belong
-   to a live process, and clearing it is how the second child gets spawned.
+   to a live process, and clearing it is how the second child gets spawned. The claim is a directory
+   of numbered generations, so every taker of one record races for one name and the create is a
+   compare-and-swap; the winner is decided by the listing that follows it, and a release marks its
+   generation rather than emptying the directory, so no number is ever reissued. A dead holder whose
+   Tailcat child is still running refuses a replacement `member-key-claim-child-alive` and names the
+   pid: a replacement started beside a child still dying is the second peer this order prevents.
 2. the member channel, then the local endpoint, then
 3. **the readiness descriptor** at `<state>/native/member/<alias>.json`, written only once the
    channel is subscribed and removed on a bounded stop. It is what sessions route on and it never

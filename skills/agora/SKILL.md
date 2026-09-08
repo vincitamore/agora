@@ -538,7 +538,14 @@ exclusive claim (`O_EXCL`, canonical state root plus enrolled key digest) as its
 any Tailcat child; a concurrent start that loses it exits by name with the winner's pid and spawns
 nothing, and a stale claim is detected as an armed record is (boot epoch, then pid probe) rather
 than trusted by presence. A claim file that cannot be read refuses rather than being cleared, since
-an unreadable claim may belong to a live process. Only after the channel is subscribed and the
+an unreadable claim may belong to a live process. The claim is a DIRECTORY of numbered generations
+per key digest: every taker of one record computes the same next name, so the `O_EXCL` create
+selects exactly one, and the winner is the post-create LISTING rather than the create. A release
+marks its own generation and leaves it, so the highest number issued survives as a floor and none is
+reissued. **A dead holder's Tailcat child fences the key too**: `start` refuses
+`member-key-claim-child-alive`, naming the pid, until that child exits, and a `stop` whose teardown
+did not finish leaves the key claimed and says so on stderr rather than publishing a free key beside
+a child still dying. Only after the channel is subscribed and the
 local endpoint bound does it publish `<state>/native/member/<alias>.json`, the readiness descriptor
 sessions route on — per ALIAS, while the claim is per KEY, so two aliases on one key share one
 client. A loser refuses and does not wait, in both directions, and the refusal names the holder's
