@@ -23,6 +23,7 @@ import {
 } from "../src/native-remote.mjs";
 import { NATIVE_PROTOCOL, NativeFrameDecoder, encodeNativeFrame, nativeCursor } from "../src/native-protocol.mjs";
 import { NativeRoomService } from "../src/native-service.mjs";
+import { authorityFixtureService, approvedOpen, approvedClose } from './authority-fixture.mjs';
 import { nativeRemoteTransport } from "../src/transports/native-remote.mjs";
 import { ServiceDarkError } from "../src/wake/subscriber.mjs";
 import { localTransferIdentity } from "../src/tailcat.mjs";
@@ -108,7 +109,8 @@ async function rig(t, over = {}) {
   const seatRoot = await mkdtemp(path.join(tmpdir(), "agora-t2-seat-"));
   t.after(() => rm(hostRoot, { recursive: true, force: true }));
   t.after(() => rm(seatRoot, { recursive: true, force: true }));
-  const service = new NativeRoomService({ root: hostRoot, accountId: HOST_ACCOUNT, seatLabel: "admin-pc" });
+  const service = await authorityFixtureService({ root: hostRoot, accountId: HOST_ACCOUNT, seatLabel: "admin-pc" },
+    [{ roomId: ROOM, publicNodeKeys: [KEY, OTHER_KEY] }]);
   await service.start();
   await service.createRoom({ roomId: ROOM, epoch: EPOCH });
   t.after(() => service.stop());
@@ -117,7 +119,7 @@ async function rig(t, over = {}) {
   let accept;
   /** Latest accept hook, so a reopened route can be wired in a cell. @type {{ fn?: (socket:any)=>void }} */
   const hostAccept = {};
-  const opened = await service.openRoute({
+  const opened = await approvedOpen(service, {
     roomId: ROOM, publicNodeKey: KEY,
     routeOptions: {
       listen: async (/** @type {(socket: any) => void} */ hook) => { accept = hook; hostAccept.fn = hook; return { port: 4242, close: async () => {} }; },
@@ -788,7 +790,7 @@ test("a client held across a route close fails by name on the next verb, and the
   const held = await room.client();
   assert.ok((await held.request("status", { roomId: ROOM })).status, "the route was not usable before the close");
 
-  await service.closeRoute({ roomId: ROOM, publicNodeKey: KEY });
+  await approvedClose(service, { roomId: ROOM, publicNodeKey: KEY });
 
   // The held client must not answer a verb for a revoked route out of a socket that still looks
   // live. Measured, not assumed: the shared request machine refuses because the socket is gone.
@@ -803,7 +805,7 @@ test("a client held across a route close fails by name on the next verb, and the
   // Reopened: a new grant and a new generation, the remote still holding the old descriptor. The
   // binding comparison fires BEFORE the proof, so this is a binding mismatch and not a stale-secret
   // proof failure either. Pinned because the obvious expectation is wrong in both directions.
-  await service.openRoute({
+  await approvedOpen(service, {
     roomId: ROOM, publicNodeKey: KEY,
     routeOptions: {
       listen: async (/** @type {(socket:any)=>void} */ hook) => { hostAccept.fn = hook; return { port: 4243, close: async () => {} }; },

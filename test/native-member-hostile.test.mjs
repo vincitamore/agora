@@ -11,6 +11,7 @@ import test from "node:test";
 import { NativeFrameDecoder, NATIVE_FRAME_MAX, NATIVE_PROTOCOL, encodeNativeFrame, nativeHandshakeProof } from "../src/native-protocol.mjs";
 import { buildRouteBinding, memberHandshakeProof, MEMBER_PHASES, mintRouteSecret, readRouteSecret, removeRouteSecret, routeProofRef, routeSecretPath, verifyMemberHandshakeProof, writeRouteSecret } from "../src/native-member.mjs";
 import { NativeRoomService } from "../src/native-service.mjs";
+import { authorityFixtureService, approvedOpen } from './authority-fixture.mjs';
 
 const ACCOUNT = "a".repeat(32);
 const ROOM = "b".repeat(32);
@@ -82,12 +83,13 @@ function fakeRouteOptions(state) {
 async function fixture(t) {
   const root = await mkdtemp(path.join(tmpdir(), "agora-t3-hostile-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const service = new NativeRoomService({ root, accountId: ACCOUNT, seatLabel: "host" });
+  const service = await authorityFixtureService({ root, accountId: ACCOUNT, seatLabel: "host" },
+    [{ roomId: ROOM, publicNodeKeys: [KEY, OTHER_KEY] }]);
   await service.start();
   await service.createRoom({ roomId: ROOM, epoch: EPOCH });
   t.after(() => service.stop());
   const route = {};
-  const opened = await service.openRoute({ roomId: ROOM, publicNodeKey: KEY, routeOptions: fakeRouteOptions(route) });
+  const opened = await approvedOpen(service, { roomId: ROOM, publicNodeKey: KEY, routeOptions: fakeRouteOptions(route) });
   const secret = await readRouteSecret(root, opened.descriptor.binding, opened.descriptor.proofRef);
   return { root, service, opened, secret, route, accept: (stream) => route.accept(stream) };
 }
@@ -223,14 +225,15 @@ test("T3 local nonce and member identity claims cannot cross the member boundary
 test("T3 concurrent double open leaves one live route and no orphan listener", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "agora-t3-double-open-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const service = new NativeRoomService({ root, accountId: ACCOUNT, seatLabel: "host" });
+  const service = await authorityFixtureService({ root, accountId: ACCOUNT, seatLabel: "host" },
+    [{ roomId: ROOM, publicNodeKeys: [KEY, OTHER_KEY] }]);
   await service.start();
   t.after(() => service.stop());
   await service.createRoom({ roomId: ROOM, epoch: EPOCH });
   const route = {};
   const settled = await Promise.allSettled([
-    service.openRoute({ roomId: ROOM, publicNodeKey: KEY, routeOptions: fakeRouteOptions(route) }),
-    service.openRoute({ roomId: ROOM, publicNodeKey: KEY, routeOptions: fakeRouteOptions(route) }),
+    approvedOpen(service, { roomId: ROOM, publicNodeKey: KEY, routeOptions: fakeRouteOptions(route) }),
+    approvedOpen(service, { roomId: ROOM, publicNodeKey: KEY, routeOptions: fakeRouteOptions(route) }),
   ]);
   const admitted = settled.filter((result) => result.status === "fulfilled");
   const refused = settled.filter((result) => result.status === "rejected");
@@ -254,7 +257,7 @@ test("T3 service-owned route: service stop closes its listener and reaps its chi
 test("T3 mixed writers serialize two member principals and one local append without a partial record", async (t) => {
   const { accept, secret, service, opened } = await fixture(t);
   const secondRoute = {};
-  const second = await service.openRoute({ roomId: ROOM, publicNodeKey: OTHER_KEY, routeOptions: fakeRouteOptions(secondRoute) });
+  const second = await approvedOpen(service, { roomId: ROOM, publicNodeKey: OTHER_KEY, routeOptions: fakeRouteOptions(secondRoute) });
   const secondSecret = await readRouteSecret(service.root, second.descriptor.binding, second.descriptor.proofRef);
   const a = pair(), b = pair(); accept(a.host); secondRoute.accept(b.host);
   assert.equal((await hello(a.client, secret)).result.type, "member-welcome");

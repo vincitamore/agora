@@ -310,6 +310,64 @@ test('failed durable commit never activates a ready listener and cleanup retains
   await assert.rejects(f.service.createRouteChallenge({ action: 'room-enroll', roomId: ROOM, publicNodeKey: MEMBER }), refusal('authority-journal-unavailable'));
 });
 
+test('intent sync uncertainty never starts an effect and survives restart as recovery-required', async (t) => {
+  const f = await fixture(t), rig = transport();
+  const p = await f.service.createRouteChallenge({ action: 'room-enroll', roomId: ROOM, publicNodeKey: MEMBER });
+  const sync = f.journal.handle.sync.bind(f.journal.handle);
+  f.journal.handle.sync = async () => { throw Object.assign(Error('injected sync failure'), {code:'EIO'}); };
+  await assert.rejects(f.service.openRoute({ roomId: ROOM, publicNodeKey: MEMBER,
+    proof: f.signed(p.challenge), routeOptions: rig.routeOptions }), refusal('authority-journal-unavailable'));
+  assert.equal(rig.starts(), 0);
+  assert.deepEqual(f.service.listRoutes(), []);
+  assert.equal(f.journal.unavailable, true);
+  f.journal.handle.sync = sync;
+  await f.service.stop();
+  // Injected I/O uncertainty, not a power-loss experiment: the write reached disk but its
+  // acknowledgement did not. Reopening sees intent, never a license to repeat an effect.
+  const next = new NativeRoomService(f.options); await next.start(); t.after(() => next.stop());
+  assert.equal(next.authorityJournal?.status(p.request.operationId).state, 'intent');
+  await assert.rejects(next.createRouteChallenge({action:'room-enroll',roomId:ROOM,publicNodeKey:MEMBER}), refusal('operator-recovery-required'));
+});
+
+test('lost open response keeps committed status and a duplicate proof cannot create another listener', async (t) => {
+  const f = await fixture(t), rig = transport();
+  const p = await f.service.createRouteChallenge({ action: 'room-enroll', roomId: ROOM, publicNodeKey: MEMBER });
+  const input = {roomId:ROOM, publicNodeKey:MEMBER, proof:f.signed(p.challenge),routeOptions:rig.routeOptions};
+  // Discard the result and reconcile from the real local status surface.
+  await f.service.openRoute(input);
+  const client=await NativeServiceClient.connect(/** @type {any} */(f.service.descriptor()));
+  t.after(()=>client.close());
+  const answer=await client.request('route-act-status',{operationId:p.request.operationId});
+  assert.equal(answer.status.state,'committed');
+  assert.equal(answer.status.requestDigest,f.journal.status(p.request.operationId).requestDigest);
+  await assert.rejects(f.service.openRoute(input),refusal('operator-act-replayed'));
+  assert.equal(rig.starts(),1);assert.equal(f.service.listRoutes().length,1);
+});
+
+test('close failure is durably revoked, keeps its cleanup handle and cannot reactivate admission', async (t) => {
+  const f = await fixture(t), rig = transport();
+  const p = await f.service.createRouteChallenge({ action: 'room-enroll', roomId: ROOM, publicNodeKey: MEMBER });
+  await f.service.openRoute({roomId:ROOM,publicNodeKey:MEMBER,proof:f.signed(p.challenge),routeOptions:rig.routeOptions});
+  const entry = f.service.routes.values().next().value; assert.ok(entry);
+  const stop=entry.resource.stop.bind(entry.resource);
+  let release=()=>{};
+  entry.resource.closed=new Promise(resolve=>{release=()=>resolve(undefined);});
+  const close=await f.service.createRouteChallenge({action:'room-revoke',roomId:ROOM,publicNodeKey:MEMBER});
+  entry.resource.stop=async()=>{
+    assert.equal(f.journal.status(close.request.operationId).state,'revoked');
+    throw Object.assign(Error('cleanup pending'),{code:'AGORA_CLEANUP_PENDING'});
+  };
+  await assert.rejects(f.service.closeRoute({roomId:ROOM,publicNodeKey:MEMBER,proof:f.signed(close.challenge)}),{code:'AGORA_CLEANUP_PENDING'});
+  assert.equal(entry.activation.active,false);
+  assert.equal(f.service.listRoutes()[0].state,'closing');
+  const pair=loopback();t.after(()=>{pair.host.destroy();pair.client.destroy();});
+  const answer=firstFrame(pair.client);rig.accept(pair.host);
+  assert.match((await answer).message,/member-route-not-active/);
+  const file=path.join(f.root,'native/authority-journal/events.jsonl');
+  assert.equal(JSON.parse((await readFile(file,'utf8')).trim().split('\n').at(-1) ?? '').event.kind,'revoked');
+  entry.resource.stop=stop;await stop();release();
+});
+
 test('authority and proof rows refuse before config; each new preflight has a config-reaching valid twin', async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), 'agora-act-preflight-')); t.after(() => rm(root, { recursive: true, force: true }));
   const run = promisify(execFile), bin = fileURLToPath(new URL('../bin/agora.mjs', import.meta.url));
