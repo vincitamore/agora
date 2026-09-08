@@ -147,7 +147,8 @@ export function checkCarryBoundary(expected, actual) {
   const addressedBySuccessor = (/** @type {ReturnType<typeof validateCarryEvent>} */ e) =>
     e.session === actual.session.slug && e.bearer === actual.registeredBearer;
   const relevant = actual.evidence.filter(e => e.bearer === b.bearer && [b.session.slug, actual.session.slug].includes(e.session));
-  const released = new Set(relevant.filter(e => ['release', 'withdrawal'].includes(e.kind)).flatMap(e => e.targets));
+  const effects = currentCarryEffects(relevant);
+  const released = effects.released;
   const claims = new Map(b.claims.map(c => [c.eventId, c]));
   const retractions = new Map(b.retractions.map(c => [c.eventId, c]));
   for (const e of relevant) {
@@ -180,11 +181,28 @@ export function checkCarryBoundary(expected, actual) {
     const accepted = actual.evidence.some(e => e.kind === 'delivery-accepted' && e.targets.includes(delivery.eventId)
       && e.session === prepared.session && e.bearer === prepared.bearer && carryRefKey(e.ref) === carryRefKey(delivery.ref));
     if (!accepted) fail('delivery-unconfirmed', delivery.eventId);
-    const answered = actual.evidence.some(e => e.kind === 'answer' && addressedBySuccessor(e)
+    const answered = effects.answers.some(e => addressedBySuccessor(e)
       && e.targets.includes(delivery.eventId) && e.ref.room === delivery.ref.room);
     if (!answered) fail('delivery-unanswered', delivery.eventId);
   }
   return { version: 1, type: 'carry-check', boundary: b.id, ok: issues.length === 0, issues };
+}
+
+/** Withdrawals remain evidence, but the effect they retract earns no credit.
+ * Resolve references, not file order or timestamps; evidence files are unordered.
+ * Callers select the permitted session lineage before folding.
+ * @param {Array<ReturnType<typeof validateCarryEvent>>} events */
+function currentCarryEffects(events) {
+  const byId = new Map(events.map(e => [e.id, e]));
+  const targets = (/** @type {ReturnType<typeof validateCarryEvent>} */ e) => e.targets.filter(id => {
+    const target = byId.get(id);
+    return target && target.bearer === e.bearer && target.ref.room === e.ref.room;
+  });
+  const withdrawn = new Set(events.filter(e => e.kind === 'withdrawal').flatMap(targets));
+  const answers = events.filter(e => e.kind === 'answer' && !withdrawn.has(e.id));
+  const released = new Set(events.filter(e => e.kind === 'release' && !withdrawn.has(e.id)).flatMap(targets));
+  for (const id of withdrawn) if (byId.get(id)?.kind === 'claim') released.add(id);
+  return { answers, released, answered: new Set(answers.flatMap(targets)) };
 }
 
 /** Read a previously sealed boundary and check against THIS session's files.
@@ -286,7 +304,7 @@ export async function sealCarryBoundary(dir, output, context) {
   if (source.mandate.bearer !== context.bearer) throw new CarryCheckError('mandate-bearer-mismatch');
   const { events, issues } = await readCarryEvidence(dir);
   const mine = events.filter(e => e.bearer === context.bearer && e.session === context.session.slug);
-  const targeted = new Set(mine.filter(e => ['release', 'withdrawal', 'answer'].includes(e.kind)).flatMap(e => e.targets));
+  const effects = currentCarryEffects(mine);
   const ref = (/** @type {ReturnType<typeof validateCarryEvent>} */ e) => ({ eventId: e.id, ref: e.ref });
   let completeOrigin = false;
   try {
@@ -297,8 +315,8 @@ export async function sealCarryBoundary(dir, output, context) {
   } catch { /* missing/corrupt historical provenance is not completeness */ }
   const boundary = validateCarryBoundary({ version: 1, id: randomUUID(),
     session: { slug: context.session.slug, source: context.session.source }, bearer: context.bearer, mandatePath: path.resolve(context.mandatePath), mandateDigest: source.digest,
-    cursors: context.cursors, claims: mine.filter(e => e.kind === 'claim' && !targeted.has(e.id)).map(ref),
-    deliveries: mine.filter(e => e.kind === 'delivery-prepared' && !targeted.has(e.id)).map(ref),
+    cursors: context.cursors, claims: mine.filter(e => e.kind === 'claim' && !effects.released.has(e.id)).map(ref),
+    deliveries: mine.filter(e => e.kind === 'delivery-prepared' && !effects.answered.has(e.id)).map(ref),
     retractions: mine.filter(e => ['release', 'withdrawal'].includes(e.kind)).map(ref),
     watermark: events.map(e => e.id),
     // A delivery log cannot attest that it captured earlier own commitments.
@@ -345,7 +363,7 @@ export async function captureCarryPost(dir, room, session, bearer, text, receipt
       targets: mine.filter(e => e.kind === 'claim' && e.subject === trailer.value).map(e => e.id) });
     if (trailer.key === 're' || trailer.key === 'withdraws') {
       const targets = mine.filter(e => (e.ref.id === trailer.value || e.ref.cursor === trailer.value)
-        && (trailer.key === 're' ? e.kind === 'delivery-prepared' : ['claim', 'release'].includes(e.kind))).map(e => e.id);
+        && (trailer.key === 're' ? e.kind === 'delivery-prepared' : ['claim', 'release', 'answer'].includes(e.kind))).map(e => e.id);
       if (targets.length) await appendCarryEvent(dir, { ...base, id: randomUUID(), kind: trailer.key === 're' ? 'answer' : 'withdrawal', targets });
     }
   }
