@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { writeCursor } from '../src/core.mjs';
 import { inheritSession, readRecord, writeRecord } from '../src/session.mjs';
 import { watch } from '../src/watch.mjs';
-import { appendCarryEvent, captureCarryPost, carryRefKey, checkCarryBoundary, mandateDigest, readCarryEvidence, readMandate, recordCarryCursorMove, requireCarrySuccessor, sealCarryBoundary, validateCarryEvent, validateMandate } from '../src/carry-check.mjs';
+import { appendCarryEvent, beginCarryPost, captureCarryPost, carryRefKey, checkCarryBoundary, mandateDigest, readCarryEvidence, readMandate, recordCarryCursorMove, requireCarrySuccessor, sealCarryBoundary, validateCarryEvent, validateMandate } from '../src/carry-check.mjs';
 import { tmp } from './helpers.mjs';
 
 const mandate = { version: 1, id: 'campaign-c1', bearer: 'Bruno/uber-wizard', role: 'builder',
@@ -371,6 +371,9 @@ test('carry CLI enforces registered successor arrival before predecessor handoff
     };
     assert.equal((await call('s1', ['session', '--as', mandate.bearer])).code, 0);
     assert.equal((await call('s1', ['post', 'backroom', 'Starting', '--claim', 'C1-BUILD'])).code, 0);
+    const posted = await readCarryEvidence(path.join(t.dir, 'sessions', 's1'));
+    assert.equal(posted.events.filter(e => e.kind === 'gap').length, 1, 'public post uses the write-ahead capture path');
+    assert.equal(posted.events.filter(e => e.kind === 'coverage').length, 1);
     const sealed = await call('s1', ['carry', 'backroom', '--seal', '--mandate', source, '--boundary', boundaryFile]);
     assert.equal(sealed.code, 0, sealed.stderr);
     assert.deepEqual(JSON.parse(sealed.stdout).gaps, []);
@@ -414,5 +417,26 @@ test('carry preflight refuses missing boundary inputs without config and admits 
         const e = /** @type {{code:number,stderr:string}} */ (err);
         assert.equal(e.code, 1); assert.match(e.stderr, /no config/); return true;
       });
+  } finally { await t.cleanup(); }
+});
+
+test('a post crash between send and capture cannot erase its commitment behind a green check', async () => {
+  const t = await tmp();
+  try {
+    const { boundary, actual } = fixture();
+    const session = { slug: 's1', source: 'AGORA_SESSION' };
+    boundary.claims = []; boundary.retractions = []; boundary.deliveries = []; boundary.watermark = [];
+    const text = 'Body not admitted to the recovery record\n\nclaim: C1\n\n-- Bruno/uber-wizard';
+    const intent = await beginCarryPost(t.dir, 'backroom', session, mandate.bearer, text);
+    actual.evidence = (await readCarryEvidence(t.dir)).events;
+    assert.equal(JSON.stringify(actual.evidence).includes('Body not admitted'), false);
+    assert.deepEqual(checkCarryBoundary(boundary, actual).issues, [{ code: 'delivery-coverage-unknown', item: intent.id }]);
+    // This state is also what a successful external send followed by a crash leaves.
+    await captureCarryPost(t.dir, 'backroom', session, mandate.bearer, text, { id: 'accepted-post', cursor: '10' }, intent);
+    actual.evidence = (await readCarryEvidence(t.dir)).events;
+    const claim = actual.evidence.find(e => e.kind === 'claim'); assert.ok(claim);
+    assert.deepEqual(checkCarryBoundary(boundary, actual).issues, [{ code: 'claim-unaccounted', item: claim.id }]);
+    actual.accounted.push({ kind: 'claim', id: claim.id, exhibit: 'resume-plan:C1' });
+    assert.equal(checkCarryBoundary(boundary, actual).ok, true);
   } finally { await t.cleanup(); }
 });
