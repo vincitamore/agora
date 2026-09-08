@@ -261,6 +261,11 @@ process.stdin.on("end", () => { try { const value=JSON.parse(body); if (!value.r
   fi
 fi
 
+if [ "${AGORA_CODEX_MANAGED:-}" = 1 ] && [ -z "$codex_server" ] && [ -z "$codex_token_file" ]; then
+  printf '%s\n' 'This Codex session is managed, but its authenticated connection references and server descriptor are unavailable; refusing legacy queue fallback.' >&2
+  exit 1
+fi
+
 if [ "$worker" = true ]; then
   # The worker execs Node without changing pid, so this is the durable resident process on POSIX.
   export AGORA_ACTOR=$actor AGORA_CONFIG=$config_path AGORA_STATE=$state_root AGORA_SESSION_PID=$$ CODEX_HOME=$codex_home CODEX_SESSION_ID=$session_id
