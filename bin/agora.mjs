@@ -134,7 +134,7 @@ const SCHEMA = {
     read: {
       args: ["<room>"],
       options: { "--thread <id>": "a thread inside the room", "--since <cursor>": "only what came after", "--limit <n>": "cap (default transport)", "--pages <n>": "pages of history to walk back through when --since is given (Slack, default 10 of 200 messages). A walk that does not reach the cursor returns nothing and names the gap rather than a partial window from the middle of the backlog", "--threads": "fold the room's live threads in: replies after --since, interleaved by time (Slack never shows them in a room read)", "--files": "materialize Slack-hosted images into this session's media directory; metadata is always carried" },
-      does: "print messages ascending; never touches the saved cursor",
+      does: "print messages ascending; never touches the saved cursor. On a native frame refusal, retry this invocation once at the host's fitting limit and report the shrink",
     },
     post: {
       args: ["<room>", "[text]"],
@@ -258,7 +258,7 @@ const SCHEMA = {
     join: {
       args: ["<room>"],
       options: { "--as <bearer>": "register this session as this bearer", "--label <name>": "a human label for this session's record", "--limit <n>": "how many recent messages to show (default 20)" },
-      does: "register, start this session's cursor at the latest message, and show the recent messages: session --as, cursor --now, read, in one call",
+      does: "register, preview the recent messages, and advance this session's cursor through the last one shown",
     },
     enroll: { args: ["<room>"], options: {"--trust <account-id>": "explicitly replace a peer pin after out-of-band verification", "--fingerprint <hex>": "confirmed peer fingerprint for --trust", "--pages <n>": "enrollment scan depth"}, does: "publish or republish this seat's Agora-owned transfer public key; never uses an ambient Tailcat identity" },
     share: { args: ["<room>", "[file ...]"], options: {"--to <account-id>": "authenticated recipient account; repeatable, maximum four", "--once": "consume each recipient route after verified receipt", "--expires-in <seconds>": "60 to 86400, default 3600", "--list": "local offers and measured liveness", "--prune": "remove expired offline offers owned by this session", "--stop <id>": "stop a local offer", "--resume <id>": "reconcile uncertain publication without duplicate posting", "--forget <id>": "explicitly release the operation guard after checking publication"}, does: "snapshot named files and publish a recipient-restricted native transfer offer after every route is ready" },
@@ -511,11 +511,47 @@ function recordLine(rec, state) {
 }
 
 /**
+ * Read, and if the host refuses the batch because it will not fit one protocol frame, take the
+ * limit its refusal names — once.
+ *
+ * Bounding the COUNT is not enough: twenty individually legal 64 KiB messages encode past a 1 MiB
+ * frame, so a default of twenty is refused on a room of large posts however small that number is.
+ * The cap is on BYTES, and only the host can say how many of THESE messages fit — which, after
+ * L4-fix, it computes for the set the caller will actually receive.
+ *
+ * Exactly one retry. The host recomputes against the narrowed set, so a second refusal means it did
+ * not converge, and looping here would hide that rather than surface it. A single message larger
+ * than one frame is unpageable by construction and its refusal stands.
+ * @param {{ read: (o: any) => Promise<any[]> }} transport @param {any} options
+ * @param {(shown: number, asked: number) => void} onShrink
+ */
+async function readWithinFrame(transport, options, onShrink) {
+  try { return await transport.read(options); }
+  catch (error) {
+    const named = /read-batch-refused:\s*(\d+) messages[\s\S]*re-read with limit (\d+)/.exec(String(/** @type {any} */ (error)?.message ?? ""));
+    if (!named) throw error;
+    const selected = Number(named[1]);
+    const fits = Number(named[2]);
+    if (!Number.isInteger(fits) || fits < 1) throw error;
+    const asked = typeof options.limit === "number" ? options.limit : undefined;
+    const took = asked === undefined ? fits : Math.min(fits, asked);
+    const msgs = await transport.read({ ...options, limit: took });
+    // A preview that quietly shows fewer rows than asked is truncation wearing paging's name. The
+    // caller REPORTS it, which is why onShrink is a required parameter rather than an option: a call
+    // site that cannot say what it dropped has no business shrinking.
+    const reportedAsked = asked ?? selected;
+    if (msgs.length < reportedAsked) onShrink(msgs.length, reportedAsked);
+    return msgs;
+  }
+}
+
+/**
  * `room` stays the transport's own name for the room (a channel id, a file path); `alias` is the
  * name the caller typed and every verb takes. `type` tells a message from the typed lines a watch
  * interleaves with them, which is what a stdout consumer needs once position stops being enough.
  * @param {import('../src/core.mjs').Message[]} msgs @param {boolean} json @param {string} [alias]
  */
+
 function printMessages(msgs, json, alias) {
   for (const m of msgs) {
     const { raw: _raw, ...rest } = decorate(m);
@@ -1694,10 +1730,27 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       await register(true);
       const key = cursorKey(roomAlias, thread);
       const limit = positive(values.limit, "limit") ?? 20;
-      const msgs = await transport.read({ thread });
+      // Keep the position the caller held before this preview moves it. When the frame forces the
+      // displayed batch smaller, only that earlier position points toward the rows omitted from the
+      // front of the requested window; the first displayed cursor points forward into rows already
+      // shown. A seeded legacy cursor is still this session's prior position.
+      const prior = (await readCursorSeeded(sdir, stateRoot, key)).cursor;
+      // Read what will be SHOWN. This asked for the whole room and then displayed `slice(-limit)`,
+      // so on a busy native-remote room it built a result too large for one protocol frame and was
+      // refused -- while wanting twenty messages. The cursor is unaffected: a limited read returns
+      // the NEWEST n (native-store slices `-limit` when there is no `since`), so the last element is
+      // the same message either way. Fewer bytes, same output, same position. And when even that
+      // many will not fit -- twenty large posts can exceed a frame alone -- the host names a limit
+      // that does, and readWithinFrame takes it exactly once.
+      /** @type {{ shown: number, asked: number }[]} */ const omitted = [];
+      const msgs = await readWithinFrame(transport, { thread, limit }, (shown, asked) =>
+        omitted.push({ shown, asked }));
       // An empty read is not proof of an empty room: a conditional read whose validator still
       // matches returns nothing, and writing a null position there moves the cursor BACK to the
       // start of the room and replays it. Leave the position alone and say which happened.
+      // The cursor lands on the last DELIVERED message. A preview never promised history, so it is
+      // never advanced past something the caller did not receive, and an append after this write is
+      // simply the next batch rather than a gap.
       if (msgs.length) {
         await recordCarryCursorMove(sdir, key, session, bearer.name, msgs[msgs.length - 1].cursor, 'join');
         await writeCursor(sdir, key, msgs[msgs.length - 1].cursor);
@@ -1707,6 +1760,15 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         console.error(`agora: ${key} cursor set to ${msgs[msgs.length - 1].cursor} (${msgs.length} message${msgs.length === 1 ? "" : "s"} read); the recent messages follow`);
       else
         console.error(`agora: the room read came back empty, so ${key} is unchanged; nothing follows`);
+      for (const { shown, asked } of omitted) {
+        // A recovery command is part of the protocol surface: it must itself fit the frame. Start
+        // at the caller's old position, or at sequence zero when this native room had no position,
+        // and use the size the host just proved it can serve. If the gap needs more than one frame,
+        // the same command advances from the last row returned without skipping any intervening row.
+        const start = prior ?? msgs[0].cursor.replace(/:[0-9]+$/, ":0");
+        const recovery = shellLine(["read", "--since", start, "--limit", String(shown)]);
+        console.error(`agora: newest ${shown} of ${asked} requested shown; ${asked - shown} older omitted; ${recovery} is the first recovery page; repeat from its last returned cursor until the omitted window is reached`);
+      }
       for (const line of envPrefix(session, bearer)) console.error(`agora: ${line}`);
       const usual = usualWake(bearer.name);
       if (usual) console.error(`agora: usual --wake for role ${usual.role} is ${usual.wake} (not applied)`);
@@ -1868,10 +1930,11 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       if (values.threads && thread) throw new AgoraError(`--threads folds the room's live threads into the read; it cannot be combined with --thread`, EXIT.usage);
       const limit = positive(values.limit, "limit");
       const pages = positive(values.pages, "pages");
-      let msgs = await transport.read({ thread, since: values.since, limit, pages });
+      let msgs = await readWithinFrame(transport, { thread, since: values.since, limit, pages }, (shown, asked) =>
+        console.error(`agora: requested ${asked} messages; the host fit and returned ${shown} in one native frame`));
       // a read after a cursor that could not walk back to it returns NOTHING rather than a window
       // from the middle of the backlog, so the empty result must say which of the two it is
-      const gap = msgs.gap;
+      const gap = /** @type {any} */ (msgs).gap;
       if (values.threads && transport.threads) {
         // On Slack a room read never contains replies, and a parent older than the cursor is
         // not in the window even when its thread moved after it: a claim made in a thread is
@@ -2466,7 +2529,11 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         await recordCarryCursorMove(sdir, key, session, bearer.name, set, 'cursor-set');
         await writeCursor(sdir, key, set);
       } else if (values.now) {
-        const msgs = await transport.read({ thread });
+        // Only the newest message's cursor is used, so ask for one. Unbounded here meant `--now`
+        // refused on exactly the rooms it was needed for -- and it is the verb a reader reaches for
+        // after being told they have no cursor, so its failure misdirected twice over.
+        const msgs = await readWithinFrame(transport, { thread, limit: 1 }, (shown, asked) =>
+          console.error(`agora: newest ${shown} of ${asked} requested shown; ${asked - shown} older omitted`));
         // never a null position from an empty read: that is the explicit "from the start" value,
         // and writing it here replays the whole room on the next watch
         if (msgs.length) {
