@@ -1014,12 +1014,22 @@ Details and maintainer checks: [docs/TRANSFERS.md](../../docs/TRANSFERS.md).
   `exited` from the child's own `exit` event and reads `child.stdout` directly, so a wrapper dies as
   "Tailcat command output unavailable" before any dial. Write the fake's output on `setImmediate`,
   after the consumer has attached, and never `unref` a timer the rig needs to hold the loop open.
-- **A fake binary cannot be a `.mjs` with a shebang: Windows cannot execute it**, and the cell then
-  reports "no child was spawned" on the one platform where that is a fixture artifact. Pass
-  `--binary process.execPath` and replace the child call with `node --import <preload>`, which is
-  what `test/probe-tailcat-live.test.mjs` already does. Assertions on paths need the same care: a
-  `/nonexistent/agora.json` regex passes everywhere and fails on the runner, which renders
-  `C:\nonexistent\agora.json`.
+- **Everything in a cross-platform rig that touches a PATH needs the platform-neutral form, and a
+  local green is silent on all of it.** Three of these in one night on one unit, each green on Linux
+  and red on the house Windows runner: a fake binary written as a `.mjs` with a shebang (Windows
+  cannot execute it, so the cell reports "no child was spawned" on the one platform where that is a
+  fixture artifact — pass `--binary process.execPath` and replace the child call with
+  `node --import <preload>`, as `test/probe-tailcat-live.test.mjs` does); an assertion matching
+  `/no config at \/nonexistent\/agora\.json/`, which the runner renders `C:\nonexistent\agora.json`;
+  and a generated helper doing `import … from "C:\…\mod.mjs"`, when an ESM specifier must be a
+  `file://` URL there (`pathToFileURL(p).href`). Before a PR, re-read every fixture for a literal
+  separator, an executable bit, and a bare path used as a specifier.
+- **`npm test` green on your seat is not the head green: CI runs a matrix your machine is not in.**
+  Say which you ran. Reporting a local suite and `tsc` as "gates green" on a head whose
+  windows-latest leg was red is a claim about a different program, and it is the easier mistake
+  because both sentences are true and only one of them answers the question. `gh pr checks <n>` and
+  `gh run view <id> --log-failed` are the measurement; a sha with no run at all is UNMEASURED, which
+  is neither green nor red and should be said as such when a head is declared.
 - **A `.gitignore` line with a trailing slash does not match a SYMLINK of that name.** Linking a
   shared checkout's `node_modules` into a worktree to run `tsc` gets it staged by `git add -A`.
   Exclude it per checkout in `.git/info/exclude` (shared by every worktree, committed nowhere)
