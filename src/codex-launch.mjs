@@ -1,7 +1,7 @@
 // @ts-check
 import { execFile, spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
-import { link, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, link, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -47,6 +47,37 @@ function processAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try { process.kill(pid, 0); return true; }
   catch (error) { return /** @type {NodeJS.ErrnoException} */ (error).code === "EPERM"; }
+}
+
+/** SQLite is the cross-runtime, crash-releasing authority already used by Agora's native service.
+ * @param {string} file @param {number} deadline @param {(ms:number)=>Promise<void>} sleep */
+async function acquireStartupAuthority(file, deadline, sleep) {
+  const moduleName = typeof process.versions.bun === "string" ? "bun:sqlite" : "node:sqlite";
+  let sqlite;
+  try { sqlite = await import(moduleName); }
+  catch { throw new AgoraError("Codex app-server startup authority needs Node 22.13 or later, or Bun with SQLite support", EXIT.error); }
+  const Database = sqlite.DatabaseSync ?? sqlite.Database;
+  if (typeof Database !== "function") throw new AgoraError("runtime has no supported SQLite API for Codex app-server startup", EXIT.error);
+  while (Date.now() < deadline) {
+    /** @type {{exec:(sql:string)=>unknown,close:()=>void} | undefined} */
+    let database;
+    try {
+      const opened = new Database(file);
+      database = opened;
+      opened.exec("PRAGMA busy_timeout=0; BEGIN EXCLUSIVE");
+      await chmod(file, 0o600);
+      let held = true;
+      return { release() { if (!held) return; held = false; try { opened.exec("ROLLBACK"); } finally { opened.close(); } } };
+    } catch (error) {
+      try { database?.close(); } catch {}
+      const sqliteError = /** @type {Error & {code?:string,errno?:number,errcode?:number}} */ (error);
+      if (sqliteError.code !== "SQLITE_BUSY" && sqliteError.errno !== 5 && sqliteError.errcode !== 5 &&
+          !/database is locked/i.test(sqliteError.message))
+        throw new AgoraError(`Codex app-server startup authority is unusable: ${file}`, EXIT.error);
+      await sleep(Math.min(100, Math.max(1, deadline - Date.now())));
+    }
+  }
+  throw new AgoraError(`Codex app-server startup authority remained busy through the deadline: ${file}`, EXIT.error);
 }
 
 async function reserveLoopbackPort() {
@@ -127,7 +158,9 @@ async function probeDescriptor(descriptor) {
  *   deps?:{ probe?:(d:any)=>Promise<boolean>, reservePort?:()=>Promise<number>, spawn?:typeof spawn,
  *     run?:typeof execFileAsync, platform?:NodeJS.Platform,
  *     uuid?:()=>string, token?:()=>string, sleep?:(ms:number)=>Promise<void>, now?:()=>string,
- *     processAlive?:(pid:number)=>boolean, beforeLockPublish?:()=>Promise<void> }
+ *     processAlive?:(pid:number)=>boolean, beforeLockPublish?:()=>Promise<void>,
+ *     afterLockObservation?:(owner:{pid:number,token:string,at:string})=>Promise<void>,
+ *     kill?:(pid:number)=>void }
  * }} options
  */
 export async function ensureCodexServer(options) {
@@ -135,11 +168,37 @@ export async function ensureCodexServer(options) {
   const paths = codexControlPaths(options.stateRoot);
   const deps = options.deps ?? {};
   const probe = deps.probe ?? probeDescriptor;
+  const sleep = deps.sleep ?? delay;
+  const deadline = Date.now() + (options.timeoutMs ?? 15_000);
   await mkdir(paths.root, { recursive: true, mode: 0o700 });
+  const authority = await acquireStartupAuthority(path.join(paths.root, "startup-authority.sqlite"), deadline, sleep);
 
   /** @type {{pid:number,token:string,at:string} | undefined} */
   let lockOwner;
   try {
+    // The JSON file is diagnostic state, not authority. SQLite serializes every observation and
+    // mutation below, so a pathname vacancy can never admit another starter.
+    while (Date.now() < deadline) {
+      const existing = await readDescriptor(paths.descriptor);
+      if (existing && await probe(existing)) return { ...existing, reused: true, descriptor: paths.descriptor };
+      let lockPresent = true;
+      try { await readFile(paths.lock, "utf8"); }
+      catch (error) {
+        if (/** @type {NodeJS.ErrnoException} */ (error).code === "ENOENT") lockPresent = false;
+        else throw error;
+      }
+      if (!lockPresent) break;
+      const owner = await readLockOwner(paths.lock);
+      if (owner && !(deps.processAlive ?? processAlive)(owner.pid)) {
+        await deps.afterLockObservation?.(owner);
+        await rm(paths.lock);
+        break;
+      }
+      await sleep(Math.min(100, Math.max(1, deadline - Date.now())));
+    }
+    if (Date.now() >= deadline)
+      throw new AgoraError("Codex app-server startup lock remains held or has unknown ownership", EXIT.error);
+
     const ownerToken = (deps.uuid ?? randomUUID)();
     lockOwner = { pid: process.pid, token: ownerToken, at: new Date().toISOString() };
     const candidate = `${paths.lock}.${ownerToken}.candidate`;
@@ -148,42 +207,6 @@ export async function ensureCodexServer(options) {
     finally { await handle.close(); }
     try { await deps.beforeLockPublish?.(); await link(candidate, paths.lock); }
     finally { await rm(candidate, { force: true }).catch(() => {}); }
-  } catch (error) {
-    if (/** @type {NodeJS.ErrnoException} */ (error).code !== "EEXIST") throw error;
-    const deadline = Date.now() + (options.timeoutMs ?? 15_000);
-    while (Date.now() < deadline) {
-      const existing = await readDescriptor(paths.descriptor);
-      if (existing && await probe(existing)) return { ...existing, reused: true, descriptor: paths.descriptor };
-      const owner = await readLockOwner(paths.lock);
-      if (owner && !(deps.processAlive ?? processAlive)(owner.pid)) {
-        const stale = `${paths.lock}.${(deps.uuid ?? randomUUID)()}.stale`;
-        try { await rename(paths.lock, stale); }
-        catch (renameError) {
-          if (/** @type {NodeJS.ErrnoException} */ (renameError).code === "ENOENT") continue;
-          throw renameError;
-        }
-        const moved = await readLockOwner(stale);
-        if (moved?.pid === owner.pid && moved.token === owner.token && !(deps.processAlive ?? processAlive)(moved.pid)) {
-          await rm(stale, { force: true });
-          return ensureCodexServer(options);
-        }
-        try { await link(stale, paths.lock); } catch (linkError) {
-          const code = /** @type {NodeJS.ErrnoException} */ (linkError).code;
-          // Another contender may already have consumed this quarantine and
-          // published the winning owner. Either collision means we no longer
-          // own a restorable source; re-enter observation instead of acting on it.
-          if (code !== "EEXIST" && code !== "ENOENT") throw linkError;
-        }
-        await rm(stale, { force: true });
-      }
-      await (deps.sleep ?? delay)(100);
-    }
-    throw new AgoraError("Codex app-server startup lock remains held or has unknown ownership", EXIT.error);
-  }
-
-  try {
-    const existing = await readDescriptor(paths.descriptor);
-    if (existing && await probe(existing)) return { ...existing, reused: true, descriptor: paths.descriptor };
 
     const codexPath = await resolveCodexBinary({ env, ...(options.codexPath ? { bin: options.codexPath } : {}) });
     const generation = (deps.uuid ?? randomUUID)();
@@ -233,19 +256,19 @@ export async function ensureCodexServer(options) {
       version: DESCRIPTOR_VERSION, endpoint, tokenFile, pid, ...(supervisorPid ? { supervisorPid } : {}), codexPath,
       startedAt: (deps.now ?? (() => new Date().toISOString()))(),
     };
-    const deadline = Date.now() + (options.timeoutMs ?? 15_000);
     while (Date.now() < deadline) {
       if (await probe(descriptor)) {
         await atomicJson(paths.descriptor, descriptor);
         return { ...descriptor, reused: false, descriptor: paths.descriptor };
       }
-      await (deps.sleep ?? delay)(100);
+      await sleep(Math.min(100, Math.max(1, deadline - Date.now())));
     }
-    try { process.kill(pid); } catch { /* the failed process may already be gone */ }
+    try { (deps.kill ?? process.kill)(pid); } catch { /* the failed process may already be gone */ }
     await rm(generationDir, { recursive: true, force: true }).catch(() => {});
     throw new AgoraError("Codex app server did not accept an authenticated loopback connection before the startup deadline", EXIT.error);
   } finally {
     if (lockOwner) await releaseLock(paths.lock, lockOwner);
+    authority.release();
   }
 }
 

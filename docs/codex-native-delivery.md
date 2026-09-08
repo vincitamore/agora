@@ -35,6 +35,11 @@ from any attached thread choose native delivery automatically. The capability va
 only to the attaching TUI through its named environment variable; server-side tool processes see
 the file reference, not the value. Arguments for Codex itself follow `--`.
 
+Concurrent launchers serialize the complete inspect/reclaim/start transaction under the runtime's
+built-in SQLite exclusive lock in the protected state root. That authority is released by the OS
+if its process dies and its busy wait shares the fifteen-second startup deadline. The adjacent JSON
+owner record is diagnostic only; an empty, malformed, or live-owned record is never reclaimed by age.
+
 The manual sequence below remains the diagnostic and rollback-level form.
 
 First stop the old watch for the same room/cursor. Preserve the thread ID and cursor.
@@ -78,8 +83,9 @@ too large for a request fails intact. No summarizer or trimming step changes its
 
 The `turn/start` response is acceptance only. Agora keeps the same connection open and correlates
 the returned turn id with `turn/completed`; only status `completed` checkpoints that batch's
-messages in order. `interrupted`, `failed`, a closed connection, or the bounded thirty-minute
-completion deadline retain the batch and report distinct non-processed outcomes. A missing start
+messages in order. `interrupted` and `failed` report their distinct outcomes. A closed connection
+or the bounded thirty-minute completion deadline reports `closed-without-completion`, because no
+correlated completion arrived; all three cases retain the batch. A missing start
 response remains uncertain: the server may have accepted the input, so the bridge does not retry
 that RPC automatically. Inspect the retained thread before restarting after uncertainty.
 Client message IDs are correlation identifiers, not a claimed provider deduplication API.

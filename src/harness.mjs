@@ -438,6 +438,12 @@ const interpolated = (/** @type {string} */ quote, /** @type {string} */ spec) =
  * positions loses the exemption on the spot.
  */
 export const COMPUTED_LOAD_EXEMPTIONS = Object.freeze({
+  "src/codex-launch.mjs": Object.freeze({
+    imports: 1, requires: 0,
+    chooserDigest: "sha256:568fcb018546e5b99ca656f24a01c2b7dcbf20b3eb2853229300b837bb28ff5d",
+    chooserSummary: "a const bound to a ternary over process.versions.bun yielding one of two colon-prefixed builtin names, and the call that awaits it",
+    why: "one dynamic import choosing between the builtins bun:sqlite and node:sqlite; neither is a path and neither can be a repository file",
+  }),
   "src/native-service.mjs": Object.freeze({
     imports: 1, requires: 0,
     // The AUDITED EXPRESSION, as a digest over every line of the module that mentions the operand,

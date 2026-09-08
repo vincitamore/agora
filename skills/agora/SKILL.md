@@ -744,10 +744,13 @@ an injected `fetch` so it is testable offline.
   Windows launcher parameters are `-CodexServer` and `-CodexTokenFile`. A standalone
   TUI must first be resumed against that authenticated server; starting a second server
   cannot steer it. Test both active and idle delivery on the retained session.
+  Concurrent launchers serialize inspect, reclaim and start under the runtime's crash-releasing
+  SQLite exclusive lock. The JSON owner record is diagnostic only and is never reclaimed by age.
   The start response is acceptance only. Agora keeps the same connection open and correlates its
-  returned turn id to `turn/completed`; only status `completed` checkpoints. Interrupted, failed,
-  closed-without-completion and the bounded thirty-minute completion timeout retain the cursor as
-  distinct outcomes. Inspect an uncertain start submission before restarting. Read
+  returned turn id to `turn/completed`; only status `completed` checkpoints. Interrupted and failed
+  turns retain the cursor with distinct outcomes. Socket closure or the bounded thirty-minute
+  completion deadline reports `closed-without-completion` because no correlated completion arrived,
+  and also retains it. Inspect an uncertain start submission before restarting. Read
   `docs/codex-native-delivery.md` for setup, rollback and verification.
 - **The queue bridge is a compatibility stopgap, not the normal launch.** A Codex session started
   outside `agora codex` cannot be attached after the fact. For that legacy session, terminal output

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -179,9 +179,14 @@ test("a contender paused before atomic owner publication cannot create a second 
       ...common, beforeLockPublish: async () => { firstReached(); await firstPaused; },
     } });
     await reached;
-    const second = await ensureCodexServer({ stateRoot: dir, codexPath: fakeCodex, deps: common });
+    let secondSettled = false;
+    const secondPromise = ensureCodexServer({ stateRoot: dir, codexPath: fakeCodex, deps: common })
+      .finally(() => { secondSettled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(secondSettled, false);
+    assert.equal(spawns, 0);
     releaseFirst();
-    const firstResult = await first;
+    const [firstResult, second] = await Promise.all([first, secondPromise]);
     assert.equal(spawns, 1);
     assert.equal(firstResult.pid, second.pid);
   } finally {
@@ -224,6 +229,129 @@ test("concurrent reclaimers of one proven-dead owner still start only one replac
     ]);
     assert.equal(spawns, 1);
     assert.equal(results[0].pid, results[1].pid);
+  } finally {
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+  }
+});
+
+test("a stale observer serializes live replacement and gap contenders under one crash-releasing authority", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "agora-codex-stale-observer-"));
+  const paths = codexControlPaths(dir);
+  await mkdir(paths.root, { recursive: true });
+  await writeFile(paths.lock, `${JSON.stringify({ pid: 919191, token: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", at: new Date().toISOString() })}\n`);
+  const fakeCodex = path.join(dir, process.platform === "win32" ? "codex.exe" : "codex");
+  await writeFile(fakeCodex, "fake", { mode: 0o700 });
+  /** @type {()=>void} */ let resumeObserver = () => {};
+  const observerPaused = new Promise((resolve) => { resumeObserver = () => resolve(undefined); });
+  /** @type {()=>void} */ let observerReached = () => {};
+  const reached = new Promise((resolve) => { observerReached = () => resolve(undefined); });
+  let observations = 0, spawns = 0, reserves = 0, uuidSequence = 0;
+  /** @type {string | undefined} */ let readyEndpoint;
+  const deps = {
+    spawn: /** @type {any} */ ((/** @type {string} */ _command, /** @type {string[]} */ _args, /** @type {any} */ options) => {
+      spawns += 1; readyEndpoint = options.env.AGORA_CODEX_SERVER;
+      return { pid: 46464, unref() {} };
+    }),
+    /** @param {{endpoint:string}} descriptor */
+    probe: async descriptor => descriptor.endpoint === readyEndpoint,
+    /** @param {number} pid */ processAlive: pid => pid !== 919191,
+    reservePort: async () => { reserves += 1; return 4893; },
+    uuid: () => `30000000-0000-4000-8000-${String(++uuidSequence).padStart(12, "0")}`,
+    token: () => "private-token",
+    sleep: async () => { await new Promise((resolve) => setImmediate(resolve)); },
+  };
+  try {
+    const a = ensureCodexServer({ stateRoot: dir, codexPath: fakeCodex, timeoutMs: 3000, deps: {
+      ...deps, afterLockObservation: async () => {
+        if (++observations === 1) { observerReached(); await observerPaused; }
+      },
+    } });
+    await reached;
+    const b = ensureCodexServer({ stateRoot: dir, codexPath: fakeCodex, timeoutMs: 3000, deps });
+    const c = ensureCodexServer({ stateRoot: dir, codexPath: fakeCodex, timeoutMs: 3000, deps });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(reserves, 0, "contenders cannot reach a pathname gap while the stale observer holds authority");
+    assert.equal(spawns, 0);
+    resumeObserver();
+    const results = await Promise.all([a, b, c]);
+    assert.equal(spawns, 1);
+    assert.equal(new Set(results.map(result => result.pid)).size, 1);
+  } finally {
+    resumeObserver();
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+  }
+});
+
+test("a killed SQLite authority holder releases startup to exactly one successor", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "agora-codex-killed-authority-"));
+  const paths = codexControlPaths(dir);
+  await mkdir(paths.root, { recursive: true });
+  const authorityFile = path.join(paths.root, "startup-authority.sqlite");
+  const fakeCodex = path.join(dir, process.platform === "win32" ? "codex.exe" : "codex");
+  await writeFile(fakeCodex, "fake", { mode: 0o700 });
+  const holderScript = `const moduleName=typeof process.versions.bun==="string"?"bun:sqlite":"node:sqlite";const sqlite=await import(moduleName);const Database=sqlite.DatabaseSync??sqlite.Database;const db=new Database(process.argv[1]);db.exec("BEGIN EXCLUSIVE");console.log("held");setInterval(()=>{},1000);`;
+  const holder = spawn(process.execPath, ["--input-type=module", "-e", holderScript, authorityFile], {
+    stdio: ["ignore", "pipe", "ignore"], windowsHide: true,
+  });
+  const held = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("authority holder did not become ready")), 3000);
+    holder.once("error", reject);
+    holder.stdout.once("data", () => { clearTimeout(timer); resolve(undefined); });
+  });
+  let spawns = 0;
+  /** @type {string | undefined} */ let readyEndpoint;
+  const deps = {
+    spawn: /** @type {any} */ ((/** @type {string} */ _command, /** @type {string[]} */ _args, /** @type {any} */ options) => {
+      spawns += 1; readyEndpoint = options.env.AGORA_CODEX_SERVER;
+      return { pid: 47474, unref() {} };
+    }),
+    /** @param {{endpoint:string}} descriptor */ probe: async descriptor => descriptor.endpoint === readyEndpoint,
+    reservePort: async () => 4894,
+    uuid: (() => { let n = 0; return () => `40000000-0000-4000-8000-${String(++n).padStart(12, "0")}`; })(),
+    token: () => "private-token",
+    sleep: async () => { await new Promise((resolve) => setImmediate(resolve)); },
+  };
+  try {
+    await held;
+    await assert.rejects(ensureCodexServer({ stateRoot: dir, codexPath: fakeCodex, timeoutMs: 25, deps }), /authority remained busy/);
+    assert.equal(spawns, 0);
+    holder.kill();
+    await new Promise((resolve) => holder.once("close", resolve));
+    const successor = await ensureCodexServer({ stateRoot: dir, codexPath: fakeCodex, timeoutMs: 3000, deps });
+    assert.equal(successor.reused, false);
+    assert.equal(spawns, 1);
+  } finally {
+    if (holder.exitCode === null) holder.kill();
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+  }
+});
+
+test("startup failure releases SQLite authority at the shared deadline", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "agora-codex-startup-deadline-"));
+  const fakeCodex = path.join(dir, process.platform === "win32" ? "codex.exe" : "codex");
+  await writeFile(fakeCodex, "fake", { mode: 0o700 });
+  let spawns = 0, kills = 0, ready = false;
+  /** @type {string | undefined} */ let endpoint;
+  let uuidSequence = 0;
+  const deps = {
+    spawn: /** @type {any} */ ((/** @type {string} */ _command, /** @type {string[]} */ _args, /** @type {any} */ options) => {
+      spawns += 1; endpoint = options.env.AGORA_CODEX_SERVER;
+      return { pid: 48484, unref() {} };
+    }),
+    /** @param {{endpoint:string}} descriptor */ probe: async descriptor => ready && descriptor.endpoint === endpoint,
+    reservePort: async () => 4895,
+    uuid: () => `50000000-0000-4000-8000-${String(++uuidSequence).padStart(12, "0")}`,
+    token: () => "private-token",
+    sleep: async () => { await new Promise((resolve) => setTimeout(resolve, 2)); },
+    kill: () => { kills += 1; },
+  };
+  try {
+    await assert.rejects(ensureCodexServer({ stateRoot: dir, codexPath: fakeCodex, timeoutMs: 15, deps }), /startup deadline/);
+    assert.equal(kills, 1);
+    ready = true;
+    const successor = await ensureCodexServer({ stateRoot: dir, codexPath: fakeCodex, timeoutMs: 3000, deps });
+    assert.equal(successor.reused, false);
+    assert.equal(spawns, 2);
   } finally {
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
   }
