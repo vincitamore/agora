@@ -45,7 +45,8 @@ export class MemberClientService {
   /**
    * @param {{ stateRoot: string, alias: string, descriptorPath: string, keyDigest: string,
    *  claim?: { path: string, generation: string }, build?: import("./harness.mjs").BuildIdentity,
-   *  nonce?: string, seatLabel?: string, timeoutMs?: number }} options
+   *  nonce?: string, seatLabel?: string, timeoutMs?: number,
+   *  channelOptions?: any, identity?: any }} options
    */
   constructor(options) {
     this.stateRoot = options.stateRoot;
@@ -56,6 +57,11 @@ export class MemberClientService {
     this.build = options.build;
     this.seatLabel = options.seatLabel ?? "member";
     this.timeoutMs = options.timeoutMs;
+    // The member channel's own options, threaded so a cell can count at the real spawn seam
+    // (`options.spawn ?? spawnTailcat`, src/tailcat-routes.mjs). A contest cell that counted at a
+    // seam of its own invention would prove its own wiring, not this one.
+    this.channelOptions = options.channelOptions;
+    this.identity = options.identity;
     // The seat-local service secret. It authenticates local sessions to this process and NEVER
     // travels: not to the host, not into the descriptor's public projection, not into a log.
     this.nonce = options.nonce ?? randomUUID().replaceAll("-", "");
@@ -85,6 +91,8 @@ export class MemberClientService {
       descriptorPath: this.descriptorPath,
       stateRoot: this.stateRoot,
       ...(this.timeoutMs ? { timeoutMs: this.timeoutMs } : {}),
+      ...(this.channelOptions ? { channelOptions: this.channelOptions } : {}),
+      ...(this.identity ? { identity: this.identity } : {}),
     });
     // Prove the channel before anything local exists: a failed dial must leave no endpoint and no
     // descriptor behind, so a session's next read still refuses with the start line rather than
