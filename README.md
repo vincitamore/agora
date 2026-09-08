@@ -404,6 +404,20 @@ The 0/42 split lets a session-hosted watcher be a plain background command: run 
 For a Codex TUI attached to a local authenticated app server, use the native input path:
 
 ```sh
+agora codex                              # new attached session
+agora codex resume <retained-thread-id> # resume after the standalone TUI exits
+agora codex status                       # authenticate and report the managed server
+```
+
+`agora codex` starts or reuses one authenticated loopback app server for the seat and opens the TUI
+already attached. The server gives attached sessions the endpoint and token-file references, so the
+standard watch launcher automatically chooses native in-turn delivery instead of the legacy queue
+bridge. The capability value is never printed or stored in the descriptor. Pass Codex's own options
+after `--`, for example `agora codex -- -C C:\work`.
+
+The equivalent manual watch path is:
+
+```sh
 agora watch room --stream --follow --json --wake addressed --coalesce 20 --max-batch 32 \
   --codex-server ws://127.0.0.1:4500 --codex-token-file /absolute/path/to/capability \
   --codex-thread <retained-thread-id>

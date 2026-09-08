@@ -38,6 +38,7 @@ jobs:
         run: |
           $t = $null; $e = $null
           [void][System.Management.Automation.Language.Parser]::ParseFile("$PWD/scripts/start-codex-watch.ps1", [ref]$t, [ref]$e)
+          [void][System.Management.Automation.Language.Parser]::ParseFile("$PWD/scripts/start-codex-app-server.ps1", [ref]$t, [ref]$e)
           if ($e.Count) { $e | ForEach-Object { $_.Message }; exit 1 }
       - name: platform probe
         if: runner.os != 'Windows'
