@@ -205,6 +205,87 @@ test("the production arm path reconciles the journal and says so, through the re
     + "from the absence of a record");
 });
 
+// ---------------------------------------------------------------------------
+// Reporting the completed prefix is not reconciling it.
+//
+// The window this record exists to close is: the consumer's completion is written, and the caller
+// dies before checkpointing the cursor. On the next arm the journal knows the work finished and the
+// cursor still points at it, so the delivery replays. A report that prints the recovered position
+// and leaves the cursor where it was closes nothing.
+
+/** Arm the real CLI once against a local room whose journal is prepared. Returns what a user sees. */
+async function armWithJournal(/** @type {string} */ root, /** @type {any[]} */ marks, /** @type {string|undefined} */ savedCursor) {
+  const roomFile = path.join(root, "cli-room.ndjson");
+  await writeFile(roomFile, "", "utf8");
+  await writeFile(path.join(root, "agora.json"), JSON.stringify({
+    actor: { name: "Opus/test", kind: "agent" },
+    rooms: { "cli-room": { transport: "local", path: roomFile } },
+  }), "utf8");
+  for (const mark of marks) {
+    const m = { id: mark.id, cursor: mark.cursor, room: "cli-room", text: "x",
+      author: { name: "peer", kind: "agent" }, ts: "2026-09-08T00:00:00Z" };
+    await codex.recordCodexSubmitted(root, "t-arm", m);
+    await codex.recordCodexAccepted(root, "t-arm", m, { turnId: `turn-${mark.id}` });
+    if (mark.outcome) await codex.recordCodexReceipt(root, "t-arm", m, { id: mark.id, outcome: mark.outcome });
+  }
+  const cli = new URL("../bin/agora.mjs", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
+  const env = { ...process.env, AGORA_STATE: root, AGORA_CONFIG: path.join(root, "agora.json"),
+    AGORA_SESSION: "armtest" };
+  if (savedCursor !== undefined)
+    await execFile(process.execPath, [cli, "cursor", "cli-room", "--set", savedCursor], { env });
+  let stderr = "";
+  try { await execFile(process.execPath, [cli, "watch", "cli-room", "--once", "--codex-queue",
+    "--codex-thread", "t-arm"], { env }); }
+  catch (error) { stderr = String(/** @type {any} */ (error)?.stderr ?? ""); }
+  let cursor = null;
+  // The cursor file is a record ({cursor, at}), not a bare string: read the field, or the assertion
+  // compares a position against a whole document and reds while the product is correct.
+  try { cursor = JSON.parse(await readFile(path.join(root, "sessions", "armtest", "cli-room.cursor"), "utf8")).cursor; }
+  catch { cursor = null; }
+  return { stderr, cursor };
+}
+
+test("the arm RECOVERS the cursor through the completed prefix, closing the accept-before-checkpoint window", async (t) => {
+  const root = await stateRoot(t);
+  // "1" and "2" completed; the caller died before checkpointing "2". "3" is acknowledged only.
+  const { cursor } = await armWithJournal(root, [
+    { id: "one", cursor: "1", outcome: "completed" },
+    { id: "two", cursor: "2", outcome: "completed" },
+    { id: "three", cursor: "3" },
+  ], "1");
+  assert.equal(cursor, "2",
+    "the saved position must move to the end of the contiguous completed run: the consumer reported "
+    + "delivery 2 finished and the cursor never caught up, so without this the next poll redelivers "
+    + "work that is already done -- which is the whole reason the record is kept");
+});
+
+test("recovery STOPS at the gap: a completion after a failure never carries the cursor over it", async (t) => {
+  const root = await stateRoot(t);
+  const { cursor } = await armWithJournal(root, [
+    { id: "one", cursor: "1", outcome: "completed" },
+    { id: "two", cursor: "2", outcome: "completed" },
+    { id: "three", cursor: "3", outcome: "failed" },
+    { id: "four", cursor: "4", outcome: "completed" },
+  ], "1");
+  assert.equal(cursor, "2",
+    "delivery 4 completed, but 3 did not: advancing to 4 would retire 3 with a receipt saying it "
+    + "succeeded, and 3 is exactly the message a person still needs to see");
+});
+
+test("an unlocatable saved cursor is REFUSED, not guessed: no rewind, no skip", async (t) => {
+  const root = await stateRoot(t);
+  const { stderr, cursor } = await armWithJournal(root, [
+    { id: "one", cursor: "1", outcome: "completed" },
+    { id: "two", cursor: "2", outcome: "completed" },
+  ], "99");
+  assert.equal(cursor, "99",
+    "a saved position that does not appear in the journal cannot be placed relative to it, and "
+    + "cursors are opaque so nothing may compare them -- moving it would be a guess that either "
+    + "rewinds into a replay or skips unread messages");
+  assert.match(stderr, /is not in this thread's journal/,
+    "and the refusal is VISIBLE: a silent no-op leaves a reader believing recovery happened");
+});
+
 test("two INDEPENDENT writer processes on one thread lose no mark", async (t) => {
   const root = await stateRoot(t);
   const moduleURL = new URL("../src/codex.mjs", import.meta.url).href;

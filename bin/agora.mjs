@@ -2186,9 +2186,15 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         }
         return undefined;
       } : undefined;
-      // Read the delivery journal for THIS room before arming. A record nothing consumes is a record
-      // that does not exist: the marks below were written by earlier arms of this thread, and a
-      // re-arm that cannot see them re-delivers blind past work the consumer may still be holding.
+      await identity({ typed: true });
+      const seeded = await readCursorSeeded(sdir, stateRoot, key);
+
+      // Reconcile the delivery journal for THIS room before arming, and ACT on it. Reporting the
+      // completed prefix and leaving the cursor behind would leave the exact window this record
+      // exists to close still open: a completed outcome is written before the caller checkpoints,
+      // so a death between the two leaves the work done and the cursor pointing at it, and the next
+      // arm redelivers something the consumer already finished.
+      //
       // Scoped to roomAlias because one thread carries every room this seat watches, and a cursor
       // from another room is a coordinate in another room.
       if (codexDelivery) {
@@ -2206,9 +2212,31 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
             + (journal.advanceTo ? `; completed through ${journal.advanceTo}` : "")
             + `. An absent-unresolved row left the queue without the consumer reporting an outcome; `
             + `it is neither retried nor counted as done, and the journal keeps it so a person can decide.`);
+
+        if (journal.advanceTo && journal.advanceTo !== seeded.cursor) {
+          // Cursors are opaque: nothing here may compare two of them. The journal's own order is the
+          // only ordering available, so a move is permitted ONLY when both the saved position and the
+          // target are found in it and the target is later. Everything else refuses and changes
+          // nothing -- a rewind would replay, and a guess would skip.
+          const at = journal.rows.findIndex((r) => r.cursor === seeded.cursor);
+          const through = journal.rows.findIndex((r) => r.cursor === journal.advanceTo);
+          if (seeded.cursor === undefined)
+            console.error(`agora: ${roomAlias} has no saved position, so the reconciled completed `
+              + `prefix is reported and not applied; advancing from nothing would skip everything `
+              + `this room delivered before the journal existed`);
+          else if (at === -1)
+            console.error(`agora: ${roomAlias}'s saved position ${seeded.cursor} is not in this `
+              + `thread's journal, so it cannot be placed relative to the completed prefix and is `
+              + `left alone; cursors are opaque and a position that cannot be located cannot be `
+              + `moved forward without risking a rewind`);
+          else if (through > at) {
+            await writeCursor(sdir, key, journal.advanceTo);
+            console.error(`agora: recovered ${roomAlias} to ${journal.advanceTo}: the consumer `
+              + `reported those deliveries completed and the cursor had not caught up, which is the `
+              + `accept-before-checkpoint window this journal exists to close`);
+          }
+        }
       }
-      await identity({ typed: true });
-      const seeded = await readCursorSeeded(sdir, stateRoot, key);
       if (seeded.seeded) console.error(`agora: no position saved for this session yet; seeded from the shared ${key}.cursor (${seeded.cursor})`);
       else if (seeded.cursor === undefined) console.error(`agora: no position saved for ${key}; reading from the start (run \`agora cursor ${roomAlias}${thread ? ` --thread ${thread}` : ""} --now\` to start from the latest message)`);
 

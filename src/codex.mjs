@@ -438,8 +438,8 @@ export async function recordCodexReceipt(root, thread, message, receipt) {
  * as before.
  * @param {{ root: string, thread: string, room?: string,
  *   list?: () => Promise<{ id: string }[]> }} opts
- * @returns {Promise<{ inFlight: any[], unresolved: any[], absent: any[], unacknowledged: any[],
- *   processed: any[], advanceTo: string | null }>}
+ * @returns {Promise<{ rows: any[], inFlight: any[], unresolved: any[], absent: any[],
+ *   unacknowledged: any[], processed: any[], advanceTo: string | null }>}
  */
 export async function reconcileCodexIntents({ root, thread, room, list }) {
   const all = await readCodexIntents(root, thread);
@@ -489,7 +489,10 @@ export async function reconcileCodexIntents({ root, thread, room, list }) {
     if (!intent.processedAt) break;
     advanceTo = intent.cursor;
   }
-  return { inFlight, unresolved, absent, unacknowledged, processed, advanceTo };
+  // `rows` is this room's marks in recorded order. A caller cannot compare two opaque cursors,
+  // so the only way to know whether a target is FORWARD of the saved position is to find both
+  // in this sequence. Handing back the sequence is what makes a guarded checkpoint possible.
+  return { rows: intents, inFlight, unresolved, absent, unacknowledged, processed, advanceTo };
 }
 
 /**
