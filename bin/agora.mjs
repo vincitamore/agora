@@ -2421,10 +2421,18 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
             try {
               if (codexQueue) await queueCodex(roomAlias, msgs, {
                 ...codexQueue,
+                // The state root turns acceptance into a DURABLE receipt: the delivery is recorded
+                // before this callback runs, so a death between the queue call and the checkpoint
+                // below leaves a record to reconcile instead of nothing at all. Without it the
+                // cursor is the only trace, and it is written after — so that window loses the
+                // delivery silently. `agora codex reconcile` is what reads these back.
+                root: stateRoot,
                 onQueued: async ({ thread: codexTarget, cursor, message }) => {
                   await batch.checkpoint(message);
                   bridged = { cursor: message.cursor, count: bridged.count + 1 };
-                  console.error(`agora: queued Codex thread ${codexTarget} delivery ${cursor}; cursor checkpointed`);
+                  // "checkpointed" is the CURSOR's fact, not the consumer's: the queue accepted it
+                  // and nothing here knows whether the far side ever took it.
+                  console.error(`agora: queued Codex thread ${codexTarget} delivery ${cursor}; accepted and cursor checkpointed (acceptance is not processing)`);
                 },
               });
               if (codexServer) await deliverCodexServer(roomAlias, msgs, {
