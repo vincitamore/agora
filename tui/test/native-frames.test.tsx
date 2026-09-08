@@ -63,10 +63,10 @@ describe("native frames", () => {
       expect(peers).toContain("no sessions registered on this seat");
 
       const dark = get("native-room-dark");
-      // the subscription's own reason (the connection closed) or the next poll's (no descriptor
-      // once the service took it down): both are the channel, neither is a refusal
+      // The first dark frame can come from close, failed reconnect, or missing descriptor.
+      // Its path/reason may be ellipsized; native-client.test.ts checks the full close reason.
       expect(dark).toContain("room dark · ");
-      expect(dark).toMatch(/room dark · (seat service at .* closed the connection|no seat service descriptor at )/);
+      expect(dark).toMatch(/room dark · (seat service at |no seat service descriptor at )/);
       expect(dark).not.toContain("room refused");
       expect(dark).not.toContain("· live");
       // the room read before the service went is still on screen, under the dark row
