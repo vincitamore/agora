@@ -6,7 +6,7 @@ import { githubEventsTransport } from "./github-events.mjs";
 import { slackTransport } from "./slack.mjs";
 import { nativeTransport } from "./native.mjs";
 import { nativeRemoteTransport } from "./native-remote.mjs";
-import { openRemoteRoom } from "../native-remote.mjs";
+import { openResidentMemberRoom } from "../native-member-client.mjs";
 import { resolvePath, stateDir } from "../core.mjs";
 
 /** GITHUB_TOKEN / GH_TOKEN, the same pair tokenSource reports as "env" for github rooms. */
@@ -62,8 +62,14 @@ export async function createTransport(alias, room, cfg, deps = {}) {
       const descriptor = /** @type {any} */ (room).descriptor;
       if (typeof descriptor !== "string" || !descriptor)
         throw new AgoraError(`room "${alias}": a native-remote room needs a descriptor (the path to the route descriptor the operator carried from the host)`);
-      const remote = await openRemoteRoom({ descriptorPath: resolvePath(descriptor), stateRoot: stateDir(cfg) });
-      return nativeRemoteTransport(room, { actor: cfg.actor, remote, session: deps.session });
+      // L12 seam 5. The row's SHAPE is unchanged and its meaning has moved: it no longer means
+      // "dial this descriptor from whatever process is asking", it means "reach the room this
+      // descriptor names, through this machine's ONE resident member client". Sessions never dial;
+      // there is no fallback branch to `openRemoteRoom` when the client is absent, because a
+      // fallback is the defect returning under the name of robustness. The refusal names the
+      // member descriptor and the start line.
+      const remote = await openResidentMemberRoom(stateDir(cfg), alias);
+      return nativeRemoteTransport(room, { actor: cfg.actor, remote: /** @type {any} */ (remote), session: deps.session });
     }
     default:
       throw new AgoraError(`room "${alias}": unknown transport "${room.transport}" (have: ${Object.keys(TRANSPORTS).join(", ")})`);
