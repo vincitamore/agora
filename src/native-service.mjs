@@ -32,6 +32,26 @@ const MAX_PENDING_WRITE = 2 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 10_000;
 const ENDPOINT_PROBE_TIMEOUT_MS = 500;
 
+/** Reserve before any effect await, releasing only the reservation this call took.
+ * This component grants no authority: the service invokes it only after proof admission.
+ * @template T
+ * @param {{routes: Map<string, any>, openingRoutes: Set<string>}} registry
+ * @param {string} roomId @param {string} key @param {() => Promise<T>} effect */
+export async function withRouteReservation(registry, roomId, key, effect) {
+  const held = registry.routes.get(key);
+  if (held || registry.openingRoutes.has(key)) {
+    const state = held ? (held.state === 'closing' ? 'closing' : 'live') : 'opening';
+    const error = new AuthorityError('route-already-open');
+    error.message = state === 'live'
+      ? `route-already-open: ${roomId} already admits this key; close it before opening a new grant`
+      : `route-already-open: ${roomId} already admits this key and that route is ${state}; wait for it to settle before opening a new grant`;
+    throw error;
+  }
+  registry.openingRoutes.add(key);
+  try { return await effect(); }
+  finally { registry.openingRoutes.delete(key); }
+}
+
 const RECLAIM_AUTHORITY_FILE = "reclaim-authority.sqlite";
 const SEAT_IDENTITY_FILE = "seat-id";
 const MAX_PORTABLE_UNIX_SOCKET_PATH_BYTES = 103;
@@ -864,6 +884,11 @@ export class NativeRoomService {
       const store = await this.openRoom(roomId);
       const original = pending.request;
       if (original.targetNodeKeyDigest !== target) throw new AuthorityError('operator-target-refused');
+      // Authenticate the retained act before naming the live-route conflict. A second valid
+      // same-key act has an actionable route conflict as well as a stale room revision.
+      verifyAuthorityProof(envelope, authority, pending.challenge, original, this.now().toISOString());
+      if (action === 'room-enroll' && this.routes.has(routeKey(roomId, digest)))
+        throw new AuthorityError('route-already-open');
       const current = { ...original, targetNodeKeyDigest: target,
         binding: { ...original.binding, host: { ...original.binding.host, id: this.accountId },
           serviceBootId: this.bootEpoch, roomEpoch: store.manifest.epoch },
@@ -900,25 +925,10 @@ export class NativeRoomService {
     // One live route per key digest: a second grant for a live digest would leave two secrets and
     // two generations for one principal, and `route close` naming the digest would name both.
     //
-    // The check and the RESERVATION are one synchronous step, deliberately. Each socket's request
-    // chain is its own, so nothing serializes two route-open frames across sockets; a check that
-    // awaits before registering lets both callers pass, both start a listener and a Tailcat child,
-    // and the second registration replace the first -- leaving a LIVE route that still admits the
-    // key, is invisible to route list, and cannot be reached by route close. That is a live
-    // resource with no marker, which is why the reservation is taken here and not after the awaits.
-    const held = this.routes.get(key);
-    if (held || this.openingRoutes.has(key)) {
-      // The message carries the route's state, because the operator's next move differs: a live
-      // route is closed first; a closing one is already being torn down and its key is held until
-      // its resource settles; an OPENING one is the reservation itself, not yet in the registry,
-      // so `route close` would say route-not-open and the honest instruction is to wait.
-      const state = held ? (held.state === "closing" ? "closing" : "live") : "opening";
-      throw new AgoraError(state === "live"
-        ? `route-already-open: ${roomId} already admits this key; close it before opening a new grant`
-        : `route-already-open: ${roomId} already admits this key and that route is ${state}; wait for it to settle before opening a new grant`);
-    }
-    this.openingRoutes.add(key);
-    try {
+    // The outer room queue protects admission revisions; this inner synchronous reservation
+    // independently protects the effect registry. Keeping it across all effect awaits avoids
+    // orphaning a listener if the admission scheduler is ever changed.
+    return await withRouteReservation(this, roomId, key, async () => {
     const activation = { active: false };
     const secret = mintRouteSecret();
     const { proofRef, file: secretPath } = await writeRouteSecret(this.root, binding, secret);
@@ -963,13 +973,7 @@ export class NativeRoomService {
       }
       throw error;
     }
-    } finally {
-      // Released on every path AFTER the reservation: the mint, the listener start, the descriptor
-      // write and the failure branch. The route-already-open refusal above reserves nothing, so
-      // it has nothing to release. A reservation that outlived its attempt would refuse the
-      // operator's next honest open with route-already-open forever.
-      this.openingRoutes.delete(key);
-    }
+    });
   }
 
   /** Live routes, read from the service's own registry rather than from files on disk. */

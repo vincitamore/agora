@@ -250,9 +250,36 @@ test('two retained challenges at one revision cannot both commit; the stale one 
   const a = await f.service.createRouteChallenge({ action: 'room-enroll', roomId: ROOM, publicNodeKey: MEMBER });
   const b = await f.service.createRouteChallenge({ action: 'room-enroll', roomId: ROOM, publicNodeKey: MEMBER });
   await f.service.openRoute({ roomId: ROOM, publicNodeKey: MEMBER, proof: f.signed(a.challenge), routeOptions: rig.routeOptions });
-  await assert.rejects(f.service.openRoute({ roomId: ROOM, publicNodeKey: MEMBER, proof: f.signed(b.challenge), routeOptions: rig.routeOptions }), refusal('operator-context-refused'));
+  await assert.rejects(f.service.openRoute({ roomId: ROOM, publicNodeKey: MEMBER, proof: f.signed(b.challenge), routeOptions: rig.routeOptions }), refusal('route-already-open'));
   assert.equal(rig.starts(), 1);
   assert.equal(f.journal.status(b.request.operationId).state, 'unknown');
+});
+
+test('public signed same-key opens hold the inner reservation at listener acquisition and create one grant', async (t) => {
+  const f = await fixture(t), first = transport(), second = transport();
+  const a = await f.service.createRouteChallenge({ action: 'room-enroll', roomId: ROOM, publicNodeKey: MEMBER });
+  const b = await f.service.createRouteChallenge({ action: 'room-enroll', roomId: ROOM, publicNodeKey: MEMBER });
+  let observed = 0;
+  for (const rig of [first, second]) {
+    const listen = rig.routeOptions.listen;
+    rig.routeOptions.listen = async (...args) => {
+      assert.equal(f.service.openingRoutes.has(`${ROOM}:${publicNodeKeyDigest(MEMBER)}`), true,
+        'public effect reached listener acquisition without its inner reservation');
+      observed++;
+      return listen(...args);
+    };
+  }
+  const outcomes = await Promise.allSettled([
+    f.service.openRoute({ roomId: ROOM, publicNodeKey: MEMBER, proof: f.signed(a.challenge), routeOptions: first.routeOptions }),
+    f.service.openRoute({ roomId: ROOM, publicNodeKey: MEMBER, proof: f.signed(b.challenge), routeOptions: second.routeOptions }),
+  ]);
+  assert.equal(outcomes.filter(x => x.status === 'fulfilled').length, 1);
+  const lost = outcomes.find(x => x.status === 'rejected'); assert.ok(lost && lost.status === 'rejected');
+  assert.deepEqual({ name: lost.reason.name, code: lost.reason.code }, refusal('route-already-open'));
+  assert.equal(observed, 1);
+  assert.equal(first.starts() + second.starts(), 1);
+  assert.equal(f.service.listRoutes().length, 1);
+  assert.equal(f.service.listRoutes()[0].grantId, a.request.binding.grantId);
 });
 
 test('concurrent different member keys still serialize the room admission revision', async (t) => {
