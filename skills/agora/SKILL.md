@@ -992,6 +992,34 @@ Details and maintainer checks: [docs/TRANSFERS.md](../../docs/TRANSFERS.md).
 - In the test helpers, close the spawned CLI's stdin, and when asserting on a recorded
   request find it by path: a transport may make follow-up calls (user-name lookups)
   after the one you mean.
+- **A cell for a race the FILESYSTEM arbitrates must use real processes.** In one process the event
+  loop walks every contender through the same await points in lockstep, so `Promise.all` over N
+  takers of one lock is testing the scheduler's fairness, not the resource's arbitration — and it is
+  unfair in exactly the direction that hides the bug. Measured: eight in-process takers against one
+  stale claim gave one holder on every trial and stayed green with the fix reverted; the same eight
+  as processes admitted two holders on 2 of 8. Such a probe belongs in `scripts/probe-*` and is
+  named in the room, because it is the only shape that can ever red.
+- **Read what the mutant PRINTED, not merely that it was red.** A rig that parks the product to make
+  the passing case deterministic can deadlock under the mutant it exists to catch, and the runner
+  then reports a timeout — indistinguishable from an unrelated hang and the kind of red that gets
+  retried away on a flaky leg. Park the first contender only, so a later one proceeds and the count
+  assertion is what fails. And check a NEGATIVE assertion against the text that should pass: a
+  `doesNotMatch(/Tailcat/)` guarding against dial-failure output fires on the correct refusal
+  "no session dials Tailcat directly".
+- **An injected `spawn` returns the CHILD, not `{ child, exited }`** — `startMemberChannel` derives
+  `exited` from the child's own `exit` event and reads `child.stdout` directly, so a wrapper dies as
+  "Tailcat command output unavailable" before any dial. Write the fake's output on `setImmediate`,
+  after the consumer has attached, and never `unref` a timer the rig needs to hold the loop open.
+- **A fake binary cannot be a `.mjs` with a shebang: Windows cannot execute it**, and the cell then
+  reports "no child was spawned" on the one platform where that is a fixture artifact. Pass
+  `--binary process.execPath` and replace the child call with `node --import <preload>`, which is
+  what `test/probe-tailcat-live.test.mjs` already does. Assertions on paths need the same care: a
+  `/nonexistent/agora.json` regex passes everywhere and fails on the runner, which renders
+  `C:\nonexistent\agora.json`.
+- **A `.gitignore` line with a trailing slash does not match a SYMLINK of that name.** Linking a
+  shared checkout's `node_modules` into a worktree to run `tsc` gets it staged by `git add -A`.
+  Exclude it per checkout in `.git/info/exclude` (shared by every worktree, committed nowhere)
+  rather than remembering not to stage it.
 
 Companions: `README.md` (setup, verbs, the room protocol, adding a transport),
 `docs/DESIGN.md` (the design record: the shape for several agents on one seat, the
