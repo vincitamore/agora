@@ -173,8 +173,8 @@ never regenerates or exposes the private key. The authority id and verifier poli
 at service startup, so rotation requires a restart. After policy expiry, both `room-enroll` and
 `room-revoke` acts refuse; restore either route mutation by hand-carrying and enrolling a fresh
 public record, then restarting the service with that authority. This is a pinned-cooperative
-boundary, not protection from another
-process running as the same OS user. An enrollment challenge expires 120 seconds after issue. A
+boundary, not protection from another process running as the same OS user. An enrollment challenge
+expires 120 seconds after issue. A
 route challenge lasts at most 120 seconds and expires sooner when its authority policy does. A late
 enrollment refuses `authority-possession-expired`. A retained route proof refuses
 `operator-act-expired` at its challenge boundary or `authority-policy-expired` at its policy
