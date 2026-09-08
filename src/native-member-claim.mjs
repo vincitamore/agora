@@ -75,7 +75,7 @@
  * epoch and `kind`, so a start refused by a `gate` reads as retry in seconds while one refused by
  * a live `resident` reads as already running, pid N.
  */
-import { mkdir, open, readdir, readFile, realpath, rm } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { AgoraError } from "./core.mjs";
 import { publicNodeKeyDigest } from "./protocol/route.mjs";
@@ -191,6 +191,10 @@ function holderDetail(claim) {
  * @property {number[]} generations every generation number present, ascending
  * @property {Set<number>} released generations whose holder marked them released
  * @property {number[]} malformed generations whose `.claim` file could not be read as a claim
+ * @property {Map<number, { bootEpoch: number, pids: number[] }>} children per generation, the
+ *   Tailcat children its holder recorded and had not seen exit. Seam 8's death proof: a holder
+ *   that crashed leaves this behind, and a replacement that spawned beside a child still dying
+ *   would be the second peer on the key exactly as a second resident would.
  */
 
 /**
@@ -209,7 +213,7 @@ export async function scanClaimDir(dir, deps = {}) {
   try { entries = await readdir(dir); }
   catch (error) {
     if (/** @type {NodeJS.ErrnoException} */ (error).code === "ENOENT")
-      return { dir, floor: 0, holder: undefined, generations: [], released: new Set(), malformed: [] };
+      return { dir, floor: 0, holder: undefined, generations: [], released: new Set(), malformed: [], children: new Map() };
     throw error;
   }
 
@@ -217,6 +221,8 @@ export async function scanClaimDir(dir, deps = {}) {
   const claims = new Set();
   /** @type {Set<number>} */
   const released = new Set();
+  /** @type {Set<number>} */
+  const childFiles = new Set();
   /** @type {Set<number>} */
   const all = new Set();
   for (const name of entries) {
@@ -227,6 +233,7 @@ export async function scanClaimDir(dir, deps = {}) {
     all.add(generation);
     if (match[2] === "claim") claims.add(generation);
     if (match[2] === "released") released.add(generation);
+    if (match[2] === "child") childFiles.add(generation);
   }
 
   const generations = [...all].sort((a, b) => a - b);
@@ -255,7 +262,66 @@ export async function scanClaimDir(dir, deps = {}) {
     if (!holder && claimAlive(record, deps)) holder = { generation, record };
   }
 
-  return { dir, floor, holder, generations, released, malformed: malformed.sort((a, b) => a - b) };
+  /** @type {Map<number, { bootEpoch: number, pids: number[] }>} */
+  const children = new Map();
+  for (const generation of childFiles) {
+    /** @type {any} */
+    let record;
+    try { record = safeParse(await readFile(keyClaimFile(dir, generation, "child"), "utf8")); }
+    catch { continue; }
+    if (!record || typeof record !== "object") continue;
+    const pids = Array.isArray(record.pids) ? record.pids.filter((/** @type {unknown} */ pid) => Number.isInteger(pid) && Number(pid) > 0) : [];
+    children.set(generation, { bootEpoch: Number(record.bootEpoch), pids });
+  }
+
+  return { dir, floor, holder, generations, released, malformed: malformed.sort((a, b) => a - b), children };
+}
+
+/**
+ * The Tailcat children a generation's holder recorded and that are still ALIVE on this boot.
+ *
+ * Seam 8's teardown proof, and the only reason it exists: a holder that DIED does not tear its
+ * child down, and the child of a dead resident is still a peer on the enrolled key. A replacement
+ * that spawned beside it would be exactly the second child this module prevents everywhere else,
+ * arriving through the one door a claim cannot see — the previous holder's corpse.
+ *
+ * A boot epoch that does not match this one means the pids belong to a machine state that is gone,
+ * so they are not probed at all: a reused pid would otherwise fence the key out forever.
+ * @param {ClaimDirScan} scan @param {number} generation
+ * @param {{ kill?: (pid: number, sig: 0) => void, boot?: number }} [deps]
+ * @returns {number[]} the pids still answering
+ */
+export function liveClaimChildren(scan, generation, deps = {}) {
+  const record = scan.children.get(generation);
+  if (!record || !record.pids.length) return [];
+  if (Number.isFinite(record.bootEpoch) && Math.abs((deps.boot ?? bootEpoch()) - record.bootEpoch) > 2) return [];
+  return record.pids.filter((pid) => pidAlive(pid, deps.kill));
+}
+
+/**
+ * Record the Tailcat children this holder currently owns, so a replacement can prove they are gone.
+ * Written by the holder AFTER each spawn and rewritten as children exit; removed by
+ * {@link clearClaimChildren} once teardown is confirmed. It is the holder's own file, so the
+ * "nobody removes a file it did not create" rule is not bent by rewriting it.
+ * @param {string} dir @param {number} generation @param {Iterable<number>} pids
+ * @param {{ boot?: number }} [deps]
+ */
+export async function recordClaimChildren(dir, generation, pids, deps = {}) {
+  const list = [...pids].filter((pid) => Number.isInteger(pid) && pid > 0);
+  const file = keyClaimFile(dir, generation, "child");
+  if (!list.length) { await rm(file, { force: true }).catch(() => {}); return; }
+  await writeFile(file, `${JSON.stringify({ bootEpoch: deps.boot ?? bootEpoch(), pids: list })}
+`, { encoding: "utf8", mode: 0o600 });
+}
+
+/**
+ * Teardown is finished: this generation owns no Tailcat child any more. Only after this may the
+ * holder publish a release, which is why {@link releaseKeyClaim} refuses while the file names a
+ * live pid rather than trusting the caller to have ordered its own shutdown correctly.
+ * @param {string} dir @param {number} generation
+ */
+export async function clearClaimChildren(dir, generation) {
+  await rm(keyClaimFile(dir, generation, "child"), { force: true }).catch(() => {});
 }
 
 /**
@@ -356,6 +422,19 @@ export async function takeKeyClaim(input, deps = {}) {
         `${dir} carries a claim that is not readable (generation ${scan.malformed.join(", ")}); it is not cleared automatically, `
         + "because an unreadable claim may still belong to a live process");
 
+    // TEARDOWN BEFORE REPLACEMENT. The holder is dead — that is why we got here — but a dead
+    // holder tears nothing down, and its Tailcat child is still a peer on this key. Spawning now
+    // is the second child arriving through the one door the claim cannot watch: the corpse of the
+    // process that held it. Refuse by name and let the child finish dying.
+    if (scan.floor) {
+      const orphans = liveClaimChildren(scan, scan.floor, deps);
+      if (orphans.length)
+        throw claimRefusal("member-key-claim-child-alive",
+          `generation ${scan.floor}'s holder is gone but its Tailcat child is still running `
+          + `(pid ${orphans.join(", ")}); a replacement started now would be a second peer on this key. `
+          + "Wait for it to exit, or stop it deliberately");
+    }
+
     const generation = scan.floor + 1;
     /** @type {KeyClaimRecord} */
     const record = {
@@ -376,7 +455,7 @@ export async function takeKeyClaim(input, deps = {}) {
       path: result.path,
       generation,
       record,
-      release: () => releaseKeyClaim(dir, generation),
+      release: () => releaseKeyClaim(dir, generation, deps),
     };
   }
   throw claimRefusal("member-key-claim-contended",
@@ -393,10 +472,20 @@ export async function takeKeyClaim(input, deps = {}) {
  * Never throws — a release runs in a `finally`, and a teardown that throws hides what it was
  * tearing down.
  * @param {string} dir @param {number} generation
- * @returns {Promise<boolean>} true when this call marked this generation released
+ * @param {{ kill?: (pid: number, sig: 0) => void, boot?: number }} [deps]
+ * @returns {Promise<boolean>} true when this call marked this generation released; FALSE while the
+ *   generation still owns a live Tailcat child, because a released state published ahead of child
+ *   termination is how the next holder spawns beside a child still dying
  */
-export async function releaseKeyClaim(dir, generation) {
+export async function releaseKeyClaim(dir, generation, deps = {}) {
   try {
+    // A PUBLISHED RELEASE MUST NEVER PRECEDE CHILD TERMINATION. Ordering this in the caller's
+    // shutdown path is not enough: the caller is exactly the process that is exiting, and an
+    // unconfirmed teardown looks identical to a finished one from inside it. So the release reads
+    // the holder's own child record and refuses while it names a live pid — the next holder then
+    // sees a stale claim with a live child and is refused by name rather than spawning beside it.
+    const scan = await scanClaimDir(dir, deps);
+    if (liveClaimChildren(scan, generation, deps).length) return false;
     const handle = await open(keyClaimFile(dir, generation, "released"), "wx", 0o600);
     try { await handle.writeFile(`${JSON.stringify({ at: new Date().toISOString() })}\n`, "utf8"); }
     finally { await handle.close().catch(() => {}); }

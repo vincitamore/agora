@@ -17,6 +17,7 @@ import net from "node:net";
 import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { AgoraError } from "./core.mjs";
+import { pidAlive } from "./session.mjs";
 import {
   NATIVE_PROTOCOL, NativeFrameDecoder, encodeNativeFrame, nativeHandshakeProof,
   parseNativeCursor, validateNativeEnvelope, validateNativeId, verifyNativeHandshakeProof,
@@ -24,6 +25,8 @@ import {
 import { nativeServiceEndpoint } from "./native-service.mjs";
 import { openRemoteRoom } from "./native-remote.mjs";
 import { writeMemberDescriptor, removeMemberDescriptor } from "./native-member-descriptor.mjs";
+import { clearClaimChildren, recordClaimChildren } from "./native-member-claim.mjs";
+import { spawnTailcat } from "./tailcat-process.mjs";
 
 /** Exactly what a member session may ask the host for; this process adds nothing to the list. */
 export const MEMBER_CLIENT_REQUESTS = Object.freeze(["status", "read", "subscribe", "append"]);
@@ -75,6 +78,10 @@ export class MemberClientService {
     this.subscriptions = new Map();
     /** @type {import("./native-remote.mjs").RemoteRoom | undefined} */
     this.room = undefined;
+    /** Tailcat children this process has spawned and not seen exit. Recorded beside the claim so
+     *  a replacement can PROVE they are gone rather than assume a dead holder tore them down. */
+    /** @type {Set<number>} */
+    this.childPids = new Set();
     this.endpointPath = "";
     this.running = false;
     this.stopping = false;
@@ -92,7 +99,7 @@ export class MemberClientService {
       descriptorPath: this.descriptorPath,
       stateRoot: this.stateRoot,
       ...(this.timeoutMs ? { timeoutMs: this.timeoutMs } : {}),
-      ...(this.channelOptions ? { channelOptions: this.channelOptions } : {}),
+      channelOptions: { ...(this.channelOptions ?? {}), spawn: this.#recordingSpawn() },
       ...(this.identity ? { identity: this.identity } : {}),
     });
     // Prove the channel before anything local exists: a failed dial must leave no endpoint and no
@@ -123,6 +130,39 @@ export class MemberClientService {
     });
     this.running = true;
     return { endpoint: this.endpointPath, roomId, alias: this.alias, pid: process.pid };
+  }
+
+  /**
+   * The channel's own spawn seam, wrapped so every Tailcat child this process starts is written
+   * beside the claim while it lives. Nothing about the spawn changes: an injected `spawn` (a
+   * cell's fake) is still the one called, and the wrapper only observes.
+   *
+   * A fake child has no `pid`, so nothing is recorded for it and no cell is forced to invent one;
+   * that is honest rather than convenient, since the record exists to name REAL processes a
+   * replacement can probe.
+   */
+  #recordingSpawn() {
+    const base = this.channelOptions?.spawn ?? spawnTailcat;
+    return async (/** @type {any} */ args, /** @type {any} */ runtime, /** @type {any} */ owner) => {
+      const child = await base(args, runtime, owner);
+      const pid = child?.pid;
+      if (typeof pid === "number" && pid > 0) {
+        this.childPids.add(pid);
+        await this.#writeChildren();
+        child.once?.("exit", () => {
+          this.childPids.delete(pid);
+          void this.#writeChildren();
+        });
+      }
+      return child;
+    };
+  }
+
+  /** @returns {Promise<void>} */
+  async #writeChildren() {
+    if (!this.claim?.dir) return;
+    try { await recordClaimChildren(this.claim.dir, this.claim.generation, this.childPids); }
+    catch { /* the record is evidence for the NEXT holder; failing to write it must not kill this one */ }
   }
 
   async #listen() {
@@ -275,6 +315,15 @@ export class MemberClientService {
     if (this.endpointPath && process.platform !== "win32") await rm(this.endpointPath, { force: true }).catch(() => {});
     try { await this.room?.close(); } catch {}
     this.room = undefined;
+    // Teardown is finished only when no child this process started is still answering. Clearing
+    // the record is what licenses the release; leaving it is what refuses the next holder. A
+    // teardown that timed out (`AGORA_CLEANUP_PENDING`) therefore leaves the record standing on
+    // purpose, and the key stays fenced until the child is actually gone.
+    for (const pid of [...this.childPids]) if (!pidAlive(pid)) this.childPids.delete(pid);
+    if (this.claim?.dir) {
+      if (this.childPids.size) await this.#writeChildren();
+      else await clearClaimChildren(this.claim.dir, this.claim.generation).catch(() => {});
+    }
   }
 }
 

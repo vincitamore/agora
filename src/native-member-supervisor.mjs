@@ -69,14 +69,26 @@ export async function runMemberClient(options) {
   try {
     started = await service.start();
   } catch (error) {
-    // The channel or the bind failed, so nothing is resident and the key must go back. Releasing
-    // our own generation only: a competitor that took the key after us keeps it.
+    // The channel or the bind failed, so nothing is resident and the key must go back. TEAR DOWN
+    // FIRST: `start` assigns the room before it can fail, so a failed start can leave a Tailcat
+    // child running, and releasing over the top of it publishes a free key beside a live peer —
+    // the same defect as an early release on the happy path, arriving by the error path where it
+    // is easier to miss. `stop` is idempotent and never throws.
+    await service.stop().catch(() => {});
     await releaseKeyClaim(claim.dir, claim.generation);
     throw error;
   }
   const halt = async () => {
+    // Stop FIRST, release second, and the order is enforced below rather than trusted here: the
+    // release reads this generation's child record and refuses while it names a live pid, so a
+    // teardown that did not finish leaves the key fenced and the next start refuses by name
+    // instead of spawning beside a child that is still dying.
     await service.stop();
-    await releaseKeyClaim(claim.dir, claim.generation);
+    const released = await releaseKeyClaim(claim.dir, claim.generation);
+    if (!released)
+      process.stderr.write(`member: the enrolled key stays claimed at generation ${claim.generation}: `
+        + "a Tailcat child of this client is still running, so a replacement would be a second peer. "
+        + "It clears when that child exits.\n");
     process.exitCode = 0;
   };
   process.on("SIGTERM", () => { void halt(); });

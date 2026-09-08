@@ -223,3 +223,47 @@ test("a start whose dial fails releases the key, so the next start is not fenced
   await runMemberClient(opts).catch(() => {});
   assert.ok(spawns.length > before, "the second start never reached the spawn seam");
 });
+
+test("the resident records the Tailcat children it spawns, and clears the record when they are gone", async (t) => {
+  const { stateRoot, descriptorPath, identity } = await seat(t);
+  const { routeKeyDigest } = await import("../src/native-member-supervisor.mjs");
+  const { keyClaimDir, canonicalStateRoot, scanClaimDir } = await import("../src/native-member-claim.mjs");
+  const { keyDigest } = await routeKeyDigest(descriptorPath);
+  const dir = keyClaimDir(await canonicalStateRoot(stateRoot), keyDigest);
+
+  // A pid that is certainly not running: the record must be WRITTEN from the spawn seam whatever
+  // the pid is (nothing probes at write time), and read back as dead by the next taker. Using a
+  // live pid here would fence this test's own state root and prove less.
+  const DEAD = 999_999_999;
+  /** @type {Record<string, unknown>} the record as it stood at each observation */
+  const seen = {};
+  /** @param {string[]} args */
+  const spawn = async (args) => {
+    const child = fakeChild(isDial(args) ? undefined : (args.includes("parse") ? "ok\n" : `${KEY}\n`));
+    child.pid = DEAD;
+    if (isDial(args)) {
+      // Observed after the dial child exists: this is the window in which a crashed resident would
+      // leave its child behind, and the whole point of the record.
+      queueMicrotask(async () => { seen.duringDial = (await scanClaimDir(dir)).children.get(1)?.pids; });
+    }
+    return child;
+  };
+
+  // This start fails its handshake (the fake never completes one), which runs the failure path:
+  // teardown, then release. Both halves are what the record is for.
+  const failed = await runMemberClient({
+    stateRoot, alias: "house-remote", descriptorPath, identity,
+    channelOptions: { spawn, firstDialAttempts: 1, firstDialTimeoutMs: 300 },
+  }).catch((error) => error);
+  assert.ok(failed instanceof Error, "the fake child completed a handshake it cannot complete");
+
+  // THE WIRE: the spawn seam wrote the child beside the claim. Deleting the wrapper leaves both
+  // ends of this correct and this assertion red, which is the seam nothing else covers.
+  assert.deepEqual(seen.duringDial, [DEAD], "no Tailcat child was recorded beside the claim");
+
+  // And teardown cleared it, so the key is genuinely free rather than free-looking.
+  const after = await scanClaimDir(dir);
+  assert.equal(after.children.get(1), undefined, "the child record outlived the child it named");
+  const claim = await readKeyClaim(stateRoot, keyDigest);
+  assert.equal(claim.held, false);
+});

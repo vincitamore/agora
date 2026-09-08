@@ -23,8 +23,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
-  attemptClaimGeneration, canonicalStateRoot, claimAlive, enrolledKeyDigest, keyClaimDir,
-  keyClaimFile, readKeyClaim, releaseKeyClaim, scanClaimDir, takeKeyClaim,
+  attemptClaimGeneration, canonicalStateRoot, claimAlive, clearClaimChildren, enrolledKeyDigest,
+  keyClaimDir, keyClaimFile, liveClaimChildren, readKeyClaim, recordClaimChildren,
+  releaseKeyClaim, scanClaimDir, takeKeyClaim,
 } from "../src/native-member-claim.mjs";
 import { publicNodeKeyDigest } from "../src/protocol/route.mjs";
 import { bootEpoch } from "../src/session.mjs";
@@ -253,7 +254,16 @@ test("release-reacquire: A's delayed create of a released number ends holding no
   assert.equal(seen.held, true);
   assert.equal(seen.claim?.generation, 3);
   assert.equal(seen.claim?.label, "the live one");
+
+  // Registered by the reader before this head existed: a subsequent successful acquisition must
+  // EXCEED the durable floor, and generations must never regress. Asserted rather than implied by
+  // the numbers above, because "3 came after 2" is what any scheme prints and "the next one is
+  // above the highest ever issued" is the property the floor exists for.
   await c.release();
+  const after = await takeKeyClaim({ stateRoot: root, keyDigest: DIGEST_A, kind: "resident" });
+  assert.ok(after.generation > 3, `a later acquisition regressed to ${after.generation}`);
+  assert.equal((await scanClaimDir(dir)).floor, after.generation);
+  await after.release();
 });
 
 test("an old holder's late release cannot free a later claim", async (t) => {
@@ -435,6 +445,94 @@ test("the digest and the kind are validated before anything is written", async (
   // Nothing was created by either refusal.
   const wouldBe = keyClaimDir(await canonicalStateRoot(root), DIGEST_A);
   await assert.rejects(() => readdir(wouldBe), (/** @type {any} */ error) => error.code === "ENOENT");
+});
+
+// --- teardown before replacement (seam 7's last contract, seam 8's hold-through-teardown) ------
+//
+// The door a claim cannot watch is the previous holder's CORPSE. A dead holder tears nothing down,
+// and the Tailcat child of a dead resident is still a peer on the enrolled key, so a replacement
+// that spawns on the strength of "the holder is dead" is the second child arriving by the one
+// route every other contract here leaves open.
+
+test("a dead holder whose Tailcat child still answers refuses a replacement by name", async (t) => {
+  const root = await stateRoot(t);
+  const dir = await claimDir(root);
+  await plant(dir, 1);                                   // the holder itself: proven dead
+  // Its child, still alive. This process's own pid on this boot is the only pid a cell can be sure
+  // answers; the point is that the replacement PROBES it rather than assuming a dead parent means
+  // a dead child.
+  await recordClaimChildren(dir, 1, [process.pid]);
+
+  await assert.rejects(
+    () => takeKeyClaim({ stateRoot: root, keyDigest: DIGEST_A, kind: "resident" }),
+    (/** @type {any} */ error) => {
+      assert.equal(codeOf(error), "member-key-claim-child-alive");
+      assert.match(error.message, new RegExp(`pid ${process.pid}\\b`));
+      assert.match(error.message, /second peer/);
+      return true;
+    },
+  );
+  // Nothing was created by the refusal: a replacement that had written its own generation would
+  // have moved the floor for a defect that is not resolved.
+  assert.deepEqual(await filesIn(dir), ["1.child", "1.claim"]);
+
+  // Teardown completes. Only now may a replacement start, and it starts above the floor.
+  await clearClaimChildren(dir, 1);
+  const next = await takeKeyClaim({ stateRoot: root, keyDigest: DIGEST_A, kind: "resident" });
+  assert.equal(next.generation, 2);
+  await next.release();
+});
+
+test("a child record from a previous boot fences nothing", async (t) => {
+  const root = await stateRoot(t);
+  const dir = await claimDir(root);
+  await plant(dir, 1);
+  // The same pid, recorded before a reboot. Probing it would say LIVE and fence the key out
+  // forever; the boot epoch is what separates a live child from a recycled number.
+  await recordClaimChildren(dir, 1, [process.pid], { boot: bootEpoch() - 100_000 });
+  const scan = await scanClaimDir(dir);
+  assert.deepEqual(liveClaimChildren(scan, 1), []);
+
+  const taken = await takeKeyClaim({ stateRoot: root, keyDigest: DIGEST_A, kind: "resident" });
+  assert.equal(taken.generation, 2);
+  await taken.release();
+});
+
+test("release refuses while the generation still owns a live child, and the mark never lands early", async (t) => {
+  const root = await stateRoot(t);
+  const held = await takeKeyClaim({ stateRoot: root, keyDigest: DIGEST_A, kind: "resident" });
+  await recordClaimChildren(held.dir, held.generation, [process.pid]);
+
+  // THE PROPERTY: a published released state must never precede child termination. Ordering this
+  // in the caller's shutdown path is not enough, because the caller is the process that is exiting
+  // and an unconfirmed teardown looks identical to a finished one from inside it.
+  assert.equal(await held.release(), false);
+  assert.deepEqual(await filesIn(held.dir), ["1.child", "1.claim"],
+    "a released mark written here would tell the next holder the key is free while a child is dying");
+
+  // And the key is not free in the meantime, by the reader the next start actually uses.
+  await assert.rejects(
+    () => takeKeyClaim({ stateRoot: root, keyDigest: DIGEST_A, kind: "gate" }),
+    (/** @type {any} */ error) => codeOf(error) === "member-key-claim-held",
+  );
+
+  await clearClaimChildren(held.dir, held.generation);
+  assert.equal(await held.release(), true);
+  assert.deepEqual(await filesIn(held.dir), ["1.claim", "1.released"]);
+});
+
+test("recording children is the holder's own file: an empty set removes it rather than leaving a lie", async (t) => {
+  const root = await stateRoot(t);
+  const held = await takeKeyClaim({ stateRoot: root, keyDigest: DIGEST_A, kind: "resident" });
+  await recordClaimChildren(held.dir, held.generation, [111, 222]);
+  const two = await scanClaimDir(held.dir);
+  assert.deepEqual(two.children.get(1)?.pids, [111, 222]);
+
+  // The children exit; the record follows them down. A stale record naming dead pids is harmless
+  // (they are probed) but a record that outlives the truth is one more thing to reason about.
+  await recordClaimChildren(held.dir, held.generation, []);
+  assert.deepEqual(await filesIn(held.dir), ["1.claim"]);
+  await held.release();
 });
 
 // --- the digest, read with no child ---------------------------------------------------------
