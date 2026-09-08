@@ -7,9 +7,9 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { writeCursor } from '../src/core.mjs';
-import { writeRecord } from '../src/session.mjs';
+import { inheritSession, readRecord, writeRecord } from '../src/session.mjs';
 import { watch } from '../src/watch.mjs';
-import { appendCarryEvent, captureCarryPost, carryRefKey, checkCarryBoundary, mandateDigest, readCarryEvidence, readMandate, sealCarryBoundary, validateCarryEvent, validateMandate } from '../src/carry-check.mjs';
+import { appendCarryEvent, captureCarryPost, carryRefKey, checkCarryBoundary, mandateDigest, readCarryEvidence, readMandate, recordCarryCursorMove, requireCarrySuccessor, sealCarryBoundary, validateCarryEvent, validateMandate } from '../src/carry-check.mjs';
 import { tmp } from './helpers.mjs';
 
 const mandate = { version: 1, id: 'campaign-c1', bearer: 'Bruno/uber-wizard', role: 'builder',
@@ -269,5 +269,96 @@ test('only a successful named own post discharges a durable delivery; unrelated 
     await captureCarryPost(t.dir, 'backroom', session, mandate.bearer, 'Answered\n\nre: m1\n\n-- Bruno/uber-wizard', { id: 'answer', cursor: '3' });
     actual.evidence = (await readCarryEvidence(t.dir)).events;
     assert.equal(checkCarryBoundary(boundary, actual).ok, true);
+  } finally { await t.cleanup(); }
+});
+
+test('cursor movement leaves a durable gap even if a later snapshot or account lists the new cursor', async () => {
+  const t = await tmp();
+  try {
+    const { boundary, actual } = fixture();
+    await writeCursor(t.dir, 'backroom', '1');
+    await recordCarryCursorMove(t.dir, 'backroom', actual.session, mandate.bearer, '99', 'cursor-set');
+    await writeCursor(t.dir, 'backroom', '99');
+    actual.evidence.push(...(await readCarryEvidence(t.dir)).events);
+    actual.cursors.set('backroom', '99');
+    actual.accounted.push({ kind: 'cursor', id: 'backroom', exhibit: 'I saw the cursor move' });
+    assert.deepEqual(checkCarryBoundary(boundary, actual).issues.map(i => i.code), ['delivery-coverage-unknown']);
+    const before = actual.evidence.length;
+    await recordCarryCursorMove(t.dir, 'backroom', actual.session, mandate.bearer, '99', 'cursor-set');
+    assert.equal((await readCarryEvidence(t.dir)).events.length, 1, 'no gap for a byte-identical no-op');
+    assert.equal(actual.evidence.length, before);
+  } finally { await t.cleanup(); }
+});
+
+test('successor registration alone is not arrival; a posted arrival must name this boundary and room', async () => {
+  const t = await tmp();
+  try {
+    const { boundary, event } = fixture();
+    const dir = path.join(t.dir, 'sessions', 's2');
+    await assert.rejects(() => requireCarrySuccessor(t.dir, 's2', boundary, 'backroom'), { name: 'CarryCheckError', code: 'successor-registration-missing' });
+    await writeRecord(dir, { slug: 's2', source: 'AGORA_SESSION', explicit: true }, { bearer: mandate.bearer });
+    await appendCarryEvent(dir, { ...event('ordinary-post', 'post'), session: 's2' });
+    await assert.rejects(() => requireCarrySuccessor(t.dir, 's2', boundary, 'backroom'), { name: 'CarryCheckError', code: 'successor-arrival-missing' });
+    await appendCarryEvent(dir, { ...event('other-boundary', 'arrival', ['different']), session: 's2' });
+    await assert.rejects(() => requireCarrySuccessor(t.dir, 's2', boundary, 'backroom'), { name: 'CarryCheckError', code: 'successor-arrival-missing' });
+    await appendCarryEvent(dir, { ...event('correct-arrival', 'arrival', [boundary.id]), session: 's2' });
+    assert.equal((await requireCarrySuccessor(t.dir, 's2', boundary, 'backroom')).id, 'correct-arrival');
+    await assert.rejects(() => requireCarrySuccessor(t.dir, 's2', boundary, 'another-room'), { name: 'CarryCheckError', code: 'successor-arrival-missing' });
+    await assert.rejects(() => requireCarrySuccessor(t.dir, '../s2', boundary, 'backroom'), { name: 'CarryCheckError', code: 'successor-session-invalid' });
+  } finally { await t.cleanup(); }
+});
+
+test('session inheritance copies durable evidence, not registration, and dry-run writes nothing', async () => {
+  const t = await tmp();
+  try {
+    const { actual, event } = fixture();
+    const src = path.join(t.dir, 'sessions', 's1'), dst = path.join(t.dir, 'sessions', 's2');
+    await writeRecord(src, { ...actual.session, explicit: true }, { bearer: mandate.bearer });
+    await appendCarryEvent(src, event('prepared', 'delivery-prepared'));
+    const next = { slug: 's2', source: 'AGORA_SESSION', explicit: true };
+    const plan = await inheritSession(t.dir, 's1', next, { dryRun: true });
+    assert.equal(plan.carry.events, 1);
+    assert.deepEqual((await readCarryEvidence(dst)).issues, ['delivery-coverage-unknown']);
+    await inheritSession(t.dir, 's1', next);
+    assert.equal(await readRecord(dst), undefined);
+    assert.equal((await readCarryEvidence(dst)).events[0].id, 'prepared');
+    assert.equal((await readCarryEvidence(src)).events[0].id, 'prepared');
+  } finally { await t.cleanup(); }
+});
+
+test('carry CLI enforces registered successor arrival before predecessor handoff', async () => {
+  const t = await tmp();
+  try {
+    const config = path.join(t.dir, 'agora.json'), source = path.join(t.dir, 'mandate.json'), boundaryFile = path.join(t.dir, 'boundary.json');
+    await writeFile(config, JSON.stringify({ actor: { name: 'test', kind: 'agent' },
+      rooms: { backroom: { transport: 'local', path: path.join(t.dir, 'room.jsonl') } } }));
+    await writeFile(source, JSON.stringify(mandate));
+    const exec = promisify(execFile), bin = fileURLToPath(new URL('../bin/agora.mjs', import.meta.url));
+    const call = async (/** @type {string} */ session, /** @type {string[]} */ args) => {
+      try {
+        const r = await exec(process.execPath, [bin, ...args], { windowsHide: true, timeout: 10000,
+          env: { ...process.env, AGORA_STATE: t.dir, AGORA_CONFIG: config, AGORA_SESSION: session, AGORA_ACTOR: mandate.bearer } });
+        return { code: 0, ...r };
+      } catch (err) { const e = /** @type {{code:number,stdout:string,stderr:string}} */ (err); return e; }
+    };
+    assert.equal((await call('s1', ['session', '--as', mandate.bearer])).code, 0);
+    assert.equal((await call('s1', ['post', 'backroom', 'Starting', '--claim', 'C1-BUILD'])).code, 0);
+    const sealed = await call('s1', ['carry', 'backroom', '--seal', '--mandate', source, '--boundary', boundaryFile]);
+    assert.equal(sealed.code, 0, sealed.stderr);
+    assert.deepEqual(JSON.parse(sealed.stdout).gaps, []);
+    assert.equal((await call('s1', ['carry', 'backroom', '--announce', '--boundary', boundaryFile])).code, 0);
+    const handoff = ['carry', 'backroom', '--handoff', 's2', '--boundary', boundaryFile];
+    const missing = await call('s1', handoff);
+    assert.equal(missing.code, 1); assert.match(missing.stderr, /successor-registration-missing/);
+    assert.equal((await call('s2', ['session', '--as', mandate.bearer])).code, 0);
+    const unposted = await call('s1', handoff);
+    assert.equal(unposted.code, 1); assert.match(unposted.stderr, /successor-evidence-unreadable/);
+    assert.equal((await call('s2', ['carry', 'backroom', '--arrive', '--boundary', boundaryFile])).code, 0);
+    const departed = await call('s1', handoff);
+    assert.equal(departed.code, 0, departed.stderr);
+    const predecessor = await readCarryEvidence(path.join(t.dir, 'sessions', 's1'));
+    assert.equal(predecessor.events.filter(e => e.kind === 'departure').length, 1);
+    const successor = await readCarryEvidence(path.join(t.dir, 'sessions', 's2'));
+    assert.equal(successor.events.filter(e => e.kind === 'arrival').length, 1);
   } finally { await t.cleanup(); }
 });

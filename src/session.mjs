@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { AgoraError, EXIT, readCursorFile, writeCursor, writeFileAtomic } from "./core.mjs";
+import { inheritCarryEvidence } from './carry-check.mjs';
 
 /**
  * A session is the unit of state: one running agent, on one machine, for as long as it lives.
@@ -484,6 +485,7 @@ export async function inheritSession(stateRoot, fromSlug, session, opts = {}) {
     conflicts,
     forced: Boolean(conflicts.length && opts.force),
     dryRun: Boolean(opts.dryRun),
+    carry: await inheritCarryEvidence(src, dst, fromSlug, session.slug, true),
   };
   if (opts.dryRun) return plan;
 
@@ -492,6 +494,7 @@ export async function inheritSession(stateRoot, fromSlug, session, opts = {}) {
   if (from.follow.length) await mkdir(path.join(dst, "follow"), { recursive: true });
   for (const key of from.follow) await copyFile(path.join(src, "follow", `${key}.json`), path.join(dst, "follow", `${key}.json`));
   if (carried.length) await appendFile(ledgerPath(dst), carried.join("\n") + "\n", "utf8");
+  await inheritCarryEvidence(src, dst, fromSlug, session.slug);
   return plan;
 }
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // @ts-check
 import { tailcatDoctor } from "../src/tailcat-runtime.mjs";
-import { captureCarryPost, checkCarryFiles, sealCarryBoundary } from "../src/carry-check.mjs";
+import { appendCarryEvent, captureCarryPost, checkCarryFiles, recordCarryCursorMove, requireCarrySuccessor, sealCarryBoundary, validateCarryBoundary } from "../src/carry-check.mjs";
 import { decodeTransfer, encodeTransfer, localTransferIdentity, requireAuthenticatedTransport, trustTransferPeer } from "../src/tailcat.mjs";
 import { shareFiles, fetchFiles, listOffers, stopOffer, resumeOffer, forgetOffer, pruneOffers } from "../src/tailcat-offers.mjs";
 import { parseArgs } from "node:util";
@@ -242,6 +242,9 @@ const SCHEMA = {
         "--account <file>": "version-1 explicit role/unit/claim/retraction/cursor account, bound to this boundary and resumed session",
         "--seal": "save an independent version-1 boundary to --boundary (no clobber); missing historical coverage stays a gap",
         "--mandate <file>": "assigner-authored version-1 mandate selected at --seal and pinned by digest",
+        "--announce": "post a boundary line for this session's sealed --boundary",
+        "--arrive": "registered successor posts its arrival for --boundary, before its predecessor may sign off",
+        "--handoff <session>": "post predecessor signoff only after this registered successor has posted arrival for the same boundary; does not stop processes",
         "--limit <n>": "how many recent messages to fold this session's own posts out of (default 200)",
         "--no-threads": "read the room alone. The room's live threads are folded into the window by default, as `read --threads` does, because on a transport whose room read omits replies a release posted in a thread would leave the claim it closed standing in the envelope; this buys one read back and accepts that",
       },
@@ -379,6 +382,9 @@ const OPTIONS = /** @type {const} */ ({
   account: { type: "string" },
   seal: { type: "boolean", default: false },
   mandate: { type: "string" },
+  announce: { type: "boolean", default: false },
+  arrive: { type: "boolean", default: false },
+  handoff: { type: "string" },
   fyi: { type: "boolean", default: false },
   follow: { type: "boolean", default: false },
   "thread-interval": { type: "string" },
@@ -1687,7 +1693,10 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       // An empty read is not proof of an empty room: a conditional read whose validator still
       // matches returns nothing, and writing a null position there moves the cursor BACK to the
       // start of the room and replays it. Leave the position alone and say which happened.
-      if (msgs.length) await writeCursor(sdir, key, msgs[msgs.length - 1].cursor);
+      if (msgs.length) {
+        await recordCarryCursorMove(sdir, key, session, bearer.name, msgs[msgs.length - 1].cursor, 'join');
+        await writeCursor(sdir, key, msgs[msgs.length - 1].cursor);
+      }
       await identity();
       if (msgs.length)
         console.error(`agora: ${key} cursor set to ${msgs[msgs.length - 1].cursor} (${msgs.length} message${msgs.length === 1 ? "" : "s"} read); the recent messages follow`);
@@ -1725,6 +1734,28 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       return EXIT.ok;
     }
     case "carry": {
+      if (values.announce || values.arrive || values.handoff) {
+        if (!values.boundary || [values.announce, values.arrive, Boolean(values.handoff), values.seal, values.check].filter(Boolean).length !== 1)
+          throw new AgoraError('carry boundary announcement takes exactly one of --announce/--arrive/--handoff with --boundary <file>', EXIT.usage);
+        const boundary = validateCarryBoundary(JSON.parse(await readFile(path.resolve(values.boundary), 'utf8')));
+        if (record?.bearer !== boundary.bearer || bearer.name !== boundary.bearer)
+          throw new AgoraError('boundary-bearer-registration-missing');
+        if (values.arrive ? session.slug === boundary.session.slug : session.slug !== boundary.session.slug)
+          throw new AgoraError('boundary-session-mismatch');
+        const arrival = values.handoff ? await requireCarrySuccessor(stateRoot, values.handoff, boundary, roomAlias) : undefined;
+        const line = values.arrive ? `Successor ${session.slug} registered and arriving for boundary ${boundary.id}.`
+          : values.handoff ? `Predecessor ${session.slug} signs off to registered successor ${values.handoff}; arrival ${arrival?.ref.id}.`
+          : `Session ${session.slug} declares boundary ${boundary.id}; re-address pending work explicitly.`;
+        const message = sign(`${line}\n\nboundary: ${boundary.id}\nto: *`, cfg.actor);
+        const receipt = await transport.post(message);
+        await captureCarryPost(sdir, roomAlias, session, bearer.name, message, receipt);
+        if (values.arrive || values.handoff) await appendCarryEvent(sdir, { version: 1, id: randomUUID(),
+          kind: values.arrive ? 'arrival' : 'departure', at: new Date().toISOString(), session: session.slug,
+          bearer: bearer.name, ref: { room: roomAlias, id: receipt.id, cursor: receipt.cursor }, targets: [boundary.id] });
+        await appendPosted(sdir, receipt.id);
+        console.log(JSON.stringify({ type: 'carry-boundary-post', boundary: boundary.id, ...receipt }));
+        return EXIT.ok;
+      }
       if (values.seal) {
         if (values.check || !values.boundary || !values.mandate || values.account)
           throw new AgoraError('carry --seal needs --boundary <new-file> --mandate <file>, without --check/--account', EXIT.usage);
@@ -2407,7 +2438,10 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
     }
     case "cursor": {
       const key = cursorKey(roomAlias, thread);
-      if (values.reset) await writeCursor(sdir, key, undefined);
+      if (values.reset) {
+        await recordCarryCursorMove(sdir, key, session, bearer.name, undefined, 'cursor-reset');
+        await writeCursor(sdir, key, undefined);
+      }
       else if (values.set !== undefined) {
         const set = values.set.trim();
         // an empty value used to fall through as a silent no-op, which reads as "the cursor is set"
@@ -2416,12 +2450,16 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         // throw, and the room stays unusable until --reset
         const why = transport.validateCursor?.(set);
         if (why) throw new AgoraError(`cursor --set ${JSON.stringify(set)}: ${why}`, EXIT.usage);
+        await recordCarryCursorMove(sdir, key, session, bearer.name, set, 'cursor-set');
         await writeCursor(sdir, key, set);
       } else if (values.now) {
         const msgs = await transport.read({ thread });
         // never a null position from an empty read: that is the explicit "from the start" value,
         // and writing it here replays the whole room on the next watch
-        if (msgs.length) await writeCursor(sdir, key, msgs[msgs.length - 1].cursor);
+        if (msgs.length) {
+          await recordCarryCursorMove(sdir, key, session, bearer.name, msgs[msgs.length - 1].cursor, 'cursor-now');
+          await writeCursor(sdir, key, msgs[msgs.length - 1].cursor);
+        }
         else console.error(`agora: the room read came back empty, so ${key} is unchanged (an empty read is not proof the room is empty)`);
       }
       const seeded = await readCursorSeeded(sdir, stateRoot, key);
