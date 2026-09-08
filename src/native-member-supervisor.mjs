@@ -48,7 +48,8 @@ export async function routeKeyDigest(descriptorPath) {
  * a parent that exits would name a pid that is gone, and the staleness check would then hand the
  * key away while the child still held it.
  * @param {{ stateRoot: string, alias: string, descriptorPath: string,
- *  build?: import("./harness.mjs").BuildIdentity, seatLabel?: string }} options
+ *  build?: import("./harness.mjs").BuildIdentity, seatLabel?: string,
+ *  channelOptions?: any, identity?: any }} options
  */
 export async function runMemberClient(options) {
   const { keyDigest } = await routeKeyDigest(options.descriptorPath);
@@ -60,6 +61,8 @@ export async function runMemberClient(options) {
     keyDigest, claim: { path: claim.path, generation: claim.generation },
     ...(options.build ? { build: options.build } : {}),
     ...(options.seatLabel ? { seatLabel: options.seatLabel } : {}),
+    ...(options.channelOptions ? { channelOptions: options.channelOptions } : {}),
+    ...(options.identity ? { identity: options.identity } : {}),
   });
   /** @type {any} */
   let started;
