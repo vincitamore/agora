@@ -50,7 +50,9 @@ const session = process.env.CODEX_SESSION_ID;
 const armed = path.join(root, "sessions", \`codex-\${session}\`, "armed", \`\${room}.json\`);
 await new Promise((resolve) => setTimeout(resolve, 12_000));
 mkdirSync(path.dirname(armed), { recursive: true });
-writeFileSync(armed, JSON.stringify({ room, pid: process.pid }) + "\\n");
+// Match the launcher's line-oriented armed-record reader as well as the
+// PowerShell launcher's JSON parser. The real watch writes this shape.
+writeFileSync(armed, JSON.stringify({ room, pid: process.pid }, null, 2) + "\\n");
 const stop = () => { rmSync(armed, { force: true }); process.exit(0); };
 process.on("SIGTERM", stop);
 process.on("SIGINT", stop);
