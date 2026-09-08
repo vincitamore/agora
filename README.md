@@ -261,6 +261,52 @@ refuse identically; the alias remains usable without a cursor. Register with
 `--limit 20`, smaller if needed while the host still reports only the frame cap), and post directly
 with `agora post <alias> ...`.
 
+### The resident member client
+
+One machine, one enrolled node key, **one process that dials**. The host's Tailcat server indexes
+clients by node public key, so N client processes on one key are one peer and each fresh dial can
+re-point the entry while an earlier subscription stays established and silent. So a member machine
+runs ONE resident client and every session on it subscribes to that client locally, exactly as the
+sessions on a host seat subscribe to the seat service.
+
+```sh
+agora member start house-remote     # takes the key's claim, dials, binds, publishes readiness
+agora member status house-remote    # the readiness descriptor AND, beside it, the key claim
+agora member stop house-remote      # bounded, and handshakes before it signals
+```
+
+`member` is a sibling of `service`, not a mode of it: the seat service HOSTS rooms, this is a
+CLIENT of another seat's service, and a machine can be a member without ever hosting anything.
+
+The order inside `start` is the whole point and is enforced rather than documented:
+
+1. **the ownership claim** — an `O_EXCL` create keyed by the canonical state root plus the enrolled
+   key digest, taken before `tailcat-process.mjs` is spawned or any dial begins. A concurrent start
+   that loses it exits by name reporting the winner's pid and **spawns nothing**. A stale claim is
+   detected as an armed record is (boot epoch, then pid probe), never trusted by presence, and a
+   claim file that cannot be read refuses rather than being cleared: an unreadable claim may belong
+   to a live process, and clearing it is how the second child gets spawned.
+2. the member channel, then the local endpoint, then
+3. **the readiness descriptor** at `<state>/native/member/<alias>.json`, written only once the
+   channel is subscribed and removed on a bounded stop. It is what sessions route on and it never
+   stands in for the claim.
+
+The claim is per KEY and the descriptor is per ALIAS: two aliases whose routes use one key are two
+rooms on one client. A concurrent loser refuses and does not wait, in both directions, and the
+refusal names the holder's kind, pid and label — so a start refused by a transient `gate` reads as
+retry-in-seconds while one refused by a live `resident` reads as already-running.
+
+**Sessions never dial.** A `native-remote` row keeps its shape and changes meaning: it resolves to
+this machine's resident client. With no client running, `read`, `post` and `watch` on that row
+refuse `service-dark`, naming the member descriptor and the line that starts one — there is no
+fallback to a direct dial, because a fallback is the defect returning under the name of robustness.
+
+**Diagnostics take the same claim.** `scripts/probe-tailcat-live.mjs --direct` spawns a key-bearing
+child, so it acquires the same claim before that child starts and holds it through teardown,
+releasing only its own generation. Reading the claim and then spawning would be a TOCTOU. When a
+resident holds the key the gate refuses and reports `measured: false` with no `pass` field at all,
+so a deferral can never be read as a failed direct path.
+
 ### Faces of a native room
 
 A native room is the canonical log; a face is a copy of one of its messages on a transport where a reader lives: a Slack channel a human reads from a phone, or a GitHub issue a collaborator watches. `agora room faces <room>` is the whole admin surface: it prints the room's face policy, and with an edit option writes it. The record lives in the seat's own state (`native/rooms/<roomId>/faces.json`, owner-only), never in the shared config, and an absent record is a room with no faces: every post is native only and nothing refuses.
