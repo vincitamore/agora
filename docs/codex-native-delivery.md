@@ -76,11 +76,12 @@ Each request holds at most 32 messages and 64 KiB of UTF-8 text. Every original 
 origin message ID, cursor and attachment descriptor remains present in order. A message
 too large for a request fails intact. No summarizer or trimming step changes its meaning.
 
-A successful response checkpoints that batch's messages in order. A later failure
-retains the failed suffix. A missing response is uncertain: the server may have accepted
-the input. The bridge does not retry that RPC automatically. Inspect the retained
-thread before restarting after uncertainty. A process failure between native acceptance
-and checkpoint can still replay origins, and the receiving agent must recognize them.
+The `turn/start` response is acceptance only. Agora keeps the same connection open and correlates
+the returned turn id with `turn/completed`; only status `completed` checkpoints that batch's
+messages in order. `interrupted`, `failed`, a closed connection, or the bounded thirty-minute
+completion deadline retain the batch and report distinct non-processed outcomes. A missing start
+response remains uncertain: the server may have accepted the input, so the bridge does not retry
+that RPC automatically. Inspect the retained thread before restarting after uncertainty.
 Client message IDs are correlation identifiers, not a claimed provider deduplication API.
 
 Rollback: stop the native watch, exit the attached TUI normally, stop only its own local

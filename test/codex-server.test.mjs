@@ -11,8 +11,8 @@ const thread = "fixture-thread-1234";
 const message = (id, text = `original ${id}\nunchanged`) => /** @type {import('../src/core.mjs').Message} */ ({
   id: `message-${id}`, cursor: `epoch:${id}`, text, ts: "2026-01-01T00:00:00Z", author: { id: "sender", name: "Sender", kind: "human" },
 });
-/** @param {import('node:test').TestContext} t @param {(request:any)=>any} respond */
-async function fixture(t, respond) {
+/** @param {import('node:test').TestContext} t @param {(request:any)=>any} respond @param {'completed'|'interrupted'|'failed'|'close'|null} [completionStatus] */
+async function fixture(t, respond, completionStatus = "completed") {
   const dir = await mkdtemp(path.join(os.tmpdir(), "agora-codex-server-"));
   const tokenFile = path.join(dir, "capability");
   await writeFile(tokenFile, "fixture-secret\n");
@@ -28,6 +28,12 @@ async function fixture(t, respond) {
       const response = respond(request);
       if (response === undefined) return; // Intentionally missing acknowledgment.
       queueMicrotask(() => this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ id: request.id, ...response }) })));
+      if (request.method === "turn/start" && response.result?.turn?.id && completionStatus === "close")
+        queueMicrotask(() => this.close());
+      else if (request.method === "turn/start" && response.result?.turn?.id && completionStatus) queueMicrotask(() =>
+        this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ method: "turn/completed", params: {
+          threadId: thread, turn: { id: response.result.turn.id, status: completionStatus },
+        } }) })));
     }
     close() { closed = true; this.dispatchEvent(new Event("close")); }
   }
@@ -110,3 +116,42 @@ test("accepted prefix checkpoints before later native refusal", async (t) => {
   await assert.rejects(deliverCodexServer("room", input, { ...f.options, onAccepted: async m => { accepted.push(m.id); } }));
   assert.deepEqual(accepted, input.slice(0,32).map(m => m.id));
 });
+
+for (const [status, outcome] of [["interrupted", "cancelled"], ["failed", "failed"]])
+  test(`native ${status} is reported as ${outcome} and never checkpointed`, async (t) => {
+    const f = await fixture(t, responds, /** @type {'interrupted'|'failed'} */ (status));
+    /** @type {any[]} */
+    const receipts = [];
+    await assert.rejects(deliverCodexServer("room", [message(1)], {
+      ...f.options, onAccepted: async () => assert.fail("terminal failure checkpointed"),
+      onProcessed: async receipt => { receipts.push(receipt); },
+    }), new RegExp(String(outcome)));
+    assert.deepEqual(receipts, [{ id: "message-1", outcome }]);
+  });
+
+test("native completion is correlated by returned turn id before processed credit", async (t) => {
+  const f = await fixture(t, responds);
+  /** @type {any[]} */
+  const receipts = [];
+  await deliverCodexServer("room", [message(1), message(2)], {
+    ...f.options, onProcessed: async receipt => { receipts.push(receipt); },
+  });
+  assert.deepEqual(receipts, [
+    { id: "message-1", outcome: "completed" },
+    { id: "message-2", outcome: "completed" },
+  ]);
+});
+
+for (const [ending, completionStatus] of [["completion timeout", null], ["connection close", "close"]])
+  test(`${ending} without correlated completion is explicit and never checkpointed`, async (t) => {
+    const f = await fixture(t, responds, /** @type {null|'close'} */ (completionStatus));
+    /** @type {any[]} */
+    const receipts = [];
+    const promise = deliverCodexServer("room", [message(1)], {
+      ...f.options, processedTimeoutMs: 10,
+      onAccepted: async () => assert.fail("missing completion checkpointed"),
+      onProcessed: async receipt => { receipts.push(receipt); },
+    });
+    await assert.rejects(promise, /closed-without-completion/);
+    assert.deepEqual(receipts, [{ id: "message-1", outcome: "closed-without-completion" }]);
+  });

@@ -724,7 +724,7 @@ function usage(only) {
   const verbs = only ? [[only, SCHEMA.verbs[/** @type {keyof typeof SCHEMA.verbs} */ (only)]]] : Object.entries(SCHEMA.verbs);
   const lines = [`agora ${version}: ${SCHEMA.description}`, "", "usage: agora <verb> [args] [options]", ""];
   for (const [verb, v] of /** @type {Array<[string, { args: string[], options: Record<string, string>, does: string }]>} */ (verbs)) {
-    lines.push(`  ${verb} ${v.args.join(" ")}`.padEnd(28) + v.does);
+    lines.push(`  ${verb} ${v.args.join(" ")}  ${v.does}`);
     for (const [opt, doc] of Object.entries(v.options)) lines.push(`      ${opt.padEnd(20)} ${doc}`);
   }
   lines.push("", "global: --config <path>   --json   --as <bearer>", `config: ${SCHEMA.config}`);
