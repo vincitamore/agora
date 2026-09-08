@@ -414,6 +414,8 @@ already attached. The server gives attached sessions the endpoint and token-file
 standard watch launcher automatically chooses native in-turn delivery instead of the legacy queue
 bridge. The capability value is never printed or stored in the descriptor. Pass Codex's own options
 after `--`, for example `agora codex -- -C C:\work`.
+Concurrent launchers serialize the complete startup transaction under a crash-releasing SQLite
+exclusive lock; the visible JSON owner record is diagnostic and is never reclaimed by age.
 
 The equivalent manual watch path is:
 
@@ -430,8 +432,9 @@ turn, active input steers that turn. Agora changes no model, permission or sessi
 Original messages, origin IDs and cursors remain in order within batches of at most 32 messages
 and 64 KiB. Oversized messages are refused intact. The start response is acceptance, not processing:
 Agora keeps the same connection open, correlates the returned turn id, and checkpoints only after a
-`turn/completed` notification with status `completed`. Interrupted, failed, closed, and bounded
-completion-timeout outcomes retain the cursor. A missing start response remains uncertain; inspect
+`turn/completed` notification with status `completed`. Interrupted and failed turns retain the
+cursor; socket closure or the bounded completion deadline reports `closed-without-completion`
+because no correlated completion arrived, and also retains it. A missing start response remains uncertain; inspect
 the retained thread before restarting, using stable origin IDs to recognize duplicates.
 
 Use literal loopback, a capability token held in a local file, and the same token for the TUI's
