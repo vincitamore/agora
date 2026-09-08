@@ -1,7 +1,7 @@
 // @ts-check
 // Cooperative recovery evidence, not authentication or a same-user tamper barrier.
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, open, readdir, readFile } from 'node:fs/promises';
+import { mkdir, open, readdir, readFile, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { AgoraError, readCursorFile } from './core.mjs';
 import { readArray, readEnum, readRecord, readString, readTimestamp } from './protocol/common.mjs';
@@ -447,6 +447,55 @@ export async function requireCarrySuccessor(stateRoot, successor, boundary, room
   return arrival;
 }
 
+/** Establish durable uncertainty before the watch can deliver. The lifetime
+ * sentinel covers failure to write even the first batch sentinel. Only a clean
+ * stop removes it; a crash or capture failure cannot claim complete coverage.
+ * @param {string} dir */
+export async function armCarryCapture(dir) {
+  let record;
+  try { record = JSON.parse(await readFile(path.join(dir, 'session.json'), 'utf8')); }
+  catch (err) {
+    if (/** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') return null;
+    throw new CarryCheckError('carry-evidence-unwritable');
+  }
+  if (typeof record?.bearer !== 'string') return null;
+  const evidence = path.join(dir, 'carry-evidence');
+  const sentinel = path.join(evidence, `${randomUUID()}.pending`);
+  const persist = async (/** @type {string} */ file, content = 'capture incomplete\n') => {
+    const handle = await open(file, 'wx', 0o600);
+    try { await handle.writeFile(content); await handle.sync(); }
+    finally { await handle.close(); }
+    if (process.platform !== 'win32') {
+      const parent = await open(evidence, 'r');
+      try { await parent.sync(); } finally { await parent.close(); }
+    }
+  };
+  try { await mkdir(evidence, { recursive: true, mode: 0o700 }); await persist(sentinel); }
+  catch { throw new CarryCheckError('carry-evidence-unwritable'); }
+  const clear = async (/** @type {string} */ file) => {
+    // A durable completion receipt makes an unlink failure recoverable without
+    // treating an unresolved marker as completed or requiring another write.
+    await persist(file + '.complete', path.basename(file));
+    try { await unlink(file); } catch { /* completion receipt is authoritative */ }
+  };
+  let failed = false;
+  /** @type {string|undefined} */ let batch;
+  return {
+    async begin() {
+      batch = path.join(evidence, `${randomUUID()}.pending`);
+      try { await persist(batch); } catch { failed = true; }
+    },
+    fail() { failed = true; },
+    async complete() {
+      if (batch && !failed) { try { await clear(batch); } catch { failed = true; } }
+      batch = undefined;
+    },
+    async stop() {
+      if (!failed && !batch) { try { await clear(sentinel); } catch { /* retained uncertainty */ } }
+    },
+  };
+}
+
 /** Prepared evidence precedes the external delivery. An unregistered watch has no
  * bearer evidence: it writes nothing and later checks refuse unknown coverage.
  * @param {string} dir @param {string} room
@@ -512,7 +561,20 @@ export async function readCarryEvidence(dir) {
   catch { return { events, issues: ['delivery-coverage-unknown'] }; }
   if (!files.length) issues.push('delivery-coverage-unknown');
   const ids = new Set();
+  const completed = new Set();
+  for (const file of files.filter(f => f.endsWith('.pending.complete'))) {
+    try {
+      const target = file.slice(0, -'.complete'.length);
+      if (await readFile(path.join(evidence, file), 'utf8') !== target) throw new Error('invalid completion');
+      completed.add(target);
+    } catch { issues.push('delivery-coverage-unknown:' + file); }
+  }
   for (const file of files.sort()) {
+    if (file.endsWith('.pending.complete')) continue;
+    if (file.endsWith('.pending')) {
+      if (!completed.has(file)) issues.push('delivery-coverage-unknown:' + file);
+      continue;
+    }
     try {
       if (!file.endsWith('.json')) throw new Error('unknown file');
       const event = validateCarryEvent(JSON.parse(await readFile(path.join(evidence, file), 'utf8')));
