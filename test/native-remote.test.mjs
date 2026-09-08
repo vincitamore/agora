@@ -1372,3 +1372,58 @@ test("a probe failure invalidates the REAL cached client, so the reattach dials 
     assert.match(String(sub.dark()), /could not be re-dialled/, "darkness was reported without a name");
   }
 });
+
+test("a replacement completed DURING dropClient's teardown is not dialled over on the probe's return", async (t) => {
+  // Astra/reader's third HOLD (backroom 1788832597), and the same race as the first two at a third
+  // await: `dropClient` closes the old socket, whose close handler can attach a healthy replacement
+  // while `resource.stop()` is still pending. The probe resumes holding a `client` that is now two
+  // generations old, and without re-reading the fence it dials over a channel that is fine.
+  //
+  // The ordering is forced, not raced: `stop()` hangs on a deferred promise, and the replacement is
+  // completed by hand while it hangs.
+  let calls = 0, subscriptions = 0;
+  /** @type {() => void} */ let releaseStop = () => {};
+  const stopHeld = new Promise((resolve) => { releaseStop = () => resolve(undefined); });
+
+  const makeClient = (/** @type {boolean} */ silent) => {
+    const socket = /** @type {any} */ (new EventEmitter());
+    socket.destroyed = false;
+    return { socket, closed: false,
+      close() { this.closed = true; },
+      request: async () => { if (silent) throw new AgoraError("member-channel-dark: silent"); return { status: { epoch: EPOCH, committed: 0 } }; },
+      subscribe: async () => { subscriptions += 1; return { messages: [] }; } };
+  };
+  const first = makeClient(true);
+  const second = makeClient(false);
+
+  const room = /** @type {any} */ ({
+    binding: { roomId: ROOM, accountId: `m-${"d".repeat(32)}`, host: { id: HOST_ACCOUNT } },
+    client: async () => { calls += 1; return calls === 1 ? first : second; },
+    close: async () => {},
+    // Stands in for the real one: it closes the old client, then its teardown HANGS, and the
+    // replacement lands in that window exactly as the close handler would do it.
+    dropClient: async (/** @type {any} */ c) => {
+      if (c !== first) return;
+      first.socket.destroyed = true;
+      first.socket.emit("close");     // the existing close path attaches the replacement
+      await stopHeld;                 // ...while teardown is still pending
+    },
+  });
+
+  const sub = await openRemoteSubscription({ room, since: nativeCursor(EPOCH, 0),
+    idleMs: 50, backoffMs: 5, maxReconnects: 3 });
+  t.after(() => sub.close());
+
+  // Let the probe fail on `first` and enter dropClient; the close inside it completes the
+  // replacement while stop hangs.
+  const deadline = Date.now() + 4000;
+  while (subscriptions < 2 && Date.now() < deadline) await sub.wait(10);
+  assert.equal(subscriptions, 2, "the replacement did not land during teardown");
+
+  releaseStop();                       // the probe now resumes, holding a stale client
+  await sub.wait(400);
+
+  assert.equal(calls, 2, `the probe dialled over a healthy replacement on resumption: ${calls} dials where 2 are owed`);
+  assert.equal(subscriptions, 2, `the probe re-subscribed a healthy channel: ${subscriptions} subscribes where 2 are owed`);
+  assert.equal(sub.dark(), undefined, "a healthy channel was reported dark after a late resumption");
+});
