@@ -171,7 +171,10 @@ Every file above is carried explicitly and never sourced from a room. Authority 
 outputs are atomic no-clobber writes; `authority public` recovers the existing public handoff and
 never regenerates or exposes the private key. The authority id is selected once at service startup,
 so rotation requires a restart. This is a pinned-cooperative boundary, not protection from another
-process running as the same OS user.
+process running as the same OS user. Enrollment and route challenges both expire 120 seconds after
+issue. A late enrollment refuses `authority-possession-expired`; an expired route challenge is
+swept and its proof refuses `operator-challenge-absent`. Issue a fresh challenge: a consumed or
+expired challenge is never reused.
 
 `agora spawn --file <path>` parses a bounded request (unknown keys exit 1 `request-field-unknown`) and asks the running seat service to open one pane after a proven hello (HMAC of the challenge under `native/pane.nonce`; echoing `bootEpoch` is not proof). `open` carries no `cmd`. `hermes` is refused. There is no verb that writes bytes into a pane. `service stop` reaps the pane authority it started (the recorded pid and its children). The pane also exits when its parent process is gone.
 
