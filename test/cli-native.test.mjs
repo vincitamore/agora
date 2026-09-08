@@ -82,6 +82,29 @@ async function fixture(t) {
   return { root, service, fable, sol, cursorFile: path.join(root, "sessions", "fable", "nat.cursor"), armedFile: path.join(root, "sessions", "fable", "armed", "nat.json") };
 }
 
+test("cli: join pages when its own DEFAULT batch is too large, and a smaller batch still works", { timeout: 60000 }, async (t) => {
+  const { service, fable } = await fixture(t);
+  // The hold that produced this cell: bounding the COUNT is not the property. Twenty-one messages,
+  // each individually legal at 64 KiB, make join's default twenty encode past a 1 MiB frame — so a
+  // fixed limit leaves a real seat unable to join a real room. The default must PAGE.
+  const store = await service.openRoom(ROOM);
+  for (let n = 0; n < 21; n += 1)
+    await store.append({ operationId: randomUUID().replaceAll("-", ""), authorName: "big", text: "x".repeat(64 * 1024) },
+      { accountId: ACCOUNT });
+
+  const joined = await agora(["join", "nat", "--as", "Opus/e2c"], fable);
+  assert.equal(joined.code, 0, `join did not page its oversized default batch: ${joined.stderr}`);
+  assert.match(joined.stderr, /cursor set to/);
+
+  // the smaller-batch twin: an explicit limit that fits needs no retry and must still work
+  const small = await agora(["join", "nat", "--as", "Opus/e2c", "--limit", "5"], fable);
+  assert.equal(small.code, 0, `an explicitly small batch failed: ${small.stderr}`);
+
+  // and cursor --now, whose read is one message and pages the same way if that one is oversized
+  const now = await agora(["cursor", "nat", "--now"], fable);
+  assert.equal(now.code, 0, `cursor --now failed on large messages: ${now.stderr}`);
+});
+
 test("cli: join asks for the batch it prints, so a room too large for one frame still joins", { timeout: 60000 }, async (t) => {
   const { service, fable } = await fixture(t);
   // THE WIRE, not the ends. The service honouring a limit and join slicing for display were both
