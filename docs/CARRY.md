@@ -79,6 +79,16 @@ actions, not proof that a model comprehended them:
 }
 ```
 
+Registered watches create a durable uncertainty guard at arm time. Failure to
+create it refuses the arm as `carry-evidence-unwritable`, before any delivery.
+After arming, capture and batch-marker failures do not stop delivery: the guard
+remains and a fresh `carry --check` refuses `delivery-coverage-unknown`. Checks
+while the guarded watch is active are conservatively unknown too. Only a clean
+stop after successful capture completes the guard. A durable completion receipt
+precedes marker deletion, so a failed deletion does not permanently block a
+completed watch. A crash or failed capture leaves unresolved evidence; no automatic
+reconciliation or deletion of those guards is claimed.
+
 Withdrawing a named answer reopens its delivery obligation; a replacement named
 answer is required. Withdrawing a release reopens its claim obligation. Both
 the original effect and its withdrawal remain in evidence, and the retractions
