@@ -244,7 +244,8 @@ test('real addressed watch delivery is prepared before the callback and acknowle
   }
 });
 
-for (const phase of ['prepare', 'prepare-later', 'accept', 'cursor', 'clear', 'clean']) for (const coalesceSeconds of [0, 1])
+for (const phase of ['prepare', 'prepare-later', 'accept', 'cursor', 'clear', 'clean',
+  'registration-missing', 'registration-malformed', 'registration-shape', 'registration-changed', 'registration-unreadable']) for (const coalesceSeconds of [0, 1])
 test(`capture ${phase} failure preserves delivery and fresh-process coverage, coalesce ${coalesceSeconds}`, async () => {
   const t = await tmp();
   try {
@@ -259,10 +260,18 @@ test(`capture ${phase} failure preserves delivery and fresh-process coverage, co
     const m = { id: 'required', cursor: '1', room: 'backroom', ts: mandate.issuedAt,
       author: { id: 'peer', kind: /** @type {'agent'} */ ('agent') }, text: `Required\n\nto: ${mandate.bearer}` };
     let polls = 0;
+    const registration = path.join(dir, 'session.json');
     const transport = /** @type {import('../src/core.mjs').Transport} */ ({ kind: 'local', room: 'backroom', threads: false,
       read: async () => {
         polls++;
         if (phase === 'prepare' || (phase === 'prepare-later' && polls === 2)) await block();
+        if (phase.startsWith('registration-')) {
+          await rename(registration, registration + '.held');
+          if (phase === 'registration-malformed') await writeFile(registration, '{');
+          if (phase === 'registration-shape') await writeFile(registration, '{}');
+          if (phase === 'registration-changed') await writeFile(registration, JSON.stringify({ bearer: 'Other/builder' }));
+          if (phase === 'registration-unreadable') await mkdir(registration);
+        }
         return [{ ...m, id: m.id + polls, cursor: String(polls) }];
       } });
     let delivered = 0;
@@ -270,6 +279,10 @@ test(`capture ${phase} failure preserves delivery and fresh-process coverage, co
       guard: () => delivered === 2 ? 'done' : undefined, sleep: async () => {}, coalesceSeconds, maxBatch: 1,
       seat: { id: 'seat' }, onBatch: async (messages, batch) => {
         delivered += messages.length;
+        if (phase.startsWith('registration-')) {
+          if (phase !== 'registration-missing') await rename(registration, registration + '.bad');
+          await rename(registration + '.held', registration);
+        }
         if (phase === 'prepare' || (phase === 'prepare-later' && polls === 2)) await restore();
         if (phase === 'accept') await block();
         if (phase === 'cursor') await mkdir(path.join(dir, 'backroom.cursor'));
@@ -305,7 +318,7 @@ test(`capture ${phase} failure preserves delivery and fresh-process coverage, co
     const result = JSON.parse(stdout);
     assert.equal(code, phase === 'clean' || phase === 'clear' ? 0 : 1);
     assert.equal(result.issues.some((/** @type {{code:string}} */ i) => i.code === 'delivery-coverage-unknown'),
-      phase.startsWith('prepare') || phase === 'accept' || phase === 'cursor');
+      phase.startsWith('prepare') || phase.startsWith('registration-') || phase === 'accept' || phase === 'cursor');
   } finally { await t.cleanup(); }
 });
 

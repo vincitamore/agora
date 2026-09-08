@@ -81,6 +81,8 @@ actions, not proof that a model comprehended them:
 
 Registered watches create a durable uncertainty guard at arm time. Failure to
 create it refuses the arm as `carry-evidence-unwritable`, before any delivery.
+The guard pins the registered bearer: later registration read/parse loss or a
+changed bearer is incomplete capture, even if registration is restored before stop.
 After arming, capture and batch-marker failures do not stop delivery: the guard
 remains and a fresh `carry --check` refuses `delivery-coverage-unknown`. Checks
 while the guarded watch is active are conservatively unknown too. Only a clean

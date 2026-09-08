@@ -207,7 +207,7 @@ export async function watch(transport, opts) {
   // the delivery path. Unknown seat addressing is retained as a coverage gap.
   const prepare = async (/** @type {import('./core.mjs').Message[]} */ messages) => {
     await capture?.begin();
-    try { return await prepareCarryBatch(stateDir, key.split('#')[0], messages, opts.seat); }
+    try { return await prepareCarryBatch(stateDir, key.split('#')[0], messages, opts.seat, capture?.bearer); }
     catch (err) { if (!capture) throw err; capture.fail(); return new Map(); }
   };
 
