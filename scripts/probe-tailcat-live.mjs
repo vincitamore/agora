@@ -1,13 +1,59 @@
 // Deliberate live relay acceptance: synthetic bytes and isolated keys, no room posts.
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-if(process.versions.bun){const result=spawnSync('node',[fileURLToPath(import.meta.url)],{stdio:'inherit',windowsHide:true});process.exit(result.status??1);}
+if(process.versions.bun){const result=spawnSync('node',[fileURLToPath(import.meta.url),...process.argv.slice(2)],{stdio:'inherit',windowsHide:true});process.exit(result.status??1);}
+import { parseArgs } from 'node:util';
+import { isIP } from 'node:net';
+import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
 import {mkdtemp,realpath,mkdir,writeFile,readFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';import path from 'node:path';import {setTimeout as delay}from'node:timers/promises';
 import {localTransferIdentity,encodeTransfer}from'../src/tailcat.mjs';
 import {shareFiles,fetchFiles,stopOffer,offerDirectory}from'../src/tailcat-offers.mjs';
 import {controlOffer}from'../src/tailcat-launcher.mjs';import{requestTransfer}from'../src/tailcat-http.mjs';
+// Cross-machine gate. The server must allow the public half of --key-file.
+// Keep its address in a file so shell quoting cannot change the token.
+// Example: node scripts/probe-tailcat-live.mjs --direct --binary /path/to/tailcat
+//   --address-file /private/server.addr --key-file /private/client.private.json
+const { values: options } = parseArgs({ options: {
+ direct: { type: 'boolean' }, binary: { type: 'string' },
+ 'address-file': { type: 'string' }, 'key-file': { type: 'string' },
+ 'timeout-ms': { type: 'string', default: '30000' },
+}, allowPositionals: false });
+if (options.direct) {
+ for (const field of ['binary', 'address-file', 'key-file']) {
+  if (!options[field]) throw new Error(`--direct requires --${field}`);
+ }
+ const timeout = Number(options['timeout-ms']);
+ if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 300000) {
+  throw new Error('--timeout-ms must be an integer from 1 to 300000');
+ }
+ const binary = await realpath(options.binary);
+ const keyPath = await realpath(options['key-file']);
+ const address = (await readFile(options['address-file'], 'utf8')).trim();
+ if (!address || /\s/.test(address)) throw new Error('Address file must contain one token');
+ const started = Date.now();
+ console.error('direct probe started', new Date(started).toISOString());
+ const child = spawnSync(binary, [`--key=${keyPath}`, 'ping', '--until-direct',
+  `--timeout=${timeout}ms`, address], {
+  encoding: 'utf8', windowsHide: true, timeout: timeout + 5000, maxBuffer: 8 * 1024 * 1024,
+ });
+ const pongs = (child.stdout ?? '').split(/\r?\n/).filter(line => /^pong in .+ via .+$/.test(line));
+ const directEndpoint = pongs.map(line => line.slice(line.lastIndexOf(' via ') + 5)).find(endpoint => {
+  const match = /^(?:\[([^\]]+)\]|([^:]+)):(\d+)$/.exec(endpoint);
+  return match && isIP(match[1] ?? match[2]) && Number(match[3]) > 0 && Number(match[3]) <= 65535;
+ }) ?? null;
+ // Printed output alone is insufficient: the one-shot verb must also exit cleanly.
+ const pass = child.status === 0 && !child.error && !child.signal && directEndpoint !== null;
+ console.log(JSON.stringify({ pass, binarySha256: createHash('sha256').update(await readFile(binary)).digest('hex'),
+  started: new Date(started).toISOString(), elapsedMs: Date.now() - started,
+  exit: child.status, signal: child.signal, error: child.error?.code ?? null,
+  directEndpoint, pongs, stderr: child.stderr ?? '' }));
+ process.exit(pass ? 0 : 1);
+}
+if (options.binary || options['address-file'] || options['key-file']) {
+ throw new Error('--binary, --address-file and --key-file require --direct');
+}
 const start=Date.now();console.log('live probe started',new Date().toISOString());
 const root=await realpath(await mkdtemp(path.join(tmpdir(),'agora-live-transfer-')));
 const messages=[],peers=[];const senderRoot=path.join(root,'sender');await mkdir(senderRoot);
