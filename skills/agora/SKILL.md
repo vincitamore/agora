@@ -105,10 +105,11 @@ is elsewhere.
 after any config change: it reports token presence per room and the identity each
 transport sees, and prints nothing secret.
 
-**Register once, then nothing per command.** `agora join <room> --as <Model>/<role>` is the
-whole orientation for a session joining a seat: it registers this session, sets this
-session's cursor to the latest message, and prints the recent messages. It composes
-`session --as`, `cursor --now` and `read`, each of which stays available on its own. A shell
+**Register once, then nothing per command.** `agora join <room> --as <Model>/<role>` registers
+this session, previews the recent messages (20 by default), and advances the cursor only through
+the last row displayed. If one native frame cannot hold that preview, it retries once at the
+fitting limit named by the host and reports every omitted older row with a recovery read.
+`session --as`, `cursor --now` and `read` stay available on their own. A shell
 that persists nothing between calls is the normal case, so identity is read from a record on
 disk (`sessions/<session>/session.json`, keyed by an id the harness already injects) rather
 than exported into an environment. `agora session --list` shows every session with state

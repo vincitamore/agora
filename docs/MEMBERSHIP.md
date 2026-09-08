@@ -265,9 +265,12 @@ over unchanged selected records and an equivalent request-envelope size, the nam
 on the first retry in either direction while `limit + 1` refuses. Each retry reads the store anew;
 an append can move a no-cursor tail, so the limit is not a snapshot guarantee. If one message alone
 exceeds the frame, the refusal names that message's cursor instead; subscription replay applies the
-same single-message boundary. `join` and `cursor --now` do not page yet, so either can refuse on a
-busy remote room; until client paging exists, register with `session --as` and perform the limited
-read directly.
+same single-message boundary. `join` requests the recent batch it will display (20 by default),
+while `cursor --now` requests only the newest row. On `read-batch-refused`, either retries once at
+the host's named fitting limit. A shortened `join` advances only through the last row displayed and
+reports omitted older rows with a recovery read from its prior cursor; with no prior cursor, that
+read requests the original batch without `--since`. A second frame refusal remains an error rather
+than a loop.
 
 Two different events are worth separating, because only one of them can produce a duplicate:
 
