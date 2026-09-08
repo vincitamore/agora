@@ -122,11 +122,12 @@ async function readLockOwner(file) {
   } catch { return undefined; }
 }
 
-/** @param {string} lockFile @param {{pid:number,token:string}} owner */
-async function releaseLock(lockFile, owner) {
+/** @param {string} lockFile @param {{pid:number,token:string}} owner @param {()=>Promise<void>} [beforeRename] */
+async function releaseLock(lockFile, owner, beforeRename) {
   const current = await readLockOwner(lockFile);
   if (current?.pid !== owner.pid || current.token !== owner.token) return;
   const released = `${lockFile}.${owner.token}.released`;
+  await beforeRename?.();
   try { await rename(lockFile, released); }
   catch (error) { if (/** @type {NodeJS.ErrnoException} */ (error).code === "ENOENT") return; throw error; }
   const moved = await readLockOwner(released);
@@ -160,7 +161,7 @@ async function probeDescriptor(descriptor) {
  *     uuid?:()=>string, token?:()=>string, sleep?:(ms:number)=>Promise<void>, now?:()=>string,
  *     processAlive?:(pid:number)=>boolean, beforeLockPublish?:()=>Promise<void>,
  *     afterLockObservation?:(owner:{pid:number,token:string,at:string})=>Promise<void>,
- *     kill?:(pid:number)=>void }
+ *     beforeLockRelease?:()=>Promise<void>, kill?:(pid:number)=>void }
  * }} options
  */
 export async function ensureCodexServer(options) {
@@ -267,8 +268,8 @@ export async function ensureCodexServer(options) {
     await rm(generationDir, { recursive: true, force: true }).catch(() => {});
     throw new AgoraError("Codex app server did not accept an authenticated loopback connection before the startup deadline", EXIT.error);
   } finally {
-    if (lockOwner) await releaseLock(paths.lock, lockOwner);
-    authority.release();
+    try { if (lockOwner) await releaseLock(paths.lock, lockOwner, deps.beforeLockRelease); }
+    finally { authority.release(); }
   }
 }
 
