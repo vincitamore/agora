@@ -122,7 +122,8 @@ test("cli: join pages when its own DEFAULT batch is too large, and a smaller bat
     assert.ok(omitted.length > 0, `${label}: fixture did not force the default batch to omit rows`);
     const recoveredIds = new Set();
     let since = hint[1];
-    for (let page = 0; page < 30 && !omitted.every((m) => recoveredIds.has(m.id)); page += 1) {
+    const previewCursor = shown.at(-1).cursor;
+    for (let page = 0; page < 30 && since !== previewCursor; page += 1) {
       const recovered = await agora(["read", "nat", "--since", since, "--limit", hint[2], "--json"], fable);
       assert.equal(recovered.code, 0, `${label}: emitted recovery page refused: ${recovered.stderr}`);
       const pageRows = typed(recovered.stdout);
@@ -130,6 +131,7 @@ test("cli: join pages when its own DEFAULT batch is too large, and a smaller bat
       for (const row of pageRows) recoveredIds.add(row.id);
       since = pageRows.at(-1).cursor;
     }
+    assert.equal(since, previewCursor, `${label}: repeated recovery pages did not reach the preview cursor`);
     assert.ok(omitted.every((m) => recoveredIds.has(m.id)), `${label}: paged hint skipped omitted rows`);
     assert.equal(JSON.parse(await readFile(cursorFile, "utf8")).cursor, shown.at(-1).cursor,
       `${label}: recovery read or join advanced the saved cursor past delivery`);
