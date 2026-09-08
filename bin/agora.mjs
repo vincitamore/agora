@@ -72,7 +72,7 @@ import { assertRemoteDescriptor, openRemoteSubscription, readRemoteDescriptor, r
 import { readRouteSecret } from "../src/native-member.mjs";
 import { closeServiceRoute, createServiceRoom, listServiceRoutes, openServiceRoute, runService,
   seatAccountId, seatLabel, serviceStatus, startService, stopService,
-  readAuthorityInput, writeAuthorityOutput, generateSeatAuthority, prepareSeatAuthorityEnrollment,
+  readAuthorityInput, writeAuthorityOutput, generateSeatAuthority, publicSeatAuthority, prepareSeatAuthorityEnrollment,
   signSeatAuthorityEnrollment, completeSeatAuthorityEnrollment, signSeatRouteAct,
   challengeServiceRoute, statusServiceRouteAct } from "../src/service-cli.mjs";
 import { spawnFromFile } from "../src/spawn-cli.mjs";
@@ -253,10 +253,10 @@ const SCHEMA = {
       does: "the seat-local native room service: start writes native/service.json and binds the endpoint; stop is bounded; status reports the descriptor without the nonce; room create mints a 32-hex id on the running service and prints it; route open admits one enrolled key over Tailcat and route close revokes it, the service owning the route rather than the verb. Never writes the shared config",
     },
     authority: {
-      args: ['keygen|enrollment-challenge|sign-enrollment|enroll|sign'],
+      args: ['keygen|public|enrollment-challenge|sign-enrollment|enroll|sign'],
       options: { '--file <path>': 'hand-carried JSON, never from a room; keygen takes signer policy, enrollment-challenge a public record, other verbs a challenge or proof',
         '--fingerprint <sha256:64hex>': 'enrollment-challenge/enroll: confirm on the counter-seat terminal, never infer from shared room identity',
-        '--label <name>': 'keygen: bounded seat label', '--out <path>': 'required public output for keygen/challenge/sign; no overwrite or private key bytes' },
+        '--label <name>': 'keygen: bounded seat label', '--out <path>': 'required public output for keygen/public/challenge/sign; public recovers an existing public handoff without regenerating; no overwrite or private key bytes' },
       does: 'explicit counter-seat Ed25519 bootstrap and delegation signing. Keygen keeps its private half 0600 here. Enrollment requires retained possession challenge. Signing checks this seat list; target independently enforces its startup list. Pinned-cooperative, not protected from the same OS user',
     },
     spawn: {
@@ -750,11 +750,14 @@ export const ARGUMENT_PREFLIGHTS = Object.freeze([
     name: 'authority',
     matches: ({ verb }) => verb === 'authority',
     refusal: ({ roomAlias, values }) => {
-      if (!['keygen', 'enrollment-challenge', 'sign-enrollment', 'enroll', 'sign'].includes(roomAlias ?? ''))
-        return 'authority needs keygen, enrollment-challenge, sign-enrollment, enroll or sign';
-      if (!values.file) return 'authority needs --file <hand-carried-json>';
+      if (!['keygen', 'public', 'enrollment-challenge', 'sign-enrollment', 'enroll', 'sign'].includes(roomAlias ?? ''))
+        return 'authority needs keygen, public, enrollment-challenge, sign-enrollment, enroll or sign';
+      if (roomAlias !== 'public' && !values.file) return 'authority needs --file <hand-carried-json>';
       if (roomAlias !== 'enroll' && !values.out) return 'authority needs --out <new-public-file>';
       if (roomAlias === 'keygen' && !values.label) return 'authority keygen needs --label <seat-label>';
+      if (roomAlias === 'keygen' && (String(values.label).length > 120 || !String(values.label).trim()
+        || /[\u0000-\u001f\u007f]/.test(String(values.label))))
+        return 'authority keygen --label must contain 1-120 characters, no controls, and not be blank';
       if (['enrollment-challenge', 'enroll'].includes(roomAlias ?? '') && !/^sha256:[a-f0-9]{64}$/.test(String(values.fingerprint ?? '')))
         return 'authority enrollment needs --fingerprint sha256:64hex confirmed on the counter-seat terminal';
       return undefined;
@@ -1106,9 +1109,10 @@ async function main(argv) {
   }
 
   if (verb === 'authority') {
-    const input = await readAuthorityInput(String(values.file));
+    const input = roomAlias === 'public' ? undefined : await readAuthorityInput(String(values.file));
     let result;
     if (roomAlias === 'keygen') result = await generateSeatAuthority(stateRoot, input, String(values.label));
+    else if (roomAlias === 'public') result = await publicSeatAuthority(stateRoot);
     else if (roomAlias === 'enrollment-challenge') result = await prepareSeatAuthorityEnrollment(stateRoot, input, String(values.fingerprint));
     else if (roomAlias === 'sign-enrollment') result = await signSeatAuthorityEnrollment(stateRoot, input);
     else if (roomAlias === 'enroll') result = await completeSeatAuthorityEnrollment(stateRoot, input, String(values.fingerprint));

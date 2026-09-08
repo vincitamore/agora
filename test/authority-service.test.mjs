@@ -18,7 +18,7 @@ import { NativeFrameDecoder } from '../src/native-protocol.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { generateSeatAuthority, prepareSeatAuthorityEnrollment, signSeatAuthorityEnrollment,
+import { generateSeatAuthority, publicSeatAuthority, prepareSeatAuthorityEnrollment, signSeatAuthorityEnrollment,
   completeSeatAuthorityEnrollment, signSeatRouteAct, readAuthorityInput, writeAuthorityOutput } from '../src/service-cli.mjs';
 
 const NOW = '2026-09-07T20:00:00.000Z', ACCOUNT = 'a'.repeat(32), ROOM = 'b'.repeat(32);
@@ -379,6 +379,8 @@ test('authority and proof rows refuse before config; each new preflight has a co
   }
   for (const [args, expected] of /** @type {[string[], string][]} */ ([
     [['authority', 'sign'], 'authority needs --file'],
+    [['authority', 'public'], 'authority needs --out'],
+    [['authority', 'keygen', '--file', 'policy.json', '--out', 'public.json', '--label', ' '], 'authority keygen --label'],
     [['authority', 'enroll', '--file', 'proof.json'], 'authority enrollment needs --fingerprint'],
     [['service', 'start', '--authority', 'not-an-id'], 'service start --authority takes'],
     [['service', 'route', 'open', ROOM, '--allow-key', MEMBER], 'route open needs --proof-file'],
@@ -391,6 +393,7 @@ test('authority and proof rows refuse before config; each new preflight has a co
   }
   for (const args of [
     ['authority', 'sign', '--file', 'challenge.json', '--out', 'new.json'],
+    ['authority', 'public', '--out', 'new.json'],
     ['service', 'start', '--authority', `a-${'a'.repeat(64)}`],
     ['service', 'route', 'open', ROOM, '--allow-key', MEMBER, '--proof-file', 'proof.json'],
     ['service', 'route', 'challenge', ROOM, '--allow-key', MEMBER, '--act', 'room-enroll', '--out', 'new.json'],
@@ -409,6 +412,11 @@ test('hand-carried bootstrap keeps signing key on counter-seat, proves possessio
   const privatePath = path.join(signerRoot, 'native/authority-key.json');
   if (process.platform !== 'win32') assert.equal((await stat(privatePath)).mode & 0o777, 0o600);
   const before = await readFile(privatePath);
+  // A failed public-output write must not require deleting or regenerating the signing key.
+  const recovered = await publicSeatAuthority(signerRoot, signerIdentity);
+  assert.deepEqual(recovered, record);
+  assert.ok(!JSON.stringify(recovered).includes(JSON.parse(before.toString('utf8')).privateKey.d));
+  assert.deepEqual(await readFile(privatePath), before);
   await assert.rejects(generateSeatAuthority(signerRoot, f.record.policy, 'other', signerIdentity), refusal('authority-output-exists'));
   assert.deepEqual(await readFile(privatePath), before);
   const pending = await prepareSeatAuthorityEnrollment(targetRoot, record, record.keyId, targetIdentity);
