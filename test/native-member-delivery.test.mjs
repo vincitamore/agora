@@ -279,3 +279,49 @@ test("the upstream is lost while two consumers stay subscribed: it re-dials and 
 
   await client.stop();
 });
+
+test("when the reconnect budget is spent every local subscription ends dark, inside the budget", async (t) => {
+  const { seatRoot, descriptorPath, channelOptions, dials, identity, roomId } = await rig(t);
+
+  // After the flip, every further dial produces a child that never handshakes, so the reattach
+  // loop spends its budget and gives up. That is the state the brief bounds: not a quiet room, not
+  // a hung watch, but darkness a session can see.
+  let refuseDials = false;
+  const spawn = async (/** @type {string[]} */ args, /** @type {any} */ runtime, /** @type {any} */ owner) => {
+    if (refuseDials && args[0] !== "parse" && args[1] !== "printpub") throw new Error("the host is gone");
+    return channelOptions.spawn(args, runtime, owner);
+  };
+
+  const client = new MemberClientService({
+    stateRoot: seatRoot, alias: "house-remote", descriptorPath,
+    keyDigest: `sha256:${"e".repeat(64)}`, seatLabel: "amore-dev-laptop",
+    channelOptions: { ...channelOptions, spawn }, identity,
+    idleMs: 200, maxReconnects: 2, backoffMs: 10,
+  });
+  await client.start();
+  t.after(() => client.stop());
+
+  const descriptor = await readMemberDescriptor(seatRoot, "house-remote");
+  const local = await NativeServiceClient.connect({ ...descriptor, timeoutMs: 5000 });
+  t.after(() => { try { local.close(); } catch { /* already gone */ } });
+  await local.subscribe(roomId, nativeCursor(EPOCH, 0), () => {});
+  assert.equal(local.socket.destroyed, false);
+
+  // The channel dies and cannot be replaced.
+  refuseDials = true;
+  dials[0].toClient.destroy();
+
+  // The bound: the budget (2 attempts at 10 ms backoff) plus the idle interval plus one poll. A
+  // generous ceiling here is honest — the assertion is that darkness ARRIVES, and a cell that
+  // asserted a tight deadline on a loaded box would be measuring the box.
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline && !local.socket.destroyed) await new Promise((r) => setTimeout(r, 25));
+
+  // THE PROPERTY: the local consumer's socket is gone, which is exactly what a session's watch
+  // reads as `service-dark`, exit 1. The failure this replaces is the opposite: a live socket
+  // delivering nothing forever, indistinguishable from a room where nobody is talking.
+  assert.equal(local.socket.destroyed, true,
+    "the local subscription stayed open after the resident gave up its reconnect budget");
+
+  await client.stop();
+});
