@@ -129,19 +129,49 @@ these checks do not make rotation safe. Errors name the damaged record without p
 The seat service is local to this machine's state root. Start it before a native watch or a native post. It never writes the shared config.
 
 ```sh
-agora service start
+agora service start --authority <a-64hex>
 agora service status
 agora service room create                    # prints a 32-hex roomId; does not edit agora.json
 agora service room create --room-id <32 hex> # use this id; duplicate is exit 1
-agora service route open <room> --allow-key <nodekey:64hex> [--out <path>]
+agora service route challenge <room> --allow-key <nodekey:64hex> --act room-enroll --out <challenge.json>
+agora service route open <room> --allow-key <nodekey:64hex> --proof-file <proof.json> [--out <path>]
 agora service route list
-agora service route close <room> --allow-key <nodekey:64hex>
+agora service route challenge <room> --allow-key <nodekey:64hex> --act room-revoke --out <challenge.json>
+agora service route close <room> --allow-key <nodekey:64hex> --proof-file <proof.json>
+agora service route act-status <operation-id>
 agora service stop
 ```
 
 A native room becomes usable when a house config row names that `roomId` — a separate edit. Minting is `room create`, not the first post: `openRoom` refuses a missing manifest.
 
 Start and stop handshake the published endpoint before they treat a pid as the service. A leftover `native/service.json` whose socket does not answer is unlinked; the process that happens to hold that pid is left alone. A live endpoint whose descriptor has no pid is exit 1, not a kill by guess. A second `start` while the handshake succeeds is exit 1 already running. Status reports the descriptor without the nonce. The child is spawned with `process.execPath`, never PATH `node`. `--daemon` is the supervisor child, not an operator verb.
+
+Member-route changes are explicit counter-seat operator acts. On the seat that will sign, generate an
+Ed25519 authority from its own delegation policy; the private half stays at
+`<state>/native/authority-key.json` and is never transferred. Carry only the public record to the
+target. Confirm its `sha256:` fingerprint at the counter-seat terminal, not from a room message,
+then carry the target's enrollment challenge back for signature and return the proof:
+
+```sh
+# Counter-seat signer
+agora authority keygen --file <signer-policy.json> --label <seat> --out <public-record.json>
+# If key generation succeeded but publishing that public file did not:
+agora authority public --out <new-public-record.json>
+
+# Target seat
+agora authority enrollment-challenge --file <public-record.json> --fingerprint <sha256:64hex> --out <enrollment-challenge.json>
+# Counter-seat signer
+agora authority sign-enrollment --file <enrollment-challenge.json> --out <enrollment-proof.json>
+# Target seat
+agora authority enroll --file <enrollment-proof.json> --fingerprint <sha256:64hex>
+agora service start --authority <a-64hex>
+```
+
+Every file above is carried explicitly and never sourced from a room. Authority and challenge
+outputs are atomic no-clobber writes; `authority public` recovers the existing public handoff and
+never regenerates or exposes the private key. The authority id is selected once at service startup,
+so rotation requires a restart. This is a pinned-cooperative boundary, not protection from another
+process running as the same OS user.
 
 `agora spawn --file <path>` parses a bounded request (unknown keys exit 1 `request-field-unknown`) and asks the running seat service to open one pane after a proven hello (HMAC of the challenge under `native/pane.nonce`; echoing `bootEpoch` is not proof). `open` carries no `cmd`. `hermes` is refused. There is no verb that writes bytes into a pane. `service stop` reaps the pane authority it started (the recorded pid and its children). The pane also exits when its parent process is gone.
 
@@ -157,9 +187,22 @@ half stays under the remote seat's state root and never leaves it.
 # Remote seat
 agora enroll agora --json
 
-# Host seat: use the remote receipt's public node key and the hosted native room's 32-hex id
-agora service route open <room-id> --allow-key <nodekey:64hex>
+# Host target: prepare the admission without effects and carry the challenge to the counter-seat
+agora service route challenge <room-id> --allow-key <nodekey:64hex> --act room-enroll --out <challenge.json>
+# Counter-seat signer: apply its own delegation list and carry the detached proof back
+agora authority sign --file <challenge.json> --out <proof.json>
+# Host target: consume the proof and open the route
+agora service route open <room-id> --allow-key <nodekey:64hex> --proof-file <proof.json>
 ```
+
+Revocation uses the same three steps with `--act room-revoke`, then `service route close ...
+--proof-file <proof.json>`. An enrolled service refuses unsigned changes
+`operator-proof-required`; a service started without an authority refuses route mutations
+`authority-absent`. If the response to an open or close is unknown, read the committed operation
+with `agora service route act-status <operation-id>`; resubmitting a consumed proof performs no
+second effect and refuses replay. Optional bearer/session fields in a proof are caller claims, not
+authenticated identities, and the CLI does not populate them automatically. `route challenge
+--out` is an authority no-clobber write; the existing `route open --out` descriptor copy is not.
 
 `service route open` prints two paths: a descriptor and its 0600 secret. The operator carries both
 files by hand through a private seat repository, never through a room, log, or this repository. On
@@ -249,12 +292,20 @@ agora post download --split --file long-report.md # Slack: explicitly split past
 agora post download --fyi "absorbed, no receipt needed"  # emits ack: none; honouring it is a judgement, never a filter
 some-script | agora post download --stdin
 
-agora service start                          # write native/service.json and bind the endpoint
+agora authority keygen --file <policy.json> --label <seat> --out <public.json>  # private key stays on the signer
+agora authority public --out <new-public.json>  # recover the existing public handoff; never regenerate the key
+agora authority enrollment-challenge --file <public.json> --fingerprint <sha256:64hex> --out <challenge.json>
+agora authority sign-enrollment --file <challenge.json> --out <proof.json>
+agora authority enroll --file <proof.json> --fingerprint <sha256:64hex>
+agora authority sign --file <challenge.json> --out <proof.json>  # deliberate counter-seat route-act signature
+agora service start --authority <a-64hex>    # load one enrolled authority/policy snapshot at startup
 agora service status                         # descriptor without the nonce
 agora service room create                    # mint a 32-hex roomId; never writes agora.json
-agora service route open <room> --allow-key <nodekey:64hex> [--out <path>]  # admit one enrolled key over Tailcat; the service owns the route
+agora service route challenge <room> --allow-key <nodekey:64hex> --act room-enroll|room-revoke --out <challenge.json>
+agora service route open <room> --allow-key <nodekey:64hex> --proof-file <proof.json> [--out <path>]
 agora service route list                     # live member routes from the service's registry, not from files
-agora service route close <room> --allow-key <nodekey:64hex>  # revoke; the remote's secret goes stale and its next hello is refused
+agora service route close <room> --allow-key <nodekey:64hex> --proof-file <proof.json>
+agora service route act-status <operation-id> # read recovery state after an unknown response; never repeats the effect
 agora service stop                           # handshake, then bounded SIGTERM/SIGKILL; reaps the pane authority
 agora spawn --file request.json              # one bounded request in, one pane out; unknown keys refused; proven hello, open carries no cmd
 agora usage --provider codex --pool-id <id> [--timeout <ms>] [--json]  # one cooperative Codex quota read; no room; unknown providers refuse; never prints credentials or provider bodies
