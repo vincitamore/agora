@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // @ts-check
 import { tailcatDoctor } from "../src/tailcat-runtime.mjs";
-import { appendCarryEvent, beginCarryPost, captureCarryPost, carryArgumentRefusal, checkCarryFiles, recordCarryCursorMove, requireCarrySuccessor, sealCarryBoundary, validateCarryBoundary } from "../src/carry-check.mjs";
+import { appendCarryEvent, beginCarryPost, captureCarryPost, completeCarryPost, carryArgumentRefusal, checkCarryFiles, recordCarryCursorMove, requireCarrySuccessor, sealCarryBoundary, validateCarryBoundary } from "../src/carry-check.mjs";
 import { decodeTransfer, encodeTransfer, localTransferIdentity, requireAuthenticatedTransport, trustTransferPeer } from "../src/tailcat.mjs";
 import { shareFiles, fetchFiles, listOffers, stopOffer, resumeOffer, forgetOffer, pruneOffers } from "../src/tailcat-offers.mjs";
 import { parseArgs } from "node:util";
@@ -1956,9 +1956,13 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
           return `${c}\n\n${block}`;
         });
       }
+      let boardIntent;
       if (room.transport === "native" && typeof transport.board === "function") {
         const claims = entries.filter((t) => t.key === "claim");
         const leaseSeconds = num(values.lease, "lease");
+        // The board can commit before post() returns (or even starts). Keep this
+        // operation unknown until all pieces have durable commitment evidence.
+        if (claims.length) boardIntent = await beginCarryPost(sdir, roomAlias, session, bearer.name, payload(assembled));
         for (const c of claims)
           await transport.board({ action: "claim", subject: asBoardSubject(c.value),
             ...(leaseSeconds ? { leaseMs: leaseSeconds * 1000 } : {}) });
@@ -1982,6 +1986,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       }
       const r = last;
       if (!r) throw new AgoraError(`nothing posted`, EXIT.error);
+      if (boardIntent) await completeCarryPost(sdir, boardIntent, r);
       if (thread) await follow(sdir, roomAlias, room, [thread]);
       else if (values.re && transport.threads) await follow(sdir, roomAlias, room, [String(values.re)]);
       // a top-level post roots the thread the humans and the other seat reply in. This session's
@@ -2278,6 +2283,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
           mode,
           ...(subscription ? { sleep: (/** @type {number} */ ms) => subscription.wait(ms) } : {}),
           own: values.all ? undefined : () => readPosted(sdir),
+          seat,
           wake: wakeRule,
           urgent: holdSeconds || maxBatch ? urgent : undefined,
           coalesceSeconds: holdSeconds,

@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { writeCursor } from '../src/core.mjs';
 import { inheritSession, readRecord, writeRecord } from '../src/session.mjs';
 import { watch } from '../src/watch.mjs';
+import { NativeRoomService } from '../src/native-service.mjs';
 import { appendCarryEvent, beginCarryPost, captureCarryPost, carryRefKey, checkCarryBoundary, mandateDigest, readCarryEvidence, readMandate, recordCarryCursorMove, requireCarrySuccessor, sealCarryBoundary, validateCarryEvent, validateMandate } from '../src/carry-check.mjs';
 import { tmp } from './helpers.mjs';
 
@@ -212,7 +213,7 @@ test('real addressed watch delivery is prepared before the callback and acknowle
         read: async () => [m, other],
       });
       let callback = 0;
-      await watch(transport, { stateDir: t.dir, key: 'room', mode: 'once', coalesceSeconds,
+      await watch(transport, { stateDir: t.dir, key: 'room', mode: 'once', coalesceSeconds, seat: { id: 'seat', name: 'Seat' },
         maxBatch: coalesceSeconds ? 2 : 0, onBatch: async (msgs, batch) => {
           callback++;
           const before = await readCarryEvidence(t.dir);
@@ -438,5 +439,67 @@ test('a post crash between send and capture cannot erase its commitment behind a
     assert.deepEqual(checkCarryBoundary(boundary, actual).issues, [{ code: 'claim-unaccounted', item: claim.id }]);
     actual.accounted.push({ kind: 'claim', id: claim.id, exhibit: 'resume-plan:C1' });
     assert.equal(checkCarryBoundary(boundary, actual).ok, true);
+  } finally { await t.cleanup(); }
+});
+
+test('native claim has durable unknown outcome before the board commits, cleared only after post capture', async () => {
+  const t = await tmp();
+  const service = new NativeRoomService({ root: t.dir, accountId: 'seat_account_0003', seatLabel: 'test' });
+  try {
+    await service.start();
+    const roomId = '9'.repeat(32);
+    await service.createRoom({ roomId, epoch: 'a'.repeat(32) });
+    const store = service.rooms.get(roomId); assert.ok(store);
+    const append = store.append.bind(store);
+    const dir = path.join(t.dir, 'sessions', 's1');
+    /** @type {number[]} */ const pendingAtEffect = [];
+    store.append = async (...args) => {
+      const evidence = (await readCarryEvidence(dir)).events;
+      pendingAtEffect.push(evidence.filter(e => e.kind === 'gap'
+        && !evidence.some(c => c.kind === 'coverage' && c.targets.includes(e.id))).length);
+      return append(...args);
+    };
+    const config = path.join(t.dir, 'agora.json');
+    await writeFile(config, JSON.stringify({ actor: { name: 'test', kind: 'agent' }, rooms: { nat: { transport: 'native', roomId } } }));
+    const bin = fileURLToPath(new URL('../bin/agora.mjs', import.meta.url));
+    await promisify(execFile)(process.execPath, [bin, 'post', 'nat', 'Taking', '--claim', 'C1'], {
+      timeout: 10000, windowsHide: true,
+      env: { ...process.env, AGORA_STATE: t.dir, AGORA_CONFIG: config, AGORA_SESSION: 's1', AGORA_ACTOR: mandate.bearer } });
+    assert.deepEqual(pendingAtEffect, [1, 2], 'board and message effects both enter inside durable unknown-outcome windows');
+    const evidence = (await readCarryEvidence(dir)).events;
+    assert.equal(evidence.filter(e => e.kind === 'claim').length, 1);
+    assert.equal(evidence.filter(e => e.kind === 'gap').length, 2);
+    for (const gap of evidence.filter(e => e.kind === 'gap'))
+      assert.equal(evidence.filter(e => e.kind === 'coverage' && e.targets.includes(gap.id)).length, 1);
+    let calls = 0;
+    store.append = async (...args) => {
+      if (++calls === 2) throw new Error('test refuses message after board commit');
+      return append(...args);
+    };
+    await assert.rejects(() => promisify(execFile)(process.execPath, [bin, 'post', 'nat', 'Taking another', '--claim', 'C2'], {
+      timeout: 10000, windowsHide: true,
+      env: { ...process.env, AGORA_STATE: t.dir, AGORA_CONFIG: config, AGORA_SESSION: 's1', AGORA_ACTOR: mandate.bearer } }),
+      (/** @type {any} */ err) => err.code === 1 && err.stderr.includes('test refuses message after board commit'));
+    const failed = (await readCarryEvidence(dir)).events;
+    assert.equal(failed.filter(e => e.kind === 'gap' && !failed.some(c => c.kind === 'coverage' && c.targets.includes(e.id))).length, 2,
+      'committed board with failed message retains whole-operation and per-send uncertainty');
+  } finally { await service.stop(); await t.cleanup(); }
+});
+
+test('carry delivery capture makes no identity request and retains unknown seat addressing as a gap', async () => {
+  const t = await tmp();
+  try {
+    await writeRecord(t.dir, { slug: path.basename(t.dir), source: 'AGORA_SESSION', explicit: true }, { bearer: mandate.bearer });
+    let identityCalls = 0;
+    const message = { id: 'seat-addressed', cursor: '1', room: 'room', ts: mandate.issuedAt,
+      author: { id: 'peer', name: 'Peer', kind: /** @type {'agent'} */ ('agent') },
+      text: 'Required\n\nto: unknown-seat\n\n-- Peer/reader' };
+    const transport = /** @type {import('../src/core.mjs').Transport} */ ({ kind: 'local', room: 'room', threads: false,
+      whoami: async () => { identityCalls++; throw new Error('identity unavailable'); }, read: async () => [message],
+      post: async () => { throw new Error('not exercised'); } });
+    await watch(transport, { stateDir: t.dir, key: 'room', mode: 'once', onBatch: async () => {} });
+    assert.equal(identityCalls, 0, 'capture reuses caller context, never adds a network wait');
+    const evidence = (await readCarryEvidence(t.dir)).events;
+    assert.deepEqual(evidence.map(e => [e.kind, e.subject]), [['gap', 'seat-address-context-unknown']]);
   } finally { await t.cleanup(); }
 });
