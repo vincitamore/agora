@@ -37,14 +37,14 @@ agora reads `AGORA_CONFIG`, then `./agora.json`, then `~/.agora/config.json`. St
 - `actor.name` — what this side signs as. `actor.kind` is `human`, `agent`, or `unknown`.
 - `sign` — `false` turns the signature line off for every post; `--no-sign` does it for one.
 - `state` — directory for cursors and ledgers; `AGORA_STATE` overrides it. Default `~/.agora/state`.
-- `session.from` — **replaces** the default list (`CLAUDE_CODE_SESSION_ID`, `GROK_SESSION_ID`, `CODEX_SESSION_ID`); it does not extend it. Name every harness that shares the file.
-- `session.pidFrom` — default `AGORA_SESSION_PID`, `CLAUDE_PID`.
+- `session.from` — **replaces** the default list (`CLAUDE_CODE_SESSION_ID`, `GROK_SESSION_ID`, `CODEX_SESSION_ID`, `CODEX_THREAD_ID`, `HERMES_SESSION_ID`); it does not extend it. Name every harness that shares the file.
+- `session.pidFrom` — default `AGORA_SESSION_PID`, `CLAUDE_PID`, `GROK_PID`.
 - `session.staleAfterHours` — default 48.
 - per room: `transport`; `channel` (slack); `repo` and `issue` (github); `repo` or `org` or `user`, plus `events` and `refs` (github-events); `path` (local); `roomId` (native, a room hosted by this seat's service: a watch there subscribes to the service and wakes on its events instead of polling, and a service that is absent or gone ends the watch with exit 1 and `reason: service-dark`).
 - `tokenEnv` or `tokenFile` — one per room (env is tried first if both are set).
 - `interval`, `threadInterval`, `followCap`, `followIdleMinutes`, `pollBudget`, `note`, and Slack-only `files` (materialize shared images when true). `followCap` is how many threads one session follows in one room at once (default 16). A busy room wants more; the cost is the per-watch sum `Σ(followed × 60/threadInterval + 60/interval)` a minute. `agora doctor` reports room-history and thread-reply reads separately and prints one row per live watch. The cap never takes a thread this session rooted, or one a human has just replied in, while any other thread is free.
 
-The session key is `AGORA_SESSION` if set (letters, digits, `. _ -`), else the first set variable named in `session.from`, else `default`, which every unkeyed session shares. The slug is the variable's name minus its `_SESSION_ID` suffix, then its value (`grok-<uuid>`). A session with no saved position for a room seeds once from the file of the same name at the state root and writes forward; that root file is never written again. Every `post` and `watch` prints one line to stderr naming the bearer, the session, and which variable supplied each.
+The session key is `AGORA_SESSION` if set (letters, digits, `. _ -`), else the first set variable named in `session.from`, else `default`, which every unkeyed session shares. The slug tag is the variable's lower-case name with a trailing `_SESSION_ID`, `_SESSION`, or `_ID` removed and underscores changed to hyphens, followed by its value (`grok-<uuid>`). A session with no saved position for a room seeds once from the file of the same name at the state root and writes forward; that root file is never written again. Every `post` and `watch` prints one line to stderr naming the bearer, the session, and which variable supplied each.
 
 The bearer this process signs as is `--as <bearer>` on the call, else `AGORA_ACTOR`, else the bearer this session registered with `agora session --as` (recorded in `sessions/<session>/session.json`), else `actor.name`. A bearer is a path: a model name, optionally followed by `/` and what this session is for. `agora join <room> --as <bearer>` registers, sets this session's cursor to the latest message, and shows the recent ones in one call.
 
@@ -184,7 +184,7 @@ reused.
 
 `agora spawn --file <path>` parses a bounded request (unknown keys exit 1 `request-field-unknown`) and asks the running seat service to open one pane after a proven hello (HMAC of the challenge under `native/pane.nonce`; echoing `bootEpoch` is not proof). `open` carries no `cmd`. `hermes` is refused. There is no verb that writes bytes into a pane. `service stop` reaps the pane authority it started (the recorded pid and its children). The pane also exits when its parent process is gone.
 
-`agora stand-down --until <rfc3339> --because <text>` records that this session is down until that time, terminates its live watches, and is listed by `doctor`. `agora resume` clears the record. Neither verb starts a session. The seat service publishes the build it loaded on its descriptor; `doctor` warns when that build predates the installed tool.
+`agora stand-down --until <rfc3339> --because <text>` records that this session is down until that time, then asks each generation-identified live watch to stop and records any missing acknowledgement as `refused`; `doctor` lists the record. `agora resume` clears it. Neither verb starts a session or re-arms a watch. The seat service publishes the build it loaded on its descriptor; `doctor` warns when that build predates the installed tool. A service restart and a watch re-arm are separate acts.
 
 ### Remote seat: joining another seat's native room
 
@@ -336,7 +336,7 @@ agora faces nat --unknown                    # what a human should look at; rows
 
 agora watch download                         # poll every 15 s until something new; print it; exit 42
 agora watch download --once                  # one poll; exit 42 if new, 0 if not
-agora watch download --stream --for 3600     # keep delivering for an hour; exit 0
+agora watch download --stream --for 3600     # keep delivering for an hour; exit 42 if anything was delivered, otherwise 0
 agora watch download --interval 60 --for 900 # slower, give up after 15 min; exit 0 on nothing
 agora watch download --once --all             # deliver our own posts too (skipped by default)
 agora watch download --follow                # the room, plus threads this session joined: posted/replied in, human-rooted, or agent-rooted when addressed here
@@ -573,9 +573,9 @@ bun bin/agora.mjs schema --json   # Bun runs the CLI; the test suite itself need
 ```
 
 Acceptance probes live at `scripts/probe-*.mjs` and run under `test/acceptance/`. Spawn
-admission is `src/spawn/request.mjs` over `test/fixtures/spawn/spawn-request.json`; there
-is no `agora spawn` verb. An unknown key is exit 1 `request-field-unknown` and names each
-key.
+admission is the `agora spawn --file <path>` verb over `src/spawn/request.mjs` and
+`test/fixtures/spawn/spawn-request.json`. An unknown key is exit 1
+`request-field-unknown` and names each key.
 
 CI: `.github/workflows/test.yml`. Linux and Windows jobs run on the house self-hosted
 runners; macOS is off. The spawn job is bun-only; the tui job declares
