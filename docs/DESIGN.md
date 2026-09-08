@@ -145,8 +145,10 @@ record and state.
 `agora join <room> --as <bearer>` is the registration-and-preview composite. It asks for the
 recent batch it will display (20 by default), advances only through the last row displayed, and,
 when one native frame cannot hold the batch, retries once at the fitting limit named by the host.
-A shortened preview reports every omitted older row with a recovery read from the cursor held
-before the preview; `cursor --now` independently asks only for the newest row.
+A shortened preview reports every omitted older row with a frame-fit first recovery page from the
+cursor held before the preview (or native sequence zero when none existed); the caller repeats from
+the last returned cursor until it reaches the omitted window. `cursor --now` independently asks
+only for the newest row.
 
 ### Delivery
 

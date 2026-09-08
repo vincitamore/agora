@@ -268,9 +268,10 @@ exceeds the frame, the refusal names that message's cursor instead; subscription
 same single-message boundary. `join` requests the recent batch it will display (20 by default),
 while `cursor --now` requests only the newest row. On `read-batch-refused`, either retries once at
 the host's named fitting limit. A shortened `join` advances only through the last row displayed and
-reports omitted older rows with a recovery read from its prior cursor; with no prior cursor, that
-read requests the original batch without `--since`. A second frame refusal remains an error rather
-than a loop.
+reports omitted older rows with a first recovery page whose limit the host just proved fits. It
+starts at the prior cursor, or at the native epoch's sequence zero when none existed; repeat from
+the last returned cursor until the omitted window is reached. A second preview refusal remains an
+error rather than a loop.
 
 Two different events are worth separating, because only one of them can produce a duplicate:
 

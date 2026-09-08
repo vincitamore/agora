@@ -82,58 +82,80 @@ async function fixture(t) {
   return { root, service, grace, sol, cursorFile: path.join(root, "sessions", "grace", "nat.cursor"), armedFile: path.join(root, "sessions", "grace", "armed", "nat.json") };
 }
 
-test("cli: join pages when its own DEFAULT batch is too large, and a smaller batch still works", { timeout: 60000 }, async (t) => {
-  const { service, grace, cursorFile } = await fixture(t);
-  // The hold that produced this cell has two axes. Twenty individually legal 64 KiB messages make
-  // join's default encode past a 1 MiB frame, while six small rows ahead of them make the recovery
-  // slice fit: the mixed fixture is what lets the emitted hint be executed rather than word-matched.
-  const store = await service.openRoom(ROOM);
-  const anchor = await store.append({ operationId: randomUUID().replaceAll("-", ""), authorName: "anchor", text: "prior" },
-    { accountId: ACCOUNT });
-  const positioned = await agora(["cursor", "nat", "--set", anchor.cursor], grace);
-  assert.equal(positioned.code, 0, positioned.stderr);
+test("cli: join pages when its own DEFAULT batch is too large, and a smaller batch still works", { timeout: 180000 }, async (t) => {
+  /** @param {any} store @param {number[]} sizes @param {string} author */
+  async function appendSizes(store, sizes, author) {
+    /** @type {{ id: string, cursor: string }[]} */ const rows = [];
+    for (const [n, size] of sizes.entries())
+      rows.push(await store.append({ operationId: randomUUID().replaceAll("-", ""), authorName: author, text: `${n}:`.padEnd(size, "x") },
+        { accountId: ACCOUNT }));
+    return rows;
+  }
 
-  /** @type {{ id: string, cursor: string }[]} */ const afterPrior = [];
-  for (let n = 0; n < 6; n += 1)
-    afterPrior.push(await store.append({ operationId: randomUUID().replaceAll("-", ""), authorName: "small", text: `${n}:`.padEnd(256, "s") },
-      { accountId: ACCOUNT }));
-  for (let n = 0; n < 20; n += 1)
-    afterPrior.push(await store.append({ operationId: randomUUID().replaceAll("-", ""), authorName: "big", text: `${n}:`.padEnd(64 * 1024, "x") },
-      { accountId: ACCOUNT }));
+  /** Execute the literal first-page instruction, then its stated continuation until every omitted id returns.
+   * @param {{ label: string, prior: boolean, prefix?: number[], rows: number[] }} input */
+  async function omittedCase({ label, prior, prefix = [], rows }) {
+    const { service, grace, cursorFile } = await fixture(t);
+    const store = await service.openRoom(ROOM);
+    let anchor;
+    if (prior) {
+      anchor = await store.append({ operationId: randomUUID().replaceAll("-", ""), authorName: "anchor", text: "prior" },
+        { accountId: ACCOUNT });
+      const positioned = await agora(["cursor", "nat", "--set", anchor.cursor], grace);
+      assert.equal(positioned.code, 0, `${label}: ${positioned.stderr}`);
+    }
+    const afterPrior = [
+      ...await appendSizes(store, prefix, "small"),
+      ...await appendSizes(store, rows, "large"),
+    ];
+    const joined = await agora(["join", "nat", "--as", "Opus/e2c", "--json"], grace);
+    assert.equal(joined.code, 0, `${label}: join did not shrink its oversized default batch: ${joined.stderr}`);
+    const hint = /read --since (\S+) --limit (\d+) is the first recovery page/.exec(joined.stderr);
+    assert.ok(hint, `${label}: omission report has no executable first page: ${joined.stderr}`);
+    assert.equal(hint[1], anchor?.cursor ?? `${EPOCH}:0`, `${label}: recovery did not start before every omitted row`);
+    assert.ok(Number(hint[2]) < 20, `${label}: recovery reused the requested count instead of the frame-fit count`);
 
-  const joined = await agora(["join", "nat", "--as", "Opus/e2c", "--json"], grace);
-  assert.equal(joined.code, 0, `join did not shrink its oversized default batch: ${joined.stderr}`);
-  assert.match(joined.stderr, /cursor set to/);
-  // The ruling's condition, not a nicety: a PREVIEW may shrink to fit, and only if it SAYS what it
-  // omitted. Without this line the verb shows fewer rows than asked and nothing distinguishes that
-  // from a room with fewer rows -- truncation reported as success, which is what the hold caught.
-  assert.match(joined.stderr, /newest \d+ of 20 requested shown; \d+ older omitted/,
-    "join shrank its batch without reporting the omission");
-  const hint = /read --since (\S+) --limit (\d+) reaches them/.exec(joined.stderr);
-  assert.ok(hint, `the omission was reported without an executable recovery hint: ${joined.stderr}`);
-  assert.equal(hint[1], anchor.cursor, "the recovery hint must use the cursor from before join overwrote it");
-  assert.equal(hint[2], "20", "the recovery hint must preserve the requested batch size");
+    const shown = typed(joined.stdout);
+    const requested = afterPrior.slice(-20);
+    const shownIds = new Set(shown.map((m) => m.id));
+    const omitted = requested.filter((m) => !shownIds.has(m.id));
+    assert.ok(omitted.length > 0, `${label}: fixture did not force the default batch to omit rows`);
+    const recoveredIds = new Set();
+    let since = hint[1];
+    for (let page = 0; page < 30 && !omitted.every((m) => recoveredIds.has(m.id)); page += 1) {
+      const recovered = await agora(["read", "nat", "--since", since, "--limit", hint[2], "--json"], grace);
+      assert.equal(recovered.code, 0, `${label}: emitted recovery page refused: ${recovered.stderr}`);
+      const pageRows = typed(recovered.stdout);
+      assert.ok(pageRows.length, `${label}: recovery stopped before reaching every omitted row`);
+      for (const row of pageRows) recoveredIds.add(row.id);
+      since = pageRows.at(-1).cursor;
+    }
+    assert.ok(omitted.every((m) => recoveredIds.has(m.id)), `${label}: paged hint skipped omitted rows`);
+    assert.equal(JSON.parse(await readFile(cursorFile, "utf8")).cursor, shown.at(-1).cursor,
+      `${label}: recovery read or join advanced the saved cursor past delivery`);
+  }
 
-  const shown = typed(joined.stdout);
-  const requested = afterPrior.slice(-20);
-  const shownIds = new Set(shown.map((m) => m.id));
-  const omitted = requested.filter((m) => !shownIds.has(m.id));
-  assert.ok(omitted.length > 0, "fixture did not force the default batch to omit rows");
-  const recovered = await agora(["read", "nat", "--since", hint[1], "--limit", hint[2], "--json"], grace);
-  assert.equal(recovered.code, 0, `the emitted recovery hint did not execute: ${recovered.stderr}`);
-  const recoveredIds = new Set(typed(recovered.stdout).map((m) => m.id));
-  assert.ok(omitted.every((m) => recoveredIds.has(m.id)), "the emitted hint did not return every omitted row");
-  assert.equal(JSON.parse(await readFile(cursorFile, "utf8")).cursor, shown.at(-1).cursor,
-    "join advanced past a row it did not deliver");
+  await omittedCase({ label: "few-large with prior", prior: true, rows: Array(20).fill(64 * 1024) });
+  await omittedCase({ label: "few-large without prior", prior: false, prefix: Array(6).fill(256), rows: Array(20).fill(64 * 1024) });
+  await omittedCase({ label: "multi-page omitted window", prior: true, rows: Array(20).fill(256 * 1024) });
 
-  // The no-omission control: an explicit limit that fits emits no recovery instruction.
-  const small = await agora(["join", "nat", "--as", "Opus/e2c", "--limit", "5"], grace);
-  assert.equal(small.code, 0, `an explicitly small batch failed: ${small.stderr}`);
-  assert.doesNotMatch(small.stderr, /older omitted|read --since/);
+  /** @param {string} label @param {number[]} sizes */
+  async function fittingCase(label, sizes) {
+    const { service, grace, cursorFile } = await fixture(t);
+    const store = await service.openRoom(ROOM);
+    const rows = await appendSizes(store, sizes, label);
+    const joined = await agora(["join", "nat", "--as", "Opus/e2c", "--json"], grace);
+    assert.equal(joined.code, 0, `${label}: ${joined.stderr}`);
+    assert.equal(typed(joined.stdout).length, 20, `${label}: a fitting default preview was shortened`);
+    assert.doesNotMatch(joined.stderr, /older omitted|first recovery page/, `${label}: fitting preview emitted recovery`);
+    const last = rows.at(-1);
+    assert.ok(last, `${label}: fixture appended no rows`);
+    assert.equal(JSON.parse(await readFile(cursorFile, "utf8")).cursor, last.cursor, `${label}: cursor missed last delivery`);
+  }
 
-  // and cursor --now, whose read is one message and pages the same way if that one is oversized
-  const now = await agora(["cursor", "nat", "--now"], grace);
-  assert.equal(now.code, 0, `cursor --now failed on large messages: ${now.stderr}`);
+  await fittingCase("small-first one-under", [...Array(5).fill(256), ...Array(15).fill(64 * 1024)]);
+  await fittingCase("reverse-mixed one-under", [...Array(15).fill(64 * 1024), ...Array(5).fill(256)]);
+  await fittingCase("many-small", Array(1100).fill(1024));
 });
 
 test("cli: join asks for the batch it prints, so a room too large for one frame still joins", { timeout: 60000 }, async (t) => {

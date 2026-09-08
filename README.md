@@ -256,9 +256,10 @@ printed; teardown is idempotent and cannot turn an already-successful operation 
 **Busy-room operating note.** `join` asks for the recent batch it will display (20 by default), and
 `cursor --now` asks only for the newest row. If either batch exceeds one native frame, the client
 retries once at the fitting limit named by the host. A shortened `join` says how many older rows it
-omitted and prints a recovery read from the cursor held before the preview; the cursor itself stops
-at the last row actually displayed. With no prior cursor, the recovery read requests the original
-batch without a `--since` bound. A second frame refusal still fails by name rather than looping.
+omitted and prints a frame-fit first recovery page from the cursor held before the preview; the
+cursor itself stops at the last row actually displayed. With no prior cursor, recovery starts at
+the native room's sequence zero. Repeat the printed read from its last returned cursor until the
+omitted window is reached. A second preview refusal still fails by name rather than looping.
 
 ### Faces of a native room
 
