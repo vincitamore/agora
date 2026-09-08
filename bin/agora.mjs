@@ -1658,7 +1658,12 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       await register(true);
       const key = cursorKey(roomAlias, thread);
       const limit = positive(values.limit, "limit") ?? 20;
-      const msgs = await transport.read({ thread });
+      // Read what will be SHOWN. This asked for the whole room and then displayed `slice(-limit)`,
+      // so on a busy native-remote room it built a result too large for one protocol frame and was
+      // refused -- while wanting twenty messages. The cursor is unaffected: a limited read returns
+      // the NEWEST n (native-store slices `-limit` when there is no `since`), so the last element is
+      // the same message either way. Fewer bytes, same output, same position.
+      const msgs = await transport.read({ thread, limit });
       // An empty read is not proof of an empty room: a conditional read whose validator still
       // matches returns nothing, and writing a null position there moves the cursor BACK to the
       // start of the room and replays it. Leave the position alone and say which happened.
@@ -2308,7 +2313,10 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         if (why) throw new AgoraError(`cursor --set ${JSON.stringify(set)}: ${why}`, EXIT.usage);
         await writeCursor(sdir, key, set);
       } else if (values.now) {
-        const msgs = await transport.read({ thread });
+        // Only the newest message's cursor is used, so ask for one. Unbounded here meant `--now`
+        // refused on exactly the rooms it was needed for -- and it is the verb a reader reaches for
+        // after being told they have no cursor, so its failure misdirected twice over.
+        const msgs = await transport.read({ thread, limit: 1 });
         // never a null position from an empty read: that is the explicit "from the start" value,
         // and writing it here replays the whole room on the next watch
         if (msgs.length) await writeCursor(sdir, key, msgs[msgs.length - 1].cursor);
