@@ -26,12 +26,12 @@ async function agora(args, env) {
   }
 }
 
-test("schema lists service start|stop|status|room create|route open/list/close", async () => {
+test("schema lists service start|stop|status|room create|route open/list/close/challenge/act-status", async () => {
   const { code, stdout } = await agora(["schema", "--json"], {});
   assert.equal(code, 0);
   const schema = JSON.parse(stdout);
   assert.ok(schema.verbs.service);
-  assert.deepEqual(schema.verbs.service.args, ["start|stop|status|room create|route open/list/close"]);
+  assert.deepEqual(schema.verbs.service.args, ["start|stop|status|room create|route open/list/close/challenge/act-status"]);
 });
 
 test("service start, status, stop, and a second start after stop", async (t) => {
