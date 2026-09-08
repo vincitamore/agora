@@ -221,13 +221,49 @@ test('SIGINT cell is skipped on win32 where process.kill is TerminateProcess', {
   await closeSessionLedger(ledger);
   const cfg = path.join(stateRoot, 'agora.json');
   await writeFile(cfg, JSON.stringify({ actor: { name: 'Test/cli', kind: 'agent' }, rooms: { house: { transport: 'local', path: 'house.ndjson' } } }), 'utf8');
-  const child = spawn(process.execPath, [bin, 'usage-sessions', '--follow', '--interval', '1', '--for', '30', '--ledger-root', ledgerRoot, '--json'], {
+
+  // READINESS, NOT A CLOCK. This cell used to wait a fixed 200 ms and then signal, which is a race
+  // against the child's own start-up: if SIGINT lands before `usage-sessions` has installed its
+  // handler, the default disposition kills the process and `close` reports a null code instead of
+  // the exit 1 the abort path produces. Measured on ext4 by varying only that wait, four runs per
+  // value: 0 ms 0/4 pass, 5 ms 0/4, 200 ms 4/4, 2000 ms 4/4. So 200 ms was not a bound, it was a
+  // margin, and 200 ms of wall clock is not 200 ms of the child's progress on a loaded machine —
+  // which is where it failed, on a CI runner sharing a box with another suite.
+  //
+  // The verb prints NOTHING until it returns (its stdout is written after `runUsageSessionsCli`
+  // resolves), so there is no output to wait for. What can be observed is the thing the assertion
+  // is actually about: the handler existing. A preload polls `process.listenerCount('SIGINT')` in
+  // the child and says so on stderr. It observes and changes nothing — no argument of the verb, no
+  // config, no signal behaviour — and it removes the parameter that was racing rather than enlarging
+  // it, so the cell now passes with zero deliberate delay.
+  const preload = path.join(stateRoot, 'sigint-ready.cjs');
+  await writeFile(preload, [
+    "const timer = setInterval(() => {",
+    "  if (process.listenerCount('SIGINT') > 0) { clearInterval(timer); process.stderr.write('AGORA_SIGINT_READY\\n'); }",
+    "}, 2);",
+    "timer.unref();",
+    ''].join('\n'), 'utf8');
+
+  const child = spawn(process.execPath, ['--require', preload, bin, 'usage-sessions', '--follow', '--interval', '1', '--for', '30', '--ledger-root', ledgerRoot, '--json'], {
     env: { ...process.env, AGORA_STATE: stateRoot, AGORA_CONFIG: cfg, AGORA_SESSION: 'cli-test' },
     windowsHide: true,
   });
   child.stdin.end();
-  await new Promise((r) => setTimeout(r, 200));
+
+  let stderr = '';
+  await new Promise((resolve, reject) => {
+    // A bound, because a cell that waits forever on a child that never gets there is a hang rather
+    // than a failure, and a hang tells the next reader nothing.
+    const timer = setTimeout(() => reject(new Error(
+      `the child never registered a SIGINT handler within 20 s; stderr so far: ${JSON.stringify(stderr)}`)), 20_000);
+    child.on('exit', (code, signal) => { clearTimeout(timer); reject(new Error(`the child exited before it was ready (code ${code}, signal ${signal})`)); });
+    child.stderr.on('data', (bytes) => {
+      stderr += String(bytes);
+      if (stderr.includes('AGORA_SIGINT_READY')) { clearTimeout(timer); resolve(undefined); }
+    });
+  });
+
   child.kill('SIGINT');
   const code = await new Promise((resolve) => child.on('close', resolve));
-  assert.equal(code, 1);
+  assert.equal(code, 1, `expected the abort path's exit 1; stderr: ${JSON.stringify(stderr)}`);
 });
