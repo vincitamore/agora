@@ -82,7 +82,7 @@ function fixture() {
   const answer = event('reply1', 'answer', ['d1']);
   const claim = validateCarryEvent({ ...prepared, id: 'claim1', kind: 'claim', subject: 'C1-BUILD' });
   const withdrawal = event('withdraw1', 'withdrawal', ['old-claim']);
-  const boundary = { version: 1, id: 'boundary1', createdAt: mandate.issuedAt,
+  const boundary = { version: 1, id: 'boundary1',
     session: { slug: 's1', source: 'CODEX_SESSION_ID' }, bearer: mandate.bearer,
     mandatePath: '/mandate.json', mandateDigest: mandateDigest(mandate),
     cursors: [{ key: 'backroom', cursor: '1' }], claims: [{ eventId: 'claim1', ref }],
@@ -94,6 +94,34 @@ function fixture() {
     accounted: [{ kind: 'role', id: 'builder', exhibit: 'resume:role' }, { kind: 'unit', id: 'C1-BUILD', exhibit: 'resume:unit' },
       { kind: 'claim', id: 'claim1', exhibit: 'resume:claim' }, { kind: 'retraction', id: 'withdraw1', exhibit: 'resume:withdrawal' }] };
   return { boundary, actual, event };
+}
+
+for (const code of ['bearer-registration-missing', 'session-key-mismatch', 'session-source-mismatch',
+  'cursor-missing', 'role-unaccounted', 'unit-unaccounted', 'claim-unaccounted', 'delivery-unanswered',
+  'delivery-unconfirmed', 'delivery-coverage-unknown', 'retraction-unaccounted', 'mandate-digest-mismatch']) {
+  test(`carry gate control: ${code}`, () => {
+    const { boundary, actual } = fixture();
+    assert.equal(checkCarryBoundary(boundary, actual).ok, true);
+    switch (code) {
+      case 'bearer-registration-missing': actual.registeredBearer = 'Other'; break;
+      case 'session-key-mismatch': actual.session.slug = 'other'; break;
+      case 'session-source-mismatch': actual.session.source = 'other'; break;
+      case 'cursor-missing': actual.cursors.clear(); break;
+      case 'role-unaccounted': actual.accounted = actual.accounted.filter(a => a.kind !== 'role'); break;
+      case 'unit-unaccounted': actual.accounted = actual.accounted.filter(a => a.kind !== 'unit'); break;
+      case 'claim-unaccounted': actual.accounted = actual.accounted.filter(a => a.kind !== 'claim'); break;
+      case 'retraction-unaccounted': actual.accounted = actual.accounted.filter(a => a.kind !== 'retraction'); break;
+      case 'delivery-unanswered': actual.evidence = actual.evidence.filter(e => e.kind !== 'answer'); break;
+      case 'delivery-unconfirmed': actual.evidence = actual.evidence.filter(e => e.kind !== 'delivery-accepted'); break;
+      case 'delivery-coverage-unknown': actual.evidenceIssues.push('lost span'); break;
+      case 'mandate-digest-mismatch': actual.mandate.digest = 'changed'; break;
+    }
+    const result = checkCarryBoundary(boundary, actual);
+    assert.equal(result.ok, false);
+    assert.ok(result.issues.some(i => i.code === code), `missing refusal ${code}`);
+    const restored = fixture();
+    assert.equal(checkCarryBoundary(restored.boundary, restored.actual).ok, true);
+  });
 }
 
 test('carry gate refuses every unaccounted obligation independently; restoring its evidence clears only it', () => {
@@ -360,5 +388,31 @@ test('carry CLI enforces registered successor arrival before predecessor handoff
     assert.equal(predecessor.events.filter(e => e.kind === 'departure').length, 1);
     const successor = await readCarryEvidence(path.join(t.dir, 'sessions', 's2'));
     assert.equal(successor.events.filter(e => e.kind === 'arrival').length, 1);
+  } finally { await t.cleanup(); }
+});
+
+test('carry preflight refuses missing boundary inputs without config and admits a complete shape to config loading', async () => {
+  const t = await tmp();
+  try {
+    const exec = promisify(execFile), bin = fileURLToPath(new URL('../bin/agora.mjs', import.meta.url));
+    const env = { ...process.env, AGORA_CONFIG: path.join(t.dir, 'missing.json'), AGORA_SESSION: 'test' };
+    for (const [args, message] of [
+      [['--check'], 'carry --check needs --boundary <file>'],
+      [['--seal', '--boundary', 'new.json'], 'carry --seal needs --mandate <file>'],
+      [['--announce'], 'carry --announce needs --boundary <file>'],
+      [['--arrive'], 'carry --arrive needs --boundary <file>'],
+      [['--handoff', 's2'], 'carry --handoff needs --boundary <file>'],
+    ]) {
+      await assert.rejects(() => exec(process.execPath, [bin, 'carry', 'room', .../** @type {string[]} */ (args)], { env, windowsHide: true }),
+        (/** @type {unknown} */ err) => {
+          const e = /** @type {{code:number,stderr:string}} */ (err);
+          assert.equal(e.code, 2); assert.equal(e.stderr, `agora: ${message}\n`); return true;
+        });
+    }
+    await assert.rejects(() => exec(process.execPath, [bin, 'carry', 'room', '--check', '--boundary', 'file.json'], { env, windowsHide: true }),
+      (/** @type {unknown} */ err) => {
+        const e = /** @type {{code:number,stderr:string}} */ (err);
+        assert.equal(e.code, 1); assert.match(e.stderr, /no config/); return true;
+      });
   } finally { await t.cleanup(); }
 });

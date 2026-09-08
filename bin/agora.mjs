@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // @ts-check
 import { tailcatDoctor } from "../src/tailcat-runtime.mjs";
-import { appendCarryEvent, captureCarryPost, checkCarryFiles, recordCarryCursorMove, requireCarrySuccessor, sealCarryBoundary, validateCarryBoundary } from "../src/carry-check.mjs";
+import { appendCarryEvent, captureCarryPost, carryArgumentRefusal, checkCarryFiles, recordCarryCursorMove, requireCarrySuccessor, sealCarryBoundary, validateCarryBoundary } from "../src/carry-check.mjs";
 import { decodeTransfer, encodeTransfer, localTransferIdentity, requireAuthenticatedTransport, trustTransferPeer } from "../src/tailcat.mjs";
 import { shareFiles, fetchFiles, listOffers, stopOffer, resumeOffer, forgetOffer, pruneOffers } from "../src/tailcat-offers.mjs";
 import { parseArgs } from "node:util";
@@ -739,6 +739,11 @@ function* closeFailures() { for (const t of closeable) if (t.closeFailed) yield 
  * }>}
  */
 export const ARGUMENT_PREFLIGHTS = Object.freeze([
+  {
+    name: 'carry',
+    matches: ({ verb }) => verb === 'carry',
+    refusal: ({ values }) => carryArgumentRefusal(values),
+  },
   {
     name: "usage-sessions",
     matches: ({ verb }) => verb === "usage-sessions",
