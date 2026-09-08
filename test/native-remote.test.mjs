@@ -1158,3 +1158,98 @@ test("a FAILING close still lets the process exit, which is the risk this surfac
     "the child exited but recorded nothing, so the surface is not carrying the failure");
   await rm(dir, { recursive: true, force: true });
 });
+
+// ------------------- L9a: a channel that stops carrying without closing its socket
+
+test("a silent dead channel is NOTICED and reported by name, with no socket close to trigger it", async () => {
+  // The reproduction the investigation asked for. Before the idle clock, the only liveness signal
+  // was `socket.once("close")`, so this exact shape — a relayed channel that stops carrying while
+  // the socket stays open — left the watch alive, the cursor frozen and nothing reported. The cell
+  // asserts the socket never closes, so it cannot pass through the old path by accident.
+  let carrying = true;
+  let redials = 0;
+  const room = scriptedRoom({
+    request: async () => {
+      if (!carrying) throw new AgoraError("member-channel-dark: the host is not answering");
+      return { status: { epoch: EPOCH, committed: 0 } };
+    },
+  });
+  let closes = 0;
+  room.socket.on("close", () => { closes += 1; });
+
+  const sub = await openRemoteSubscription({ room, since: nativeCursor(EPOCH, 0),
+    idleMs: 120, backoffMs: 5, maxReconnects: 2 });
+
+  // The channel stops carrying. No close, no error event, no exit — exactly what was measured.
+  carrying = false;
+  room.client = async () => { redials += 1; throw new AgoraError("member-channel-dark: the host is not answering"); };
+
+  const deadline = Date.now() + 5000;
+  while (sub.dark() === undefined && Date.now() < deadline) await sub.wait(20);
+
+  assert.equal(closes, 0, "the socket closed, so this cell did not exercise the silent path it exists for");
+  assert.ok(redials > 0, "nothing re-dialled: the idle clock never noticed the channel had stopped carrying");
+  assert.match(String(sub.dark()), /could not be re-dialled/,
+    "the subscription stayed silent instead of reporting darkness by name");
+  await assert.rejects(sub.read(), (e) => e instanceof ServiceDarkError);
+  sub.close();
+});
+
+test("the idle clock stays out of the way while the channel carries", async () => {
+  // The other half, and the one that keeps the first from being satisfied by a probe that fires
+  // constantly: a live channel must not be re-dialled, and a probe answered is not activity the
+  // consumer sees.
+  let redials = 0;
+  const room = scriptedRoom();
+  const sub = await openRemoteSubscription({ room, since: nativeCursor(EPOCH, 0),
+    idleMs: 60, backoffMs: 5, maxReconnects: 2 });
+  // Overridden AFTER the subscription is open: the first draft armed this before the initial dial
+  // and the cell failed on its own fixture rather than on the code, which is the fixture-reaches-an-
+  // earlier-guard shape this file already carries an instance of.
+  room.client = async () => { redials += 1; throw new Error("a live channel must not be re-dialled"); };
+
+  // Several idle windows with the channel answering normally.
+  await sub.wait(400);
+  assert.equal(redials, 0, `a healthy channel was re-dialled ${redials} time(s)`);
+  assert.equal(sub.dark(), undefined, "a healthy channel was reported dark");
+  sub.close();
+});
+
+test("the idle clock is REF'd: a process holding nothing else still reports the dead channel", async () => {
+  // Written because the in-process cells above cannot see this. Mutating the timer to `unref()`
+  // leaves all of them green — a test process is full of referenced handles, so the timer always
+  // fires under `node --test`. The only rig that discriminates is a child whose sole possible
+  // handle is the clock itself, which is the same shape L7 needed for the handshake timer and the
+  // reason knowledge/dev-gotchas/a-timeout-that-only-fires-while-another-handle-lives-is-not-a-bound
+  // says an ordinary cell cannot gate it.
+  const dir = await mkdtemp(path.join(tmpdir(), "agora-l9a-"));
+  const probe = path.join(dir, "probe.mjs");
+  await writeFile(probe, `
+    import { EventEmitter } from "node:events";
+    import { openRemoteSubscription } from ${JSON.stringify(new URL("../src/native-remote.mjs", import.meta.url).href)};
+    const socket = new EventEmitter();          // NOT a real handle: nothing here holds the loop
+    socket.destroyed = false;
+    let carrying = true;
+    const client = { socket,
+      request: async () => { if (!carrying) throw Object.assign(new Error("member-channel-dark: gone"), { code: "member-channel-dark" }); return { status: { epoch: "${"e".repeat(32)}", committed: 0 } }; },
+      subscribe: async () => ({ messages: [] }) };
+    const room = { binding: { roomId: "${"b".repeat(32)}", accountId: "m-x", host: { id: "h" } },
+      client: async () => client, close: async () => {} };
+    const sub = await openRemoteSubscription({ room, since: "${"e".repeat(32)}:0",
+      idleMs: 120, backoffMs: 5, maxReconnects: 1 });
+    carrying = false;
+    room.client = async () => { throw Object.assign(new Error("member-channel-dark: gone"), { code: "member-channel-dark" }); };
+    // NO polling loop, deliberately: sub.wait() arms a setTimeout, which is itself a referenced
+    // handle, and an earlier draft of this cell used one — so the child stayed alive on ITS OWN
+    // timer and the unref mutant passed. The rig has to hold nothing. With the clock ref'd the
+    // process lives until the probe fires, reattach fails, darkness is set and stopClock() releases
+    // the loop, so it exits reporting the reason; with it unref'd there is nothing to hold the loop
+    // at all and the process exits at once, reporting null.
+    process.on("exit", () => console.log(JSON.stringify({ dark: sub.dark() ?? null })));
+  `);
+  const { stdout } = await promisify(execFile)(process.execPath, [probe], { timeout: 15000 });
+  const seen = JSON.parse(stdout.trim());
+  assert.match(String(seen.dark), /could not be re-dialled/,
+    "the child exited or stayed silent instead of reporting the dead channel: the clock is not holding the loop");
+  await rm(dir, { recursive: true, force: true });
+});
