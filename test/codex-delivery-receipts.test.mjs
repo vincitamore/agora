@@ -44,7 +44,7 @@ async function stateRoot(t) {
 
 /** A message the bridge would deliver. The id is the idempotence point, above the transport. */
 const message = (/** @type {string} */ id, /** @type {string} */ cursor) =>
-  /** @type {any} */ ({ id, cursor, room: "backroom", text: `body ${id}`,
+  /** @type {any} */ ({ id, cursor, room: "room-one", text: `body ${id}`,
     author: { name: "peer", kind: "agent" }, ts: "2026-09-08T00:00:00Z" });
 
 test("accepted is durable BEFORE the caller is told, so a death between them leaves a record to reconcile rather than a blind replay", async (t) => {
@@ -52,7 +52,7 @@ test("accepted is durable BEFORE the caller is told, so a death between them lea
   /** @type {string[]} */ const queued = [];
   /** The caller's checkpoint never runs: this is the death between acceptance and the cursor write. */
   await assert.rejects(
-    codex.queueCodex("backroom", [message("m1", "1788888888.000100")], {
+    codex.queueCodex("room-one", [message("m1", "1788888888.000100")], {
       root, thread: "t-1", bin: process.execPath,
       run: /** @type {any} */ (async (/** @type {string} */ _bin, /** @type {string[]} */ argv) => {
         queued.push(String(argv[argv.indexOf("--message") + 1])); return { stdout: "", stderr: "" }; }),
@@ -79,7 +79,7 @@ test("absence from the pending list is reported as absent-unresolved and advance
   const root = await stateRoot(t);
   const run = /** @type {any} */ (async () => ({ stdout: "", stderr: "" }));
   /** @type {string[]} */ const advanced = [];
-  await codex.queueCodex("backroom", [message("still-there", "1788888888.000200"), message("vanished", "1788888888.000300")], {
+  await codex.queueCodex("room-one", [message("still-there", "1788888888.000200"), message("vanished", "1788888888.000300")], {
     root, thread: "t-2", bin: process.execPath, run,
     onQueued: async (/** @type {any} */ d) => { advanced.push(d.cursor); },
   });
@@ -218,7 +218,7 @@ async function armWithJournal(/** @type {string} */ root, /** @type {any[]} */ m
   const roomFile = path.join(root, "cli-room.ndjson");
   await writeFile(roomFile, "", "utf8");
   await writeFile(path.join(root, "agora.json"), JSON.stringify({
-    actor: { name: "Opus/test", kind: "agent" },
+    actor: { name: "Tester/one", kind: "agent" },
     rooms: { "cli-room": { transport: "local", path: roomFile } },
   }), "utf8");
   for (const mark of marks) {
@@ -308,8 +308,8 @@ test("an unlocatable saved cursor is REFUSED, not guessed: no rewind, no skip", 
 test("two INDEPENDENT writer processes on one thread lose no mark", async (t) => {
   const root = await stateRoot(t);
   const moduleURL = new URL("../src/codex.mjs", import.meta.url).href;
-  // The launcher's normal shape arms backroom and agora as separate watch PROCESSES against one
-  // thread and one state root. Two processes are the honest test: an in-process race can be argued
+  // A seat commonly arms two rooms as separate watch PROCESSES against one thread and one state
+  // root. Two processes are the honest test: an in-process race can be argued
   // away as an artifact of one event loop, and the failure this guards against is a lost acceptance,
   // which is the one thing the record exists to make impossible.
   const writer = (/** @type {string} */ tag) => execFile(process.execPath, ["--input-type=module", "-e", `
@@ -317,10 +317,10 @@ test("two INDEPENDENT writer processes on one thread lose no mark", async (t) =>
     for (let i = 0; i < 25; i++)
       await recordCodexSubmitted(${JSON.stringify(root)}, "t-race", {
         id: ${JSON.stringify(tag)} + "-" + i, cursor: "1788888888.0100" + String(i).padStart(2, "0"),
-        room: "backroom",
+        room: "room-one",
       });
   `]);
-  await Promise.all([writer("backroom"), writer("agora")]);
+  await Promise.all([writer("room-one"), writer("room-two")]);
 
   const rows = await codex.readCodexIntents(root, "t-race");
   const ids = new Set(rows.map((/** @type {any} */ r) => r.id));
@@ -377,7 +377,7 @@ test("a turn that fails before acceptance leaves the intent unacknowledged, neve
     + "an acceptance would report the server holding work it never received");
   assert.equal(row.processedAt ?? null, null, "and nothing was processed");
 
-  const state = await codex.reconcileCodexIntents({ root, thread: "t-6", room: "backroom", list: async () => [] });
+  const state = await codex.reconcileCodexIntents({ root, thread: "t-6", room: "room-one", list: async () => [] });
   assert.equal(state.advanceTo, null, "an unacknowledged intent advances no cursor");
 });
 
@@ -418,7 +418,7 @@ test("advanceTo is the longest COMPLETED PREFIX, so one failure stops the advanc
   await codex.recordCodexReceipt(root, "t-4", third, { id: "third", outcome: "completed" });
 
   // Nothing is left in the queue: every turn reached a terminal state.
-  const state = await codex.reconcileCodexIntents({ root, thread: "t-4", room: "backroom", list: async () => [] });
+  const state = await codex.reconcileCodexIntents({ root, thread: "t-4", room: "room-one", list: async () => [] });
 
   assert.deepEqual(state.processed.map((/** @type {any} */ i) => i.id), ["first", "third"],
     "both completed turns are processed facts, and staying honest about the third is what makes the "
