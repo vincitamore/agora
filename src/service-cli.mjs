@@ -104,6 +104,13 @@ async function signingIdentity(root, readIdentity) {
   return { record, key };
 }
 
+/** Recover the public handoff after key generation succeeded but output publication failed.
+ * Never regenerates, replaces or returns the private half.
+ * @param {string} root @param {AuthorityIdentityReader} [readIdentity] */
+export async function publicSeatAuthority(root, readIdentity = existingAuthorityIdentity) {
+  return (await signingIdentity(root, readIdentity)).record;
+}
+
 /** Prepare and retain locally BEFORE carrying the challenge to the counter-seat.
  * Fingerprint must be confirmed on that seat's terminal; shared room names prove no provenance.
  * @param {string} root @param {unknown} candidate @param {string} fingerprint @param {AuthorityIdentityReader} [readIdentity] */
