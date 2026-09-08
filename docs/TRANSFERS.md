@@ -120,6 +120,24 @@ identity races, route isolation and requesting-parent death without network serv
 with synthetic files and isolated keys: two recipients, a denied third key, real
 share/fetch/receipt replay, duplicate publication refusal and resident cleanup.
 
+To require a direct path between two machines, start an allowlisted Tailcat server
+on one and save its address token in a private file on the other. Run the gate
+with the client key whose public half the server allows:
+
+```sh
+node scripts/probe-tailcat-live.mjs --direct --binary /path/to/tailcat \
+  --address-file /private/server.addr --key-file /private/client.private.json \
+  --timeout-ms 30000
+```
+
+The gate prints a JSON record with the binary hash, start time, elapsed time,
+pongs, direct endpoint and child exit status. It exits 0 only when the child
+reports a direct IP endpoint **and exits 0**. Relay pongs alone fail this gate;
+they can still demonstrate working relay transport. The outer process bound is
+the requested timeout plus five seconds. The address and private key are not
+printed. For a paired capture, stamp the client start and retain both machines'
+logs; a local-machine pass does not establish traversal across two routers.
+
 Runtime upgrades use the manual `vendor-tailcat` workflow only. Normal PR CI never
 rebuilds Go. Pin upstream with `<tag>^{commit}` and pin build actions to full commits.
 Collect the workflow artifacts with `node scripts/vendor-tailcat.mjs collect <dir>`;
