@@ -6,6 +6,8 @@ import { parseArgs } from 'node:util';
 import { isIP } from 'node:net';
 import { createHash } from 'node:crypto';
 import { redactTailcatDiagnostics } from '../src/tailcat-diagnostics.mjs';
+import { enrolledKeyDigest, takeKeyClaim } from '../src/native-member-claim.mjs';
+import { stateDir } from '../src/core.mjs';
 import assert from 'node:assert/strict';
 import {mkdtemp,realpath,mkdir,writeFile,readFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';import path from 'node:path';import {setTimeout as delay}from'node:timers/promises';
@@ -33,12 +35,45 @@ if (options.direct) {
  const keyPath = await realpath(options['key-file']);
  const address = (await readFile(options['address-file'], 'utf8')).trim();
  if (!address || /\s/.test(address)) throw new Error('Address file must contain one token');
+ // L12 seam 8. This probe spawns a key-bearing Tailcat child, and the host indexes clients by node
+ // PUBLIC key: run while a resident member client holds that key, this child is a competing peer and
+ // recreates the very failure the probe exists to measure. So it takes the SAME exclusive ownership
+ // claim the resident client takes, BEFORE its child starts, and holds it through teardown.
+ //
+ // Reading the claim and then spawning would be a TOCTOU: the window between the two is where the
+ // second peer appears. The digest comes from the key file itself, never from `printpub`, because
+ // that would be a Tailcat child spawned to decide whether a Tailcat child may be spawned.
+ //
+ // An isolated key gets a free pass by construction rather than by a special case: a different key
+ // is a different digest is a different claim file, so it contends with nothing.
+ const stateRoot = stateDir({});
+ const keyDigest = await enrolledKeyDigest(keyPath);
+ /** @type {Awaited<ReturnType<typeof takeKeyClaim>>} */
+ let claim;
+ try {
+  claim = await takeKeyClaim({ stateRoot, keyDigest, kind: 'gate', label: 'probe-tailcat-live --direct' });
+ } catch (error) {
+  // A refusal here is NOT a direct-path failure, and must never be read as one: nothing was
+  // measured. `pass` is absent rather than false, `measured` says so, and the holder is named so
+  // the operator knows whether to retry in seconds or to stop the resident deliberately.
+  const code = /** @type {{ code?: string }} */ (error).code ?? 'member-key-claim-refused';
+  console.log(JSON.stringify({ measured: false, deferred: true, refused: code,
+   started: new Date().toISOString(),
+   message: `the direct path was not measured: ${error instanceof Error ? error.message : String(error)}` }));
+  process.exit(1);
+ }
  const started = Date.now();
  console.error('direct probe started', new Date(started).toISOString());
- const child = spawnSync(binary, [`--key=${keyPath}`, 'ping', '--until-direct',
-  `--timeout=${timeout}ms`, address], {
-  encoding: 'utf8', windowsHide: true, timeout: timeout + 5000, maxBuffer: 8 * 1024 * 1024,
- });
+ let child;
+ try {
+  child = spawnSync(binary, [`--key=${keyPath}`, 'ping', '--until-direct',
+   `--timeout=${timeout}ms`, address], {
+   encoding: 'utf8', windowsHide: true, timeout: timeout + 5000, maxBuffer: 8 * 1024 * 1024,
+  });
+ } finally {
+  // Only this generation. A late release must not free a claim a resident took after us.
+  await claim.release();
+ }
  const privateValues = [address, keyPath, options['key-file']];
  const safeStdout = redactTailcatDiagnostics(child.stdout ?? '', privateValues);
  const safeStderr = Buffer.from(redactTailcatDiagnostics(child.stderr ?? '', privateValues));
@@ -53,7 +88,7 @@ if (options.direct) {
  }) ?? null;
  // Printed output alone is insufficient: the one-shot verb must also exit cleanly.
  const pass = child.status === 0 && !child.error && !child.signal && directEndpoint !== null;
- console.log(JSON.stringify({ pass, binarySha256: createHash('sha256').update(await readFile(binary)).digest('hex'),
+ console.log(JSON.stringify({ pass, measured: true, binarySha256: createHash('sha256').update(await readFile(binary)).digest('hex'),
   started: new Date(started).toISOString(), elapsedMs: Date.now() - started,
   exit: child.status, signal: child.signal, error: child.error?.code ?? null,
   directEndpoint, pongs, stderr }));

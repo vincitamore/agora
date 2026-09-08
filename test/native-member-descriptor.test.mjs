@@ -19,6 +19,7 @@ const ALIAS = "house-remote";
 const ROOM_ID = "a".repeat(32);
 const KEY_DIGEST = `sha256:${"b".repeat(64)}`;
 
+/** @param {import('node:test').TestContext} t */
 async function stateRoot(t) {
   const root = await mkdtemp(path.join(tmpdir(), "agora-memberdesc-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -43,7 +44,7 @@ test("a session with no resident client is told to START one, never to dial", as
   const root = await stateRoot(t);
   await assert.rejects(
     () => readMemberDescriptor(root, ALIAS),
-    (error) => {
+    (/** @type {any} */ error) => {
       assert.ok(error instanceof ServiceDarkError, "a missing member client is service-dark, like a dark seat service");
       assert.equal(error.reason, "service-dark");
       assert.equal(error.exitCode, 1);
@@ -71,7 +72,7 @@ test("every unreadable shape refuses with the start line, not just the absent on
     await writeFile(file, body, "utf8");
     await assert.rejects(
       () => readMemberDescriptor(root, ALIAS),
-      (error) => {
+      (/** @type {any} */ error) => {
         assert.ok(error instanceof ServiceDarkError, name);
         assert.match(error.message, /agora member start house-remote/, `${name} must carry the start line`);
         return true;
@@ -154,7 +155,7 @@ test("removal is idempotent and never throws", async (t) => {
 test("an alias that is not a usable path segment is refused, not joined into a path", async (t) => {
   const root = await stateRoot(t);
   for (const alias of ["../escape", "a/b", "", "with space", "dot.dot/../x"]) {
-    assert.throws(() => memberDescriptorPath(root, alias), (error) => {
+    assert.throws(() => memberDescriptorPath(root, alias), (/** @type {any} */ error) => {
       assert.ok(error instanceof ServiceDarkError);
       assert.match(error.message, /not a usable room alias/);
       return true;

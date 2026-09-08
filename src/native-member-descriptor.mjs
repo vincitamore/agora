@@ -70,7 +70,10 @@ export async function writeMemberDescriptor(stateRoot, descriptor) {
   return file;
 }
 
-/** Remove it on a bounded stop. Never throws: a teardown that throws hides what it tore down. */
+/**
+ * Remove it on a bounded stop. Never throws: a teardown that throws hides what it tore down.
+ * @param {string} stateRoot @param {string} alias
+ */
 export async function removeMemberDescriptor(stateRoot, alias) {
   try { await rm(memberDescriptorPath(stateRoot, alias), { force: true }); return true; }
   catch { return false; }
