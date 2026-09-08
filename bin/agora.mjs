@@ -2503,6 +2503,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
             author: { id: "agora-watch", name: "agora-watch", kind: "system" }, ts: new Date().toISOString(),
           };
           try {
+            // No `root` here on purpose: this notice is synthetic, carries no source cursor and advances nothing, so a durable intent for it would be a permanently unresolved row in a file whose meaning is that unresolved means something.
             if (codexQueue) await queueCodex(roomAlias, [/** @type {any} */ (notice)], { ...codexQueue, attempts: 1 });
             else if (codexServer) await deliverCodexServer(roomAlias, [/** @type {any} */ (notice)], { ...codexServer });
             console.error(`agora: watch-ended notice delivered to the Codex task`);
