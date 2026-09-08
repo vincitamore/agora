@@ -224,9 +224,9 @@ async function armWithJournal(/** @type {string} */ root, /** @type {any[]} */ m
   for (const mark of marks) {
     const m = { id: mark.id, cursor: mark.cursor, room: "cli-room", text: "x",
       author: { name: "peer", kind: "agent" }, ts: "2026-09-08T00:00:00Z" };
-    await codex.recordCodexSubmitted(root, "t-arm", m);
-    await codex.recordCodexAccepted(root, "t-arm", m, { turnId: `turn-${mark.id}` });
-    if (mark.outcome) await codex.recordCodexReceipt(root, "t-arm", m, { id: mark.id, outcome: mark.outcome });
+    await codex.recordCodexSubmitted(root, "tarm-00000001", m);
+    await codex.recordCodexAccepted(root, "tarm-00000001", m, { turnId: `turn-${mark.id}` });
+    if (mark.outcome) await codex.recordCodexReceipt(root, "tarm-00000001", m, { id: mark.id, outcome: mark.outcome });
   }
   const cli = new URL("../bin/agora.mjs", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
   const env = { ...process.env, AGORA_STATE: root, AGORA_CONFIG: path.join(root, "agora.json"),
@@ -235,14 +235,19 @@ async function armWithJournal(/** @type {string} */ root, /** @type {any[]} */ m
     await execFile(process.execPath, [cli, "cursor", "cli-room", "--set", savedCursor], { env });
   let stderr = "";
   try { await execFile(process.execPath, [cli, "watch", "cli-room", "--once", "--codex-queue",
-    "--codex-thread", "t-arm"], { env }); }
+    "--codex-thread", "tarm-00000001"], { env }); }
   catch (error) { stderr = String(/** @type {any} */ (error)?.stderr ?? ""); }
   let cursor = null;
   // The cursor file is a record ({cursor, at}), not a bare string: read the field, or the assertion
   // compares a position against a whole document and reds while the product is correct.
   try { cursor = JSON.parse(await readFile(path.join(root, "sessions", "armtest", "cli-room.cursor"), "utf8")).cursor; }
   catch { cursor = null; }
-  return { stderr, cursor };
+  // The arm's EFFECTIVE since, as recorded at watch start. Recovering the file and leaving this at
+  // the old value would re-offer the row the recovery skipped, so it is the observable that matters.
+  let armed = null;
+  try { armed = JSON.parse(await readFile(path.join(root, "sessions", "armtest", "armed", "cli-room.json"), "utf8")); }
+  catch { armed = null; }
+  return { stderr, cursor, armed };
 }
 
 test("the arm RECOVERS the cursor through the completed prefix, closing the accept-before-checkpoint window", async (t) => {
@@ -258,6 +263,13 @@ test("the arm RECOVERS the cursor through the completed prefix, closing the acce
     + "delivery 2 finished and the cursor never caught up, so without this the next poll redelivers "
     + "work that is already done -- which is the whole reason the record is kept");
 });
+
+// NOT ASSERTED HERE, and named so a reader does not mistake its absence for coverage: that the
+// recovered position becomes this arm's effective `since` for the subscription. The liveness guard
+// ends a bridged watch before the subscription and before the armed record is even written, so the
+// observable does not exist without a live consumer thread. A seam could therefore record the right
+// position and hand the transport the wrong one and every cell here would stay green. Measured by a
+// follow-on unit that holds a real writer lock from a helper process (ruled at backroom 1788897730).
 
 test("recovery STOPS at the gap: a completion after a failure never carries the cursor over it", async (t) => {
   const root = await stateRoot(t);

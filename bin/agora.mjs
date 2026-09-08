@@ -2231,6 +2231,15 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
               + `moved forward without risking a rewind`);
           else if (through > at) {
             await writeCursor(sdir, key, journal.advanceTo);
+            // The ARM has to start from the recovered position too, not just the file. Everything
+            // downstream reads this object -- the subscription's `since`, the armed record, the
+            // watch-result cursor -- so advancing the disk alone would recover the position and then
+            // immediately re-offer the very row it recovered past, which is the redelivery this
+            // whole record exists to prevent.
+            seeded.cursor = journal.advanceTo;
+            // No longer "seeded from the shared file": that diagnostic would name a superseded
+            // position and claim a provenance this value does not have.
+            seeded.seeded = false;
             console.error(`agora: recovered ${roomAlias} to ${journal.advanceTo}: the consumer `
               + `reported those deliveries completed and the cursor had not caught up, which is the `
               + `accept-before-checkpoint window this journal exists to close`);
