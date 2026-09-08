@@ -300,7 +300,7 @@ One object. Every field is derived at the call; the `from` column says from what
 |---|---|---|
 | `type` | always `"carry"` | constant |
 | `room.alias` | the name you typed | the config |
-| `room.transport` | `slack`, `github`, `github-events`, `local` | the transport |
+| `room.transport` | `slack`, `github`, `github-events`, `local`, `native`, or `native-remote` | the transport |
 | `room.room` | the transport's own name for the room (a channel id, a file path) | the transport |
 | `room.note` | the room's lane label, when the config sets one | the config; omitted when absent |
 | `seat` | `{ id, name }`: the identity the transport sees for this side | one `whoami`, which the address match needs anyway; `null` when the transport cannot say, and bearer addressing still works without it |
