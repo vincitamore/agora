@@ -126,6 +126,23 @@ The verb checks the successor's registration and durable arrival for that exact
 boundary and room before posting signoff. A generic earlier post does not count.
 These verbs do not stop processes or transfer an authenticated principal.
 
+Own posts also have a write-ahead gap. Before the send, the CLI syncs an
+`outgoing-post-unknown` record carrying only the payload digest. After the
+successful send and all trailer-capture writes, it syncs coverage naming that
+gap. A crash between network success and local capture therefore remains a
+refusal rather than silently losing a claim. An unknown send is not retried
+automatically by the recovery checker.
+
+## Calibration
+
+The twelve `carry gate control: <code>` cells independently exercise registration,
+session key/source, cursor presence, role, unit, claim, named delivery answer,
+delivery acceptance, coverage, retraction and mandate digest. Suppressing each
+refusal in turn reddens its own cell; restoring it greens the control set.
+Removing preparation on either watch path, removing the cross-boundary union,
+and bypassing the public handoff's successor check each redden the named
+integration cell without changing its fixture or making the module fail to load.
+
 ## Explicit remaining seams
 
 No automatic before-first-act enforcement or per-harness compaction hook is
