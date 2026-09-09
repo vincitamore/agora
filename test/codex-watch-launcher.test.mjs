@@ -29,6 +29,7 @@ test("Codex launcher waits beyond the old ten-second clock for the subscribed ar
     ...process.env,
     AGORA_CODEX_SERVER: "",
     AGORA_CODEX_TOKEN_FILE: "",
+    AGORA_CODEX_MANAGED: "",
     CODEX_SESSION_ID: session,
     CODEX_THREAD_ID: session,
   };
@@ -182,6 +183,7 @@ test("watch launcher recovers the managed server after Codex filters the TUI env
     ...process.env,
     AGORA_CODEX_SERVER: "",
     AGORA_CODEX_TOKEN_FILE: "",
+    AGORA_CODEX_MANAGED: "",
     CODEX_SESSION_ID: session,
     CODEX_THREAD_ID: session,
   };
@@ -284,6 +286,7 @@ test("managed Codex launchers refuse legacy queue fallback when the attachment i
     AGORA_CODEX_MANAGED: "1",
     AGORA_CODEX_SERVER: "",
     AGORA_CODEX_TOKEN_FILE: "",
+    AGORA_CODEX_MANAGED: "",
     CODEX_SESSION_ID: session,
     CODEX_THREAD_ID: session,
   };
