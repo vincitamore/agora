@@ -34,6 +34,7 @@ test("Codex launcher passes --wake through to the armed watch and refuses an unk
     ...process.env,
     AGORA_CODEX_SERVER: "",
     AGORA_CODEX_TOKEN_FILE: "",
+    AGORA_CODEX_MANAGED: "",
     CODEX_SESSION_ID: session,
     CODEX_THREAD_ID: session,
   };
