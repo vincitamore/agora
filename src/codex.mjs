@@ -439,7 +439,7 @@ export async function recordCodexReceipt(root, thread, message, receipt) {
  * @param {{ root: string, thread: string, room?: string,
  *   list?: () => Promise<{ id: string }[]> }} opts
  * @returns {Promise<{ rows: any[], inFlight: any[], unresolved: any[], absent: any[],
- *   unacknowledged: any[], processed: any[], advanceTo: string | null }>}
+ *   unacknowledged: any[], unwitnessedCompletion: any[], processed: any[], advanceTo: string | null }>}
  */
 export async function reconcileCodexIntents({ root, thread, room, list }) {
   const all = await readCodexIntents(root, thread);
@@ -465,6 +465,14 @@ export async function reconcileCodexIntents({ root, thread, room, list }) {
     inFlight = [];
     absent = unwitnessed.filter((/** @type {any} */ i) => i.resolution === "absent");
   }
+  // Acknowledged, WITNESSED, and the witness was not a completion. It has an outcome, so it is not
+  // unwitnessed and falls out of every category above; it has no processedAt, so it is not processed
+  // either. Before the checkpoint moved to the acknowledgment this state was rare enough that landing
+  // in no bucket went unnoticed; now it is what an ordinary delivery looks like whenever the outcome
+  // has not arrived by the time the connection closes, so a row here would otherwise be recorded and
+  // reported to nobody. Named for what is missing: the completion was never witnessed.
+  const unwitnessedCompletion = intents.filter(
+    (/** @type {any} */ i) => !i.processedAt && i.outcome && i.outcome !== "completed");
   // Inferred from the marks, never observed: acknowledged, no terminal, no recorded absence.
   const unresolved = list ? [] : unwitnessed.filter(
     (/** @type {any} */ i) => i.acceptedAt && i.resolution !== "absent");
@@ -492,7 +500,7 @@ export async function reconcileCodexIntents({ root, thread, room, list }) {
   // `rows` is this room's marks in recorded order. A caller cannot compare two opaque cursors,
   // so the only way to know whether a target is FORWARD of the saved position is to find both
   // in this sequence. Handing back the sequence is what makes a guarded checkpoint possible.
-  return { rows: intents, inFlight, unresolved, absent, unacknowledged, processed, advanceTo };
+  return { rows: intents, inFlight, unresolved, absent, unacknowledged, unwitnessedCompletion, processed, advanceTo };
 }
 
 /**

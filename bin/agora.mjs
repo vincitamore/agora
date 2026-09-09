@@ -2205,13 +2205,20 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
           // nothing at all, so the prefix is always empty and the recovery silently never fires.
           root: stateRoot, thread: codexDelivery.thread, room: transport.room,
         });
-        if (journal.unresolved.length || journal.unacknowledged.length || journal.absent.length)
+        if (journal.unresolved.length || journal.unacknowledged.length || journal.absent.length
+            || journal.unwitnessedCompletion.length)
           console.error(`agora: Codex thread ${codexDelivery.thread} for ${roomAlias}: `
             // "unresolved", not "in flight": no outcome was recorded, and on the legacy queue that
             // item may already have been consumed or cleared. Observed pending is a different claim
             // and needs a queue listing this bridge does not have.
             + `${journal.unresolved.length} accepted and unresolved, `
             + `${journal.unacknowledged.length} handed over without acknowledgment, `
+            // The outcome IS recorded and it was not a completion, which since the checkpoint moved
+            // to the acknowledgment is the ordinary shape of a delivery whose turn had not finished
+            // when the connection closed. Reported, never re-delivered: the text is in the thread and
+            // the bearer can read it there. Without this clause such a row is in the journal and in
+            // no line anyone sees.
+            + `${journal.unwitnessedCompletion.length} acknowledged with no witnessed completion, `
             + `${journal.absent.length} absent-unresolved`
             + (journal.advanceTo ? `; completed through ${journal.advanceTo}` : "")
             + `. An absent-unresolved row left the queue without the consumer reporting an outcome; `
