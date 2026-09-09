@@ -157,6 +157,7 @@ export async function deliverCodexServer(room, messages, options) {
   /** Turns submitted by this call, kept so their outcomes can be recorded without gating submission.
    * @type {{messages:import('./core.mjs').Message[], turn:Promise<{turnId:string,outcome:string}>}[]} */
   const pending = [];
+  /** @type {unknown} */ let flushError;
   try {
     const state = await client.request("thread/read", { threadId: options.thread, includeTurns: false });
     if (state?.thread?.id !== options.thread || !["idle", "active"].includes(state?.thread?.status?.type))
@@ -191,16 +192,32 @@ export async function deliverCodexServer(room, messages, options) {
       // absence of one is itself recorded below rather than waited for.
       pending.push({ messages: batch.messages, turn: client.waitForTurn(result.turn.id, options.processedTimeoutMs ?? 30 * 60_000) });
     }
-    // Every batch is now submitted and every cursor checkpointed. What remains is bookkeeping: take
-    // the outcomes that have already landed, and record the rest as unwitnessed by this connection.
-    // Nothing here can hold a later delivery, because there is no later delivery inside this call.
-    for (const entry of pending) {
-      const terminal = await Promise.race([entry.turn, Promise.resolve(undefined)]);
-      for (const message of entry.messages) {
-        const receipt = /** @type {{id:string,outcome:'completed'|'cancelled'|'failed'|'closed-without-completion'}} */ (
-          { id: message.id, outcome: terminal?.outcome ?? "closed-without-completion" });
-        await options.onProcessed?.(receipt);
+  } finally {
+    // The flush lives HERE, not after the loop above, because a later batch can throw -- a refused
+    // turn/start is the ordinary case -- and a flush placed after the loop is skipped by exactly that
+    // throw, leaving every already-acknowledged message checkpointed with no receipt at all. Measured
+    // on the landed head: 33 messages, second start refused, 32 checkpointed, 0 receipts.
+    //
+    // It also runs AFTER close(), which resolves every still-pending waiter (with its real outcome if
+    // one arrived, otherwise closed-without-completion). That makes each entry already settled, so
+    // awaiting it cannot block and no peek is needed: the previous Promise.race against a resolved
+    // sentinel was doing that job by ordering alone, and one fewer thing to reason about is worth
+    // more here than the microsecond it saved.
+    client.close();
+    try {
+      for (const entry of pending) {
+        const terminal = await entry.turn;
+        for (const message of entry.messages) {
+          const receipt = /** @type {{id:string,outcome:'completed'|'cancelled'|'failed'|'closed-without-completion'}} */ (
+            { id: message.id, outcome: terminal.outcome });
+          await options.onProcessed?.(receipt);
+        }
       }
+    } catch (error) {
+      // A failure to RECORD must never impersonate the delivery failure being recorded, so it is
+      // held and rethrown below only when nothing else was already on its way out.
+      flushError = error;
     }
-  } finally { client.close(); }
+  }
+  if (flushError) throw flushError;
 }
