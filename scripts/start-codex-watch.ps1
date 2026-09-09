@@ -62,15 +62,30 @@ function Get-SupervisorPid([int]$WatcherPid) {
     return $null
 }
 
+# Windows does not end a child when its parent dies, and the worker shell runs the Node watch as
+# a child. Stopping only the shell (the pid Win32_Process.Create returned) leaves the watch alive,
+# polling a room nobody is reading. Every stop here therefore walks the tree from the given pid
+# and ends the leaves first, so a stop is a stop whatever the shape under it.
+function Stop-ProcessTree([int]$RootPid) {
+    if (-not $RootPid) { return @() }
+    $stopped = @()
+    $children = Get-CimInstance -ClassName Win32_Process -Filter "ParentProcessId=$RootPid" -ErrorAction SilentlyContinue
+    foreach ($child in @($children)) {
+        if ($child.ProcessId -and $child.ProcessId -ne $RootPid) { $stopped += Stop-ProcessTree ([int]$child.ProcessId) }
+    }
+    if (Get-Process -Id $RootPid -ErrorAction SilentlyContinue) {
+        Stop-Process -Id $RootPid -Force -ErrorAction SilentlyContinue
+        $stopped += $RootPid
+    }
+    return $stopped
+}
+
 function Stop-ArmedWatch($Armed) {
     if (-not $Armed -or -not $Armed.pid) { return $null }
     $watcherPid = [int]$Armed.pid
     $supervisorPid = Get-SupervisorPid $watcherPid
-    Stop-Process -Id $watcherPid -Force -ErrorAction SilentlyContinue
-    if ($supervisorPid) {
-        Start-Sleep -Milliseconds 150
-        Stop-Process -Id $supervisorPid -Force -ErrorAction SilentlyContinue
-    }
+    if ($supervisorPid) { Stop-ProcessTree $supervisorPid > $null }
+    Stop-ProcessTree $watcherPid > $null
     Remove-Item -LiteralPath $armedPath -Force -ErrorAction SilentlyContinue
     return [pscustomobject]@{ watcherPid = $watcherPid; supervisorPid = $supervisorPid }
 }
@@ -270,7 +285,9 @@ while (-not $watcherPid -and $armingClock.Elapsed.TotalSeconds -lt $ArmingTimeou
 $armingClock.Stop()
 
 if (-not $watcherPid) {
-    Stop-Process -Id ([int]$created.ProcessId) -Force -ErrorAction SilentlyContinue
+    # The watch may already be running under the worker shell without having published its
+    # receipt yet; ending only the shell would orphan it. Reap the whole tree.
+    Stop-ProcessTree ([int]$created.ProcessId) > $null
     throw "Codex watch did not publish its subscribed armed receipt within $ArmingTimeoutSeconds seconds. Inspect $LogPrefix.stderr.log."
 }
 

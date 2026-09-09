@@ -103,9 +103,18 @@ test("spawn --file with a live service opens one pane and prints a 32-hex id", {
 });
 
 test("spawn --file without bun is pane-bun-absent", async (t) => {
-  const { root, env } = await withConfig(t);
-  const envNoBun = { ...env, BUN: path.join(root, "no-such-bun") };
-  t.after(async () => { await agora(["service", "stop"], envNoBun); });
+  // Not withConfig: that helper registers rm(root) first, and after-hooks run in registration
+  // order, so the descriptor would be gone before `service stop` ran and stop would (correctly)
+  // unlink a stale descriptor and kill nothing, leaking one detached daemon per run. The service
+  // started here is stopped in the same hook that removes its root, stop first.
+  const root = await mkdtemp(path.join(tmpdir(), "agora-spawn-nobun-"));
+  const cfg = path.join(root, "agora.json");
+  await writeFile(cfg, JSON.stringify({ actor: { name: "seat", kind: "agent" }, rooms: { scratch: { transport: "local", path: path.join(root, "room.ndjson") } } }));
+  const envNoBun = { AGORA_STATE: root, AGORA_CONFIG: cfg, AGORA_SESSION: "sp", BUN: path.join(root, "no-such-bun") };
+  t.after(async () => {
+    await agora(["service", "stop"], envNoBun);
+    await rm(root, { recursive: true, force: true });
+  });
   const started = await agora(["service", "start", "--json"], envNoBun);
   assert.equal(started.code, 0, started.stderr);
   const file = path.join(root, "req.json");
