@@ -15,6 +15,22 @@ import {
   ensureCodexServer,
 } from "../src/codex-launch.mjs";
 
+// A HANG GUARD, not a bound under test, and the distinction is the whole reason this value is safe.
+//
+// A bound under test must FIRE: the cell asserts the refusal it produces, so its size is part of
+// what is being measured. A hang guard must NEVER fire on any load this box can produce; it exists
+// only so that a successor which is genuinely dead fails instead of hanging the suite, and no cell
+// asserts anything about elapsed time on these calls.
+//
+// The old 3000 ms values were bounds under test in disguise. They sat on successor calls whose only
+// job is to complete, nothing asserted their duration, and yet one of them fired under load and
+// reddened CI on a head that had not touched it. Measured here: a successor call takes 15.0 to 20.9
+// ms over twelve samples (median 15.7), so this guard sits about 5700x above the slowest observed
+// run. Raising 3000 to some larger plausible number would only move the coin; a guard three orders
+// of magnitude clear of the work removes the outcome's dependence on the clock, while the runner's
+// own timeout still turns a real hang into a red rather than a wait.
+const SUCCESSOR_HANG_GUARD_MS = 120_000;
+
 test("schema exposes the attached Codex launcher", () => {
   const bin = path.resolve(import.meta.dirname, "..", "bin", "agora.mjs");
   const result = spawnSync(process.execPath, [bin, "schema", "--json"], { encoding: "utf8" });
@@ -140,11 +156,11 @@ test("an unpublished or malformed lock remains unknown through the bound and sta
   await writeFile(paths.lock, "");
   let spawns = 0;
   try {
-    await assert.rejects(ensureCodexServer({ stateRoot: dir, timeoutMs: 10, deps: {
+    await assert.rejects(ensureCodexServer({ stateRoot: dir, timeoutMs: 2000, deps: {
       probe: async () => false,
       spawn: /** @type {any} */ (() => { spawns += 1; throw new Error("must not spawn"); }),
       sleep: async () => { await new Promise((resolve) => setTimeout(resolve, 2)); },
-    } }), /(unknown ownership|startup authority remained busy through the deadline)/);
+    } }), /unknown ownership/);
     assert.equal(spawns, 0);
     assert.equal(await readFile(paths.lock, "utf8"), "");
   } finally {
@@ -267,14 +283,14 @@ test("a stale observer serializes live replacement and gap contenders under one 
     sleep: async () => { await new Promise((resolve) => setImmediate(resolve)); },
   };
   try {
-    const a = ensureCodexServer({ stateRoot: dir, codexPath: fakeCodex, timeoutMs: 3000, deps: {
+    const a = ensureCodexServer({ stateRoot: dir, codexPath: fakeCodex, timeoutMs: SUCCESSOR_HANG_GUARD_MS, deps: {
       ...deps, afterLockObservation: async () => {
         if (++observations === 1) { observerReached(); await observerPaused; }
       },
     } });
     await reached;
-    const b = ensureCodexServer({ stateRoot: dir, codexPath: fakeCodex, timeoutMs: 3000, deps });
-    const c = ensureCodexServer({ stateRoot: dir, codexPath: fakeCodex, timeoutMs: 3000, deps });
+    const b = ensureCodexServer({ stateRoot: dir, codexPath: fakeCodex, timeoutMs: SUCCESSOR_HANG_GUARD_MS, deps });
+    const c = ensureCodexServer({ stateRoot: dir, codexPath: fakeCodex, timeoutMs: SUCCESSOR_HANG_GUARD_MS, deps });
     await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(reserves, 0, "contenders cannot reach a pathname gap while the stale observer holds authority");
     assert.equal(spawns, 0);
@@ -323,7 +339,7 @@ test("a killed SQLite authority holder releases startup to exactly one successor
     assert.equal(spawns, 0);
     holder.kill();
     await new Promise((resolve) => holder.once("close", resolve));
-    const successor = await ensureCodexServer({ stateRoot: dir, codexPath: fakeCodex, timeoutMs: 3000, deps });
+    const successor = await ensureCodexServer({ stateRoot: dir, codexPath: fakeCodex, timeoutMs: SUCCESSOR_HANG_GUARD_MS, deps });
     assert.equal(successor.reused, false);
     assert.equal(spawns, 1);
   } finally {
@@ -352,10 +368,10 @@ test("startup failure releases SQLite authority at the shared deadline", async (
     kill: () => { kills += 1; },
   };
   try {
-    await assert.rejects(ensureCodexServer({ stateRoot: dir, codexPath: fakeCodex, timeoutMs: 15, deps }), /startup deadline/);
+    await assert.rejects(ensureCodexServer({ stateRoot: dir, codexPath: fakeCodex, timeoutMs: 2000, deps }), /startup deadline/);
     assert.equal(kills, 1);
     ready = true;
-    const successor = await ensureCodexServer({ stateRoot: dir, codexPath: fakeCodex, timeoutMs: 3000, deps });
+    const successor = await ensureCodexServer({ stateRoot: dir, codexPath: fakeCodex, timeoutMs: SUCCESSOR_HANG_GUARD_MS, deps });
     assert.equal(successor.reused, false);
     assert.equal(spawns, 2);
   } finally {
@@ -381,11 +397,11 @@ test("diagnostic release failure preserves its error but cannot retain SQLite au
     sleep: async () => { await new Promise((resolve) => setImmediate(resolve)); },
   };
   try {
-    await assert.rejects(ensureCodexServer({ stateRoot: dir, codexPath: fakeCodex, timeoutMs: 3000, deps: {
+    await assert.rejects(ensureCodexServer({ stateRoot: dir, codexPath: fakeCodex, timeoutMs: SUCCESSOR_HANG_GUARD_MS, deps: {
       ...deps, beforeLockRelease: async () => { throw Object.assign(new Error("injected diagnostic rename failure"), { code: "EPERM" }); },
     } }), /injected diagnostic rename failure/);
     assert.equal(spawns, 1);
-    const successor = await ensureCodexServer({ stateRoot: dir, codexPath: fakeCodex, timeoutMs: 3000, deps });
+    const successor = await ensureCodexServer({ stateRoot: dir, codexPath: fakeCodex, timeoutMs: SUCCESSOR_HANG_GUARD_MS, deps });
     assert.equal(successor.reused, true);
     assert.equal(spawns, 1);
   } finally {
