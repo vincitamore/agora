@@ -135,8 +135,13 @@ setInterval(() => {}, 1_000);
     return true;
   });
   const timeoutElapsed = Date.now() - timeoutStartedAt;
+  // The FLOOR only, and deliberately no ceiling. The property is that the reported bound binds
+  // elapsed time rather than counting probes, and the floor is what carries it: a run slower than
+  // the bound cannot make an early refusal look correct. A ceiling asserts the opposite direction --
+  // that a loaded box finished in time -- which is not a property of the code at all. It was the
+  // coin: measured red twice by a hair, most recently 5068 ms against 5000 on a box running another
+  // suite. The reported armingTimeoutSeconds below is the other half of the same claim.
   assert.ok(timeoutElapsed >= 1_500, `two-second bound fired too early at ${timeoutElapsed} ms`);
-  assert.ok(timeoutElapsed < 5_000, `two-second bound stretched to ${timeoutElapsed} ms`);
 
   // A timed-out arm leaves no worker behind. The watch was spawned and was mid-subscribe when
   // the launcher gave up; on Windows the worker shell's child does not die with the shell, and
