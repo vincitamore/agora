@@ -501,8 +501,10 @@ process answers for. The commitments are not copied by it and do not need to be:
 them from the room.
 
 **When `--inherit` refuses, recover the position by hand — never with `cursor --now`.** A
-predecessor killed mid-poll can come back `carry-inherit-source-corrupt`, and the refusal is
-whole-source: the cursors it exists to move are usually fine. Recover by reading the room to the
+predecessor killed mid-poll used to come back `carry-inherit-source-corrupt` over a capture left
+`.pending` in its evidence store (four times on one seat in a day); that is unknown coverage,
+not corruption, and no longer refuses. A refusal now means a genuinely torn or duplicated
+evidence record, and it is still whole-source: the cursors inherit exists to move are usually fine. Recover by reading the room to the
 end (`read --threads`), classifying what is there, and then `cursor --set` to the cursor of the
 last message actually read, per room and per followed thread. Reach for `cursor --now` only when
 replaying history is genuinely unwanted: it jumps to the transport's newest position, so anything

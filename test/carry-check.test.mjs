@@ -640,6 +640,29 @@ test('carry delivery capture makes no identity request and retains unknown seat 
   } finally { await t.cleanup(); }
 });
 
+test('inheritance skips a capture left pending by a watch killed mid-poll; a torn event still refuses', async () => {
+  const t = await tmp();
+  try {
+    const { actual, event } = fixture();
+    const src = path.join(t.dir, 'sessions', 's1'), dst = path.join(t.dir, 'sessions', 's2');
+    await writeRecord(src, { ...actual.session, explicit: true }, { bearer: mandate.bearer });
+    await appendCarryEvent(src, event('prepared', 'delivery-prepared'));
+    // what a killed watch leaves: a pending capture with no completion marker
+    await writeFile(path.join(src, 'carry-evidence', 'deadbeef.pending'), 'capture incomplete\n');
+    assert.deepEqual((await readCarryEvidence(src)).issues, ['delivery-coverage-unknown:deadbeef.pending']);
+    const next = { slug: 's2', source: 'AGORA_SESSION', explicit: true };
+    const plan = await inheritSession(t.dir, 's1', next, { dryRun: true });
+    assert.equal(plan.carry.events, 1, 'the pending capture is skipped, the event is inherited');
+    await inheritSession(t.dir, 's1', next);
+    assert.equal((await readCarryEvidence(dst)).events[0].id, 'prepared');
+    // a torn event is still corruption
+    await writeFile(path.join(src, 'carry-evidence', 'torn.json'), '{');
+    const again = { slug: 's3', source: 'AGORA_SESSION', explicit: true };
+    await assert.rejects(() => inheritSession(t.dir, 's1', again, { dryRun: true }),
+      { name: 'CarryCheckError', code: 'carry-inherit-source-corrupt' });
+  } finally { await t.cleanup(); }
+});
+
 test('inheritance refuses an incompatible lineage in dry-run and before copying any evidence', async () => {
   const source = await tmp(), target = await tmp();
   try {
