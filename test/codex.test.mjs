@@ -247,9 +247,11 @@ test("both Codex launchers slow followed-thread polling without weakening room d
     readFile(path.join(root, "scripts", "start-codex-watch.sh"), "utf8"),
   ]);
   assert.match(powershell, /\[double\]\$ThreadInterval = 120/);
-  assert.match(powershell, /--wake addressed --thread-interval \$ThreadInterval --coalesce 20/);
-  assert.match(powershell, /'-ThreadInterval', \[string\]\$ThreadInterval/);
+  assert.match(powershell, /\[ValidateSet\('all', 'addressed', 'mine'\)\]\s+\[string\]\$Wake = 'addressed'/);
+  assert.match(powershell, /--wake \$Wake --thread-interval \$ThreadInterval --coalesce 20/);
+  assert.match(powershell, /'-ThreadInterval', \[string\]\$ThreadInterval,\s+'-Wake', \$Wake/);
   assert.match(posix, /^thread_interval=120$/m);
-  assert.match(posix, /--wake addressed \\\n\s+--thread-interval "\$thread_interval" --coalesce 20/);
-  assert.match(posix, /--thread-interval "\$thread_interval"/);
+  assert.match(posix, /^wake=addressed$/m);
+  assert.match(posix, /--wake "\$wake" \\\n\s+--thread-interval "\$thread_interval" --coalesce 20/);
+  assert.match(posix, /--thread-interval "\$thread_interval" --wake "\$wake"/);
 });
