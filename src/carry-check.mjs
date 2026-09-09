@@ -265,11 +265,16 @@ export async function inheritCarryEvidence(src, dst, from, to, dryRun = false) {
     if (/** @type {NodeJS.ErrnoException} */ (err).code !== 'ENOENT')
       throw new CarryCheckError('carry-inherit-lineage-conflict');
   }
+  // Unknown coverage is not corruption. A `.pending` capture without its `.complete` marker is
+  // what a watch killed mid-poll leaves behind (a relaunch, a reboot), and it is evidence the
+  // successor does not need; refusing the whole source over it refused every restarted
+  // resident's immediate predecessor (four times on one seat, 2026-09-09). Only an unreadable
+  // or duplicated event, or a bad completion marker, is corruption.
   const source = await readCarryEvidence(src);
-  const corrupt = source.issues.filter(i => i !== 'delivery-coverage-unknown');
+  const corrupt = source.issues.filter(i => !isCoverageIssue(i));
   if (corrupt.length) throw new CarryCheckError('carry-inherit-source-corrupt');
   const target = await readCarryEvidence(dst);
-  if (target.issues.some(i => i !== 'delivery-coverage-unknown')) throw new CarryCheckError('carry-inherit-target-corrupt');
+  if (target.issues.some(i => !isCoverageIssue(i))) throw new CarryCheckError('carry-inherit-target-corrupt');
   const present = new Map(target.events.map(e => [e.id, JSON.stringify(e)]));
   for (const e of source.events) if (present.has(e.id) && present.get(e.id) !== JSON.stringify(e))
     throw new CarryCheckError('carry-inherit-conflict');
@@ -555,6 +560,12 @@ export async function appendCarryEvent(dir, value) {
     try { await parent.sync(); } finally { await parent.close(); }
   }
   return event;
+}
+
+/** An issue that says coverage is unknown (no store, an empty store, a capture left pending),
+ * as opposed to one that says a record is corrupt. @param {string} issue */
+export function isCoverageIssue(issue) {
+  return issue === 'delivery-coverage-unknown' || issue.startsWith('delivery-coverage-unknown:');
 }
 
 /** No store means unknown coverage, not zero obligations.
