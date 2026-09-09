@@ -219,3 +219,44 @@ test("a superseded wait on one turn id is retired, not stranded with its timer a
   const after = process.getActiveResourcesInfo().filter(r => r === "Timeout").length;
   assert.ok(after <= before, `delivery left ${after - before} armed timer(s) behind`);
 });
+
+// Calibrated against the landed head before the repair existed: 33 messages with the second
+// turn/start refused reported 32 checkpointed and ZERO receipts, because the flush sat after the
+// batch loop and the throw skipped it. Found by an independent read of main, not by this author.
+test("an accepted batch keeps its receipts when a LATER batch is refused", async (t) => {
+  let starts = 0;
+  const f = await fixture(t, (request) =>
+    request.method === "turn/start" && ++starts === 2 ? { error: { code: -32600 } } : responds(request));
+  /** @type {string[]} */ const accepted = [];
+  /** @type {any[]} */ const receipts = [];
+  await assert.rejects(deliverCodexServer("room", Array.from({ length: 33 }, (_, i) => message(i)), {
+    ...f.options,
+    onAccepted: async (m) => { accepted.push(m.id); },
+    onProcessed: async (r) => { receipts.push(r); },
+  }));
+  assert.equal(accepted.length, 32, "the first batch is acknowledged and checkpointed");
+  assert.equal(receipts.length, accepted.length,
+    "every checkpointed message is also recorded; the refusal must not swallow the receipts");
+  assert.ok(receipts.every(r => r.outcome === "completed" || r.outcome === "closed-without-completion"));
+});
+
+// Pre-registered by the reader BEFORE this repair existed, and it caught the repair's own excess:
+// the first version wrapped one catch around the whole flush, so a single failed receipt write
+// abandoned every receipt after it -- the defect the flush exists to close, one level in. The catch
+// is per receipt, and the FIRST error is the one kept and rethrown.
+test("a failed receipt write does not abandon the receipts after it, and the first failure is the one raised", async (t) => {
+  const f = await fixture(t, responds);
+  /** @type {string[]} */ const attempted = [];
+  const first = new Error("receipt-write-refused");
+  const second = new Error("a later failure that must not replace the first");
+  await assert.rejects(deliverCodexServer("room", [message(1), message(2), message(3)], {
+    ...f.options,
+    onProcessed: async (receipt) => {
+      attempted.push(receipt.id);
+      if (attempted.length === 1) throw first;
+      if (attempted.length === 2) throw second;
+    },
+  }), (error) => error === first);
+  assert.deepEqual(attempted, ["message-1", "message-2", "message-3"],
+    "every acknowledged message is attempted, whatever its neighbours did");
+});

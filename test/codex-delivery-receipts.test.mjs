@@ -431,3 +431,27 @@ test("advanceTo is the longest COMPLETED PREFIX, so one failure stops the advanc
     "a row with a witnessed outcome is never 'absent': absence is what this bridge says when it does "
     + "NOT know what happened, and here the consumer said so itself");
 });
+
+// Calibrated against the landed head before the repair: a row with an outcome that is not a
+// completion fell in NO bucket -- rows=1, processed=0, unresolved=0, unacknowledged=0, absent=0 --
+// so the arm printed nothing for it. That was tolerable while such a row was rare; once the
+// checkpoint moved to the acknowledgment it became what an ordinary delivery looks like whenever the
+// outcome has not arrived by the time the connection closes.
+test("an acknowledged delivery whose completion was never witnessed is REPORTED, and does not move the completed prefix", async (t) => {
+  const root = await stateRoot(t);
+  const transportRoom = path.join(root, "cli-room.ndjson");
+  const m = { ...message("unwitnessed", "1788888888.001700"), room: transportRoom };
+  await codex.recordCodexSubmitted(root, "t-unwitnessed", m);
+  await codex.recordCodexAccepted(root, "t-unwitnessed", m, { turnId: "turn-unwitnessed" });
+  await codex.recordCodexReceipt(root, "t-unwitnessed", m, { id: "unwitnessed", outcome: "closed-without-completion" });
+
+  const state = await codex.reconcileCodexIntents({ root, thread: "t-unwitnessed", room: transportRoom });
+  assert.equal(state.rows.length, 1);
+  assert.equal(state.unwitnessedCompletion.length, 1,
+    "the row is acknowledged and witnessed as NOT completed, which is its own state and needs its own name");
+  assert.deepEqual([state.unresolved.length, state.unacknowledged.length, state.absent.length, state.processed.length],
+    [0, 0, 0, 0], "and it is none of the others: an outcome exists, so it is not unwitnessed, and it is not processed");
+  assert.equal(state.advanceTo, null,
+    "the completed prefix stays completed-only: stepping over an unwitnessed row would hand back a "
+    + "coordinate asserting processing that nobody observed");
+});

@@ -776,10 +776,14 @@ an injected `fetch` so it is testable offline.
   acknowledgment carries a new turn id while the completion arrives under the original one, so the
   awaited id never completed and the poll loop stood still for the whole thirty-minute deadline. The
   checkpoint is safe there only because the journal marks the message accepted and unresolved before
-  the wait and the next arm reconciles it; without that record an early checkpoint would trade the
-  stall for silent loss. Completion is still tracked and never awaited: an outcome that arrives
-  before the call's connection closes is recorded, and one that does not is recorded as
-  `closed-without-completion` rather than waited for. Interrupted and failed turns are reported with
+  the wait and the next arm REPORTS it; without that record an early checkpoint would trade the
+  stall for silent loss. Reported, never re-delivered, and the distinction is the whole guarantee:
+  the acknowledgment means the server took the text into the thread, so an unwitnessed turn is a
+  message the bearer can still read there, and nothing resends it. Completion is still tracked and
+  never awaited: an outcome that arrives before the call's connection closes is recorded, and one
+  that does not is recorded as `closed-without-completion` and counted at the next arm as
+  acknowledged with no witnessed completion, which is what an ordinary delivery looks like whenever
+  the turn outlives the connection. Interrupted and failed turns are reported with
   distinct outcomes and no longer withhold the cursor. Inspect an uncertain start submission before
   restarting. Read
   `docs/codex-native-delivery.md` for setup, rollback and verification.
@@ -847,7 +851,10 @@ an injected `fetch` so it is testable offline.
   turn nobody completes cannot hold the deliveries behind it, and the outcome is what says whether
   the consumer actually did the work. The queue bridge records acceptance
   alone, which is all it can observe. Arming reports that room's rows before delivery starts, and
-  the wording is exact: **accepted and unresolved** means acknowledged with no outcome recorded, NOT
+  the wording is exact: **acknowledged with no witnessed completion** means the outcome IS recorded and
+  it was not a completion — the ordinary shape of a delivery whose turn outlived the connection, since
+  the checkpoint moved to the acknowledgment; it is reported, never re-delivered. **accepted and
+  unresolved** means acknowledged with no outcome recorded at all, NOT
   that a delivery is still running -- proving that would need a listing of the consumer's pending
   work, which no bridge here can obtain. **absent-unresolved** counts entries an earlier
   listing-backed reconciliation already RECORDED as gone; arming cannot observe a new one, for the
