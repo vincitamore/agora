@@ -364,6 +364,33 @@ test("listRecords: every session with state, registered or not, with its livenes
   }
 });
 
+test("departures: a gone session whose bearer is live again on the seat is a restart, never announced, and stays silent after the successor dies too", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const sess = (/** @type {string} */ slug) => ({ slug, source: "x", explicit: true });
+    const dead = () => { const e = /** @type {NodeJS.ErrnoException} */ (new Error("gone")); e.code = "ESRCH"; throw e; };
+    const kill = (/** @type {number} */ pid) => { if (pid !== process.pid) dead(); };
+    const boot = bootEpoch();
+    const ago = (/** @type {number} */ minutes) => new Date(Date.now() - minutes * 60_000);
+    // the old resident: process gone, quiet past the grace, with state in room r
+    await writeRecord(sessionDir(dir, sess("old")), sess("old"), { bearer: "Opus/ncu-command", pid: 1, pidSource: "TEST", now: ago(10) });
+    await writeCursor(sessionDir(dir, sess("old")), "r", "1");
+    // its successor: the same bearer under a new session, this process (live)
+    await writeRecord(sessionDir(dir, sess("new")), sess("new"), { bearer: "Opus/ncu-command", pid: process.pid, pidSource: "TEST" });
+    await writeCursor(sessionDir(dir, sess("new")), "r", "1");
+    let gone = await departures(dir, { selfSlug: "me", roomKey: "r", kill, boot });
+    assert.deepEqual(gone.map((g) => g.slug), [], "a restarted bearer is not a departure");
+    const marker = JSON.parse(await readFile(path.join(sessionDir(dir, sess("old")), "departed", "r.json"), "utf8"));
+    assert.equal(marker.reason, "restarted");
+    // once the successor is gone too, only the successor is announced; the old record stays silent
+    await writeRecord(sessionDir(dir, sess("new")), sess("new"), { bearer: "Opus/ncu-command", pid: 1, pidSource: "TEST", now: ago(10) });
+    gone = await departures(dir, { selfSlug: "me", roomKey: "r", kill, boot });
+    assert.deepEqual(gone.map((g) => g.slug), ["new"]);
+  } finally {
+    await cleanup();
+  }
+});
+
 test("departures: gone past the grace and within the stale horizon, not yet announced in this room, never oneself; one announcer wins", async () => {
   const { dir, cleanup } = await tmp();
   try {
