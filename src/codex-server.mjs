@@ -204,19 +204,23 @@ export async function deliverCodexServer(room, messages, options) {
     // sentinel was doing that job by ordering alone, and one fewer thing to reason about is worth
     // more here than the microsecond it saved.
     client.close();
-    try {
-      for (const entry of pending) {
-        const terminal = await entry.turn;
-        for (const message of entry.messages) {
-          const receipt = /** @type {{id:string,outcome:'completed'|'cancelled'|'failed'|'closed-without-completion'}} */ (
-            { id: message.id, outcome: terminal.outcome });
-          await options.onProcessed?.(receipt);
-        }
+    for (const entry of pending) {
+      /** @type {{turnId:string,outcome:string}} */ let terminal;
+      try { terminal = await entry.turn; }
+      catch (error) { flushError ??= error; continue; }
+      for (const message of entry.messages) {
+        const receipt = /** @type {{id:string,outcome:'completed'|'cancelled'|'failed'|'closed-without-completion'}} */ (
+          { id: message.id, outcome: terminal.outcome });
+        // Per RECEIPT, not around the loop. One catch around the whole flush turns a single failed
+        // write into the loss of every receipt after it -- the same shape as the defect this flush
+        // exists to close, one level in: there the throw skipped the flush, here it would abandon
+        // the remainder. Each message is attempted whatever its neighbours did.
+        try { await options.onProcessed?.(receipt); }
+        // The FIRST failure is the one kept: it is the one with a cause not yet contaminated by
+        // whatever the later writes hit. A failure to RECORD must never impersonate the delivery
+        // failure being recorded, so it is rethrown below only when nothing else was on its way out.
+        catch (error) { flushError ??= error; }
       }
-    } catch (error) {
-      // A failure to RECORD must never impersonate the delivery failure being recorded, so it is
-      // held and rethrown below only when nothing else was already on its way out.
-      flushError = error;
     }
   }
   if (flushError) throw flushError;

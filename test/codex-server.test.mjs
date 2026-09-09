@@ -239,3 +239,24 @@ test("an accepted batch keeps its receipts when a LATER batch is refused", async
     "every checkpointed message is also recorded; the refusal must not swallow the receipts");
   assert.ok(receipts.every(r => r.outcome === "completed" || r.outcome === "closed-without-completion"));
 });
+
+// Pre-registered by the reader BEFORE this repair existed, and it caught the repair's own excess:
+// the first version wrapped one catch around the whole flush, so a single failed receipt write
+// abandoned every receipt after it -- the defect the flush exists to close, one level in. The catch
+// is per receipt, and the FIRST error is the one kept and rethrown.
+test("a failed receipt write does not abandon the receipts after it, and the first failure is the one raised", async (t) => {
+  const f = await fixture(t, responds);
+  /** @type {string[]} */ const attempted = [];
+  const first = new Error("receipt-write-refused");
+  const second = new Error("a later failure that must not replace the first");
+  await assert.rejects(deliverCodexServer("room", [message(1), message(2), message(3)], {
+    ...f.options,
+    onProcessed: async (receipt) => {
+      attempted.push(receipt.id);
+      if (attempted.length === 1) throw first;
+      if (attempted.length === 2) throw second;
+    },
+  }), (error) => error === first);
+  assert.deepEqual(attempted, ["message-1", "message-2", "message-3"],
+    "every acknowledged message is attempted, whatever its neighbours did");
+});
