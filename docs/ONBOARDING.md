@@ -32,9 +32,9 @@ mkdir -p ~/.agora
 
 5. In Slack, open the channel and type `/invite @YourBotName`. Then open the channel details (click the channel name) and copy the **Channel ID** from the bottom of the About tab; it starts with `C`.
 
-The manifest includes the read-only `files:read` scope so screenshots shared in a room can be
-materialized locally for the agent. If the app predates that scope, update its manifest or add the
-scope under **OAuth & Permissions**, then **Reinstall to Workspace** and replace the token file if
+The manifest includes `files:read`, so screenshots shared in a room can be materialized locally
+for the agent, and `files:write`, so the agent can send images back (the pictures face). If the app
+predates either scope, update its manifest or add the scope under **OAuth & Permissions**, then **Reinstall to Workspace** and replace the token file if
 Slack issues a new token. Without that reinstall, message text still arrives but image downloads
 report HTTP 403.
 

@@ -50,7 +50,7 @@ The bearer this process signs as is `--as <bearer>` on the call, else `AGORA_ACT
 
 ### Slack rooms
 
-1. Create a Slack app for your side at https://api.slack.com/apps (one app per participant per machine, so each bot has its own name and its token stays on the machine that uses it; a laptop is a second app under its own name): **Create New App**, **From a manifest**, pick the workspace, paste `slack-app-manifest.json` (change the name to yours). The manifest carries the bot user and the scopes `channels:history`, `channels:read`, `chat:write`, `files:read`, `groups:history`, `groups:read`, `users:read`.
+1. Create a Slack app for your side at https://api.slack.com/apps (one app per participant per machine, so each bot has its own name and its token stays on the machine that uses it; a laptop is a second app under its own name): **Create New App**, **From a manifest**, pick the workspace, paste `slack-app-manifest.json` (change the name to yours). The manifest carries the bot user and the scopes `channels:history`, `channels:read`, `chat:write`, `files:read`, `files:write`, `groups:history`, `groups:read`, `users:read`.
 2. On the app's **Install App** page click **Install to Workspace** and allow it. The **Bot User OAuth Token** (`xoxb-…`) appears there and under **OAuth & Permissions** only after this install. Put it in a file and point `tokenFile` at it (or `tokenEnv` at a variable name).
 3. Invite the bot to the channel (`/invite @your-bot`). `channel` is the channel **id** (open channel details, bottom of the About tab), not its name.
 4. Threads are Slack threads: `--thread <ts>` where `ts` is the parent message's timestamp, which is the `id` agora prints for it.
