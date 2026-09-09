@@ -19,6 +19,7 @@ status=false
 stop=false
 force=false
 worker=false
+wake=addressed
 platform=$(uname -s 2>/dev/null || true)
 launchd=false
 launchd_label=
@@ -40,6 +41,7 @@ while [ "$#" -gt 0 ]; do
     --codex-token-file|-CodexTokenFile) codex_token_file=$2; shift 2 ;;
     --log-prefix|-LogPrefix) log_prefix=$2; shift 2 ;;
     --thread-interval|-ThreadInterval) thread_interval=$2; shift 2 ;;
+    --wake|-Wake) wake=$2; shift 2 ;;
     --arming-timeout|-ArmingTimeoutSeconds) arming_timeout=$2; shift 2 ;;
     --status|-Status) status=true; shift ;;
     --stop|-Stop) stop=true; shift ;;
@@ -53,6 +55,10 @@ case "$thread_interval" in
   ''|*[!0-9]*) printf '%s\n' '--thread-interval must be a positive integer' >&2; exit 2 ;;
 esac
 [ "$thread_interval" -gt 0 ] || { printf '%s\n' '--thread-interval must be a positive integer' >&2; exit 2; }
+case "$wake" in
+  all|addressed|mine) ;;
+  *) printf '%s\n' '--wake must be one of all, addressed, mine' >&2; exit 2 ;;
+esac
 case "$arming_timeout" in
   ''|*[!0-9]*) printf '%s\n' '--arming-timeout must be a positive integer' >&2; exit 2 ;;
 esac
@@ -272,11 +278,11 @@ if [ "$worker" = true ]; then
   unset AGORA_SESSION
   if [ -n "$codex_server" ]; then
     [ -n "$codex_token_file" ] && [ -f "$codex_token_file" ] || { printf '%s\n' '--codex-server requires an existing --codex-token-file' >&2; exit 2; }
-    exec "$runtime_path" "$agora_path" watch "$room" --stream --follow --json --wake addressed \
+    exec "$runtime_path" "$agora_path" watch "$room" --stream --follow --json --wake "$wake" \
       --thread-interval "$thread_interval" --coalesce 20 --max-batch 32 --codex-server "$codex_server" --codex-token-file "$codex_token_file" --codex-thread "$thread_id" >>"$log_prefix.stdout.log" 2>>"$log_prefix.stderr.log"
   fi
   [ -z "$codex_token_file" ] || { printf '%s\n' '--codex-token-file requires --codex-server' >&2; exit 2; }
-  exec "$runtime_path" "$agora_path" watch "$room" --stream --follow --json --wake addressed \
+  exec "$runtime_path" "$agora_path" watch "$room" --stream --follow --json --wake "$wake" \
     --thread-interval "$thread_interval" --coalesce 20 --max-batch 32 --codex-queue --codex-thread "$thread_id" --codex-bin "$codex_path" >>"$log_prefix.stdout.log" 2>>"$log_prefix.stderr.log"
 fi
 
@@ -294,7 +300,7 @@ create_launchd_plist() {
   for plist_value in \
     "$script_path" --worker --room "$room" --actor "$actor" --session-id "$session_id" \
     --thread-id "$thread_id" --config "$config_path" --state "$state_root" --runtime "$runtime_path" \
-    --codex-home "$codex_home" --codex-bin "$codex_path" --log-prefix "$log_prefix" --thread-interval "$thread_interval"
+    --codex-home "$codex_home" --codex-bin "$codex_path" --log-prefix "$log_prefix" --thread-interval "$thread_interval" --wake "$wake"
   do
     plutil -insert "ProgramArguments.$plist_index" -string "$plist_value" "$plist_load_path"
     plist_index=$((plist_index + 1))
@@ -345,13 +351,13 @@ elif [ "$platform" = Linux ]; then
     [ -n "$codex_token_file" ] && [ -f "$codex_token_file" ] || { printf '%s\n' '--codex-server requires an existing --codex-token-file' >&2; exit 2; }
     nohup setsid "$script_path" --worker --room "$room" --actor "$actor" --session-id "$session_id" --thread-id "$thread_id" \
       --config "$config_path" --state "$state_root" --runtime "$runtime_path" --codex-bin "$codex_path" \
-      --codex-home "$codex_home" --log-prefix "$log_prefix" --thread-interval "$thread_interval" \
+      --codex-home "$codex_home" --log-prefix "$log_prefix" --thread-interval "$thread_interval" --wake "$wake" \
       --codex-server "$codex_server" --codex-token-file "$codex_token_file" >/dev/null 2>&1 &
   else
     [ -z "$codex_token_file" ] || { printf '%s\n' '--codex-token-file requires --codex-server' >&2; exit 2; }
     nohup setsid "$script_path" --worker --room "$room" --actor "$actor" --session-id "$session_id" --thread-id "$thread_id" \
       --config "$config_path" --state "$state_root" --runtime "$runtime_path" --codex-bin "$codex_path" \
-      --codex-home "$codex_home" --log-prefix "$log_prefix" --thread-interval "$thread_interval" >/dev/null 2>&1 &
+      --codex-home "$codex_home" --log-prefix "$log_prefix" --thread-interval "$thread_interval" --wake "$wake" >/dev/null 2>&1 &
   fi
   supervisor_pid=$!
 else
