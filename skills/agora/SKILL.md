@@ -769,11 +769,18 @@ an injected `fetch` so it is testable offline.
   cannot steer it. Test both active and idle delivery on the retained session.
   Concurrent launchers serialize inspect, reclaim and start under the runtime's crash-releasing
   SQLite exclusive lock. The JSON owner record is diagnostic only and is never reclaimed by age.
-  The start response is acceptance only. Agora keeps the same connection open and correlates its
-  returned turn id to `turn/completed`; only status `completed` checkpoints. Interrupted and failed
-  turns retain the cursor with distinct outcomes. Socket closure or the bounded thirty-minute
-  completion deadline reports `closed-without-completion` because no correlated completion arrived,
-  and also retains it. Inspect an uncertain start submission before restarting. Read
+  The start response is acceptance, and acceptance is what CHECKPOINTS: the cursor advances when
+  `turn/start` returns a turn id, not when that turn completes. Waiting for the completion held every
+  later delivery behind the current one, because `turn/start` against a running turn is a STEER whose
+  acknowledgment carries a new turn id while the completion arrives under the original one, so the
+  awaited id never completed and the poll loop stood still for the whole thirty-minute deadline. The
+  checkpoint is safe there only because the journal marks the message accepted and unresolved before
+  the wait and the next arm reconciles it; without that record an early checkpoint would trade the
+  stall for silent loss. Completion is still tracked and never awaited: an outcome that arrives
+  before the call's connection closes is recorded, and one that does not is recorded as
+  `closed-without-completion` rather than waited for. Interrupted and failed turns are reported with
+  distinct outcomes and no longer withhold the cursor. Inspect an uncertain start submission before
+  restarting. Read
   `docs/codex-native-delivery.md` for setup, rollback and verification.
 - **The queue bridge is a compatibility stopgap, not the normal launch.** A Codex session started
   outside `agora codex` cannot be attached after the fact. For that legacy session, terminal output
@@ -832,8 +839,11 @@ an injected `fetch` so it is testable offline.
   session id is not evidence that the process will remain resident after the turn ends.
 - **A delivery leaves marks, and arming a watch reads them back.** Every delivery appends to
   `<state>/codex/<thread>.intents.jsonl`, one line per mark. The native path records three: an
-  INTENT before the request, an ACCEPTANCE with the turn id when `turn/start` returns one, and the
-  terminal OUTCOME, where only `completed` counts as processed. The queue bridge records acceptance
+  INTENT before the request, an ACCEPTANCE with the turn id when `turn/start` returns one — which is
+  also where the cursor advances — and the terminal OUTCOME, where only `completed` counts as
+  PROCESSED. Processed and checkpointed are now different facts: the cursor moves at acceptance so a
+  turn nobody completes cannot hold the deliveries behind it, and the outcome is what says whether
+  the consumer actually did the work. The queue bridge records acceptance
   alone, which is all it can observe. Arming reports that room's rows before delivery starts, and
   the wording is exact: **accepted and unresolved** means acknowledged with no outcome recorded, NOT
   that a delivery is still running -- proving that would need a listing of the consumer's pending

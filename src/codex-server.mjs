@@ -126,6 +126,12 @@ export async function connectCodexServer(options) {
         turnWaiters.delete(turnId);
         resolve({ turnId, outcome: "closed-without-completion" });
       }, timeoutMs);
+      // A second wait on the same turn id must not strand the first. While every waiter was awaited
+      // before the next turn was started this could not arise; now that submission does not wait, two
+      // waiters can be live at once, and a bare set() would drop the earlier one's timer on the floor
+      // -- still armed, still holding the event loop, resolving nobody. Retire it explicitly.
+      const superseded = turnWaiters.get(turnId);
+      if (superseded) { clearTimeout(superseded.timer); superseded.resolve({ turnId, outcome: "closed-without-completion" }); }
       turnWaiters.set(turnId, { resolve, timer });
     });
     return { request, waitForTurn, close };
@@ -148,6 +154,9 @@ export async function deliverCodexServer(room, messages, options) {
   const batches = codexServerBatches(room, messages); // Validate the complete batch before any effect.
   if (!batches.length) return;
   const client = await connectCodexServer(options);
+  /** Turns submitted by this call, kept so their outcomes can be recorded without gating submission.
+   * @type {{messages:import('./core.mjs').Message[], turn:Promise<{turnId:string,outcome:string}>}[]} */
+  const pending = [];
   try {
     const state = await client.request("thread/read", { threadId: options.thread, includeTurns: false });
     if (state?.thread?.id !== options.thread || !["idle", "active"].includes(state?.thread?.status?.type))
@@ -165,14 +174,33 @@ export async function deliverCodexServer(room, messages, options) {
       // and a record that cannot show accepted-but-not-processed cannot tell a running turn from a
       // dead one. A throw above this line means no acknowledgment ever existed, so no mark is written.
       for (const message of batch.messages) await options.onTurnStarted?.(message, { turnId: result.turn.id });
-      const terminal = await client.waitForTurn(result.turn.id, options.processedTimeoutMs ?? 30 * 60_000);
-      for (const message of batch.messages) {
-        const receipt = /** @type {{id:string,outcome:'completed'|'cancelled'|'failed'|'closed-without-completion'}} */ ({ id: message.id, outcome: terminal.outcome });
+      // The CHECKPOINT, and it rides the acknowledgment rather than the completion. Gating it on a
+      // correlated turn/completed made every later delivery wait on this turn: `turn/start` steers a
+      // turn that is already running, and a steer is acknowledged with a NEW turn id while the
+      // completion arrives under the ORIGINAL one -- so the id waited on here never completes, and
+      // the wait below ran to its timeout while the poll loop stood still. Measured on both Codex
+      // seats, each going deaf on the first delivery after its own arming post, which is exactly the
+      // moment its TUI was mid-turn.
+      //
+      // Checkpointing here is safe ONLY because the journal records this message as accepted and
+      // unresolved and the next arm reconciles it: without that record an early checkpoint would
+      // trade this stall for silent loss on a death between acknowledgment and completion.
+      for (const message of batch.messages) await options.onAccepted?.(message);
+      // Completion is TRACKED, never awaited: submission of the next batch does not depend on it.
+      // A receipt is recorded if the outcome arrives before this call's connection closes, and the
+      // absence of one is itself recorded below rather than waited for.
+      pending.push({ messages: batch.messages, turn: client.waitForTurn(result.turn.id, options.processedTimeoutMs ?? 30 * 60_000) });
+    }
+    // Every batch is now submitted and every cursor checkpointed. What remains is bookkeeping: take
+    // the outcomes that have already landed, and record the rest as unwitnessed by this connection.
+    // Nothing here can hold a later delivery, because there is no later delivery inside this call.
+    for (const entry of pending) {
+      const terminal = await Promise.race([entry.turn, Promise.resolve(undefined)]);
+      for (const message of entry.messages) {
+        const receipt = /** @type {{id:string,outcome:'completed'|'cancelled'|'failed'|'closed-without-completion'}} */ (
+          { id: message.id, outcome: terminal?.outcome ?? "closed-without-completion" });
         await options.onProcessed?.(receipt);
-        if (receipt.outcome === "completed") await options.onAccepted?.(message);
       }
-      if (terminal.outcome !== "completed")
-        throw new AgoraError(`Codex turn ended ${terminal.outcome}; cursor retained`, EXIT.error);
     }
   } finally { client.close(); }
 }
