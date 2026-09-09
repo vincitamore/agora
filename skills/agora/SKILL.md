@@ -823,7 +823,8 @@ an injected `fetch` so it is testable offline.
   machine never share open files), and preserve arguments containing shell metacharacters. The watch
   command they launch includes `--thread-interval 120 --coalesce 20`, so every resident uses the
   slower followed-thread cadence. Coalescing does not reduce the number of turns on the legacy queue path. Override the cadence with `-ThreadInterval N` on Windows or
-  `--thread-interval N` on POSIX. The watch itself accepts `--codex-bin` /
+  `--thread-interval N` on POSIX, and the wake filter with `-Wake` / `--wake` (`all`, `addressed`, `mine`;
+  default `addressed`, which still wakes on every unaddressed line, so a working bearer passes `mine`). The watch itself accepts `--codex-bin` /
   `AGORA_CODEX_BIN` and `--codex-thread` /
   `AGORA_CODEX_THREAD`; room content always remains one argv value. Verify the returned supervisor
   PID, the PID in the session's `armed/<room>.json`, and `agora doctor`'s live-watch count plus Codex
