@@ -1,7 +1,7 @@
 // @ts-check
 import test from "node:test";
 import assert from "node:assert/strict";
-import { access, chmod, copyFile, mkdir, open, readFile, readdir, writeFile } from "node:fs/promises";
+import { access, chmod, copyFile, mkdir, open, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -49,6 +49,11 @@ const room = process.argv[3];
 const root = process.env.AGORA_STATE;
 const session = process.env.CODEX_SESSION_ID;
 const armed = path.join(root, "sessions", \`codex-\${session}\`, "armed", \`\${room}.json\`);
+// Record the watch's pid the moment it starts, before the slow subscribe: the launcher's
+// timeout path is measured against this, since the armed record is exactly what a timed-out
+// arm never sees.
+mkdirSync(${JSON.stringify(fixture.dir)}, { recursive: true });
+writeFileSync(path.join(${JSON.stringify(fixture.dir)}, "started-" + process.argv[3] + ".pid"), String(process.pid));
 await new Promise((resolve) => setTimeout(resolve, 12_000));
 mkdirSync(path.dirname(armed), { recursive: true });
 // Match the launcher's line-oriented armed-record reader as well as the
@@ -115,6 +120,10 @@ setInterval(() => {}, 1_000);
   }
   const timeoutArgs = [...common,
     process.platform === "win32" ? "-ArmingTimeoutSeconds" : "--arming-timeout", "2"];
+  // The first arm's watch also wrote this file; drop it so the assertion below can only be
+  // satisfied by the worker the timed-out arm spawned.
+  const startedPidFile = path.join(fixture.dir, `started-${room}.pid`);
+  await rm(startedPidFile, { force: true });
   const timeoutStartedAt = Date.now();
   await assert.rejects(runFile(command, timeoutArgs, {
     env: timeoutEnvironment,
@@ -127,6 +136,17 @@ setInterval(() => {}, 1_000);
   const timeoutElapsed = Date.now() - timeoutStartedAt;
   assert.ok(timeoutElapsed >= 1_500, `two-second bound fired too early at ${timeoutElapsed} ms`);
   assert.ok(timeoutElapsed < 5_000, `two-second bound stretched to ${timeoutElapsed} ms`);
+
+  // A timed-out arm leaves no worker behind. The watch was spawned and was mid-subscribe when
+  // the launcher gave up; on Windows the worker shell's child does not die with the shell, and
+  // one such orphan per suite run accumulated 75 fixture watches on a seat before this cell
+  // measured it. Read the pid the watch recorded at its own start, then require it gone.
+  const orphanPid = Number(await readFile(startedPidFile, "utf8"));
+  assert.ok(orphanPid > 0, "the timed-out arm did spawn its watch (the launcher gave up after, not before)");
+  const gone = async () => { try { process.kill(orphanPid, 0); return false; } catch (error) { return /** @type {any} */ (error).code === "ESRCH"; } };
+  const reapDeadline = Date.now() + 3_000;
+  while (!(await gone()) && Date.now() < reapDeadline) await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.ok(await gone(), `worker ${orphanPid} survived the launcher's arming timeout`);
 });
 
 test("Codex POSIX launcher gives macOS to launchd without weakening Linux detachment", async () => {

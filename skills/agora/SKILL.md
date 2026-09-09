@@ -928,6 +928,14 @@ an injected `fetch` so it is testable offline.
   ECONNREFUSED on the recorded port licenses unlink; timeout, any other probe error, or a
   malformed lock refuses. The listen port is allocated by the OS (`127.0.0.1` port `0`,
   exclusive), not derived: a killed writer does not hand its number to the next one.
+- On Windows the launcher's worker shell runs the Node watch as a child, and a child outlives
+  a killed parent there, so every stop in `start-codex-watch.ps1` walks the process tree from
+  the pid it holds and ends the leaves first (`Stop-ProcessTree`); a timed-out arm reaps the
+  worker it spawned the same way. Measured before that: one orphaned fixture watch per suite
+  run, 75 on one seat, plus one detached service daemon per run from a test whose `rm(root)`
+  after-hook was registered ahead of its `service stop`, so stop found a stale descriptor and
+  (correctly) killed nothing. A test that starts a service stops it in the same hook that
+  removes its root, stop first; after-hooks run in registration order.
 - A watch armed as bare `agora` may be the global npm install, not the clone whose `src`
   and `bin` trees you measured. Read the armed command line. Re-arm on an explicit path
   into the clone when that is the build you mean to dogfood. Stopping the harness task
