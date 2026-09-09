@@ -866,7 +866,11 @@ an injected `fetch` so it is testable offline.
   `sessions x followed x 60/threadInterval` against the reply limit, and note that a
   session resuming after a gap pages, so one poll can spend up to ten calls.
 - A departure is announced only after the record's process is gone **and** its last write is
-  older than the grace, and only for records younger than the stale horizon. A session that
+  older than the grace, and only for records younger than the stale horizon. **A restart is not a
+  departure**: a gone record whose bearer is live again under a new session on the seat (a resident
+  relaunched by its unit, a harness restarted) is marked `restarted` for the room and never
+  announced; before this rule the sweep posted "X is no longer running ... still here: X" three
+  times in one minute on a seat whose residents had just relaunched (2026-09-09). A session that
   dies and is resumed within the grace is never announced; a record older than the horizon is
   pruned, not announced; after a reboot every recent record is announced once, which is the
   truth.

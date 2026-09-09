@@ -552,6 +552,10 @@ const departedDir = (/** @type {string} */ dir) => path.join(dir, "departed");
  * minutes are required before anyone is declared gone) and newer than the stale horizon
  * (older than that, the record is pruned, not announced). The caller announces each one
  * after winning `claimDeparture`, so several watchers on the seat post one line, not one each.
+ * A gone record whose BEARER is live again under another session on this seat is a restart, not a
+ * departure: announcing it produces the self-contradicting line "X is no longer running ... still
+ * here: X" (measured 2026-09-09 on a seat whose residents relaunch under systemd), so it is marked
+ * as handled for the room and never announced.
  * @param {string} stateRoot
  * @param {{ selfSlug: string, roomKey: string, graceMinutes?: number, staleHours?: number, now?: Date, kill?: (pid: number, sig: 0) => void, boot?: number }} opts
  */
@@ -561,11 +565,19 @@ export async function departures(stateRoot, opts) {
   const now = opts.now ?? new Date();
   /** @type {Array<{ slug: string, dir: string, record: SessionRecord }>} */
   const out = [];
-  for (const r of await listRecords(stateRoot, { kill: opts.kill, boot: opts.boot })) {
+  const records = await listRecords(stateRoot, { kill: opts.kill, boot: opts.boot });
+  const liveBearers = new Set(records.filter((r) => r.state === "live" && r.record).map((r) => /** @type {SessionRecord} */ (r.record).bearer));
+  for (const r of records) {
     if (r.slug === opts.selfSlug || !r.record || r.state !== "gone") continue;
     const age = ageHours(r.record, now);
     if (age < grace || age > stale) continue;
     if (existsSync(path.join(departedDir(r.dir), `${opts.roomKey}.json`))) continue;
+    if (liveBearers.has(r.record.bearer)) {
+      // a restart: the bearer answers under a new session; record that this room was not told,
+      // on purpose, so no later poll announces the old session once the successor is gone too
+      await markRestarted(r.dir, opts.roomKey, opts.selfSlug);
+      continue;
+    }
     // a session that never touched this room is not announced in it: a fresh room otherwise opens
     // with obituaries for bearers it never met, taken from the whole seat's roster
     if (!(await hasRoomState(r.dir, opts.roomKey))) continue;
@@ -617,6 +629,20 @@ export async function sessionScope(dir) {
     if (rec) armed.push({ key, room: rec.room, ...(rec.thread ? { thread: rec.thread } : {}), ...(rec.mode ? { mode: rec.mode } : {}), pid: rec.pid, ...(rec.build ? { build: rec.build } : {}) });
   }
   return { rooms, armed };
+}
+
+/**
+ * Mark a gone session as superseded by a live successor of the same bearer in one room, so it is
+ * never announced there. Same file as `claimDeparture` (that is what silences it), with a reason.
+ * @param {string} dir the gone session's directory @param {string} roomKey @param {string} by
+ */
+export async function markRestarted(dir, roomKey, by) {
+  await mkdir(departedDir(dir), { recursive: true });
+  try {
+    await writeFile(path.join(departedDir(dir), `${roomKey}.json`), JSON.stringify({ roomKey, by, at: new Date().toISOString(), reason: "restarted" }) + "\n", { encoding: "utf8", flag: "wx" });
+  } catch (e) {
+    if (/** @type {NodeJS.ErrnoException} */ (e).code !== "EEXIST") throw e;
+  }
 }
 
 /**
