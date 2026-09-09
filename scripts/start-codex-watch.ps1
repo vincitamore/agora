@@ -17,6 +17,8 @@ param(
     [string]$CodexTokenFile = $env:AGORA_CODEX_TOKEN_FILE,
     [string]$LogPrefix,
     [double]$ThreadInterval = 120,
+    [ValidateSet('all', 'addressed', 'mine')]
+    [string]$Wake = 'addressed',
     [int]$ArmingTimeoutSeconds = 60,
     [switch]$Status,
     [switch]$Stop,
@@ -245,7 +247,7 @@ if ($Worker) {
     $stdoutPath = "$LogPrefix.stdout.log"
     $stderrPath = "$LogPrefix.stderr.log"
     $deliveryArgs = if ($CodexServer) { @('--codex-server', $CodexServer, '--codex-token-file', $CodexTokenFile) } else { @('--codex-queue', '--codex-bin', $CodexPath) }
-    & $RuntimePath $agoraPath watch $Room --stream --follow --json --wake addressed --thread-interval $ThreadInterval --coalesce 20 --max-batch 32 --codex-thread $ThreadId @deliveryArgs 1>> $stdoutPath 2>> $stderrPath
+    & $RuntimePath $agoraPath watch $Room --stream --follow --json --wake $Wake --thread-interval $ThreadInterval --coalesce 20 --max-batch 32 --codex-thread $ThreadId @deliveryArgs 1>> $stdoutPath 2>> $stderrPath
     exit $LASTEXITCODE
 }
 
@@ -271,7 +273,8 @@ $workerArgs = @(
     '-RuntimePath', $RuntimePath,
     '-CodexPath', $CodexPath,
     '-LogPrefix', $LogPrefix,
-    '-ThreadInterval', [string]$ThreadInterval
+    '-ThreadInterval', [string]$ThreadInterval,
+    '-Wake', $Wake
 )
 if ($CodexServer) {
     if (-not $CodexTokenFile -or -not [IO.Path]::IsPathRooted($CodexTokenFile) -or -not (Test-Path -LiteralPath $CodexTokenFile -PathType Leaf)) {
