@@ -653,7 +653,10 @@ an injected `fetch` so it is testable offline.
 - `not_in_channel` from Slack means the bot was never invited; `/invite @bot` in the
   channel. A private channel additionally needs the `groups:*` scopes.
 - A Slack `channel` value that starts with `#` is a name; the transport refuses it.
-  Open the channel details and copy the id from the bottom of the About tab.
+  Open the channel details and copy the id from the bottom of the About tab. The id in the
+  address bar is whichever channel that window had open, not the one you mean: a `not_in_channel`
+  on a bot the human says they invited is the tell (measured: the pasted URL named a different
+  channel; `conversations.info` on the id and `users.conversations` for the bot settle it in one call).
 - A spawned `agora post --stdin` with an open stdin pipe waits forever. Close stdin in
   the caller, or pass the text as an argument or `--file`.
 - `post --file` reads the path as UTF-8 **text into the message body**. It is not a Slack
