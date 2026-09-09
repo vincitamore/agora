@@ -117,15 +117,24 @@ test("accepted prefix checkpoints before later native refusal", async (t) => {
   assert.deepEqual(accepted, input.slice(0,32).map(m => m.id));
 });
 
+// These two cells asserted the OLD contract: a turn that did not complete withheld the checkpoint
+// and threw. That guarantee is deliberately gone. It was the protection against losing a message on
+// a non-completion, and it cost every later delivery a wait on a turn that may never correlate --
+// which is what made both Codex seats deaf. The protection it provided now comes from the journal
+// instead: the message is marked accepted-and-unresolved before the wait, and the next arm
+// reconciles it. What these cells pin now is that the outcome is still REPORTED, and that reporting
+// a failure is no longer the same act as withholding the cursor.
 for (const [status, outcome] of [["interrupted", "cancelled"], ["failed", "failed"]])
-  test(`native ${status} is reported as ${outcome} and never checkpointed`, async (t) => {
+  test(`native ${status} is reported as ${outcome} without withholding the acknowledged checkpoint`, async (t) => {
     const f = await fixture(t, responds, /** @type {'interrupted'|'failed'} */ (status));
     /** @type {any[]} */
     const receipts = [];
-    await assert.rejects(deliverCodexServer("room", [message(1)], {
-      ...f.options, onAccepted: async () => assert.fail("terminal failure checkpointed"),
+    /** @type {string[]} */ const checkpoints = [];
+    await deliverCodexServer("room", [message(1)], {
+      ...f.options, onAccepted: async (m) => { checkpoints.push(m.id); },
       onProcessed: async receipt => { receipts.push(receipt); },
-    }), new RegExp(String(outcome)));
+    });
+    assert.deepEqual(checkpoints, ["message-1"], "the acknowledgment is the checkpoint, whatever the outcome");
     assert.deepEqual(receipts, [{ id: "message-1", outcome }]);
   });
 
@@ -143,15 +152,70 @@ test("native completion is correlated by returned turn id before processed credi
 });
 
 for (const [ending, completionStatus] of [["completion timeout", null], ["connection close", "close"]])
-  test(`${ending} without correlated completion is explicit and never checkpointed`, async (t) => {
+  test(`${ending} without correlated completion is recorded explicitly rather than awaited`, async (t) => {
     const f = await fixture(t, responds, /** @type {null|'close'} */ (completionStatus));
     /** @type {any[]} */
     const receipts = [];
-    const promise = deliverCodexServer("room", [message(1)], {
+    /** @type {string[]} */ const checkpoints = [];
+    await deliverCodexServer("room", [message(1)], {
       ...f.options, processedTimeoutMs: 10,
-      onAccepted: async () => assert.fail("missing completion checkpointed"),
+      onAccepted: async (m) => { checkpoints.push(m.id); },
       onProcessed: async receipt => { receipts.push(receipt); },
     });
-    await assert.rejects(promise, /closed-without-completion/);
+    assert.deepEqual(checkpoints, ["message-1"]);
     assert.deepEqual(receipts, [{ id: "message-1", outcome: "closed-without-completion" }]);
   });
+
+// The defect this head exists to close, driven through the real deliverCodexServer. The fixture
+// acknowledges every turn and never completes one, which is the measured shape: turn/start against
+// an ACTIVE turn is a steer, acknowledged under a new turn id while the completion arrives under the
+// original one, so the id awaited here never completes.
+//
+// The bound is deliberately the TEST timeout and not an elapsed-time assertion. An elapsed ceiling
+// would be a wall-clock coin on a shared runner; correct code returns in milliseconds and the old
+// code blocks for the full thirty-minute processed timeout, so the discriminator is the same one a
+// reader can see hang. Keeping processedTimeoutMs at its real default is what makes the mutant hang
+// rather than merely slow.
+test("a turn that never completes does not hold the batches behind it", { timeout: 30_000 }, async (t) => {
+  // Distinct turn ids per start, as the real server issues.
+  let turn = 0;
+  const f = await fixture(t, (request) => {
+    if (request.method === "initialize") return { result: {} };
+    if (request.method === "thread/read") return { result: { thread: { id: thread, status: { type: "active" } } } };
+    return { result: { turn: { id: `native-turn-${++turn}` } } };
+  }, null);
+  const many = Array.from({ length: 40 }, (_, i) => message(i + 1));
+  /** @type {string[]} */ const checkpoints = [];
+  /** @type {any[]} */ const receipts = [];
+  await deliverCodexServer("room", many, {
+    ...f.options,
+    onAccepted: async (m) => { checkpoints.push(m.id); },
+    onProcessed: async receipt => { receipts.push(receipt); },
+  });
+  const starts = f.requests.filter(r => r.method === "turn/start");
+  assert.equal(starts.length, 2, "40 messages exceed the 32-per-batch cap, so the second batch proves the first did not hold it");
+  assert.equal(checkpoints.length, many.length, "every acknowledged message is checkpointed");
+  assert.deepEqual(checkpoints, many.map(m => m.id), "and in order");
+  assert.equal(receipts.length, many.length);
+  assert.ok(receipts.every(r => r.outcome === "closed-without-completion"),
+    "an uncorrelated turn is recorded as unwitnessed, not waited on");
+});
+
+// The guard added beside the change above, and the run in which it was watched to fail: with the
+// supersession clause removed, this file's tests all PASS and the process never EXITS, because the
+// first waiter's thirty-minute timer is dropped from the map still armed. A pass/fail count cannot
+// see that, so the assertion is on the live timer itself rather than on any delivery outcome.
+// Reachable only now: while every waiter was awaited before the next start, two could not coexist.
+test("a superseded wait on one turn id is retired, not stranded with its timer armed", async (t) => {
+  const f = await fixture(t, request => responds(request, "active"), null);
+  const before = process.getActiveResourcesInfo().filter(r => r === "Timeout").length;
+  /** @type {any[]} */ const receipts = [];
+  // One constant turn id for both batches is what forces the collision; the real server does not do
+  // this, which is exactly why the stranded timer would have gone unnoticed until CI stopped exiting.
+  await deliverCodexServer("room", Array.from({ length: 40 }, (_, i) => message(i + 1)), {
+    ...f.options, onProcessed: async receipt => { receipts.push(receipt); },
+  });
+  assert.equal(receipts.length, 40);
+  const after = process.getActiveResourcesInfo().filter(r => r === "Timeout").length;
+  assert.ok(after <= before, `delivery left ${after - before} armed timer(s) behind`);
+});
