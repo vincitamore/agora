@@ -68,14 +68,34 @@ function Get-SupervisorPid([int]$WatcherPid) {
 # and ends the leaves first, so a stop is a stop whatever the shape under it.
 function Stop-ProcessTree([int]$RootPid) {
     if (-not $RootPid) { return @() }
-    $stopped = @()
-    $children = Get-CimInstance -ClassName Win32_Process -Filter "ParentProcessId=$RootPid" -ErrorAction SilentlyContinue
-    foreach ($child in @($children)) {
-        if ($child.ProcessId -and $child.ProcessId -ne $RootPid) { $stopped += Stop-ProcessTree ([int]$child.ProcessId) }
+    # One CIM read for the whole table, then walk the parent map in memory. A query per tree
+    # level costs a second or more each on a slow host, and the arming-timeout path is measured
+    # against a bound that a few of those would blow through.
+    $byParent = @{}
+    foreach ($proc in @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId -ErrorAction SilentlyContinue)) {
+        if (-not $proc.ProcessId -or -not $proc.ParentProcessId) { continue }
+        if (-not $byParent.ContainsKey([int]$proc.ParentProcessId)) { $byParent[[int]$proc.ParentProcessId] = @() }
+        $byParent[[int]$proc.ParentProcessId] += [int]$proc.ProcessId
     }
-    if (Get-Process -Id $RootPid -ErrorAction SilentlyContinue) {
-        Stop-Process -Id $RootPid -Force -ErrorAction SilentlyContinue
-        $stopped += $RootPid
+    $order = @()
+    $seen = @{ $RootPid = $true }
+    $stack = [System.Collections.Generic.Stack[int]]::new()
+    $stack.Push($RootPid)
+    while ($stack.Count -gt 0) {
+        $current = $stack.Pop()
+        $order += $current
+        if (-not $byParent.ContainsKey($current)) { continue }
+        foreach ($child in $byParent[$current]) {
+            if (-not $seen.ContainsKey($child)) { $seen[$child] = $true; $stack.Push($child) }
+        }
+    }
+    [array]::Reverse($order)
+    $stopped = @()
+    foreach ($id in $order) {
+        if (Get-Process -Id $id -ErrorAction SilentlyContinue) {
+            Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
+            $stopped += $id
+        }
     }
     return $stopped
 }
