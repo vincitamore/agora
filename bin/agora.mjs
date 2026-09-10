@@ -8,7 +8,7 @@ import { parseArgs } from "node:util";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { copyFile, readFile } from "node:fs/promises";
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -96,6 +96,7 @@ import { runUsage } from "../src/usage-cli.mjs";
 import { runUsageSessionsCli } from "../src/session-accounting.mjs";
 import { readShadowArgs, runEconomyShadowCli, ShadowInputError } from "../src/economy/shadow.mjs";
 import { clearStandDown, clearWatchStop, completeStandDownAck, declareStandDown, listStandDowns, standDownRequested } from "../src/stand-down.mjs";
+import { DEFAULT_IDLE_SECONDS, DEFAULT_MIN_CONTEXT, ROOM_MECHANICS_DOC, assertResidentSlug, configuredResidents, planCycle, readInheritMarker, removeInheritMarker, renderResidentPrompt, restartCommand, writeInheritMarker } from "../src/resident.mjs";
 import { FACE_ATTACHMENT_MODES, FACE_BUILT, FACE_SELECTORS, appendFaceRecord, facePolicyPath, listFaceRecords, normalizeSelectors, readFacePolicy, selectFaces, writeFacePolicy } from "../src/faces.mjs";
 
 /**
@@ -310,6 +311,18 @@ const SCHEMA = {
       options: {},
       does: "clear this session's stand-down record. This verb does not start a session or re-arm watches; a live session re-arms them itself. agora codex is the separate attached-session launcher",
     },
+    resident: {
+      args: ["<prompt <profile-path> | cycle <slug>...|--all | inherit <slug>>"],
+      options: {
+        "--all": "cycle: every slug in the config's residents table",
+        "--dry-run": "cycle: print the verdicts, write no marker, restart nothing",
+        "--idle <seconds>": `cycle: the last inference must be older than this (default ${DEFAULT_IDLE_SECONDS}: a one-hour prompt-cache TTL plus a margin)`,
+        "--min-context <tokens>": `cycle: the context must be at least this (default ${DEFAULT_MIN_CONTEXT}); keep it above every resident's orientation floor`,
+        "--restart <command>": "cycle: run this after writing the marker ({slug} is the resident); else the config row's restart; else the restart is the caller's",
+        "--force": "inherit: take the predecessor's position in a room this session already read",
+      },
+      does: "standing sessions. prompt prints a profile with the shipped room-mechanics block appended (the resident-sized discipline, so no skill loads at arming). cycle finds the newest live session signing as /<slug>, measures its last inference and context from the harness transcript, and when it is cold (past --idle) AND large (past --min-context) writes <state>/residents/<slug>/inherit.json naming it and restarts the unit: a successor pays its floor, a cold wake pays the whole context. inherit consumes that marker (the same inheritance as session --inherit) and is a no-op without one. Never writes the shared config; docs/RESIDENTS.md",
+    },
     doctor: { args: [], options: { "--offline": "skip the identity check", "--repair-tailcat": "restore the cached runtime from its hash-verified bundled capsule" }, does: "config, token presence per room, identity per room, this session and bearer and where each came from, the harness prompt-cache TTL where this seat can read one, and the reads a minute this seat spends with the arithmetic behind the number; three preflights for a resident bearer warn when a watch is armed against a five-minute TTL (cache-ttl), when a watch polls within half to one and a half times a TTL that was read (interval-near-ttl), and when no live watch in a room wakes on all (no-all-watch). Room and watch reports are derived. Tailcat integrity is verified locally; first use expands the bundled capsule into state, and --repair-tailcat explicitly restores a corrupt cache" },
     schema: { args: [], options: { "--json": "the whole surface as JSON, protocol included" }, does: "this description" },
     usage: {
@@ -431,6 +444,9 @@ const OPTIONS = /** @type {const} */ ({
   forget: { type: "boolean", default: false },
   inherit: { type: "string" },
   force: { type: "boolean", default: false },
+  idle: { type: "string" },
+  "min-context": { type: "string" },
+  restart: { type: "string" },
   face: { type: "string", multiple: true },
   "no-face": { type: "boolean", default: false },
   unknown: { type: "boolean", default: false },
@@ -1019,7 +1035,8 @@ async function main(argv) {
   const session = resolveSession(cfg, process.env, (line) => console.error(`agora: ${line}`));
   const sdir = sessionDir(stateRoot, session);
   const processOwner = harnessPid(cfg, process.env);
-  const record = verb === "session" || verb === "join" ? await readRecord(sdir) : await touchRecord(sdir, { build, ...processOwner });
+  // resident runs from a timer or an arming step that registers afterwards: read, never touch
+  const record = verb === "session" || verb === "join" || verb === "resident" ? await readRecord(sdir) : await touchRecord(sdir, { build, ...processOwner });
   const bearer = resolveBearer(cfg, { as: values.as, env: process.env, record });
   cfg.actor = { ...cfg.actor, name: bearer.name }; // one string: the signature, the local transport's identity
   /**
@@ -1323,6 +1340,88 @@ async function main(argv) {
     else if (rec) console.log(`stand-down cleared (was until ${rec.until}). Re-arm watches from this live session; this resume verb did not start a session.`);
     else console.log("no stand-down record for this session");
     return EXIT.ok;
+  }
+
+  if (verb === "resident") {
+    const action = roomAlias ?? "";
+    if (action === "prompt") {
+      const file = rest[0];
+      if (!file || rest.length !== 1) throw new AgoraError("agora resident prompt <profile-path>", EXIT.usage);
+      const profile = await readFile(file, "utf8").catch((e) => { throw new AgoraError(`cannot read profile ${file}: ${e.code ?? e.message}`, EXIT.error); });
+      const block = await readFile(path.join(projectRoot, ROOM_MECHANICS_DOC), "utf8");
+      process.stdout.write(renderResidentPrompt(profile, block));
+      return EXIT.ok;
+    }
+    if (action === "inherit") {
+      const slug = assertResidentSlug(String(rest[0] ?? ""));
+      if (rest.length !== 1) throw new AgoraError("agora resident inherit <slug>", EXIT.usage);
+      const marker = await readInheritMarker(stateRoot, slug);
+      if (!marker) {
+        if (json) console.log(JSON.stringify({ type: "resident-inherit", resident: slug, inherited: false, reason: "no marker" }));
+        else console.log(`no inherit marker for resident ${slug}; nothing to inherit. Register with \`agora session --as <Model>/${slug}\`.`);
+        return EXIT.ok;
+      }
+      if (marker.from === session.slug) {
+        await removeInheritMarker(stateRoot, slug);
+        throw new AgoraError(`the marker for ${slug} names this session (${session.slug}) as the predecessor; removed it. The successor runs inherit, not the session that was cycled.`, EXIT.usage);
+      }
+      if (!existsSync(path.join(stateRoot, "sessions", marker.from))) {
+        await removeInheritMarker(stateRoot, slug);
+        console.error(`agora: the marker for ${slug} named ${marker.from}, which has no state here any more (pruned?); removed the marker, nothing inherited`);
+        if (json) console.log(JSON.stringify({ type: "resident-inherit", resident: slug, inherited: false, reason: "predecessor-gone", from: marker.from }));
+        return EXIT.ok;
+      }
+      const plan = await inheritSession(stateRoot, marker.from, session, { force: values.force, dryRun: values["dry-run"] });
+      if (!plan.dryRun) await removeInheritMarker(stateRoot, slug);
+      if (json) console.log(JSON.stringify({ type: "resident-inherit", resident: slug, inherited: !plan.dryRun, marker: { at: marker.at, context: marker.context, lastInference: marker.lastInference, by: marker.by }, ...plan }));
+      else console.log(`${plan.dryRun ? "would inherit" : "inherited"} resident ${slug} from ${plan.from} (cycled ${marker.at}${marker.context ? ` at ${marker.context} context` : ""}): ${plan.cursors.length} cursor${plan.cursors.length === 1 ? "" : "s"}, ${plan.follow.length} follow set${plan.follow.length === 1 ? "" : "s"}, ${plan.ledger.lines} posted id${plan.ledger.lines === 1 ? "" : "s"}${plan.forced ? `; --force took its position in ${plan.conflicts.join(", ")}` : ""}`);
+      if (!plan.dryRun) console.error(`agora: ${plan.from}'s record was not copied; run \`agora session --as <Model>/${slug}\` so this session signs as itself`);
+      return EXIT.ok;
+    }
+    if (action === "cycle") {
+      const table = configuredResidents(cfg);
+      const slugs = [...new Set([...rest.map((r) => assertResidentSlug(String(r))), ...(values.all ? Object.keys(table) : [])])];
+      if (!slugs.length) throw new AgoraError(values.all ? "--all found no residents table in the config; name the slugs, or add residents: { <slug>: { restart?: <command> } }" : "agora resident cycle <slug>... | --all", EXIT.usage);
+      const num = (/** @type {string} */ name, /** @type {number} */ dflt) => {
+        const raw = /** @type {any} */ (values)[name];
+        if (raw === undefined) return dflt;
+        const n = Number(raw);
+        if (!Number.isInteger(n) || n < 0) throw new AgoraError(`--${name} takes a non-negative integer, not ${JSON.stringify(raw)}`, EXIT.usage);
+        return n;
+      };
+      const idleSeconds = num("idle", DEFAULT_IDLE_SECONDS);
+      const minContext = num("min-context", DEFAULT_MIN_CONTEXT);
+      /** @type {number} */
+      let rc = EXIT.ok;
+      for (const slug of slugs) {
+        const row = /** @type {any} */ (await planCycle(stateRoot, slug, { idleSeconds, minContext }));
+        if (row.action === "cycle") {
+          if (values["dry-run"]) row.action = "would-cycle";
+          else {
+            const marker = await writeInheritMarker(stateRoot, slug, { from: row.session, context: row.context, lastInference: row.lastInference, by: "cycle" });
+            row.marker = marker.file;
+            const template = values.restart !== undefined ? String(values.restart) : table[slug]?.restart;
+            if (template) {
+              const cmd = restartCommand(template, slug);
+              row.restart = cmd;
+              const result = await new Promise((resolve) => {
+                const child = spawn(cmd, { shell: true, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+                let err = "";
+                child.stderr?.on("data", (d) => { err += String(d); });
+                child.on("error", (e) => resolve({ code: -1, err: e.message }));
+                child.on("close", (code) => resolve({ code, err }));
+              });
+              row.restartExit = /** @type {any} */ (result).code;
+              if (/** @type {any} */ (result).code !== 0) { row.restartError = String(/** @type {any} */ (result).err).trim().slice(0, 400); rc = EXIT.error; }
+            } else row.restart = null;
+          }
+        }
+        if (json) console.log(JSON.stringify(row));
+        else console.log(`${slug.padEnd(14)} ${String(row.action).padEnd(12)} ${row.context !== undefined ? `context ${row.context}, idle ${row.idleSeconds}s` : ""}${row.restart ? `; restart: ${row.restart}${row.restartExit === 0 ? " ok" : ` exit ${row.restartExit}`}` : ""}  ${row.reason}`);
+      }
+      return rc;
+    }
+    throw new AgoraError(`agora resident takes prompt, cycle or inherit, not ${JSON.stringify(action)}`, EXIT.usage);
   }
 
   if (verb === "rooms") {
