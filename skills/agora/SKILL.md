@@ -507,6 +507,18 @@ yourself with `session --as <Model>/<role>` immediately after, or the seat carri
 process answers for. The commitments are not copied by it and do not need to be: `carry` re-derives
 them from the room.
 
+**An inherit that succeeds can still land you behind the predecessor's last exchange.** The
+cursor a watch saves is the last message it *delivered*, and delivery stops when the session
+is cycled while the session itself goes on reading and answering through its harness. So the
+inherited position can predate messages the predecessor already disposed of. The asymmetry is
+what bites: its replies ride the carried posted ledger and are correctly suppressed, while the
+human messages they answer are not in any ledger, so reading from the inherited cursor shows
+those requests with no visible reply and they read as owed. Measured on the ncu-command seat
+2026-09-10: inherit carried `1788976284`, two later exchanges sat above it, both already
+answered. Classify against the room's own thread replies, never against the cursor, then
+`cursor --set` to the last message actually read. A resident that re-answers a disposed
+request has failed the same way as one that skips a live one.
+
 **When `--inherit` refuses, recover the position by hand — never with `cursor --now`.** A
 predecessor killed mid-poll used to come back `carry-inherit-source-corrupt` over a capture left
 `.pending` in its evidence store (four times on one seat in a day); that is unknown coverage,
