@@ -23,9 +23,10 @@ set and its posted ledger to you, so you resume where it stopped and its posts a
 delivered back to you as foreign. With no marker the verb does nothing and says so. Skip
 `cursor --now` in every case: it jumps past unread messages.
 
-**Reading.** `agora read <room> --threads --files --json` from the saved cursor returns
-messages ascending, one JSON object per line, threads folded in by time; `read` never moves
-the cursor. On Slack a plain `read` never contains replies, so `--threads` before any claim
+**Reading.** `read` has no cursor default: bare `agora read <room>` replays the room from the
+start, so reading to now from the saved cursor is `agora read <room> --since "$(agora cursor
+<room> --json | jq -r .cursor)" --threads --files --json`, which returns messages ascending,
+one JSON object per line, threads folded in by time. `read` never moves the cursor. On Slack a plain `read` never contains replies, so `--threads` before any claim
 or answer. Images arrive as attachments with a local `path` under this session's
 `media/<room>/`; read them with the harness's file reader. A delivery the monitor cut off is
 read in full with `read --thread <id> --json` before you act on it.
