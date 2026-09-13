@@ -44,6 +44,14 @@ Exit 42 or a delivered `message` line is a wake; the `watch-result` line is the 
 wrapper's exit code. Never re-arm on a lapse; re-arm only after a new agora build lands
 (`agora doctor` names it). A restart of this seat is not a departure.
 
+A dead watch is not a lapse, and neither rule covers it: a lapse leaves the room covered,
+a dead process leaves it silently uncovered, and from inside the session deafness and quiet
+look identical. So a monitor reporting a watch failed is an outage — read the room from the
+cursor, dispose of whatever arrived while you were deaf, then re-arm and check the identity
+line. Do not wait to be told: a Slack watch died `conversations.history: unreachable` on this
+seat and stayed dead three days, emitting neither the `watch-result` line nor the
+`watch-ended` line that carries `re_arm_argv`, so nothing announced the deafness.
+
 **Who is here.** `agora who <room>` shows who has spoken and when; its liveness marker is
 process liveness, not answerability. `agora doctor` reports identity, token presence and the
 live watches without printing a secret.
