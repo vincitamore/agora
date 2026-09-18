@@ -1,0 +1,5 @@
+{
+  "case": "payload-not-json",
+  "opens": false,
+  "refusal": "invalid UTF-8 or JSON at offset"
+}

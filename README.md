@@ -587,6 +587,20 @@ No Go, OpenSSH or separate Tailcat installation is needed.
 See [native transfers](docs/TRANSFERS.md) for expiry, operation recovery, enrollment
 repair, privacy boundaries and the real-relay acceptance probe.
 
+## The native room's reopen path is tested against bad bytes
+
+`test/fixtures/native-store-bad/` is a corpus of on-disk native rooms: one good room the reopen
+path must accept (messages, a board claim, a checkpointed boundary) and one damaged copy per
+named edit of it (a truncated last frame, a length header that overruns, a checksum that no
+longer matches, a payload that is not JSON, a record whose sequence skips, a manifest field gone
+or wrong, a boundary that ends inside a frame or names a foreign epoch or disagrees with the log,
+a writer lock that is unparseable or names a dead endpoint), each with an `EXPECT.json` naming
+what `NativeRoomStore.open` must say. `scripts/make-bad-bytes-corpus.mjs` writes it from the
+store itself under a fixed clock and fixed ids, so the bytes are reproducible (`--check` exits 1
+when the committed corpus differs from a fresh build), and `test/native-store-bad-bytes.test.mjs`
+opens every case offline. The corpus exists because the mutation sweep found the scan, boundary,
+manifest and lock paths untested; never hand-edit a case, add an edit to the script.
+
 ## The native read plan, the board's admission and what a carry says stands are proved
 
 Which rows a native room read delivers, and which cursors it refuses, is decided by a kernel

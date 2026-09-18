@@ -1,0 +1,5 @@
+{
+  "case": "manifest-room-mismatch",
+  "opens": false,
+  "refusal": "manifest is invalid"
+}
