@@ -6,8 +6,9 @@
 //
 //   BEND_CLONE=<path to a bendlang/bend checkout> bun spec/build-kernel.ts [--spec <name>] [--check]
 //
-// Kernels: `cursor` (spec/cursor.bend, laws spec/LAWS.bend, proof spec/PROOF.bend) and
-// `board` (spec/board.bend, spec/BOARD-LAWS.bend, spec/BOARD-PROOF.bend). No --spec
+// Kernels: `cursor` (spec/cursor.bend, laws spec/LAWS.bend, proof spec/PROOF.bend),
+// `board` (spec/board.bend, spec/BOARD-LAWS.bend, spec/BOARD-PROOF.bend) and `settlement`
+// (spec/settlement.bend, the singulis ledger, with SETTLEMENT-LAWS/-PROOF). No --spec
 // regenerates every kernel. --check regenerates into memory and exits 1 when a committed
 // file differs.
 
@@ -20,10 +21,16 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CLONE = process.env.BEND_CLONE ?? resolve(ROOT, "..", "bend-src");
 const MAIN = join(CLONE, "bend2", "main.ts").replaceAll("\\", "/");
 
-const KERNELS: Record<string, { source: string; laws: string; proof: string; out: string }> = {
+const KERNELS: Record<string, { source: string; laws: string; proof: string; out: string; origin?: string }> = {
   cursor: { source: "spec/cursor.bend", laws: "spec/LAWS.bend", proof: "spec/PROOF.bend", out: "src/native-cursor.kernel.mjs" },
   board: { source: "spec/board.bend", laws: "spec/BOARD-LAWS.bend", proof: "spec/BOARD-PROOF.bend", out: "src/native-board.kernel.mjs" },
+  // the singulis settlement ledger, byte-identical to projects/singulis/spec/settlement.bend
+  // (its laws and proof carried beside it with the import lines renamed); `--check` also diffs
+  // the source against the singulis copy when that tree is present (SINGULIS_SPEC, else
+  // ../singulis/spec), so the two consumers keep one kernel
+  settlement: { source: "spec/settlement.bend", laws: "spec/SETTLEMENT-LAWS.bend", proof: "spec/SETTLEMENT-PROOF.bend", out: "src/native-settlement.kernel.mjs", origin: "settlement.bend" },
 };
+const SINGULIS = process.env.SINGULIS_SPEC ?? resolve(ROOT, "..", "singulis", "spec");
 
 const args = process.argv.slice(2);
 const check = args.includes("--check");
@@ -80,6 +87,14 @@ for (const name of names) {
   ].join("\n");
   const js = header + Comp.js_lib(book, outs, outs);
 
+  if (k.origin && existsSync(join(SINGULIS, k.origin))) {
+    if (readFileSync(join(SINGULIS, k.origin), "utf8") !== readFileSync(join(ROOT, k.source), "utf8")) {
+      console.error(`${k.source} differs from ${join(SINGULIS, k.origin)}: the settlement kernel is one source in two trees; copy, never edit one side`);
+      failed = true;
+      continue;
+    }
+    console.log(`ok   ${k.source} is byte-identical to the singulis copy`);
+  }
   if (check) {
     const committed = existsSync(out) ? readFileSync(out, "utf8") : "";
     if (committed !== js) {

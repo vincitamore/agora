@@ -586,7 +586,7 @@ No Go, OpenSSH or separate Tailcat installation is needed.
 See [native transfers](docs/TRANSFERS.md) for expiry, operation recovery, enrollment
 repair, privacy boundaries and the real-relay acceptance probe.
 
-## The native read plan and the board's admission are proved
+## The native read plan, the board's admission and what a carry says stands are proved
 
 Which rows a native room read delivers, and which cursors it refuses, is decided by a kernel
 whose properties are machine-checked. `spec/cursor.bend` is the kernel (a foreign epoch is
@@ -607,8 +607,19 @@ verb that names what it drops; a refusal changes nothing). `src/native-board.ker
 compiled form and `native-store.mjs` `#appendBoard` asks it whether an act is admitted, with the
 error messages unchanged; the lease length a record carries stays the store's policy.
 
-To change either, edit the `.bend` source (and the laws, if the claim moves), then regenerate
-with a Bend checkout on hand (`BEND_CLONE=<path> bun spec/build-kernel.ts [--spec cursor|board]`):
+What a session's `carry` says still stands is the third kernel, and it is not agora's own:
+`spec/settlement.bend` is a byte-for-byte copy of the singulis settlement ledger (an append-only
+list of `Assert`, `Allocate` and `Retract` entries, where a retraction must name the coordination
+step that made it), with `spec/SETTLEMENT-LAWS.bend` (a fact stands only through an exhibit; an
+exhibit settles its fact; nothing is unsettled without coordination) and `spec/SETTLEMENT-PROOF.bend`
+carried beside it. `carry`'s room fold asserts each of the session's verdict posts as a fact and
+retracts it under the session's own step when a later post `withdraws:` it or answers it by `re:`;
+the standing facts are the `verdicts` field and the retracted ones are `superseded`. The two
+consumers share one source: `build-kernel.ts` refuses to emit the settlement kernel when the copy
+differs from `../singulis/spec/settlement.bend` (or `SINGULIS_SPEC`) where that tree is present.
+
+To change any of them, edit the `.bend` source (and the laws, if the claim moves), then regenerate
+with a Bend checkout on hand (`BEND_CLONE=<path> bun spec/build-kernel.ts [--spec cursor|board|settlement]`):
 the script proves the kernel's PROOF file first, refuses `@unsafe`, `?TODO` and hash imports, and
 emits the file. `bun spec/build-kernel.ts --check` exits 1 when a committed file is not a fresh
 regeneration; `test/native-cursor-kernel.test.mjs` runs that check for every kernel wherever `bun`

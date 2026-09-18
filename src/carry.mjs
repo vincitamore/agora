@@ -4,6 +4,7 @@ import { readFollow } from "./follow.mjs";
 import { armedAlive, readArmed, sessionScope } from "./session.mjs";
 import { after, boundedRoots, mergeAscending } from "./threads.mjs";
 import { matchesAddress, parseTrailers } from "./trailers.mjs";
+import Settlement from "./native-settlement.kernel.mjs";
 
 /**
  * What a session hands to whoever holds the seat after it -- across a compaction, or to a
@@ -230,10 +231,36 @@ function namedIds(v) {
 export function foldRoom(msgs, posted, who) {
   /** @type {Array<Ref & { subject: string }>} */
   const releases = [];
-  /** @type {Array<Ref & { verdict: string, exhibits: string[] }>} */
-  const verdicts = [];
+  /**
+   * What this session says stands is decided by the singulis settlement kernel
+   * (spec/settlement.bend, proved; vendored as native-settlement.kernel.mjs): every verdict post
+   * asserts its own id as a fact on an append-only ledger, and a `withdraws:` (or a verdict
+   * answering a verdict by `re:`) retracts that fact under a coordination step naming this
+   * session, so `standing(ledger, fact)` is the verdict set and its complement is the superseded
+   * set. Nothing here re-implements the ledger's reading; the fold only records, in retraction
+   * order, which post superseded which.
+   * @type {Array<Ref & { verdict: string, exhibits: string[] }>}
+   */
+  const verdictPosts = [];
   /** @type {Array<Ref & { verdict: string, exhibits: string[], supersededBy: string }>} */
   const superseded = [];
+  /** @type {Map<string, bigint>} verdict post id or cursor -> the fact the ledger keys it by */
+  const facts = new Map();
+  /** @param {string} id */
+  const factOf = (id) => ({ $: "Fact", id: /** @type {bigint} */ (facts.get(id)) });
+  /** the ledger, newest first, in the kernel's own list shape @type {any} */
+  let ledger = { $: "Nil" };
+  const self = { $: "Step", members: { $: "Con", head: 0n, tail: { $: "Nil" } } };
+  /** retract one of this session's standing verdicts, recording who superseded it
+   * @param {string} named @param {string} by */
+  const retract = (named, by) => {
+    if (!facts.has(named)) return;
+    const fact = factOf(named);
+    if (Settlement.standing(ledger, fact) !== true) return;
+    const post = verdictPosts.find((v) => v.id === named || v.cursor === named);
+    if (post) superseded.push({ ...post, supersededBy: by });
+    ledger = { $: "Con", head: { $: "Retract", fact, step: self }, tail: ledger };
+  };
   /** @type {Array<Ref & { to: string[] }>} */
   const obligations = [];
 
@@ -286,8 +313,7 @@ export function foldRoom(msgs, posted, who) {
     // the one that withdrew it. A link that depends on remembering a second flag while being wrong
     // about something is a link nobody makes, so the retraction is a flag of its own.
     for (const id of withdrawn) {
-      const at = verdicts.findIndex((v) => v.id === id || v.cursor === id);
-      if (at >= 0) superseded.push({ ...verdicts.splice(at, 1)[0], supersededBy: m.id });
+      retract(id, m.id);
       // withdrawing the post that took a subject hands the subject back, exactly as a `release:`
       // does, and is carried in the same list so a successor sees the retraction rather than a gap
       for (const subject of claimedBy.get(id) ?? []) {
@@ -311,11 +337,12 @@ export function foldRoom(msgs, posted, who) {
         // withdrawn from one that was never posted, and would go looking for its exhibit again.
         // `withdraws:` above is the same move said outright; this one stays for the block that
         // says it by answering.
-        for (const id of answers) {
-          const at = verdicts.findIndex((v) => v.id === id || v.cursor === id);
-          if (at >= 0) superseded.push({ ...verdicts.splice(at, 1)[0], supersededBy: m.id });
-        }
-        verdicts.push({ verdict: t.value, exhibits, ...ref });
+        for (const id of answers) retract(id, m.id);
+        const fact = { $: "Fact", id: BigInt(verdictPosts.length + 1) };
+        facts.set(m.id, fact.id);
+        facts.set(m.cursor, fact.id);
+        verdictPosts.push({ verdict: t.value, exhibits, ...ref });
+        ledger = { $: "Con", head: { $: "Assert", fact }, tail: ledger };
       }
     }
     // under both names a later `withdraws:` may use: an agent that read the cursor off `post`
@@ -355,7 +382,7 @@ export function foldRoom(msgs, posted, who) {
   return {
     claims: [...openClaims.values()],
     releases,
-    verdicts,
+    verdicts: verdictPosts.filter((v) => Settlement.standing(ledger, factOf(v.id)) === true),
     superseded,
     obligations,
     owed,
