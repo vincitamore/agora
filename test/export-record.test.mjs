@@ -69,6 +69,26 @@ test("the mapping: messages verbatim, settlement artifacts for verdicts and with
   assert.equal(files.has("members/U1.md"), false, "a human is a person, not a member");
 });
 
+test("a retraction is written only for the author's own post in the window, as carry reads it", () => {
+  // another author's `re:` + verdict contests m1 and withdraws nothing; a `withdraws:` naming a
+  // stranger's post or a post outside the window retracts nothing (the second is counted)
+  const cross = [
+    msg("m1", "passes\n\nverdict: pass\nexhibit: run 1\n\n-- Grace/settle"),
+    msg("m2", "fails\n\nre: m1\nverdict: fail\nexhibit: their run\n\n-- Codex/ops", { who: "Codex/ops" }),
+    msg("m3", "taking yours back\n\nwithdraws: m1\n\n-- Codex/ops", { who: "Codex/ops" }),
+    msg("m4", "taking a ghost back\n\nwithdraws: m99\n\n-- Grace/settle"),
+  ];
+  const { files, summary } = buildRecord(cross, SOURCE);
+  assert.equal(summary.retractions, 0);
+  assert.equal(summary.unresolved, 1);
+  assert.deepEqual([...files.keys()].filter((p) => p.startsWith("artifacts/")).sort(), ["artifacts/m1.md", "artifacts/m2.md"]);
+  assert.equal(fm(files.get("artifacts/m2.md")).retracts, undefined);
+  const { standing } = standingByExport(files);
+  assert.deepEqual(standing.sort(), ["m1", "m2"], "both facts stand; a contest is not a withdrawal");
+  const own = new Set(["m1", "m4"]);
+  assert.deepEqual(foldRoom(cross, own, { bearer: "Grace/settle" }).verdicts.map((v) => v.id), ["m1"], "carry agrees: m1 stands");
+});
+
 test("member slugs are filesystem-safe and never empty", () => {
   assert.equal(memberSlug("Grace/settle"), "Grace-settle");
   assert.equal(memberSlug("  ///  "), "unnamed");
