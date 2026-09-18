@@ -34,6 +34,7 @@ const RED = join(SPEC, "laws-red");
 const GREEN = "All terms check.";
 const CLONE = process.env.BEND_CLONE ?? resolve(SPEC, "..", "..", "bend-src");
 const MAIN = join(CLONE, "bend2", "main.ts").replaceAll("\\", "/");
+const ROOT = resolve(SPEC, "..");
 
 const KERNELS: Record<string, { source: string; laws: string; proof: string }> = {
   cursor: { source: "cursor.bend", laws: "LAWS.bend", proof: "PROOF.bend" },
@@ -72,9 +73,21 @@ const escape = (s: string) => s.replace(/[-.]/g, (c) => "\\" + c);
 
 function main(argv: string[]): number {
   if (!existsSync(MAIN)) {
-    console.error(`no Bend checkout at ${CLONE} (set BEND_CLONE)`);
+    console.error(`no Bend checkout at ${CLONE} (set BEND_CLONE, or fetch the pin: node scripts/bend-checkout.mjs)`);
     return 2;
   }
+
+// the checkout must be at the pinned commit: a proof against another Bend is a proof of nothing
+// this repository ships (spec/bend.pin.json; scripts/bend-checkout.mjs fetches the pin)
+const PIN = JSON.parse(readFileSync(join(ROOT, "spec", "bend.pin.json"), "utf8"));
+{
+  const head = spawnSync("git", ["-C", CLONE, "rev-parse", "HEAD"], { encoding: "utf8" });
+  const at = (head.stdout ?? "").trim();
+  if (head.status !== 0 || at !== PIN.sha) {
+    console.error(`Bend checkout at ${CLONE} is ${at || "not a git checkout"}; the pin is ${PIN.sha} (${PIN.version}). Fetch it: node scripts/bend-checkout.mjs --into ${CLONE}`);
+    return 2;
+  }
+}
   const at = argv.indexOf("--kernel");
   const names = at >= 0 ? [argv[at + 1]] : Object.keys(KERNELS);
   for (const n of names) if (!KERNELS[n]) { console.error(`unknown kernel ${n}; known: ${Object.keys(KERNELS).join(", ")}`); return 2; }

@@ -1091,8 +1091,11 @@ Details and maintainer checks: [docs/TRANSFERS.md](../../docs/TRANSFERS.md).
   the singulis ledger and is never edited here: the builder refuses to emit it when it differs from
   the singulis tree beside this one. Change a plan in the `.bend` source and regenerate with
   `BEND_CLONE=<checkout> bun spec/build-kernel.ts [--spec cursor|board|settlement]`; never edit a
-  `.mjs`. `--check` and `test/native-cursor-kernel.test.mjs` refuse a committed file that is not a
-  fresh regeneration (the test skips by name where bun or the checkout is absent). Every law
+  `.mjs`. The checkout is pinned by `spec/bend.pin.json` and fetched by `node
+  scripts/bend-checkout.mjs` (house mirror first); the builder and the laws gate refuse any other
+  commit, and CI runs both on every push. `--check` and `test/native-cursor-kernel.test.mjs` refuse
+  a committed file that is not a fresh regeneration (the test skips by name where bun or the
+  checkout is absent; CI never skips, because the checkout step runs first). Every law
   ships a red mutation of its model under `spec/laws-red/<kernel>/<law>/` and
   `bun spec/laws-check.ts` (`test/native-laws-red.test.mjs`) requires each to redden the checker
   at that law in isolation; a new law lands with its fixture, and a law no mutation can redden
