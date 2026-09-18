@@ -1,0 +1,5 @@
+{
+  "case": "boundary-digest-disagrees",
+  "opens": false,
+  "refusal": "does not match its acknowledged sequence/digest boundary"
+}

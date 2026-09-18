@@ -1,0 +1,5 @@
+{
+  "case": "manifest-record-limit-zero",
+  "opens": false,
+  "refusal": "manifest is invalid"
+}
