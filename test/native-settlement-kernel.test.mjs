@@ -50,3 +50,14 @@ test("a stranger's step is inert; the asserter's step, with anyone else in it, u
   assert.deepEqual(S.read(l, fact(1n)), { $: "Settled", member: 7n });
   assert.deepEqual(S.read(stranger, fact(1n)), { $: "Settled", member: 7n });
 });
+
+test("a ledger of a hundred thousand entries reads in constant stack (the read is one tail-recursive pass)", () => {
+  // measured before the accumulator read: RangeError near 4,900 entries in the emitted kernel
+  const n = 100_000;
+  const l = list(Array.from({ length: n }, (_, i) => asserted(BigInt(i % 50), BigInt(i % 3))));
+  assert.equal(S.standing(l, fact(49n)), true);
+  assert.deepEqual(S.read(l, fact(7n)), { $: "Settled", member: 1n }, "the newest assertion of fact 7 is entry 7, by member 7 % 3");
+  const withStranger = { $: "Con", head: { $: "Retract", fact: fact(7n), step: { $: "Step", members: list([9n]) } }, tail: l };
+  assert.equal(S.standing(withStranger, fact(7n)), true, "a stranger's step above a hundred thousand entries retracts nothing");
+});
+

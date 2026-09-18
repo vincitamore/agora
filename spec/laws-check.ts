@@ -49,6 +49,14 @@ function check(dir: string, proof: string): { out: string; green: boolean } {
   return { out, green: out === GREEN };
 }
 
+/** run a fixture's witness.bend (a pure main) and return the last line the checker printed */
+function witness(dir: string): string {
+  const file = join(dir, "witness.bend").replaceAll("\\", "/");
+  const p = spawnSync("bun", [MAIN, file], { encoding: "utf8", env: { ...process.env, BEND_HUB: "http://127.0.0.1:1" } });
+  const out = ((p.stdout ?? "") + (p.stderr ?? "")).trim().split(/\r?\n/);
+  return out[out.length - 1] ?? "";
+}
+
 function lawNames(text: string): string[] {
   return [...text.matchAll(/^law ([A-Za-z0-9_.]+):/gm)].map((m) => m[1]);
 }
@@ -142,7 +150,12 @@ const PIN = JSON.parse(readFileSync(join(ROOT, "spec", "bend.pin.json"), "utf8")
       const dir = join(RED, name, n);
       if (!existsSync(dir) || !statSync(dir).isDirectory()) { say(false, `${n}: no red fixture under laws-red/${name}/${n}/`); continue; }
       const overlay = readdirSync(dir);
-      const foreign = overlay.filter((f) => f !== k.source);
+      // a witness.bend beside the mutation is the semantic exhibit: its pure main evaluates the
+      // law's claim on concrete values and must print True{} beside the mutation and False{}
+      // beside the real model; with one present, the red may fire in a kit lemma the law's proof
+      // depends on (proof terms spell the model's shape), since the witness carries the falsity
+      const foreign = overlay.filter((f) => f !== k.source && f !== "witness.bend");
+      const witnessed = overlay.includes("witness.bend");
       if (foreign.length) { say(false, `${n}: fixture may overlay only ${k.source} (found ${foreign.join(", ")})`); continue; }
       if (!overlay.includes(k.source)) { say(false, `${n}: fixture carries no ${k.source}`); continue; }
       const tmp = mkdtempSync(join(tmpdir(), "laws-red-"));
@@ -152,12 +165,25 @@ const PIN = JSON.parse(readFileSync(join(ROOT, "spec", "bend.pin.json"), "utf8")
         writeFileSync(join(tmp, k.proof), isolateProof(src[k.proof], n));
         const r = check(tmp, k.proof);
         const where = r.out.match(locAt)?.[1];
+        let wRed = "", wReal = "";
+        if (witnessed) {
+          cpSync(join(dir, "witness.bend"), join(tmp, "witness.bend"));
+          const real = mkdtempSync(join(tmpdir(), "laws-real-"));
+          try {
+            cpSync(join(SPEC, k.source), join(real, k.source));
+            cpSync(join(dir, "witness.bend"), join(real, "witness.bend"));
+            wRed = witness(tmp); wReal = witness(real);
+          } finally { rmSync(real, { recursive: true, force: true }); }
+        }
+        const witnessOk = witnessed && wRed === "True{}" && wReal === "False{}";
         const malformed = inModel.test(r.out) || /TODOs? found/.test(r.out);
         const why = r.green ? " (STAYED GREEN)"
           : malformed ? ` (malformed fixture: ${r.out.split("\n").find((l) => /Location|TODO/.test(l))})`
+          : witnessOk ? ` (fired at ${r.out.match(/Location: (\S+)/)?.[1] ?? "?"}; witness violated under the mutation, holds under the real model)`
+          : witnessed ? ` (witness printed ${wRed || "nothing"} under the mutation and ${wReal || "nothing"} under the real model)`
           : where === n ? ""
           : ` (fired elsewhere: ${r.out.match(/Location: (\S+)/)?.[1] ?? r.out.split("\n")[0]})`;
-        say(!r.green && !malformed && where === n, `${n}: red fixture reddens the gate at this law, in isolation${why}`);
+        say(!r.green && !malformed && (witnessed ? witnessOk : where === n), `${n}: red fixture reddens the gate at this law, in isolation${why}`);
       } finally {
         rmSync(tmp, { recursive: true, force: true });
       }
