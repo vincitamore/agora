@@ -7,6 +7,7 @@ import path from "node:path";
 import { AgoraError } from "./core.mjs";
 import Kernel from "./native-cursor.kernel.mjs";
 import BoardKernel from "./native-board.kernel.mjs";
+import { nat as kernelNat } from "./kernel-nat.mjs";
 import { nativeCursor, nativeDigest, nativeMessageId, parseNativeCursor, validateNativeEpoch, validateNativeId } from "./native-protocol.mjs";
 import { ProtocolValidationError } from "./protocol/common.mjs";
 import { validateBoardPayload } from "./protocol/operation.mjs";
@@ -502,7 +503,7 @@ export class NativeRoomStore {
     /** @param {string} id */
     const nat = (id) => { if (!interned.has(id)) interned.set(id, BigInt(interned.size + 1)); return /** @type {bigint} */ (interned.get(id)); };
     const holder = stored
-      ? { $: "Held", account: nat(stored.accountId), lease: nat(stored.leaseId), fence: nat(stored.fence), expires: BigInt(Math.max(0, Date.parse(stored.expiresAt) || 0)) }
+      ? { $: "Held", account: nat(stored.accountId), lease: nat(stored.leaseId), fence: nat(stored.fence), expires: kernelNat(Math.max(0, Date.parse(stored.expiresAt) || 0), "the stored expiry") }
       : { $: "NoHolder" };
     const me = nat(authenticated.accountId);
     const fenceNamed = payload.action === "renew" || payload.action === "release" ? payload.fence : "";
@@ -511,7 +512,11 @@ export class NativeRoomStore {
       : payload.action === "release" ? { $: "Release", account: me, lease: nat(payload.leaseId), fence: nat(payload.fence) }
       : payload.action === "break" ? { $: "Break", human: input.authorKind === "human" }
       : { $: "Contest" };
-    const verdict = BoardKernel.judge(act, holder, BigInt(this.records.length + 1), BigInt(this.now().getTime()));
+    // every number the kernel receives is checked against the interpreter's Nat ceiling first
+    // (src/kernel-nat.mjs): the kernel aborts past it with a bare string, the store refuses by name
+    const now = kernelNat(this.now().getTime(), "the clock");
+    kernelNat(now + 1000n, "the expiry the kernel would compute");
+    const verdict = BoardKernel.judge(act, holder, kernelNat(this.records.length + 1, "the cursor"), now);
     if (verdict.$ === "Held_by_another" && live)
       throw new AgoraError(`native board subject ${payload.subject} is held at ${live.cursor} by ${live.accountId} until ${live.expiresAt}`);
     if (verdict.$ === "Not_the_holder")
@@ -635,7 +640,7 @@ export class NativeRoomStore {
     // the kernel generated from spec/cursor.bend, whose laws the checker proves: a foreign epoch and
     // a future sequence are refused, and a delivery is exactly the rows after the cursor, capped by
     // the limit and by the committed sequence (spec/LAWS.bend).
-    const plan = Kernel.plan(cursor.epoch === this.manifest.epoch, BigInt(this.records.length), BigInt(cursor.sequence), BigInt(limit));
+    const plan = Kernel.plan(cursor.epoch === this.manifest.epoch, kernelNat(this.records.length, "the committed sequence"), kernelNat(cursor.sequence, "the cursor sequence"), kernelNat(limit, "the read limit"));
     if (plan.$ === "RefusedEpoch") throw new AgoraError(`native room cursor belongs to epoch ${cursor.epoch}, not live epoch ${this.manifest.epoch}; recover explicitly without advancing`);
     if (plan.$ === "RefusedFuture") throw new AgoraError(`native room cursor ${cursor.sequence} exceeds committed sequence ${this.records.length}; recover explicitly without advancing`);
     return messages(this.records.slice(Number(plan.from) - 1, Number(plan.to)));
