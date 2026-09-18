@@ -586,7 +586,7 @@ No Go, OpenSSH or separate Tailcat installation is needed.
 See [native transfers](docs/TRANSFERS.md) for expiry, operation recovery, enrollment
 repair, privacy boundaries and the real-relay acceptance probe.
 
-## The native read plan is proved
+## The native read plan and the board's admission are proved
 
 Which rows a native room read delivers, and which cursors it refuses, is decided by a kernel
 whose properties are machine-checked. `spec/cursor.bend` is the kernel (a foreign epoch is
@@ -598,13 +598,23 @@ and `spec/PROOF.bend` proves them under the Bend 2 checker. `src/native-cursor.k
 that source compiled to plain JavaScript and committed, so the CLI keeps zero runtime
 dependencies; `src/native-store.mjs` imports it and never re-implements the plan.
 
-To change the plan, edit `spec/cursor.bend` (and the laws, if the claim moves), then
-regenerate with a Bend checkout on hand (`BEND_CLONE=<path> bun spec/build-kernel.ts`): the
-script proves `spec/PROOF.bend` first, refuses `@unsafe`, `?TODO` and hash imports, and emits the
-file. `bun spec/build-kernel.ts --check` exits 1 when the committed file is not a fresh
-regeneration; `test/native-cursor-kernel.test.mjs` runs that check wherever `bun` and a checkout
-exist and skips by name elsewhere, and pins the kernel's JavaScript face (BigInt in, tagged
-objects out) everywhere. Never edit the generated file.
+The board's admission is the second kernel: `spec/board.bend` judges a claim, renew, release,
+contest or break against the live holder (an expired lease is no holder), and `spec/BOARD-LAWS.bend`
+states nine claims proved by `spec/BOARD-PROOF.bend` (one live holder per subject; an expired lease
+is free; a free subject is fenced at the claim's own cursor; only the holder releases; a stranger is
+refused; a stale fence is refused; renew keeps the holder and extends the lease; break is a human
+verb that names what it drops; a refusal changes nothing). `src/native-board.kernel.mjs` is its
+compiled form and `native-store.mjs` `#appendBoard` asks it whether an act is admitted, with the
+error messages unchanged; the lease length a record carries stays the store's policy.
+
+To change either, edit the `.bend` source (and the laws, if the claim moves), then regenerate
+with a Bend checkout on hand (`BEND_CLONE=<path> bun spec/build-kernel.ts [--spec cursor|board]`):
+the script proves the kernel's PROOF file first, refuses `@unsafe`, `?TODO` and hash imports, and
+emits the file. `bun spec/build-kernel.ts --check` exits 1 when a committed file is not a fresh
+regeneration; `test/native-cursor-kernel.test.mjs` runs that check for every kernel wherever `bun`
+and a checkout exist and skips by name elsewhere, and the two `native-*-kernel.test.mjs` files pin
+each kernel's JavaScript face (BigInt in, tagged objects out) everywhere. Never edit a generated
+file.
 
 ## Development commands
 

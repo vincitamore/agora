@@ -55,7 +55,7 @@ test("consecutive reads are contiguous and disjoint", () => {
   assert.equal(cursor, 10n);
 });
 
-test("the committed kernel is a fresh regeneration of the proven source", (t) => {
+test("every committed kernel is a fresh regeneration of its proven source", (t) => {
   const clone = process.env.BEND_CLONE ?? resolve(ROOT, "..", "bend-src");
   const bun = spawnSync("bun", ["--version"], { encoding: "utf8" });
   if (bun.error || !existsSync(resolve(clone, "bend2", "main.ts"))) {

@@ -6,6 +6,7 @@ import net from "node:net";
 import path from "node:path";
 import { AgoraError } from "./core.mjs";
 import Kernel from "./native-cursor.kernel.mjs";
+import BoardKernel from "./native-board.kernel.mjs";
 import { nativeCursor, nativeDigest, parseNativeCursor, validateNativeEpoch, validateNativeId } from "./native-protocol.mjs";
 import { ProtocolValidationError } from "./protocol/common.mjs";
 import { validateBoardPayload } from "./protocol/operation.mjs";
@@ -492,20 +493,39 @@ export class NativeRoomStore {
     }
     const stored = this.holders.get(payload.subject);
     const live = this.#liveHolder(payload.subject);
-    if (payload.action === "claim") {
-      if (live)
-        throw new AgoraError(`native board subject ${payload.subject} is held at ${live.cursor} by ${live.accountId} until ${live.expiresAt}`);
-    } else if (payload.action === "release" || payload.action === "renew") {
-      if (!live || live.accountId !== authenticated.accountId || live.leaseId !== payload.leaseId)
-        throw new AgoraError(`native board subject ${payload.subject} is not held by this account under that lease`);
-      if (live.fence !== payload.fence)
-        throw new AgoraError(`native board subject ${payload.subject} fence is ${live.fence}, not ${payload.fence}`);
-    } else if (payload.action === "break") {
-      if (input.authorKind !== "human")
-        throw new AgoraError("native board break is a human verb");
-      if (!stored)
-        throw new AgoraError(`native board subject ${payload.subject} has no holder to break`);
-    }
+    // Admission is decided by the kernel generated from spec/board.bend, whose laws the checker
+    // proves (spec/BOARD-LAWS.bend): one live holder per subject, an expired lease is no holder,
+    // release and renew need the holder's account, lease id and live fence, break is a human verb
+    // that names what it drops. Ids are interned to Nats for this one judgement (only equality is
+    // compared) and instants are epoch milliseconds; the lease length the record will carry is
+    // still computed below by #leaseMs, which owns the cap and fallback policy.
+    /** @type {Map<string, bigint>} */
+    const interned = new Map();
+    /** @param {string} id */
+    const nat = (id) => { if (!interned.has(id)) interned.set(id, BigInt(interned.size + 1)); return /** @type {bigint} */ (interned.get(id)); };
+    const holder = stored
+      ? { $: "Held", account: nat(stored.accountId), lease: nat(stored.leaseId), fence: nat(stored.fence), expires: BigInt(Math.max(0, Date.parse(stored.expiresAt) || 0)) }
+      : { $: "NoHolder" };
+    const me = nat(authenticated.accountId);
+    const fenceNamed = payload.action === "renew" || payload.action === "release" ? payload.fence : "";
+    const act = payload.action === "claim" ? { $: "Claim", account: me, op: nat(input.operationId), lease_ms: 1000n }
+      : payload.action === "renew" ? { $: "Renew", account: me, lease: nat(payload.leaseId), fence: nat(payload.fence), lease_ms: 1000n }
+      : payload.action === "release" ? { $: "Release", account: me, lease: nat(payload.leaseId), fence: nat(payload.fence) }
+      : payload.action === "break" ? { $: "Break", human: input.authorKind === "human" }
+      : { $: "Contest" };
+    const verdict = BoardKernel.judge(act, holder, BigInt(this.records.length + 1), BigInt(this.now().getTime()));
+    if (verdict.$ === "Held_by_another" && live)
+      throw new AgoraError(`native board subject ${payload.subject} is held at ${live.cursor} by ${live.accountId} until ${live.expiresAt}`);
+    if (verdict.$ === "Not_the_holder")
+      throw new AgoraError(`native board subject ${payload.subject} is not held by this account under that lease`);
+    if (verdict.$ === "Fence_mismatch" && live)
+      throw new AgoraError(`native board subject ${payload.subject} fence is ${live.fence}, not ${fenceNamed}`);
+    if (verdict.$ === "Not_human")
+      throw new AgoraError("native board break is a human verb");
+    if (verdict.$ === "Nothing_to_break")
+      throw new AgoraError(`native board subject ${payload.subject} has no holder to break`);
+    if (verdict.$ !== "Applied")
+      throw new AgoraError(`native board verdict ${verdict.$} on ${payload.subject} names no holder to report`);
     if (this.records.length >= this.manifest.recordLimit)
       throw new AgoraError(`native room reached its ${this.manifest.recordLimit}-record resident limit; retain or archive explicitly before accepting more`);
     const sequence = this.records.length + 1;
