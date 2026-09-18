@@ -110,8 +110,8 @@ law renew_extends:
    == K.Applied{K.Held{account, lease, cursor, Nat.add(now, ms)}} : K.Verdict}
 
 # LAW 8 (break is a human verb, and it names what it drops): an agent's break
-# is refused; a human's break on a held subject frees it; a human's break on
-# an unheld subject is refused as nothing to break.
+# is refused whatever is stored; a human's break on a subject whose lease is
+# live frees it.
 law break_is_human:
   for stored: K.Holder
   for +a: Nat
@@ -120,10 +120,25 @@ law break_is_human:
   for +e: Nat
   for +cursor: Nat
   for +now: Nat
+  for live: {True{} == Nat.is_gt(e, now) : Bool}
   {(K.judge(K.Break{False{}}, stored, cursor, now),
-    K.judge(K.Break{True{}}, K.Held{a, l, f, e}, cursor, now),
+    K.judge(K.Break{True{}}, K.Held{a, l, f, e}, cursor, now))
+   == (K.Not_human{}, K.Applied{K.NoHolder{}}) : K.Verdict & K.Verdict}
+
+# LAW 8b (nothing to break): a human's break on a subject nobody live-holds,
+# whether the lease has expired or none was ever taken, is refused as nothing
+# to break: an expired lease is no holder to a break, as it is to every verb.
+law nothing_to_break:
+  for +a: Nat
+  for +l: Nat
+  for +f: Nat
+  for +e: Nat
+  for +cursor: Nat
+  for +now: Nat
+  for gone: {False{} == Nat.is_gt(e, now) : Bool}
+  {(K.judge(K.Break{True{}}, K.Held{a, l, f, e}, cursor, now),
     K.judge(K.Break{True{}}, K.NoHolder{}, cursor, now))
-   == (K.Not_human{}, K.Applied{K.NoHolder{}}, K.Nothing_to_break{}) : K.Verdict & K.Verdict & K.Verdict}
+   == (K.Nothing_to_break{}, K.Nothing_to_break{}) : K.Verdict & K.Verdict}
 
 # LAW 9 (a refusal changes nothing, a contest takes nothing): after any refusal
 # the subject's holder is exactly what was stored, and a contest applies the

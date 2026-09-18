@@ -234,7 +234,7 @@ function $judge$(a_0, stored_0, cursor_0, now_0) {
     return run_jump($judge$owned$, [run_loop($owns$(account_5, lease_3, run_loop($live$(stored_0, now_0)))), run_loop($Nat$is_eq$(fence_3, run_loop($fence_of$(run_loop($live$(stored_0, now_0)))))), {$: "NoHolder"}]);
   } else if (a_0.$ === "Break") {
     const human_0 = a_0.human;
-    return run_jump($judge$break$, [human_0, stored_0]);
+    return run_jump($judge$break$, [human_0, run_loop($live$(stored_0, now_0))]);
   } else {
     return {$: "Applied", ["holder"]: stored_0};
   }

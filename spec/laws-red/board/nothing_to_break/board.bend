@@ -1,4 +1,4 @@
-# RED FIXTURE for law renew_extends: a renew by the holder drops the holder
+# RED FIXTURE for law nothing_to_break: a human break on an unheld subject is admitted (so an expired lease is broken too)
 # The native board's claim discipline, as a kernel small enough to prove things
 # about. A subject has at most one holder; a holder is an account under a lease
 # id, fenced at the cursor of the event that gave it the subject, until an
@@ -73,11 +73,7 @@ def judge.owned(ok: Bool, fenced: Bool, after: Holder) -> Verdict:
         case False{}:
           Fence_mismatch{}
         case True{}:
-          match after:
-            case NoHolder{}:
-              Applied{NoHolder{}}
-            case Held{a, l, f, e}:
-              Applied{NoHolder{}}
+          Applied{after}
 
 def judge.break(human: Bool, stored: Holder) -> Verdict:
   match human:
@@ -86,7 +82,7 @@ def judge.break(human: Bool, stored: Holder) -> Verdict:
     case True{}:
       match stored:
         case NoHolder{}:
-          Nothing_to_break{}
+          Applied{NoHolder{}}
         case Held{a, l, f, e}:
           Applied{NoHolder{}}
 
