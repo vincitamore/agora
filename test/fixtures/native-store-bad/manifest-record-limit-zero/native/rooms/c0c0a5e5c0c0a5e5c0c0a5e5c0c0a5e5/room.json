@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "roomId": "c0c0a5e5c0c0a5e5c0c0a5e5c0c0a5e5",
+  "epoch": "9f97cbaedb3b45d5a9807816a2c6fa5a",
+  "hostAccountId": "a0e7ad17c2dee02fc4cee4fcd6a04a9a",
+  "recordLimit": 0,
+  "claimLeaseMs": 3600000,
+  "claimLeaseCapMs": 86400000,
+  "createdAt": "2026-09-18T12:00:01.000Z"
+}

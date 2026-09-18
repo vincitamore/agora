@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "roomId": "c0c0a5e5c0c0a5e5c0c0a5e5c0c0a5e5",
+  "epoch": "00000000000000000000000000000000",
+  "sequence": 5,
+  "end": 3895,
+  "digest": "sha256:506a41e3a06ceb0015a074f2d4aedebbbf3ce21f14c8390a14fe206381fb26f5"
+}

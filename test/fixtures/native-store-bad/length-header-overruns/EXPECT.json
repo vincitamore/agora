@@ -1,0 +1,5 @@
+{
+  "case": "length-header-overruns",
+  "opens": false,
+  "refusal": "declares an invalid"
+}

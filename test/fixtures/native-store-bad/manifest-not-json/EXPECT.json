@@ -1,0 +1,5 @@
+{
+  "case": "manifest-not-json",
+  "opens": false,
+  "refusal": "has no valid manifest"
+}

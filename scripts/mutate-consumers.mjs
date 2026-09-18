@@ -30,7 +30,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
  */
 const TARGETS = {
   "src/carry.mjs": { fast: ["test/carry.test.mjs", "test/carry-seams.test.mjs"], full: ["test/carry.test.mjs", "test/carry-seams.test.mjs", "test/export-record.test.mjs"] },
-  "src/native-store.mjs": { fast: ["test/native-store.test.mjs", "test/native-board.test.mjs", "test/native-post-ledger.test.mjs"], full: ["test/native-store.test.mjs", "test/native-board.test.mjs", "test/native-post-ledger.test.mjs", "test/native-store-model.test.mjs"] },
+  "src/native-store.mjs": { fast: ["test/native-store.test.mjs", "test/native-board.test.mjs", "test/native-post-ledger.test.mjs"], full: ["test/native-store.test.mjs", "test/native-board.test.mjs", "test/native-post-ledger.test.mjs", "test/native-store-model.test.mjs", "test/native-store-bad-bytes.test.mjs"] },
 };
 
 const VERDICTS = ["Held_by_another", "Not_the_holder", "Fence_mismatch", "Not_human", "Nothing_to_break", "Applied"];

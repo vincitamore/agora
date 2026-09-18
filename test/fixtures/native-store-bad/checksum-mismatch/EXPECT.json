@@ -1,0 +1,5 @@
+{
+  "case": "checksum-mismatch",
+  "opens": false,
+  "refusal": "checksum mismatch at offset"
+}
