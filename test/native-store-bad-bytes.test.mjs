@@ -15,7 +15,7 @@ import { NativeRoomStore } from "../src/native-store.mjs";
 
 const ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const CORPUS = join(ROOT, "test", "fixtures", "native-store-bad");
-const ROOM = "05965422ca7443659256e229a2d03479";
+const ROOM = "c0c0a5e5c0c0a5e5c0c0a5e5c0c0a5e5";
 
 const cases = (await readdir(CORPUS)).sort();
 assert.ok(cases.includes("good"), "the corpus carries the good room");

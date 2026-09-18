@@ -26,7 +26,7 @@ import { NativeRoomStore } from "../src/native-store.mjs";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const OUT = join(ROOT, "test", "fixtures", "native-store-bad");
 export const HOST = "a0e7ad17c2dee02fc4cee4fcd6a04a9a";
-export const ROOM = "05965422ca7443659256e229a2d03479";
+export const ROOM = "c0c0a5e5c0c0a5e5c0c0a5e5c0c0a5e5"; // synthetic: no seat room has this id
 const DEAD_LOCK = JSON.stringify({ host: "127.0.0.1", port: 1, pid: 1, identity: "corpus" }) + "\n";
 
 /** the byte offset of the last frame's header, the file size and the bytes */

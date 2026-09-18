@@ -1,1 +1,3 @@
 * text=auto eol=lf
+# native room logs are length-prefixed binary frames; state it, never rely on NUL detection
+*.frames binary
