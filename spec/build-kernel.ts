@@ -25,7 +25,7 @@ const MAIN = join(CLONE, "bend2", "main.ts").replaceAll("\\", "/");
 const KERNELS: Record<string, { source: string; laws: string; proof: string; out: string; origin?: string }> = {
   cursor: { source: "spec/cursor.bend", laws: "spec/LAWS.bend", proof: "spec/PROOF.bend", out: "src/native-cursor.kernel.mjs" },
   board: { source: "spec/board.bend", laws: "spec/BOARD-LAWS.bend", proof: "spec/BOARD-PROOF.bend", out: "src/native-board.kernel.mjs" },
-  // the singulis settlement ledger, byte-identical to projects/singulis/spec/settlement.bend
+  // the singulis settlement ledger, byte-identical to the singulis project's spec/settlement.bend
   // (its laws and proof carried beside it with the import lines renamed); `--check` also diffs
   // the source against the singulis copy when that tree is present (SINGULIS_SPEC, else
   // ../singulis/spec), so the two consumers keep one kernel
