@@ -1086,7 +1086,8 @@ Details and maintainer checks: [docs/TRANSFERS.md](../../docs/TRANSFERS.md).
   `spec/settlement.bend`, whose laws (`spec/LAWS.bend`, `spec/BOARD-LAWS.bend`,
   `spec/SETTLEMENT-LAWS.bend`) the Bend 2 checker proves before a file is emitted; the native
   store imports the first two to decide what a read delivers and whether a board act (claim,
-  renew, release, contest, break) is admitted, and `carry` imports the third to decide which of a
+  renew, release, contest, break) is admitted (the holder the store keeps is the one the verdict
+  names, expiry included; the real lease goes to the kernel), and `carry` imports the third to decide which of a
   session's verdicts stand and which are superseded. `settlement.bend` is a byte-identical copy of
   the singulis ledger and is never edited here: the builder refuses to emit it when it differs from
   the singulis tree beside this one. Change a plan in the `.bend` source and regenerate with
