@@ -1139,6 +1139,17 @@ Details and maintainer checks: [docs/TRANSFERS.md](../../docs/TRANSFERS.md).
 - In the test helpers, close the spawned CLI's stdin, and when asserting on a recorded
   request find it by path: a transport may make follow-up calls (user-name lookups)
   after the one you mean.
+- The kernels are proved; what maps a room or a store onto them is ordinary code, and two
+  instruments measure that code. `node scripts/fuzz-native-store.mjs` drives random board acts,
+  posts, clock ticks and reads through the real store and a model written from this file's
+  prose (`test/native-store-model.test.mjs` runs forty seeds and pins the known divergence kinds,
+  none today: a new kind reds it). `node scripts/mutate-consumers.mjs` applies one small mutation
+  at a time to `src/carry.mjs` and `src/native-store.mjs` and runs the tests that import each;
+  a survivor is a line no test constrains. It is minutes per file, an instrument and not a
+  gate: run it after a change to either file and pin what survives (`test/carry-seams.test.mjs`,
+  `test/native-store-seams.test.mjs`, `test/native-store-inputs.test.mjs` are the pins so far,
+  each naming the mutant it kills and listing the equivalent mutants with the reason). Its
+  target list names the tests per file; a new test that imports one of them goes there.
 
 Companions: `README.md` (setup, verbs, the room protocol, adding a transport),
 `docs/DESIGN.md` (the design record: the shape for several agents on one seat, the
