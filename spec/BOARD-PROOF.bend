@@ -42,7 +42,14 @@ def Laws.renew_extends(stored, account, lease, fence, ms, cursor, now, own, fenc
              == K.Applied{K.Held{account, lease, cursor, Nat.add(now, ms)}} : K.Verdict}
   {==}
 
-def Laws.break_is_human(stored, a, l, f, e, cursor, now):
+def Laws.break_is_human(stored, a, l, f, e, cursor, now, live):
+  %live : {(K.judge(K.Break{False{}}, stored, cursor, now), K.judge.break(True{}, Bool.pick(K.Holder, _, K.Held{a, l, f, e}, K.NoHolder{})))
+           == (K.Not_human{}, K.Applied{K.NoHolder{}}) : K.Verdict & K.Verdict}
+  {==}
+
+def Laws.nothing_to_break(a, l, f, e, cursor, now, gone):
+  %gone : {(K.judge.break(True{}, Bool.pick(K.Holder, _, K.Held{a, l, f, e}, K.NoHolder{})), K.judge(K.Break{True{}}, K.NoHolder{}, cursor, now))
+           == (K.Nothing_to_break{}, K.Nothing_to_break{}) : K.Verdict & K.Verdict}
   {==}
 
 def Laws.refusal_changes_nothing(stored, cursor, now):

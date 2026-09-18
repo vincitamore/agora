@@ -86,7 +86,8 @@ def judge.break(human: Bool, stored: Holder) -> Verdict:
           Applied{NoHolder{}}
 
 # the verdict on an act. `stored` is the holder the store remembers (expired or
-# not); `cursor` is the sequence this event would take; `now` the instant.
+# not); `cursor` is the sequence this event would take; `now` the instant. Every
+# verb, break included, is judged against the LIVE holder.
 def judge(a: Act, +stored: Holder, +cursor: Nat, +now: Nat) -> Verdict:
   match a:
     case Claim{+account, +op, +lease_ms}:
@@ -100,7 +101,7 @@ def judge(a: Act, +stored: Holder, +cursor: Nat, +now: Nat) -> Verdict:
         Nat.is_eq(fence, fence_of(live(stored, now))),
         NoHolder{})
     case Break{human}:
-      judge.break(human, stored)
+      judge.break(human, live(stored, now))
     case Contest{}:
       Applied{stored}
 
