@@ -76,6 +76,7 @@ import {
 import { FOLLOW_CAP, FOLLOW_IDLE_MINUTES, aliasThreads, dropFollow, followableMessages, followThreads, readFollow, rootsOf, threadsOf } from "../src/follow.mjs";
 import { withThreads } from "../src/threads.mjs";
 import { carryState, carryWindow, foldRoom, renderCarry } from "../src/carry.mjs";
+import { buildRecord, writeRecord as writeExportRecord } from "../src/export-record.mjs";
 import { decorate, human } from "../src/render.mjs";
 import { formatTrailers, matchesAddress, parseTrailers, TRAILER_VALUE_MAX, trailerValueOk } from "../src/trailers.mjs";
 import { SLACK_TEXT_MAX, chunkAtLines, encodeSlackText } from "../src/transports/slack.mjs";
@@ -230,6 +231,15 @@ const SCHEMA = {
       args: ["<room>"],
       options: { "--thread <id>": "a thread inside the room", "--reset": "forget (next watch reads from the start)", "--now": "skip to the latest message (an empty read leaves it where it is)", "--set <cursor>": "set explicitly, if the transport can read that shape" },
       does: "show or move this session's saved cursor",
+    },
+    "export-record": {
+      args: ["<room>"],
+      options: {
+        "--into <dir>": "the directory to write; must be new or empty",
+        "--limit <n>": "how many recent messages to export (default 200)",
+        "--no-threads": "read the room alone; by default the room's live threads are folded into the window, as `carry` does",
+      },
+      does: "write the room as a record in the collective-record layout the singulis conformance suite reads (config.md, members/, messages/, artifacts/): every message a messages/ file with its trailers rendered; every post carrying verdict: or withdraws: a settlement artifact, a withdrawal or an answered verdict recorded as retracts: under the author's coordination step; agents as members, humans as persons. A read: no delivery, no cursor, no wake, and nothing in the room steers it",
     },
     who: {
       args: ["<room>"],
@@ -1894,6 +1904,23 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       const usual = usualWake(bearer.name);
       if (usual) console.error(`agora: usual --wake for role ${usual.role} is ${usual.wake} (not applied)`);
       printMessages(msgs.slice(-limit), json, roomAlias);
+      return EXIT.ok;
+    }
+    case "export-record": {
+      if (!values.into) throw new AgoraError("export-record needs --into <dir>", EXIT.usage);
+      const limit = positive(values.limit, "limit") ?? 200;
+      const window = await carryWindow(transport, { limit, thread, threads: !values["no-threads"] });
+      if (window.threadsUnread.length) console.error(redact(`agora: ${window.threadsUnread.length} live thread(s) not read: ${window.threadsUnread.map((u) => `${u.id} (${u.reason})`).join(", ")}`));
+      const { files, summary } = buildRecord(window.messages, { alias: roomAlias, transport: transport.kind, room: transport.room });
+      const into = path.resolve(values.into);
+      try {
+        await writeExportRecord(into, files);
+      } catch (e) {
+        if (/** @type {any} */ (e)?.code === "export-target-not-empty") throw new AgoraError("export-target-not-empty: " + /** @type {Error} */ (e).message);
+        throw e;
+      }
+      const out = { type: "export-record", room: { alias: roomAlias, transport: transport.kind, room: transport.room }, into, files: files.size, threadsUnread: window.threadsUnread, ...summary };
+      console.log(json ? JSON.stringify(out) : `exported ${summary.messages} messages, ${summary.artifacts} settlement artifacts (${summary.retractions} retractions), ${summary.members.length} members, ${summary.persons.length} persons into ${into}`);
       return EXIT.ok;
     }
     case "who": {
