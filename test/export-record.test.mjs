@@ -118,7 +118,7 @@ function standingByExport(files) {
   const list = (xs) => xs.reduceRight((t, h) => ({ $: "Con", head: h, tail: t }), /** @type {any} */ ({ $: "Nil" }));
   const entries = arts.map((a) => a.fm.retracts
     ? { $: "Retract", fact: factOf(String(a.fm.retracts)), step: { $: "Step", members: list(a.fm["coordination-step"].map((/** @type {string} */ m) => factOf("member:" + m).id)) } }
-    : { $: "Assert", fact: factOf(a.id) });
+    : { $: "Assert", fact: factOf(a.id), member: factOf("member:" + a.fm.author).id });
   const ledger = S.apply(list(entries), { $: "Nil" });
   return { standing: arts.filter((a) => !a.fm.retracts && S.standing(ledger, factOf(a.id)) === true).map((a) => a.id), arts };
 }
