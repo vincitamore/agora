@@ -6,8 +6,10 @@
 //   node scripts/bend-checkout.mjs --into <dir>          into <dir>
 //   node scripts/bend-checkout.mjs --verify [<dir>]      exit 1 unless <dir> is at the pinned commit
 //
-// The fetch tries the house mirror first and upstream second: upstream is one force-pushed commit,
-// so the pinned sha can vanish there, while the mirror keeps every pin under a tag. A directory
+// The fetch tries upstream by sha; a mirror named by BEND_MIRROR (and BEND_MIRROR_TAG, default
+// pin-<sha7>) is tried first when set, because upstream is one force-pushed commit and the pinned
+// sha can vanish there while a mirror keeps every pin under a tag. Nothing in this file or the pin
+// names a mirror: a clone of this repository builds from upstream with no other host to reach. A directory
 // already at the pinned commit is left alone. The resolved path is printed on the last line, and
 // under GitHub Actions it is also appended to $GITHUB_ENV as BEND_CLONE, so later steps (the kernel
 // regeneration test, the laws gate) run the proofs instead of skipping by name.
@@ -42,9 +44,10 @@ function fetchPinned(dir) {
     const init = git(["init", "-q"], dir);
     if (!init.ok) throw new Error(`git init failed in ${dir}: ${init.err}`);
   }
+  const mirror = process.env.BEND_MIRROR;
+  const tag = process.env.BEND_MIRROR_TAG ?? `pin-${PIN.sha.slice(0, 7)}`;
   const sources = [
-    { name: "mirror", url: PIN.mirror, ref: `refs/tags/${PIN.tag}` },
-    { name: "mirror (sha)", url: PIN.mirror, ref: PIN.sha },
+    ...(mirror ? [{ name: "mirror (tag)", url: mirror, ref: `refs/tags/${tag}` }, { name: "mirror (sha)", url: mirror, ref: PIN.sha }] : []),
     { name: "upstream (sha)", url: PIN.upstream, ref: PIN.sha },
   ];
   const tried = [];

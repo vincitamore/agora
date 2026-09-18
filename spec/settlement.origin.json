@@ -1,0 +1,5 @@
+{
+  "origin": "projects/singulis/spec/settlement.bend (the singulis collective's proven settlement ledger; agora vendors it byte-identical)",
+  "sha256": "e976151832907a4cd7d8559a2f3a3711b46f60ec91a4fcf1a41485cb703340ee",
+  "note": "spec/build-kernel.ts measures spec/settlement.bend against this digest on every run, so drift from the origin is refused from a clean clone with no sibling tree; when the origin tree is beside this repository (SINGULIS_SPEC, else ../singulis/spec) the live copy is compared too. Moving the origin means copying it here and rewriting this digest in the same commit."
+}

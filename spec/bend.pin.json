@@ -2,7 +2,5 @@
   "sha": "8008146ab90abb98b496fa2a6ffe555da7fb0dd5",
   "version": "Bend 2.0.4",
   "upstream": "https://github.com/bendlang/bend",
-  "mirror": "https://forge.example.invalid/amoyer/bend-src.git",
-  "tag": "pin-8008146",
-  "note": "The commit every kernel here is proved against. scripts/bend-checkout.mjs fetches it; spec/build-kernel.ts and spec/laws-check.ts refuse a checkout at any other commit. Upstream is a single force-pushed commit, so the house mirror is the fetch that survives the next force-push; move the pin by re-cloning, re-running every PROOF, and pushing the new commit to the mirror under a new tag."
+  "note": "The commit every kernel here is proved against. scripts/bend-checkout.mjs fetches it from upstream by sha; spec/build-kernel.ts and spec/laws-check.ts refuse a checkout at any other commit. Upstream keeps one squashed commit that has been force-pushed before, so the sha can vanish there; a mirror that keeps it under a tag is named by BEND_MIRROR (a git URL) and BEND_MIRROR_TAG when you have one, and is tried first when set. Move the pin by re-cloning, re-running every PROOF, and pushing the new commit to your mirror under a new tag."
 }
