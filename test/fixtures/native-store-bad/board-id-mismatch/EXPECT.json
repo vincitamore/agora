@@ -1,0 +1,5 @@
+{
+  "case": "board-id-mismatch",
+  "opens": false,
+  "refusal": "board identity does not match"
+}

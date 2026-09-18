@@ -1,0 +1,5 @@
+{
+  "case": "boundary-ends-after-header",
+  "opens": false,
+  "refusal": "ends inside a record"
+}

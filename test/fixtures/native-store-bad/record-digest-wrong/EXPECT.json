@@ -1,0 +1,5 @@
+{
+  "case": "record-digest-wrong",
+  "opens": false,
+  "refusal": "record digest mismatch"
+}

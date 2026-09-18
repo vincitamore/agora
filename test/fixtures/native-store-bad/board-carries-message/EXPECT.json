@@ -1,0 +1,5 @@
+{
+  "case": "board-carries-message",
+  "opens": false,
+  "refusal": "board record must not carry a chat message"
+}
