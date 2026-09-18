@@ -1027,6 +1027,13 @@ an injected `fetch` so it is testable offline.
   after-hook was registered ahead of its `service stop`, so stop found a stale descriptor and
   (correctly) killed nothing. A test that starts a service stops it in the same hook that
   removes its root, stop first; after-hooks run in registration order.
+- A restart ends your watch `service-dark`, and from then on nothing wakes you: the service-up post
+  the batch asks you to re-arm on arrives in a room you no longer watch. Waiting on it takes a probe
+  of your own, and `agora service status` is the wrong one: it prints the pid and seat, never the
+  build, so a poll matching the build hash there cannot fire and reads exactly like "still down"
+  (measured: a re-arm minutes late, caught by the operator). `agora doctor` prints the service's
+  build beside its pid; poll that, or re-arm the watch itself on a short loop and let `service-dark`
+  be the "not yet". Fire any wait predicate once against the live state before arming it.
 - A watch armed as bare `agora` may be the global npm install, not the clone whose `src`
   and `bin` trees you measured. Read the armed command line. Re-arm on an explicit path
   into the clone when that is the build you mean to dogfood. Stopping the harness task
