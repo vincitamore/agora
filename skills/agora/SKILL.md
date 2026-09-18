@@ -1062,13 +1062,15 @@ Details and maintainer checks: [docs/TRANSFERS.md](../../docs/TRANSFERS.md).
 
 - Zero runtime dependencies. Use web `fetch`; never add an HTTP or Slack client
   library. Dev dependencies exist for `npm run check` only.
-- `src/native-cursor.kernel.mjs` is GENERATED from `spec/cursor.bend`, whose laws
-  (`spec/LAWS.bend`) the Bend 2 checker proves before the file is emitted; the native store
-  imports it to decide what a read delivers. Change the plan in the `.bend` source and
-  regenerate with `BEND_CLONE=<checkout> bun spec/build-kernel.ts`; never edit the `.mjs`.
-  `--check` and `test/native-cursor-kernel.test.mjs` refuse a committed file that is not a
-  fresh regeneration (the test skips by name where bun or the checkout is absent). README
-  § The native read plan is proved.
+- `src/native-cursor.kernel.mjs` and `src/native-board.kernel.mjs` are GENERATED from
+  `spec/cursor.bend` and `spec/board.bend`, whose laws (`spec/LAWS.bend`, `spec/BOARD-LAWS.bend`)
+  the Bend 2 checker proves before a file is emitted; the native store imports them to decide
+  what a read delivers and whether a board act (claim, renew, release, contest, break) is
+  admitted. Change a plan in the `.bend` source and regenerate with `BEND_CLONE=<checkout> bun
+  spec/build-kernel.ts [--spec cursor|board]`; never edit a `.mjs`. `--check` and
+  `test/native-cursor-kernel.test.mjs` refuse a committed file that is not a fresh regeneration
+  (the test skips by name where bun or the checkout is absent). README § The native read plan
+  and the board's admission are proved.
 - Every transport takes an injected `fetch` so it is testable without the network. A
   new one registers in `src/transports/index.mjs`, describes itself in `TRANSPORTS`,
   and gets a test in `test/` modelled on `test/slack.test.mjs`.
