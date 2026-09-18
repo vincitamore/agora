@@ -1151,7 +1151,10 @@ Details and maintainer checks: [docs/TRANSFERS.md](../../docs/TRANSFERS.md).
   gated by `test/acceptance/`; a probe that exists only as a command one bearer typed is
   not a gate. Every new package lands with its own job in `.github/workflows/test.yml`.
   Linux and Windows CI run on the house self-hosted runners (unfurnished: no assumed
-  `node`/`cmd.exe` on PATH); macOS is off. The spawn job is bun-only
+  `node`/`cmd.exe` on PATH); macOS is off. Every job carries the same-repository guard: a pull
+  request runs on those runners only when its head is this repository, so a fork's pull request
+  never executes on house hardware; keep the guard on any job added, and keep the repository's
+  fork-approval setting on as the second lock. The spawn job is bun-only
   (`setup-bun`, no `setup-node`); the tui job declares node.
 - `bin/agora.mjs` stays tracked as mode `100755`; `npm link` on macOS or Linux installs it
   as-is and refuses to run a non-executable file. A Windows checkout does not carry the
