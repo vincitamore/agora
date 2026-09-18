@@ -27,8 +27,8 @@ if (mode === 'verify') {
   // recipe into a scratch directory, and compare the bytes' sha256 with lock.json. Writes nothing
   // under vendor/. With -trimpath, -buildvcs=false, CGO off and the pinned toolchain a Go build is
   // byte-reproducible, so a difference is a finding.
+  if (!input || !['windows', 'linux', 'darwin'].includes(os)) throw Error('Usage: verify <upstream-checkout> <windows|linux|darwin>');
   const cwd = resolve(input);
-  if (!['windows', 'linux', 'darwin'].includes(os)) throw Error('Usage: verify <upstream-checkout> <windows|linux|darwin>');
   const lock = JSON.parse(readFileSync(resolve(vendor, 'lock.json'), 'utf8'));
   if (JSON.stringify(lock.source) !== JSON.stringify(source)) throw Error('lock.json and source.json disagree; re-vendor before verifying');
   const goVersion = assertPinnedSource(cwd);
