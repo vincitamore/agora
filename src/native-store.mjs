@@ -550,9 +550,9 @@ export class NativeRoomStore {
     const kernelHolder = verdict.holder.$ === "Held"
       ? { accountId: ids.get(verdict.holder.account), leaseId: ids.get(verdict.holder.lease), fence: Number(verdict.holder.fence), expiresAt: new Date(Number(verdict.holder.expires)).toISOString() }
       : null;
+    const askedLeaseId = payload.action === "renew" ? payload.leaseId : input.operationId;
     if (kernelHolder && (payload.action === "claim" || payload.action === "renew")) {
-      if (kernelHolder.fence !== sequence || kernelHolder.accountId !== authenticated.accountId ||
-          kernelHolder.leaseId !== (payload.action === "claim" ? input.operationId : payload.leaseId))
+      if (kernelHolder.fence !== sequence || kernelHolder.accountId !== authenticated.accountId || kernelHolder.leaseId !== askedLeaseId)
         throw new AgoraError(`native board kernel named a holder the store did not ask for on ${payload.subject}: refusing before commit`);
     }
     const expiresAt = kernelHolder && (payload.action === "claim" || payload.action === "renew") ? kernelHolder.expiresAt : undefined;
