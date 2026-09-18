@@ -71,7 +71,7 @@ const execFileAsync = promisify(execFile);
 /**
  * `face` is a native room's post-time face choice: transports named by `--face`, `"none"` for
  * `--no-face`, absent for the room's own policy. Only the native transport reads it.
- * @typedef {{ thread?: string, face?: 'none' | string[] }} PostOptions
+ * @typedef {{ thread?: string, face?: 'none' | string[], beforeSend?: (id: string) => Promise<void> | void }} PostOptions
  */
 /**
  * What a transport implements. `read` returns messages ascending, each carrying a cursor.

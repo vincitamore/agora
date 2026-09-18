@@ -27,9 +27,12 @@ def Laws.stranger_refused(stored, account, lease, fence, ms, cursor, now, other)
             == (K.Not_the_holder{}, K.Not_the_holder{}) : K.Verdict & K.Verdict}
   {==}
 
-def Laws.stale_fence_refused(stored, account, lease, fence, cursor, now, own, stale):
-  %own : {K.judge.owned(_, Nat.is_eq(fence, K.fence_of(K.live(stored, now))), K.NoHolder{}) == K.Fence_mismatch{} : K.Verdict}
-  %stale : {K.judge.owned(True{}, _, K.NoHolder{}) == K.Fence_mismatch{} : K.Verdict}
+def Laws.stale_fence_refused(stored, account, lease, fence, ms, cursor, now, own, stale):
+  %own : {(K.judge.owned(_, Nat.is_eq(fence, K.fence_of(K.live(stored, now))), K.NoHolder{}),
+           K.judge.owned(_, Nat.is_eq(fence, K.fence_of(K.live(stored, now))), K.Held{account, lease, cursor, Nat.add(now, ms)}))
+          == (K.Fence_mismatch{}, K.Fence_mismatch{}) : K.Verdict & K.Verdict}
+  %stale : {(K.judge.owned(True{}, _, K.NoHolder{}), K.judge.owned(True{}, _, K.Held{account, lease, cursor, Nat.add(now, ms)}))
+            == (K.Fence_mismatch{}, K.Fence_mismatch{}) : K.Verdict & K.Verdict}
   {==}
 
 def Laws.renew_extends(stored, account, lease, fence, ms, cursor, now, own, fenced):

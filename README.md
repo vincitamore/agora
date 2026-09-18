@@ -592,9 +592,10 @@ repair, privacy boundaries and the real-relay acceptance probe.
 Which rows a native room read delivers, and which cursors it refuses, is decided by a kernel
 whose properties are machine-checked. `spec/cursor.bend` is the kernel (a foreign epoch is
 refused; a sequence past the committed one is refused; otherwise the delivery is the rows from
-`since + 1` through the smaller of `since + limit` and `committed`); `spec/LAWS.bend` states six
-claims about it (the two refusals, that a refusal advances nothing, that a read is exactly the
-rows after the cursor, that delivery never exceeds the room, that the cursor never regresses)
+`since + 1` through the smaller of `since + limit` and `committed`); `spec/LAWS.bend` states seven
+claims about it (the two refusals, that each refusal advances nothing, that a read is exactly the
+rows after the cursor, that the cursor after a read never passes the room, that the cursor never
+regresses)
 and `spec/PROOF.bend` proves them under the Bend 2 checker. `src/native-cursor.kernel.mjs` is
 that source compiled to plain JavaScript and committed, so the CLI keeps zero runtime
 dependencies; `src/native-store.mjs` imports it and never re-implements the plan.
@@ -627,6 +628,17 @@ regeneration; `test/native-cursor-kernel.test.mjs` runs that check for every ker
 and a checkout exist and skips by name elsewhere, and the two `native-*-kernel.test.mjs` files pin
 each kernel's JavaScript face (BigInt in, tagged objects out) everywhere. Never edit a generated
 file.
+
+Every law also ships a known-red mutation of its model under `spec/laws-red/<kernel>/<law>/`
+(C0 for laws): `BEND_CLONE=<path> bun spec/laws-check.ts` proves the real files green, greps the
+closure, checks the import chain and law/def parity, then overlays each fixture and requires the
+checker to go red at that law, checked in isolation (a LAWS copy holding only that law, a PROOF
+copy holding the kit and only its def, both built by the gate), because the checker halts at the
+first red and two laws about one function pin its shape in their proof terms. A fixture may
+overlay only the model file. A law that no mutation can redden is a law that constrains nothing;
+it is restated, never dropped from the gate. `test/native-laws-red.test.mjs` runs it where `bun`
+and a checkout exist and asserts the fixture set everywhere. `--list` prints each law's fixture
+and why it is red.
 
 ## Development commands
 
