@@ -52,7 +52,7 @@ function doc(fm, body) {
  * Fold a window into record files. Pure: the same window gives the same files.
  * @param {Message[]} msgs ascending
  * @param {{ alias: string, transport: string, room: string }} source
- * @returns {{ files: Map<string, string>, summary: { messages: number, artifacts: number, retractions: number, members: string[], persons: string[], oldest: string | null, newest: string | null } }}
+ * @returns {{ files: Map<string, string>, summary: { messages: number, artifacts: number, retractions: number, unresolved: number, members: string[], persons: string[], oldest: string | null, newest: string | null } }}
  */
 export function buildRecord(msgs, source) {
   const files = new Map();
@@ -64,6 +64,8 @@ export function buildRecord(msgs, source) {
   const authors = new Map();
   let artifacts = 0;
   let retractions = 0;
+  /** `withdraws:` or `re:` values naming a post outside the window */
+  let unresolved = 0;
 
   for (const m of msgs) {
     const name = m.signedAs ?? m.author.name;
@@ -93,12 +95,24 @@ export function buildRecord(msgs, source) {
     const re = named("re");
     if (!verdicts.length && !withdraws.length) continue;
 
+    // A retraction is written only where carry would read one: the named post is in the window
+    // AND it is this author's own. A `re:` or `withdraws:` naming another author's verdict is
+    // that author's fact being contested, not withdrawn; writing it as `retracts:` under a step
+    // naming only the contester would hand the singulis ledger an uncoordinated retraction dressed
+    // as a coordinated one (the member whose fact is withdrawn absent from the step). A post named
+    // outside the window is not asserted here, so there is nothing to retract; it is counted.
     /** @param {string} named */
-    const resolve = (named) => byId.get(named)?.id ?? byCursor.get(named)?.id ?? named;
-    const retracts = [
-      ...withdraws.map(resolve),
-      ...re.map(resolve).filter((id) => verdicts.length && verdictIds.has(id)),
-    ];
+    const resolve = (named) => byId.get(named) ?? byCursor.get(named);
+    /** @param {string} named @returns {string | null} */
+    const own = (named) => {
+      const target = resolve(named);
+      if (!target) { unresolved += 1; return null; }
+      return memberSlug(target.signedAs ?? target.author.name) === slug ? target.id : null;
+    };
+    /** @type {string[]} */
+    const retracts = [];
+    for (const id of withdraws.map(own)) if (id !== null) retracts.push(id);
+    for (const id of re.map(own)) if (id !== null && verdicts.length && verdictIds.has(id)) retracts.push(id);
     if (verdicts.length) verdictIds.add(m.id);
     // The singulis mapping reads a settlement artifact as EITHER an assertion OR one retraction
     // (`retracts:` makes it a Retract and nothing else), and the kernel's Retract names one fact.
@@ -162,7 +176,7 @@ export function buildRecord(msgs, source) {
     },
   }, `# ${source.alias}\n\nExported from an agora room by \`agora export-record\`; the room is the source and this record a reading of it.`));
 
-  return { files, summary: { messages: msgs.length, artifacts, retractions, members: members.sort(), persons: persons.sort(), oldest, newest } };
+  return { files, summary: { messages: msgs.length, artifacts, retractions, unresolved, members: members.sort(), persons: persons.sort(), oldest, newest } };
 }
 
 /**
