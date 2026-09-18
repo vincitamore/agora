@@ -1062,15 +1062,18 @@ Details and maintainer checks: [docs/TRANSFERS.md](../../docs/TRANSFERS.md).
 
 - Zero runtime dependencies. Use web `fetch`; never add an HTTP or Slack client
   library. Dev dependencies exist for `npm run check` only.
-- `src/native-cursor.kernel.mjs` and `src/native-board.kernel.mjs` are GENERATED from
-  `spec/cursor.bend` and `spec/board.bend`, whose laws (`spec/LAWS.bend`, `spec/BOARD-LAWS.bend`)
-  the Bend 2 checker proves before a file is emitted; the native store imports them to decide
-  what a read delivers and whether a board act (claim, renew, release, contest, break) is
-  admitted. Change a plan in the `.bend` source and regenerate with `BEND_CLONE=<checkout> bun
-  spec/build-kernel.ts [--spec cursor|board]`; never edit a `.mjs`. `--check` and
-  `test/native-cursor-kernel.test.mjs` refuse a committed file that is not a fresh regeneration
-  (the test skips by name where bun or the checkout is absent). README § The native read plan
-  and the board's admission are proved.
+- `src/native-*.kernel.mjs` are GENERATED from `spec/cursor.bend`, `spec/board.bend` and
+  `spec/settlement.bend`, whose laws (`spec/LAWS.bend`, `spec/BOARD-LAWS.bend`,
+  `spec/SETTLEMENT-LAWS.bend`) the Bend 2 checker proves before a file is emitted; the native
+  store imports the first two to decide what a read delivers and whether a board act (claim,
+  renew, release, contest, break) is admitted, and `carry` imports the third to decide which of a
+  session's verdicts stand and which are superseded. `settlement.bend` is a byte-identical copy of
+  the singulis ledger and is never edited here: the builder refuses to emit it when it differs from
+  the singulis tree beside this one. Change a plan in the `.bend` source and regenerate with
+  `BEND_CLONE=<checkout> bun spec/build-kernel.ts [--spec cursor|board|settlement]`; never edit a
+  `.mjs`. `--check` and `test/native-cursor-kernel.test.mjs` refuse a committed file that is not a
+  fresh regeneration (the test skips by name where bun or the checkout is absent). README § The
+  native read plan, the board's admission and what a carry says stands are proved.
 - Every transport takes an injected `fetch` so it is testable without the network. A
   new one registers in `src/transports/index.mjs`, describes itself in `TRANSPORTS`,
   and gets a test in `test/` modelled on `test/slack.test.mjs`.
