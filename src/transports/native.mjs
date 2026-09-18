@@ -1,7 +1,7 @@
 // @ts-check
 import { randomUUID } from "node:crypto";
 import { AgoraError } from "../core.mjs";
-import { parseNativeCursor } from "../native-protocol.mjs";
+import { nativeMessageId, parseNativeCursor } from "../native-protocol.mjs";
 import { ServiceDarkError, connectSeatService, nativeMessage, readServiceDescriptor, validateNativeRoomId } from "../wake/subscriber.mjs";
 
 /**
@@ -63,14 +63,21 @@ export function nativeTransport(room, { actor, stateRoot, session, connect }) {
      * the service that runs the faces reads it from the same request that committed the message;
      * the ack's `faces[]`, when the service supplies one, is returned as the receipt's face rows.
      * This transport never publishes a face itself.
+     *
+     * `beforeSend(id)` runs, awaited, once the message id is known and before the append is
+     * sent: the id is a digest of the room, this seat's account and the client-minted operation
+     * id, so the poster can record it in its own ledger first. A watch subscribed on the same
+     * session receives the service's push before this request returns, and a ledger written
+     * after the receipt lost that race (measured: a session's own posts delivered back to it).
      */
-    async post(text, { thread, face } = {}) {
+    async post(text, { thread, face, beforeSend } = {}) {
       if (thread !== undefined) throw new AgoraError("native rooms have no threads");
       /** @type {import('../native-service.mjs').NativeServiceClient} */
       let c;
       try { c = await client(); }
       catch (e) { throw new AgoraError(`room-dark: ${e instanceof Error ? e.message : String(e)}; nothing was posted and no cursor was issued`); }
       const operationId = randomUUID().replaceAll("-", "");
+      if (beforeSend) await beforeSend(nativeMessageId(roomId, (await readServiceDescriptor(stateRoot)).accountId, operationId));
       const receipt = await c.request("append", { roomId, operation: { operationId, authorName: actor.name, authorKind: actor.kind, text }, ...(face === undefined ? {} : { face }) });
       return { id: String(receipt.id), cursor: String(receipt.cursor), ...(Array.isArray(receipt.faces) ? { faces: receipt.faces } : {}) };
     },

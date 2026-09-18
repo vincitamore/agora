@@ -7,7 +7,7 @@ import path from "node:path";
 import { AgoraError } from "./core.mjs";
 import Kernel from "./native-cursor.kernel.mjs";
 import BoardKernel from "./native-board.kernel.mjs";
-import { nativeCursor, nativeDigest, parseNativeCursor, validateNativeEpoch, validateNativeId } from "./native-protocol.mjs";
+import { nativeCursor, nativeDigest, nativeMessageId, parseNativeCursor, validateNativeEpoch, validateNativeId } from "./native-protocol.mjs";
 import { ProtocolValidationError } from "./protocol/common.mjs";
 import { validateBoardPayload } from "./protocol/operation.mjs";
 
@@ -27,9 +27,7 @@ const UTF8 = new TextDecoder("utf-8", { fatal: true });
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest();
 
 /** @param {string} roomId @param {string} accountId @param {string} operationId */
-function messageId(roomId, accountId, operationId) {
-  return createHash("sha256").update(roomId).update("\0").update(accountId).update("\0").update(operationId).digest("hex");
-}
+const messageId = nativeMessageId;
 
 /** @param {string} root @param {string} roomId */
 function roomDirectory(root, roomId) {

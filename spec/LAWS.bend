@@ -22,16 +22,22 @@ law future_sequence_refused:
   for future: {True{} == Nat.is_gt(since, committed) : Bool}
   {K.plan(True{}, committed, since, limit) == K.RefusedFuture{} : K.Plan}
 
-# LAW 3 (a refusal advances nothing): after either refusal the consumer holds
-# exactly the cursor it held before.
+# LAW 3 (a refusal advances nothing): after a foreign-epoch refusal the
+# consumer holds exactly the cursor it held before, whatever the room holds.
 law refusal_advances_nothing:
   for +committed: Nat
   for +since: Nat
   for +limit: Nat
+  {K.next(since, K.plan(False{}, committed, since, limit)) == since : Nat}
+
+# LAW 3b (a future-sequence refusal advances nothing): the same after a
+# future-sequence refusal.
+law future_refusal_advances_nothing:
+  for +committed: Nat
+  for +since: Nat
+  for +limit: Nat
   for future: {True{} == Nat.is_gt(since, committed) : Bool}
-  {(K.next(since, K.plan(False{}, committed, since, limit)),
-    K.next(since, K.plan(True{}, committed, since, limit)))
-   == (since, since) : Nat & Nat}
+  {K.next(since, K.plan(True{}, committed, since, limit)) == since : Nat}
 
 # LAW 4 (a read is the rows after the cursor): a cursor at or under the
 # committed sequence delivers exactly the sequences from since + 1 up to the
@@ -45,13 +51,15 @@ law read_is_the_rows_after_the_cursor:
   {K.plan(True{}, committed, since, limit)
    == K.Slice{1n+since, Nat.min(Nat.add(since, limit), committed)} : K.Plan}
 
-# LAW 5 (delivery never exceeds the room): the last sequence a read may
-# deliver is at most the committed sequence.
+# LAW 5 (delivery never exceeds the room): after a read holding a cursor at
+# or under the committed sequence, the cursor the consumer holds is still at
+# or under the committed sequence.
 law delivery_within_committed:
   for +committed: Nat
   for +since: Nat
   for +limit: Nat
-  {True{} == Nat.is_le(Nat.min(Nat.add(since, limit), committed), committed) : Bool}
+  for +held: {False{} == Nat.is_gt(since, committed) : Bool}
+  {True{} == Nat.is_le(K.next(since, K.plan(True{}, committed, since, limit)), committed) : Bool}
 
 # LAW 6 (the cursor never regresses): whatever a read delivers, the cursor a
 # consumer holds afterwards is at or after the one it held before.

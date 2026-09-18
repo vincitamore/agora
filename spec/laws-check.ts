@@ -14,8 +14,16 @@
 // its exit code: an `@unsafe` book exits 0. A fixture may overlay the model file only;
 // one that carries a LAWS or PROOF file is refused, since a red produced by a weakened
 // law or a sabotaged proof exhibits nothing about the model.
+//
+// Each fixture is checked against its law IN ISOLATION: the gate builds a LAWS copy holding
+// only that law and a PROOF copy holding the kit and only that law's def, both mechanically,
+// and requires the checker to go red there. The checker halts at the first red, and two laws
+// about one function pin its shape in their proof terms (cursor laws 5 and 6 both unfold
+// `next`), so in the full file whichever law comes first catches every mutation of that
+// function and the later law could never be shown red at itself. A red inside the model
+// file, or a TODO, is a malformed fixture, not an exhibit.
 
-import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -43,6 +51,24 @@ function check(dir: string, proof: string): { out: string; green: boolean } {
 function lawNames(text: string): string[] {
   return [...text.matchAll(/^law ([A-Za-z0-9_.]+):/gm)].map((m) => m[1]);
 }
+
+// a LAWS file reduced to one law: everything before the first `law` line (the imports), then
+// that law's block (its `law` line through the line before the next `law`, or the end)
+function isolateLaws(text: string, name: string): string {
+  const at = text.search(/^law /m);
+  const head = at < 0 ? text : text.slice(0, at);
+  const mine = text.slice(at).split(/^(?=law )/m).find((b) => b.startsWith(`law ${name}:`));
+  if (!mine) throw new Error(`law ${name} not found`);
+  return head + mine;
+}
+
+// a PROOF file reduced to one law's def: every top-level block that is not a `def Laws.*`
+// (imports, the kit) plus that law's own def; a block runs from a `def` line to the next
+function isolateProof(text: string, name: string): string {
+  return text.split(/^(?=def )/m).filter((b) => !b.startsWith("def Laws.") || b.startsWith(`def Laws.${name}(`)).join("");
+}
+
+const escape = (s: string) => s.replace(/[-.]/g, (c) => "\\" + c);
 
 function main(argv: string[]): number {
   if (!existsSync(MAIN)) {
@@ -86,8 +112,8 @@ function main(argv: string[]): number {
     }
 
     // 3. the import chain: PROOF -> LAWS -> the model
-    say(new RegExp(`^import \\./${k.laws.replace(".", "\\.")} as `, "m").test(src[k.proof]), `${k.proof} imports ${k.laws}`);
-    say(new RegExp(`^import \\./${k.source.replace(".", "\\.")} as `, "m").test(src[k.laws]), `${k.laws} imports ${k.source}`);
+    say(new RegExp(`^import \\./${escape(k.laws)} as `, "m").test(src[k.proof]), `${k.proof} imports ${k.laws}`);
+    say(new RegExp(`^import \\./${escape(k.source)} as `, "m").test(src[k.laws]), `${k.laws} imports ${k.source}`);
 
     // 4. every law has its def, and no def without a law
     const defs = [...src[k.proof].matchAll(/^def Laws\.([A-Za-z0-9_.]+)\(/gm)].map((m) => m[1]);
@@ -97,7 +123,8 @@ function main(argv: string[]): number {
       `every law is filled and every Laws.* def has a law${missing.length ? ` (open: ${missing.join(", ")})` : ""}${extra.length ? ` (orphan defs: ${extra.join(", ")})` : ""}`);
 
     // 5. C0 for laws: each law has a mutation of the model that reddens the gate, at that law
-    const locAt = new RegExp(`Location: ${stem.replace(/[-.]/g, "\\$&")}\\.([A-Za-z0-9_.]+)`);
+    const locAt = new RegExp(`Location: ${escape(stem)}\\.([A-Za-z0-9_.]+)`);
+    const inModel = new RegExp(`Location: ${escape(k.source.replace(/\.bend$/, ""))}\\.`);
     for (const n of laws) {
       const dir = join(RED, name, n);
       if (!existsSync(dir) || !statSync(dir).isDirectory()) { say(false, `${n}: no red fixture under laws-red/${name}/${n}/`); continue; }
@@ -107,11 +134,17 @@ function main(argv: string[]): number {
       if (!overlay.includes(k.source)) { say(false, `${n}: fixture carries no ${k.source}`); continue; }
       const tmp = mkdtempSync(join(tmpdir(), "laws-red-"));
       try {
-        for (const f of files) cpSync(join(SPEC, f), join(tmp, f));
         cpSync(join(dir, k.source), join(tmp, k.source));
+        writeFileSync(join(tmp, k.laws), isolateLaws(src[k.laws], n));
+        writeFileSync(join(tmp, k.proof), isolateProof(src[k.proof], n));
         const r = check(tmp, k.proof);
         const where = r.out.match(locAt)?.[1];
-        say(!r.green && where === n, `${n}: red fixture reddens the gate at this law${r.green ? " (STAYED GREEN)" : where ? (where === n ? "" : ` (fired at ${where})`) : ` (fired, location unparsed: ${r.out.split("\n")[0]})`}`);
+        const malformed = inModel.test(r.out) || /TODOs? found/.test(r.out);
+        const why = r.green ? " (STAYED GREEN)"
+          : malformed ? ` (malformed fixture: ${r.out.split("\n").find((l) => /Location|TODO/.test(l))})`
+          : where === n ? ""
+          : ` (fired elsewhere: ${r.out.match(/Location: (\S+)/)?.[1] ?? r.out.split("\n")[0]})`;
+        say(!r.green && !malformed && where === n, `${n}: red fixture reddens the gate at this law, in isolation${why}`);
       } finally {
         rmSync(tmp, { recursive: true, force: true });
       }

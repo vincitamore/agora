@@ -1,4 +1,4 @@
-# RED FIXTURE for law refusal_advances_nothing: a foreign-epoch refusal resets the cursor to the start
+# RED FIXTURE for law delivery_within_committed: a delivery moves the cursor one past the last delivered row
 # The delivery plan of a native room read, as a kernel small enough to prove
 # things about. A room has `committed` records numbered 1..committed in one
 # epoch. A read names the cursor it holds (the sequence it has already seen)
@@ -35,11 +35,11 @@ def plan(same_epoch: Bool, +committed: Nat, +since: Nat, +limit: Nat) -> Plan:
 def next(+since: Nat, p: Plan) -> Nat:
   match p:
     case RefusedEpoch{}:
-      0n
+      since
     case RefusedFuture{}:
       since
     case Slice{from, +to}:
-      Bool.pick(Nat, Nat.is_gt(from, to), since, to)
+      Bool.pick(Nat, Nat.is_gt(from, to), since, 1n+to)
 
 # how many rows a plan delivers
 def delivered(p: Plan) -> Nat:

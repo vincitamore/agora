@@ -333,13 +333,12 @@ export async function sealCarryBoundary(dir, output, context) {
   return boundary;
 }
 
-/** Capture trailer commitments only from a successful own post. Call BEFORE the
- * existing appendPosted, so the very first post can establish a fresh origin.
- * Existing/rotated ledgers deliberately start with unknown pre-C1 history.
- * @param {string} dir @param {string} room @param {{slug:string}} session
- * @param {string} bearer @param {string} text @param {{id:string,cursor:string}} receipt
- * @param {ReturnType<typeof validateCarryEvent>} [intent] */
-export async function captureCarryPost(dir, room, session, bearer, text, receipt, intent) {
+/** Establish this session's carry origin once, BEFORE its first ledger line: a session whose
+ * ledger is empty at that moment has complete commitment history from here on; an existing or
+ * rotated ledger deliberately starts with unknown pre-C1 history. Idempotent (exclusive create).
+ * The CLI calls it before any ledger write, since a native post records its id before the send.
+ * @param {string} dir @param {{slug:string}} session @param {string} bearer */
+export async function ensureCarryOrigin(dir, session, bearer) {
   await mkdir(dir, { recursive: true });
   let previousPosts = false;
   for (const file of ['posted.jsonl', 'posted.1.jsonl']) {
@@ -351,6 +350,16 @@ export async function captureCarryPost(dir, room, session, bearer, text, receipt
     try { await handle.writeFile(JSON.stringify({ version: 1, session: session.slug, bearer, commitmentsComplete: !previousPosts }) + '\n'); await handle.sync(); }
     finally { await handle.close(); }
   } catch (err) { if (/** @type {NodeJS.ErrnoException} */ (err).code !== 'EEXIST') throw err; }
+}
+
+/** Capture trailer commitments only from a successful own post. The origin is established here
+ * too for a caller that writes the ledger afterwards; a caller that records the ledger first
+ * calls ensureCarryOrigin before it.
+ * @param {string} dir @param {string} room @param {{slug:string}} session
+ * @param {string} bearer @param {string} text @param {{id:string,cursor:string}} receipt
+ * @param {ReturnType<typeof validateCarryEvent>} [intent] */
+export async function captureCarryPost(dir, room, session, bearer, text, receipt, intent) {
+  await ensureCarryOrigin(dir, session, bearer);
   const evidence = await readCarryEvidence(dir);
   /** @type {string|undefined} */ let inheritedFrom;
   try {
