@@ -1,4 +1,4 @@
-# RED FIXTURE for law stranger_cannot_retract: any step retracts, the asserter's or a stranger's
+# RED FIXTURE for law stranger_cannot_retract: any pending step retracts, the asserter's or a stranger's
 # The settlement ledger of section 1 and P8, as a model small enough to prove
 # things about. A ledger is the append-only list of what the collective has
 # done to its shared record, newest first. Three kinds of entry exist:
@@ -39,6 +39,11 @@ def Fact.eq(+a: Fact, +b: Fact) -> Bool:
   Fact{y} = b
   Nat.is_eq(x, y)
 
+# a step's members
+def members(s: Step) -> List<&2, Nat>:
+  Step{ms} = s
+  ms
+
 # whether member m is among a step's members
 def member_of(+m: Nat, ms: List<&2, Nat>) -> Bool:
   match ms:
@@ -47,31 +52,90 @@ def member_of(+m: Nat, ms: List<&2, Nat>) -> Bool:
     case n <> rest:
       Nat.is_eq(m, n) || member_of(m, rest)
 
-# what a retraction leaves of a fact's standing: nothing when it names the
-# fact and its step includes the fact's asserter; otherwise what stood below
-def read.retract(hit: Bool, ms: List<&2, Nat>, below: Standing) -> Standing:
+# whether member m is in any of the steps
+def includes_any(+m: Nat, steps: List<&2, Step>) -> Bool:
+  match steps:
+    case Nil{}:
+      False{}
+    case Step{ms} <> rest:
+      True{}
+
+# a step appended at the end of a list of steps
+def snoc(steps: List<&2, Step>, s: Step) -> List<&2, Step>:
+  match steps:
+    case Nil{}:
+      s <> []
+    case x <> rest:
+      x <> snoc(rest, s)
+
+# What a read of fact f carries down the ledger, newest entry first: the
+# retraction steps about f met so far and not yet answered by an assertion
+# (Pending), or, once the newest assertion about f is met, whether one of
+# those steps included its member (Decided). The walk is a single tail-recursive
+# pass: nothing below the newest assertion about f is ever consulted, and no
+# call waits on a deeper one, so the read is bounded by the ledger's length in
+# time and by nothing in stack.
+type Read is Data:
+  Pending{steps: List<&2, Step>}
+  Decided{blocked: Bool, member: Nat}
+
+# an assertion that names f decides the read; one that does not is passed over
+def read.on_assert(hit: Bool, +m: Nat, st: Read) -> Read:
   match hit:
     case False{}:
-      below
+      st
     case True{}:
-      match below:
-        case Unsettled{}:
-          Unsettled{}
-        case Settled{+m}:
-          Unsettled{}
+      match st:
+        case Pending{steps}:
+          Decided{includes_any(m, steps), m}
+        case Decided{b, k}:
+          Decided{b, k}
 
-# the standing of fact f in ledger l: the newest entry about f decides.
-def read(l: List<Entry>, +f: Fact) -> Standing:
+# a retraction that names f joins the pending steps, unless the read is done
+def read.on_retract(hit: Bool, s: Step, st: Read) -> Read:
+  match hit:
+    case False{}:
+      st
+    case True{}:
+      match st:
+        case Pending{steps}:
+          Pending{s <> steps}
+        case Decided{b, k}:
+          Decided{b, k}
+
+# what a finished read says: a fact never asserted is unsettled; an asserted
+# one stands unless a step including its asserter retracted it
+def read.finish(st: Read) -> Standing:
+  match st:
+    case Pending{steps}:
+      Unsettled{}
+    case Decided{+b, +k}:
+      Bool.pick(Standing, b, Unsettled{}, Settled{k})
+
+def read.go(l: List<&2, Entry>, +f: Fact, st: Read) -> Standing:
   match l:
     case Nil{}:
-      Unsettled{}
+      read.finish(st)
     case Assert{g, m} <> rest:
-      Bool.pick(Standing, Fact.eq(g, f), Settled{m}, read(rest, f))
+      read.go(rest, f, read.on_assert(Fact.eq(g, f), m, st))
     case Allocate{n} <> rest:
-      read(rest, f)
+      read.go(rest, f, st)
     case Retract{g, s} <> rest:
-      Step{ms} = s
-      read.retract(Fact.eq(g, f), ms, read(rest, f))
+      read.go(rest, f, read.on_retract(Fact.eq(g, f), s, st))
+
+# the standing of fact f in ledger l: the newest entry about f decides.
+def read(l: List<&2, Entry>, +f: Fact) -> Standing:
+  read.go(l, f, Pending{[]})
+
+# what one retraction step leaves of a standing: nothing when the step
+# includes the asserter, else what stood. Not used by the read, which folds
+# every step into one pass; it is the reading the laws are stated against.
+def read.retract(ms: List<&2, Nat>, r: Standing) -> Standing:
+  match r:
+    case Unsettled{}:
+      Unsettled{}
+    case Settled{+m}:
+      Bool.pick(Standing, member_of(m, ms), Unsettled{}, Settled{m})
 
 def standing.of(r: Standing) -> Bool:
   match r:
@@ -81,7 +145,7 @@ def standing.of(r: Standing) -> Bool:
       True{}
 
 # whether fact f stands in ledger l
-def standing(l: List<Entry>, +f: Fact) -> Bool:
+def standing(l: List<&2, Entry>, +f: Fact) -> Bool:
   standing.of(read(l, f))
 
 # whether an entry is an exhibit's assertion
@@ -95,7 +159,7 @@ def is_exhibit(e: Entry) -> Bool:
       False{}
 
 # whether a list of entries is coordination-free: it retracts nothing
-def coordination_free(es: List<Entry>) -> Bool:
+def coordination_free(es: List<&2, Entry>) -> Bool:
   match es:
     case Nil{}:
       True{}
@@ -107,7 +171,7 @@ def coordination_free(es: List<Entry>) -> Bool:
       False{}
 
 # apply entries to a ledger in order, oldest first
-def apply(es: List<Entry>, l: List<Entry>) -> List<Entry>:
+def apply(es: List<&2, Entry>, l: List<&2, Entry>) -> List<&2, Entry>:
   match es:
     case Nil{}:
       l
