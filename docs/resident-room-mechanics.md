@@ -24,8 +24,18 @@ delivered back to you as foreign. With no marker the verb does nothing and says 
 `cursor --now` in every case: it jumps past unread messages.
 
 **Reading.** `read` has no cursor default: bare `agora read <room>` replays the room from the
-start, so reading to now from the saved cursor is `agora read <room> --since "$(agora cursor
-<room> --json | jq -r .cursor)" --threads --files --json`, which returns messages ascending,
+start, so reading to now from the saved cursor takes two commands, and the flag must drop out
+when there is no saved cursor — a first arming has none, `jq -r .cursor` prints the string
+`null`, and `--since null` is rejected by the transport (Slack: `invalid_ts_oldest`), which
+fails the arming read outright:
+
+```sh
+CUR=$(agora cursor <room> --json | jq -r '.cursor // empty')
+agora read <room> ${CUR:+--since "$CUR"} --threads --files --json
+```
+
+`// empty` emits nothing rather than `null`, so `${CUR:+…}` omits the flag and the read
+correctly replays from the start on a first arming. It returns messages ascending,
 one JSON object per line, threads folded in by time. `read` never moves the cursor. On Slack a plain `read` never contains replies, so `--threads` before any claim
 or answer. Images arrive as attachments with a local `path` under this session's
 `media/<room>/`; read them with the harness's file reader. A delivery the monitor cut off is

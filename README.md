@@ -620,7 +620,13 @@ member 0 on both sides of its own ledger. `carry`'s room fold asserts each of th
 retracts it under the session's own step when a later post `withdraws:` it or answers it by `re:`;
 the standing facts are the `verdicts` field and the retracted ones are `superseded`. The two
 consumers share one source: `build-kernel.ts` refuses to emit the settlement kernel when the copy
-differs from `../singulis/spec/settlement.bend` (or `SINGULIS_SPEC`) where that tree is present.
+differs from `../singulis/spec/settlement.bend` (or `SINGULIS_SPEC`) where that tree is present. The
+read is one tail-recursive pass carrying a `Pending`/`Decided` state, so a ledger of any length reads
+in constant stack (a hundred thousand entries in the kernel face test; a million in 82 ms measured);
+its red fixtures each carry a `witness.bend`, a pure `main` evaluating the law on concrete values that
+`laws-check.ts` requires to print `True{}` beside the mutation and `False{}` beside the real model,
+because an accumulator model's proof terms spell its shape and a mutation reds a kit lemma before
+the law's own def.
 
 To change any of them, edit the `.bend` source (and the laws, if the claim moves), then regenerate
 with a Bend checkout on hand (`BEND_CLONE=<path> bun spec/build-kernel.ts [--spec cursor|board|settlement]`):

@@ -11,7 +11,7 @@ import ./settlement.bend as S
 # and whatever kind of entry carries the count, settles nothing.
 law only_exhibits_settle:
   for e: S.Entry
-  for l: List<S.Entry>
+  for l: List<&2, S.Entry>
   for +f: S.Fact
   for ne: {S.is_exhibit(e) == False{} : Bool}
   for st: {S.standing(e <> l, f) == True{} : Bool}
@@ -20,7 +20,7 @@ law only_exhibits_settle:
 # LAW 2 (an exhibit settles): after an exhibit by any member asserts a fact,
 # the fact stands.
 law exhibit_settles:
-  for l: List<S.Entry>
+  for l: List<&2, S.Entry>
   for +f: S.Fact
   for +m: Nat
   {S.standing(S.Assert{f, m} <> l, f) == True{} : Bool}
@@ -29,8 +29,8 @@ law exhibit_settles:
 # keeps standing under any coordination-free sequence of entries. Only a
 # retraction, which must name its coordination step, can unsettle it.
 law monotone_without_coordination:
-  for es: List<S.Entry>
-  for l: List<S.Entry>
+  for es: List<&2, S.Entry>
+  for +l: List<&2, S.Entry>
   for +f: S.Fact
   for cf: {S.coordination_free(es) == True{} : Bool}
   for st: {S.standing(l, f) == True{} : Bool}
@@ -41,7 +41,7 @@ law monotone_without_coordination:
 # it exactly as it stood before. A step of one stranger, or of many, is not
 # coordination.
 law stranger_cannot_retract:
-  for l: List<S.Entry>
+  for l: List<&2, S.Entry>
   for +f: S.Fact
   for +a: Nat
   for ms: List<&2, Nat>
@@ -52,7 +52,7 @@ law stranger_cannot_retract:
 # LAW 5 (the asserter's step retracts): where a fact was settled by member a,
 # a retraction whose step includes a unsettles it, whoever else is in the step.
 law asserter_retracts:
-  for l: List<S.Entry>
+  for l: List<&2, S.Entry>
   for +f: S.Fact
   for +a: Nat
   for ms: List<&2, Nat>
