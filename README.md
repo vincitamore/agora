@@ -625,7 +625,11 @@ differs from `../singulis/spec/settlement.bend` (or `SINGULIS_SPEC`) where that 
 To change any of them, edit the `.bend` source (and the laws, if the claim moves), then regenerate
 with a Bend checkout on hand (`BEND_CLONE=<path> bun spec/build-kernel.ts [--spec cursor|board|settlement]`):
 the script proves the kernel's PROOF file first, refuses `@unsafe`, `?TODO` and hash imports, and
-emits the file. `bun spec/build-kernel.ts --check` exits 1 when a committed file is not a fresh
+emits the file. The checkout is pinned by `spec/bend.pin.json`; `node scripts/bend-checkout.mjs` fetches that commit
+(the house mirror first, upstream second, since upstream is one force-pushed commit) into
+`../bend-src` or, under CI, the runner's tool cache, and both `build-kernel.ts` and `laws-check.ts`
+refuse a checkout at any other commit. CI runs the checkout step, then the regeneration check and
+the laws gate on every push and pull request. `bun spec/build-kernel.ts --check` exits 1 when a committed file is not a fresh
 regeneration; `test/native-cursor-kernel.test.mjs` runs that check for every kernel wherever `bun`
 and a checkout exist and skips by name elsewhere, and the two `native-*-kernel.test.mjs` files pin
 each kernel's JavaScript face (BigInt in, tagged objects out) everywhere. Never edit a generated

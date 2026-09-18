@@ -22,8 +22,17 @@ jobs:
         with:
           node-version: 22
       - run: npm ci
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - name: Bend checkout (pinned; spec/bend.pin.json)
+        run: node scripts/bend-checkout.mjs
       - run: npm test
       - run: npm run check
+      - name: kernels are fresh regenerations of their proven sources
+        run: bun spec/build-kernel.ts --check
+      - name: every law reddens on its fixture (C0 for laws)
+        run: bun spec/laws-check.ts
       - name: macOS launchd lifecycle
         if: runner.os == 'macOS'
         env:
