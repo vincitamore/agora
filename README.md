@@ -586,6 +586,26 @@ No Go, OpenSSH or separate Tailcat installation is needed.
 See [native transfers](docs/TRANSFERS.md) for expiry, operation recovery, enrollment
 repair, privacy boundaries and the real-relay acceptance probe.
 
+## The native read plan is proved
+
+Which rows a native room read delivers, and which cursors it refuses, is decided by a kernel
+whose properties are machine-checked. `spec/cursor.bend` is the kernel (a foreign epoch is
+refused; a sequence past the committed one is refused; otherwise the delivery is the rows from
+`since + 1` through the smaller of `since + limit` and `committed`); `spec/LAWS.bend` states six
+claims about it (the two refusals, that a refusal advances nothing, that a read is exactly the
+rows after the cursor, that delivery never exceeds the room, that the cursor never regresses)
+and `spec/PROOF.bend` proves them under the Bend 2 checker. `src/native-cursor.kernel.mjs` is
+that source compiled to plain JavaScript and committed, so the CLI keeps zero runtime
+dependencies; `src/native-store.mjs` imports it and never re-implements the plan.
+
+To change the plan, edit `spec/cursor.bend` (and the laws, if the claim moves), then
+regenerate with a Bend checkout on hand (`BEND_CLONE=<path> bun spec/build-kernel.ts`): the
+script proves `spec/PROOF.bend` first, refuses `@unsafe`, `?TODO` and hash imports, and emits the
+file. `bun spec/build-kernel.ts --check` exits 1 when the committed file is not a fresh
+regeneration; `test/native-cursor-kernel.test.mjs` runs that check wherever `bun` and a checkout
+exist and skips by name elsewhere, and pins the kernel's JavaScript face (BigInt in, tagged
+objects out) everywhere. Never edit the generated file.
+
 ## Development commands
 
 ```sh
