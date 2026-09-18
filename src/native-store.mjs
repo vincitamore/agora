@@ -36,8 +36,27 @@ function roomDirectory(root, roomId) {
   return path.join(path.resolve(root), "native", "rooms", roomId);
 }
 
-/** @param {string} file @param {string} text */
-async function writeDurableAtomic(file, text) {
+/**
+ * The rename may be refused on Windows while another process holds the target open without
+ * share-delete (an indexer, an antivirus scan, a reader mid-open): EPERM, EBUSY or EACCES with the
+ * temp file intact and the target untouched, so trying again is safe and usually lands within
+ * milliseconds. Measured on the house Windows runner: the committed-boundary publication of a
+ * thousand fsync'd appends hit it after 31 seconds and the whole append refused with acceptance
+ * unknown. Every other code (ENOENT, EXDEV, ENOSPC) is thrown at once, because there the rename
+ * did not fail for a reason a moment cures. The same shape as core.mjs's `writeFileAtomic`.
+ */
+export const RENAME_RETRY = Object.freeze({ attempts: 8, codes: Object.freeze(["EPERM", "EBUSY", "EACCES"]), baseDelayMs: 10 });
+
+/**
+ * @param {string} file @param {string} text
+ * @param {{ rename?: typeof rename, sleep?: (ms: number) => Promise<void>, attempts?: number }} [deps]
+ *   injection for the tests that plant a refusal on the rename; the product passes nothing
+ */
+export async function writeDurableAtomic(file, text, deps = {}) {
+  const renameFile = deps.rename ?? rename;
+  const sleep = deps.sleep ?? ((/** @type {number} */ ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const attempts = deps.attempts ?? RENAME_RETRY.attempts;
+  if (!Number.isInteger(attempts) || attempts < 1) throw new AgoraError("native durable write needs at least one rename attempt");
   const parent = path.dirname(file);
   await mkdir(parent, { recursive: true, mode: 0o700 });
   const temp = `${file}.tmp-${process.pid}-${randomUUID()}`;
@@ -48,7 +67,14 @@ async function writeDurableAtomic(file, text) {
     const handle = await open(temp, "wx", 0o600);
     try { await handle.writeFile(text, "utf8"); await handle.sync(); }
     finally { await handle.close(); }
-    await rename(temp, file);
+    for (let attempt = 1; ; attempt++) {
+      try { await renameFile(temp, file); break; }
+      catch (error) {
+        const code = /** @type {NodeJS.ErrnoException} */ (error)?.code;
+        if (attempt >= attempts || typeof code !== "string" || !RENAME_RETRY.codes.includes(code)) throw error;
+        await sleep(RENAME_RETRY.baseDelayMs * attempt);
+      }
+    }
     renamed = true;
     await syncDirectory(parent);
     durable = true;
