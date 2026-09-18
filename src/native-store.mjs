@@ -500,22 +500,28 @@ export class NativeRoomStore {
     // still computed below by #leaseMs, which owns the cap and fallback policy.
     /** @type {Map<string, bigint>} */
     const interned = new Map();
+    /** @type {Map<bigint, string>} the way back from a verdict's Nats to the store's ids */
+    const ids = new Map();
     /** @param {string} id */
-    const nat = (id) => { if (!interned.has(id)) interned.set(id, BigInt(interned.size + 1)); return /** @type {bigint} */ (interned.get(id)); };
+    const nat = (id) => { if (!interned.has(id)) { interned.set(id, BigInt(interned.size + 1)); ids.set(/** @type {bigint} */ (interned.get(id)), id); } return /** @type {bigint} */ (interned.get(id)); };
     const holder = stored
       ? { $: "Held", account: nat(stored.accountId), lease: nat(stored.leaseId), fence: nat(stored.fence), expires: kernelNat(Math.max(0, Date.parse(stored.expiresAt) || 0), "the stored expiry") }
       : { $: "NoHolder" };
     const me = nat(authenticated.accountId);
     const fenceNamed = payload.action === "renew" || payload.action === "release" ? payload.fence : "";
-    const act = payload.action === "claim" ? { $: "Claim", account: me, op: nat(input.operationId), lease_ms: 1000n }
-      : payload.action === "renew" ? { $: "Renew", account: me, lease: nat(payload.leaseId), fence: nat(payload.fence), lease_ms: 1000n }
+    // the lease the record will carry is the one the kernel judges with: #leaseMs owns the cap and
+    // fallback policy and refuses before the kernel sees a value; the kernel's Held{expires} is then
+    // the expiry the store keeps, not a placeholder the store recomputes beside it
+    const leaseMs = payload.action === "claim" || payload.action === "renew" ? this.#leaseMs(payload, live) : undefined;
+    const act = payload.action === "claim" ? { $: "Claim", account: me, op: nat(input.operationId), lease_ms: kernelNat(/** @type {number} */ (leaseMs), "the lease") }
+      : payload.action === "renew" ? { $: "Renew", account: me, lease: nat(payload.leaseId), fence: nat(payload.fence), lease_ms: kernelNat(/** @type {number} */ (leaseMs), "the lease") }
       : payload.action === "release" ? { $: "Release", account: me, lease: nat(payload.leaseId), fence: nat(payload.fence) }
       : payload.action === "break" ? { $: "Break", human: input.authorKind === "human" }
       : { $: "Contest" };
     // every number the kernel receives is checked against the interpreter's Nat ceiling first
     // (src/kernel-nat.mjs): the kernel aborts past it with a bare string, the store refuses by name
     const now = kernelNat(this.now().getTime(), "the clock");
-    kernelNat(now + 1000n, "the expiry the kernel would compute");
+    if (leaseMs !== undefined) kernelNat(now + BigInt(leaseMs), "the expiry the kernel would compute");
     const verdict = BoardKernel.judge(act, holder, kernelNat(this.records.length + 1, "the cursor"), now);
     if (verdict.$ === "Held_by_another" && live)
       throw new AgoraError(`native board subject ${payload.subject} is held at ${live.cursor} by ${live.accountId} until ${live.expiresAt}`);
@@ -535,8 +541,21 @@ export class NativeRoomStore {
     const cursor = nativeCursor(this.manifest.epoch, sequence);
     const boardId = messageId(this.manifest.roomId, authenticated.accountId, input.operationId);
     const payloadDigest = nativeDigest({ accountId: authenticated.accountId, board: payload });
-    const leaseMs = payload.action === "claim" || payload.action === "renew" ? this.#leaseMs(payload, live) : undefined;
-    const expiresAt = leaseMs !== undefined ? new Date(this.now().getTime() + leaseMs).toISOString() : undefined;
+    // What the store keeps is what the kernel decided. Applied{Held{account, lease, fence, expires}}
+    // comes back as ids through the interning map; its fence must be this record's own cursor and
+    // its account and lease must be the ones the record names, or the store's wiring and the
+    // kernel's reading have parted and nothing downstream may trust either. The expiry the record
+    // carries is the kernel's, so #applyBoard on reopen re-derives from the record exactly the
+    // holder the kernel named. A contest applies the stored holder unchanged and carries no lease.
+    const kernelHolder = verdict.holder.$ === "Held"
+      ? { accountId: ids.get(verdict.holder.account), leaseId: ids.get(verdict.holder.lease), fence: Number(verdict.holder.fence), expiresAt: new Date(Number(verdict.holder.expires)).toISOString() }
+      : null;
+    if (kernelHolder && (payload.action === "claim" || payload.action === "renew")) {
+      if (kernelHolder.fence !== sequence || kernelHolder.accountId !== authenticated.accountId ||
+          kernelHolder.leaseId !== (payload.action === "claim" ? input.operationId : payload.leaseId))
+        throw new AgoraError(`native board kernel named a holder the store did not ask for on ${payload.subject}: refusing before commit`);
+    }
+    const expiresAt = kernelHolder && (payload.action === "claim" || payload.action === "renew") ? kernelHolder.expiresAt : undefined;
     const unsigned = { version: LOG_VERSION, roomId: this.manifest.roomId, epoch: this.manifest.epoch, sequence,
       accountId: authenticated.accountId, operationId: input.operationId, kind: "board",
       payloadDigest, previousDigest: this.records.at(-1)?.recordDigest ?? null,
