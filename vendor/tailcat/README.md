@@ -30,7 +30,9 @@ node scripts/vendor-tailcat.mjs verify ./tailcat <windows|linux|darwin>
 version differs, builds each architecture of that OS into a scratch directory with exactly the
 recorded flags, and prints the rebuilt sha256 beside the locked one, exit 1 on any difference.
 With `-trimpath`, `-buildvcs=false`, CGO off and a pinned toolchain, a Go build is
-byte-reproducible, so a difference is a finding, not noise.
+byte-reproducible, so a difference is a finding, not noise. The same check runs in this
+repository's Actions as the `vendor-tailcat` workflow (`workflow_dispatch`, job `verify`,
+one runner per OS); dispatching it is the exhibit, and a fork runs it too.
 
 ## Re-vendoring
 
