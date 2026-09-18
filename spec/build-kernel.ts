@@ -39,8 +39,20 @@ const names = specAt >= 0 ? [args[specAt + 1]] : Object.keys(KERNELS);
 for (const n of names) if (!KERNELS[n]) { console.error(`unknown kernel ${n}; known: ${Object.keys(KERNELS).join(", ")}`); process.exit(2); }
 
 if (!existsSync(MAIN)) {
-  console.error(`no Bend checkout at ${CLONE}; set BEND_CLONE`);
+  console.error(`no Bend checkout at ${CLONE}; set BEND_CLONE, or fetch the pin: node scripts/bend-checkout.mjs`);
   process.exit(2);
+}
+
+// the checkout must be at the pinned commit: a proof against another Bend is a proof of nothing
+// this repository ships (spec/bend.pin.json; scripts/bend-checkout.mjs fetches the pin)
+const PIN = JSON.parse(readFileSync(join(ROOT, "spec", "bend.pin.json"), "utf8"));
+{
+  const head = spawnSync("git", ["-C", CLONE, "rev-parse", "HEAD"], { encoding: "utf8" });
+  const at = (head.stdout ?? "").trim();
+  if (head.status !== 0 || at !== PIN.sha) {
+    console.error(`Bend checkout at ${CLONE} is ${at || "not a git checkout"}; the pin is ${PIN.sha} (${PIN.version}). Fetch it: node scripts/bend-checkout.mjs --into ${CLONE}`);
+    process.exit(2);
+  }
 }
 
 const Bend = await import(join(CLONE, "bend2", "bend.ts").replaceAll("\\", "/"));
