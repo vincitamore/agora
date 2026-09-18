@@ -594,12 +594,22 @@ path must accept (messages, a board claim, a checkpointed boundary) and one dama
 named edit of it (a truncated last frame, a length header that overruns, a checksum that no
 longer matches, a payload that is not JSON, a record whose sequence skips, a manifest field gone
 or wrong, a boundary that ends inside a frame or names a foreign epoch or disagrees with the log,
-a writer lock that is unparseable or names a dead endpoint), each with an `EXPECT.json` naming
-what `NativeRoomStore.open` must say. `scripts/make-bad-bytes-corpus.mjs` writes it from the
+a writer lock that is unparseable or names a dead endpoint), and behind a well-formed frame, one
+edit per field the scan validates (a record naming another room, epoch or protocol version, a
+malformed operation, account or payload digest, a record digest that is malformed or wrong, a
+chat record with no message or whose message id, author, room or cursor disagree with its
+position, a board record whose id or cursor disagree or that carries a message or an invalid
+payload, a boundary with the wrong version or room, a fractional or past-the-limit sequence, a
+negative or fractional end, a malformed digest, or one ending inside a header; and two that must
+open: a boundary at exactly the record limit, and one acknowledging four of five frames), each
+with an `EXPECT.json` naming what `NativeRoomStore.open` must say. `scripts/make-bad-bytes-corpus.mjs` writes it from the
 store itself under a fixed clock and fixed ids, so the bytes are reproducible (`--check` exits 1
 when the committed corpus differs from a fresh build), and `test/native-store-bad-bytes.test.mjs`
 opens every case offline. The corpus exists because the mutation sweep found the scan, boundary,
-manifest and lock paths untested; never hand-edit a case, add an edit to the script.
+manifest and lock paths untested, and its second wave because the first reddened the byte-level
+cases and left every field-level check behind them standing; never hand-edit a case, add an edit
+to the script (a field edit goes through `editRecord`, which re-seals the frame so the checksum
+passes and the field check is what refuses).
 
 ## The native read plan, the board's admission and what a carry says stands are proved
 

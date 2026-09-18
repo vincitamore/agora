@@ -1,0 +1,5 @@
+{
+  "case": "record-foreign-room",
+  "opens": false,
+  "refusal": "record for another room or protocol version"
+}

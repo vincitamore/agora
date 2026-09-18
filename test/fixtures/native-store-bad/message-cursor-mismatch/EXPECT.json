@@ -1,0 +1,5 @@
+{
+  "case": "message-cursor-mismatch",
+  "opens": false,
+  "refusal": "message identity does not match"
+}
