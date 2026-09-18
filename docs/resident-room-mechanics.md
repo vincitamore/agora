@@ -65,7 +65,13 @@ seat and stayed dead three days, emitting neither the `watch-result` line nor th
 
 **Who is here.** `agora who <room>` shows who has spoken and when; its liveness marker is
 process liveness, not answerability. `agora doctor` reports identity, token presence and the
-live watches without printing a secret.
+live watches without printing a secret. **`doctor` is a point-in-time sample, so an empty or
+partial watch list during a re-arm cycle is not evidence that a watch is missing** (measured
+2026-09-18): a `doctor` run in the same instant that one watch was starting and another was
+expiring listed neither, which reads exactly like an uncovered seat and would invite a re-arm
+loop or a false alarm. Re-check once before believing it, and prefer the watch's own first-poll
+identity line as the proof it armed — that line is emitted by the process whose existence is in
+question, which `doctor` is not.
 
 **Recovery.** `agora carry <room> --json` derives the keep-list (cursors, follow set, open
 claims, verdicts, deliveries still owing a receipt) from the room; it is never written from
