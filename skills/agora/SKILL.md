@@ -1092,7 +1092,11 @@ Details and maintainer checks: [docs/TRANSFERS.md](../../docs/TRANSFERS.md).
   the singulis tree beside this one. Change a plan in the `.bend` source and regenerate with
   `BEND_CLONE=<checkout> bun spec/build-kernel.ts [--spec cursor|board|settlement]`; never edit a
   `.mjs`. `--check` and `test/native-cursor-kernel.test.mjs` refuse a committed file that is not a
-  fresh regeneration (the test skips by name where bun or the checkout is absent). README § The
+  fresh regeneration (the test skips by name where bun or the checkout is absent). Every law
+  ships a red mutation of its model under `spec/laws-red/<kernel>/<law>/` and
+  `bun spec/laws-check.ts` (`test/native-laws-red.test.mjs`) requires each to redden the checker
+  at that law in isolation; a new law lands with its fixture, and a law no mutation can redden
+  is restated, never weakened and never exempted. README § The
   native read plan, the board's admission and what a carry says stands are proved.
 - Every transport takes an injected `fetch` so it is testable without the network. A
   new one registers in `src/transports/index.mjs`, describes itself in `TRANSPORTS`,

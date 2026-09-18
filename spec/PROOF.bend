@@ -109,8 +109,11 @@ def Laws.future_sequence_refused(committed, since, limit, future):
   %future : {K.plan.same(committed, since, limit, _) == K.RefusedFuture{} : K.Plan}
   {==}
 
-def Laws.refusal_advances_nothing(committed, since, limit, future):
-  %future : {(since, K.next(since, K.plan.same(committed, since, limit, _))) == (since, since) : Nat & Nat}
+def Laws.refusal_advances_nothing(committed, since, limit):
+  {==}
+
+def Laws.future_refusal_advances_nothing(committed, since, limit, future):
+  %future : {K.next(since, K.plan.same(committed, since, limit, _)) == since : Nat}
   {==}
 
 def Laws.read_is_the_rows_after_the_cursor(committed, since, limit, held):
@@ -118,8 +121,24 @@ def Laws.read_is_the_rows_after_the_cursor(committed, since, limit, held):
            == K.Slice{1n+since, Nat.min(Nat.add(since, limit), committed)} : K.Plan}
   {==}
 
-def Laws.delivery_within_committed(committed, since, limit):
-  min_le_r(Nat.add(since, limit), committed)
+# the cursor after a slice is under the room, split on the emptiness verdict
+def next_le(c: Cmp, +since: Nat, +to: Nat, +committed: Nat, e: {c == Nat.cmp(1n+since, to) : Cmp},
+  a: {True{} == Nat.is_le(since, committed) : Bool}, b: {True{} == Nat.is_le(to, committed) : Bool})
+  -> {True{} == Nat.is_le(Bool.pick(Nat, Cmp.is_gt(c), since, to), committed) : Bool}:
+  match c:
+    case LT{}:
+      b
+    case EQ{}:
+      b
+    case GT{}:
+      a
+
+def Laws.delivery_within_committed(committed, since, limit, held):
+  %held : {True{} == Nat.is_le(K.next(since, K.plan.same(committed, since, limit, _)), committed) : Bool}
+  next_le(Nat.cmp(1n+since, Nat.min(Nat.add(since, limit), committed)), since,
+    Nat.min(Nat.add(since, limit), committed), committed, {==},
+    cmp_ngt_le(Nat.cmp(since, committed), held),
+    min_le_r(Nat.add(since, limit), committed))
 
 def Laws.cursor_never_regresses(committed, since, limit, held):
   %held : {True{} == Nat.is_le(since, K.next(since, K.plan.same(committed, since, limit, _))) : Bool}

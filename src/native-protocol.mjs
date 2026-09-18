@@ -8,6 +8,15 @@ const ID_RE = /^[A-Za-z0-9_-]{16,128}$/;
 const EPOCH_RE = /^[a-f0-9]{32}$/;
 const UTF8 = new TextDecoder("utf-8", { fatal: true });
 
+/**
+ * The id of a native message is fixed by the room, the appending account and the client-minted
+ * operation id, so the poster knows it before the append is sent; the store derives the same.
+ * @param {string} roomId @param {string} accountId @param {string} operationId
+ */
+export function nativeMessageId(roomId, accountId, operationId) {
+  return createHash("sha256").update(roomId).update("\0").update(accountId).update("\0").update(operationId).digest("hex");
+}
+
 /** @param {unknown} value @returns {string} */
 function canonical(value) {
   if (value === null || typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);

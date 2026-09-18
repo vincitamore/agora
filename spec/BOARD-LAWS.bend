@@ -77,17 +77,21 @@ law stranger_refused:
    == (K.Not_the_holder{}, K.Not_the_holder{}) : K.Verdict & K.Verdict}
 
 # LAW 6 (a stale fence is refused): the holder naming a fence other than the
-# live one is refused, so an act built on an old view of the board cannot land.
+# live one is refused, release and renew alike, so an act built on an old view
+# of the board cannot land.
 law stale_fence_refused:
   for stored: K.Holder
   for +account: Nat
   for +lease: Nat
   for +fence: Nat
+  for +ms: Nat
   for +cursor: Nat
   for +now: Nat
   for own: {True{} == K.owns(account, lease, K.live(stored, now)) : Bool}
   for stale: {False{} == Nat.is_eq(fence, K.fence_of(K.live(stored, now))) : Bool}
-  {K.judge(K.Release{account, lease, fence}, stored, cursor, now) == K.Fence_mismatch{} : K.Verdict}
+  {(K.judge(K.Release{account, lease, fence}, stored, cursor, now),
+    K.judge(K.Renew{account, lease, fence, ms}, stored, cursor, now))
+   == (K.Fence_mismatch{}, K.Fence_mismatch{}) : K.Verdict & K.Verdict}
 
 # LAW 7 (renew keeps the holder and moves the lease): a renew by the holder,
 # at the live fence, keeps its account and lease id, re-fences at this cursor,

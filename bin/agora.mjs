@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // @ts-check
 import { tailcatDoctor } from "../src/tailcat-runtime.mjs";
-import { appendCarryEvent, beginCarryPost, captureCarryPost, completeCarryPost, carryArgumentRefusal, checkCarryFiles, recordCarryCursorMove, requireCarrySuccessor, sealCarryBoundary, validateCarryBoundary } from "../src/carry-check.mjs";
+import { appendCarryEvent, beginCarryPost, captureCarryPost, ensureCarryOrigin, completeCarryPost, carryArgumentRefusal, checkCarryFiles, recordCarryCursorMove, requireCarrySuccessor, sealCarryBoundary, validateCarryBoundary } from "../src/carry-check.mjs";
 import { decodeTransfer, encodeTransfer, localTransferIdentity, requireAuthenticatedTransport, trustTransferPeer } from "../src/tailcat.mjs";
 import { shareFiles, fetchFiles, listOffers, stopOffer, resumeOffer, forgetOffer, pruneOffers } from "../src/tailcat-offers.mjs";
 import { parseArgs } from "node:util";
@@ -99,6 +99,29 @@ import { readShadowArgs, runEconomyShadowCli, ShadowInputError } from "../src/ec
 import { clearStandDown, clearWatchStop, completeStandDownAck, declareStandDown, listStandDowns, standDownRequested } from "../src/stand-down.mjs";
 import { DEFAULT_IDLE_SECONDS, DEFAULT_MIN_CONTEXT, ROOM_MECHANICS_DOC, assertResidentSlug, configuredResidents, planCycle, readInheritMarker, removeInheritMarker, renderResidentPrompt, restartCommand, writeInheritMarker } from "../src/resident.mjs";
 import { FACE_ATTACHMENT_MODES, FACE_BUILT, FACE_SELECTORS, appendFaceRecord, facePolicyPath, listFaceRecords, normalizeSelectors, readFacePolicy, selectFaces, writeFacePolicy } from "../src/faces.mjs";
+
+/**
+ * Post and record the id in this session's ledger: BEFORE the send where the transport can name
+ * the id (native: a digest of room, account and operation id), after the receipt elsewhere. A
+ * watch on the same session reads the ledger to skip its own posts; on a native room the
+ * service pushes the append to that watch before the post request returns, so a ledger written
+ * afterwards lost the race and the session's own post came back to it as foreign. With `origin`
+ * the carry origin is established before the first ledger line, so a first post still seals as
+ * complete history whichever order the ledger and the capture land in.
+ * @param {import('../src/core.mjs').Transport} transport @param {string} sdir @param {string} text
+ * @param {import('../src/core.mjs').PostOptions} [opts]
+ * @param {{ session: { slug: string }, bearer: string }} [origin]
+ */
+async function recordedPost(transport, sdir, text, opts = {}, origin) {
+  const record = async (/** @type {string} */ id) => {
+    if (origin) await ensureCarryOrigin(sdir, origin.session, origin.bearer);
+    await appendPosted(sdir, id);
+  };
+  let early = false;
+  const r = await transport.post(text, { ...opts, beforeSend: async (id) => { early = true; await record(id); } });
+  if (!early) await record(r.id);
+  return r;
+}
 
 /**
  * The arithmetic `doctor`'s poll rate is: the threads every watching session follows, each read at
@@ -1852,8 +1875,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       const who = await transport.whoami();
       const key = await localTransferIdentity(stateRoot);
       const payload = sign(`Transfer enrollment for account ${who.id}; fingerprint ${key.fingerprint}. This key identifies the seat, not an individual bearer.\n${encodeTransfer({version:1,kind:"enrollment",nodeKey:key.nodeKey})}`, cfg.actor);
-      const result = await transport.post(payload);
-      await appendPosted(sdir, result.id);
+      const result = await recordedPost(transport, sdir, payload);
       console.log(json ? JSON.stringify({type:"enrollment",account:who.id,name:who.name,nodeKey:key.nodeKey,fingerprint:key.fingerprint,...result}) : `Transfer enrollment published for ${who.id} (${who.name}), fingerprint ${key.fingerprint}. Share to this account id on first use.`);
       return EXIT.ok;
     }
@@ -1963,12 +1985,11 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
           : `Session ${session.slug} declares boundary ${boundary.id}; re-address pending work explicitly.`;
         const message = sign(`${line}\n\nboundary: ${boundary.id}\nto: *`, cfg.actor);
         const intent = await beginCarryPost(sdir, roomAlias, session, bearer.name, message);
-        const receipt = await transport.post(message);
+        const receipt = await recordedPost(transport, sdir, message, {}, { session, bearer: bearer.name });
         await captureCarryPost(sdir, roomAlias, session, bearer.name, message, receipt, intent);
         if (values.arrive || values.handoff) await appendCarryEvent(sdir, { version: 1, id: randomUUID(),
           kind: values.arrive ? 'arrival' : 'departure', at: new Date().toISOString(), session: session.slug,
           bearer: bearer.name, ref: { room: roomAlias, id: receipt.id, cursor: receipt.cursor }, targets: [boundary.id] });
-        await appendPosted(sdir, receipt.id);
         console.log(JSON.stringify({ type: 'carry-boundary-post', boundary: boundary.id, ...receipt }));
         return EXIT.ok;
       }
@@ -2185,9 +2206,8 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       try {
         for (const piece of pieces) {
           const intent = await beginCarryPost(sdir, roomAlias, session, bearer.name, payload(piece));
-          last = await transport.post(payload(piece), { thread, ...(wireChoice === undefined ? {} : { face: wireChoice }) });
+          last = await recordedPost(transport, sdir, payload(piece), { thread, ...(wireChoice === undefined ? {} : { face: wireChoice }) }, { session, bearer: bearer.name });
           await captureCarryPost(sdir, roomAlias, session, bearer.name, payload(piece), last, intent);
-          await appendPosted(sdir, last.id);
           ids.push(last.id);
         }
       } catch (e) {
@@ -2540,8 +2560,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
           .filter((u) => !seenUnknown.has(u.bearer) && seenUnknown.add(u.bearer));
         const text = departuresLine(won.map((d) => d.record), [...new Set(live)], unknown);
         try {
-          const r = await transport.post(cfg.sign !== false ? sign(text, cfg.actor) : text, { thread });
-          await appendPosted(sdir, r.id);
+          const r = await recordedPost(transport, sdir, cfg.sign !== false ? sign(text, cfg.actor) : text, { thread });
           console.error(`agora: announced to ${roomAlias}: ${text}`);
         } catch (e) {
           // the claim is what makes exactly one watcher the announcer; kept over a failure it makes
