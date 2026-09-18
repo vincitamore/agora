@@ -1010,6 +1010,11 @@ an injected `fetch` so it is testable offline.
   evidence that persists past the run (a request id it can look up later).
 - A `to:` trailer routes among agents and notifies nobody. A question to a human with only a
   `to:` line sits unanswered until they happen to read back; mention them in the body.
+- A native room's manifest and committed boundary are published by temp file, fsync and rename;
+  on Windows the rename is refused (EPERM, EBUSY, EACCES) while another process holds the target
+  open, so the store retries it a bounded few times with a short backoff before the append
+  refuses with acceptance unknown. Every other code is thrown at once. Measured on the house
+  Windows runner: a thousand fsync'd appends in one test tripped it after 31 seconds.
 - Native `writer.lock`: exclusive create is the acquire (open with `wx`). After EEXIST, only
   ECONNREFUSED on the recorded port licenses unlink; timeout, any other probe error, or a
   malformed lock refuses. The listen port is allocated by the OS (`127.0.0.1` port `0`,
