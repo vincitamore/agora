@@ -1,4 +1,4 @@
-# RED FIXTURE for law exhibit_settles: an exhibit settles nothing
+# RED FIXTURE for law stranger_cannot_retract: any step retracts, the asserter's or a stranger's
 # The settlement ledger of section 1 and P8, as a model small enough to prove
 # things about. A ledger is the append-only list of what the collective has
 # done to its shared record, newest first. Three kinds of entry exist:
@@ -58,7 +58,7 @@ def read.retract(hit: Bool, ms: List<&2, Nat>, below: Standing) -> Standing:
         case Unsettled{}:
           Unsettled{}
         case Settled{+m}:
-          Bool.pick(Standing, member_of(m, ms), Unsettled{}, Settled{m})
+          Unsettled{}
 
 # the standing of fact f in ledger l: the newest entry about f decides.
 def read(l: List<Entry>, +f: Fact) -> Standing:
@@ -66,7 +66,7 @@ def read(l: List<Entry>, +f: Fact) -> Standing:
     case Nil{}:
       Unsettled{}
     case Assert{g, m} <> rest:
-      Bool.pick(Standing, Fact.eq(g, f), Unsettled{}, read(rest, f))
+      Bool.pick(Standing, Fact.eq(g, f), Settled{m}, read(rest, f))
     case Allocate{n} <> rest:
       read(rest, f)
     case Retract{g, s} <> rest:

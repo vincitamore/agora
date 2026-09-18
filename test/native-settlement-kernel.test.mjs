@@ -13,27 +13,40 @@ const fact = (id) => ({ $: "Fact", id });
 /** @param {any[]} xs newest first */
 const list = (xs) => xs.reduceRight((tail, head) => ({ $: "Con", head, tail }), { $: "Nil" });
 const step = { $: "Step", members: list([0n]) };
+/** @param {bigint} id @param {bigint} [member] */
+const asserted = (id, member = 0n) => ({ $: "Assert", fact: fact(id), member });
 
 test("a fact stands through an exhibit and only through one", () => {
   assert.equal(S.standing({ $: "Nil" }, fact(1n)), false);
-  assert.equal(S.standing(list([{ $: "Assert", fact: fact(1n) }]), fact(1n)), true);
-  assert.equal(S.standing(list([{ $: "Assert", fact: fact(1n) }]), fact(2n)), false);
+  assert.equal(S.standing(list([asserted(1n)]), fact(1n)), true);
+  assert.equal(S.standing(list([asserted(1n)]), fact(2n)), false);
   assert.equal(S.standing(list([{ $: "Allocate", count: 9n }]), fact(1n)), false, "an allocation settles nothing");
 });
 
 test("the newest entry about a fact decides: a retraction unsettles, a later assertion re-settles", () => {
-  const asserted = list([{ $: "Assert", fact: fact(1n) }]);
-  const retracted = { $: "Con", head: { $: "Retract", fact: fact(1n), step }, tail: asserted };
+  const l = list([asserted(1n)]);
+  const retracted = { $: "Con", head: { $: "Retract", fact: fact(1n), step }, tail: l };
   assert.equal(S.standing(retracted, fact(1n)), false);
-  const again = { $: "Con", head: { $: "Assert", fact: fact(1n) }, tail: retracted };
+  const again = { $: "Con", head: asserted(1n), tail: retracted };
   assert.equal(S.standing(again, fact(1n)), true);
 });
 
 test("apply of coordination-free entries never unsettles what stood", () => {
-  const es = list([{ $: "Assert", fact: fact(2n) }, { $: "Allocate", count: 3n }]);
+  const es = list([asserted(2n), { $: "Allocate", count: 3n }]);
   assert.equal(S.coordination_free(es), true);
   assert.equal(S.coordination_free(list([{ $: "Retract", fact: fact(2n), step }])), false);
-  const l = list([{ $: "Assert", fact: fact(1n) }]);
+  const l = list([asserted(1n)]);
   assert.equal(S.standing(S.apply(es, l), fact(1n)), true);
   assert.equal(S.standing(S.apply(es, l), fact(2n)), true);
+});
+
+test("a stranger's step is inert; the asserter's step, with anyone else in it, unsettles", () => {
+  const l = list([asserted(1n, 7n)]);
+  const stranger = { $: "Con", head: { $: "Retract", fact: fact(1n), step: { $: "Step", members: list([3n]) } }, tail: l };
+  assert.equal(S.standing(stranger, fact(1n)), true, "member 3 did not assert fact 1");
+  assert.equal(S.coordination_free(stranger), false, "the retraction is on the ledger even though it did nothing");
+  const many = { $: "Con", head: { $: "Retract", fact: fact(1n), step: { $: "Step", members: list([3n, 7n]) } }, tail: l };
+  assert.equal(S.standing(many, fact(1n)), false, "member 7 asserted it and is in the step");
+  assert.deepEqual(S.read(l, fact(1n)), { $: "Settled", member: 7n });
+  assert.deepEqual(S.read(stranger, fact(1n)), { $: "Settled", member: 7n });
 });

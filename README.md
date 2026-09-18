@@ -613,8 +613,10 @@ What a session's `carry` says still stands is the third kernel, and it is not ag
 `spec/settlement.bend` is a byte-for-byte copy of the singulis settlement ledger (an append-only
 list of `Assert`, `Allocate` and `Retract` entries, where a retraction must name the coordination
 step that made it), with `spec/SETTLEMENT-LAWS.bend` (a fact stands only through an exhibit; an
-exhibit settles its fact; nothing is unsettled without coordination) and `spec/SETTLEMENT-PROOF.bend`
-carried beside it. `carry`'s room fold asserts each of the session's verdict posts as a fact and
+exhibit settles its fact; nothing is unsettled without coordination; a retraction whose step omits
+the member who asserted the fact is inert; the asserter's step unsettles) and
+`spec/SETTLEMENT-PROOF.bend` carried beside it. Every assertion names its member, and `carry` is
+member 0 on both sides of its own ledger. `carry`'s room fold asserts each of the session's verdict posts as a fact and
 retracts it under the session's own step when a later post `withdraws:` it or answers it by `re:`;
 the standing facts are the `verdicts` field and the retracted ones are `superseded`. The two
 consumers share one source: `build-kernel.ts` refuses to emit the settlement kernel when the copy
