@@ -12,12 +12,8 @@ import path from "node:path";
 import { fuzzOnce } from "../scripts/fuzz-native-store.mjs";
 
 /** the store's readings the model does not share, each reproduced by the seeds below */
-const KNOWN = {
-  // a human break on a subject whose lease has expired is applied (the board kernel's LAW 8
-  // judges the stored holder, not the live one); the model reads an expired lease as nothing
-  // to break, the reading LAW 2 gives every other verb
-  "board:break": "a human break on an expired lease is applied rather than refused as nothing-to-break",
-};
+/** @type {Record<string, string>} */
+const KNOWN = {};
 
 test("the store diverges from the documented model only in the pinned ways", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agora-store-model-"));
