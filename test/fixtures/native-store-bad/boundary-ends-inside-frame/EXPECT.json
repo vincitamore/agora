@@ -1,5 +1,5 @@
 {
   "case": "boundary-ends-inside-frame",
   "opens": false,
-  "refusal": "ends inside a"
+  "refusal": "ends inside a record"
 }

@@ -4,7 +4,11 @@
 // room the reader must accept, and one damaged copy per named edit of it). Each case's
 // EXPECT.json says whether `NativeRoomStore.open` opens it or what refusal it names. These are
 // the on-disk seams the mutation sweep found untested: the scan, boundary, manifest and
-// writer-lock paths.
+// writer-lock paths. The second wave (record, message, board and boundary fields behind a
+// re-sealed frame, and the header and length bounds) reddens 19 of the sweep's 20 on-disk
+// survivors; the one left green on purpose is `Buffer.alloc(4)` -> `alloc(5)` for the header:
+// readExact fills the fifth byte from the next frame or stops at the file's end, the length is
+// read from the first four either way, and the `< 4` check is what guards a short read.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { cp, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
@@ -32,7 +36,11 @@ for (const name of cases) {
       t.after(() => store.close());
       assert.ok(Array.isArray(store.read({ limit: 10 })), "reads back");
     } else {
-      await assert.rejects(NativeRoomStore.open({ root, roomId: ROOM }), (e) => {
+      // a case that opens where a refusal was expected is closed before the assertion fails: an
+      // open store holds a handle that keeps the runner alive, so a defect that admits bad bytes
+      // would otherwise read as a hang rather than a red
+      const opened = NativeRoomStore.open({ root, roomId: ROOM }).then((store) => { store.close(); return store; }, (e) => { throw e; });
+      await assert.rejects(opened, (e) => {
         assert.equal(/** @type {any} */ (e).name, "AgoraError", `${name}: refused as an AgoraError, not ${String(e)}`);
         assert.match(String(/** @type {any} */ (e).message), new RegExp(expect.refusal.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")), `${name}: refused by name`);
         return true;

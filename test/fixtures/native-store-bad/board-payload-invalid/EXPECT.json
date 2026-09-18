@@ -1,0 +1,5 @@
+{
+  "case": "board-payload-invalid",
+  "opens": false,
+  "refusal": "board record is invalid"
+}

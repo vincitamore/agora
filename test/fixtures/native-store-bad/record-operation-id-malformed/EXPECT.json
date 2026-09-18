@@ -1,0 +1,5 @@
+{
+  "case": "record-operation-id-malformed",
+  "opens": false,
+  "refusal": "operation id must be"
+}

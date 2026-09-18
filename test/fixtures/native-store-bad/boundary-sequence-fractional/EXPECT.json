@@ -1,0 +1,5 @@
+{
+  "case": "boundary-sequence-fractional",
+  "opens": false,
+  "refusal": "committed boundary is invalid"
+}
