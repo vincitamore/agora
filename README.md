@@ -660,9 +660,14 @@ To change any of them, edit the `.bend` source (and the laws, if the claim moves
 with a Bend checkout on hand (`BEND_CLONE=<path> bun spec/build-kernel.ts [--spec cursor|board|settlement]`):
 the script proves the kernel's PROOF file first, refuses `@unsafe`, `?TODO` and hash imports, and
 emits the file. The checkout is pinned by `spec/bend.pin.json`; `node scripts/bend-checkout.mjs` fetches that commit
-(the house mirror first, upstream second, since upstream is one force-pushed commit) into
-`../bend-src` or, under CI, the runner's tool cache, and both `build-kernel.ts` and `laws-check.ts`
-refuse a checkout at any other commit. CI runs the checkout step, then the regeneration check and
+from upstream by sha into `../bend-src` or, under CI, the runner's tool cache, and both
+`build-kernel.ts` and `laws-check.ts` refuse a checkout at any other commit. Upstream keeps one
+squashed commit that has been force-pushed before, so a mirror that keeps the pin under a tag
+can be named by `BEND_MIRROR` (and `BEND_MIRROR_TAG`, default `pin-<sha7>`) and is tried first
+when set; nothing in the tree names one. The settlement kernel is a copy of another project's
+proven ledger: `spec/settlement.origin.json` carries the origin's sha256, `build-kernel.ts` measures
+the copy against it on every run, and against the live origin tree too when one is beside this
+repository (`SINGULIS_SPEC`, else `../singulis/spec`). CI runs the checkout step, then the regeneration check and
 the laws gate on every push and pull request. `bun spec/build-kernel.ts --check` exits 1 when a committed file is not a fresh
 regeneration; `test/native-cursor-kernel.test.mjs` runs that check for every kernel wherever `bun`
 and a checkout exist and skips by name elsewhere, and the two `native-*-kernel.test.mjs` files pin

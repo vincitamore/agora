@@ -13,6 +13,7 @@
 // file differs.
 
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { resolve, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -99,13 +100,26 @@ for (const name of names) {
   ].join("\n");
   const js = header + Comp.js_lib(book, outs, outs);
 
-  if (k.origin && existsSync(join(SINGULIS, k.origin))) {
-    if (readFileSync(join(SINGULIS, k.origin), "utf8") !== readFileSync(join(ROOT, k.source), "utf8")) {
-      console.error(`${k.source} differs from ${join(SINGULIS, k.origin)}: the settlement kernel is one source in two trees; copy, never edit one side`);
+  if (k.origin) {
+    // the origin's digest is committed beside the copy, so drift is refused from a clean clone
+    // with no sibling tree; the live sibling is compared too when it is there, and the line says which
+    const pinned = JSON.parse(readFileSync(join(ROOT, "spec", "settlement.origin.json"), "utf8"));
+    const digest = createHash("sha256").update(readFileSync(join(ROOT, k.source))).digest("hex");
+    if (digest !== pinned.sha256) {
+      console.error(`${k.source} sha256 ${digest} differs from the committed origin digest ${pinned.sha256} (spec/settlement.origin.json): the settlement kernel is one source in two trees; copy from the origin and rewrite the digest in the same commit, never edit one side`);
       failed = true;
       continue;
     }
-    console.log(`ok   ${k.source} is byte-identical to the singulis copy`);
+    if (existsSync(join(SINGULIS, k.origin))) {
+      if (readFileSync(join(SINGULIS, k.origin), "utf8") !== readFileSync(join(ROOT, k.source), "utf8")) {
+        console.error(`${k.source} differs from the live origin ${join(SINGULIS, k.origin)} while matching the committed digest: the origin moved; copy it here and rewrite spec/settlement.origin.json`);
+        failed = true;
+        continue;
+      }
+      console.log(`ok   ${k.source} matches the committed origin digest and the live singulis copy`);
+    } else {
+      console.log(`ok   ${k.source} matches the committed origin digest (no singulis tree beside this repository to compare live)`);
+    }
   }
   if (check) {
     const committed = existsSync(out) ? readFileSync(out, "utf8") : "";
