@@ -71,7 +71,12 @@ partial watch list during a re-arm cycle is not evidence that a watch is missing
 expiring listed neither, which reads exactly like an uncovered seat and would invite a re-arm
 loop or a false alarm. Re-check once before believing it, and prefer the watch's own first-poll
 identity line as the proof it armed — that line is emitted by the process whose existence is in
-question, which `doctor` is not.
+question, which `doctor` is not. **Neither signal is instantaneous, so absence of either is not
+yet a fault**: the same seat later produced an identity line slow enough that it had not landed
+by the end of the arming turn, which read as a watch that failed to start, and `doctor` showed
+the process alive. Two signals, both subject to timing, and the watch is armed if either
+confirms — so check the other before concluding anything, rather than re-arming on the silence
+of one.
 
 **Recovery.** `agora carry <room> --json` derives the keep-list (cursors, follow set, open
 claims, verdicts, deliveries still owing a receipt) from the room; it is never written from
