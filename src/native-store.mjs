@@ -5,6 +5,7 @@ import { mkdir, open, readFile, realpath, rename, rm, stat } from "node:fs/promi
 import net from "node:net";
 import path from "node:path";
 import { AgoraError } from "./core.mjs";
+import Kernel from "./native-cursor.kernel.mjs";
 import { nativeCursor, nativeDigest, parseNativeCursor, validateNativeEpoch, validateNativeId } from "./native-protocol.mjs";
 import { ProtocolValidationError } from "./protocol/common.mjs";
 import { validateBoardPayload } from "./protocol/operation.mjs";
@@ -612,9 +613,14 @@ export class NativeRoomStore {
     const messages = (records) => records.filter((r) => r.message).map((r) => structuredClone(r.message));
     if (!options.since) return messages(this.records.slice(-limit));
     const cursor = parseNativeCursor(options.since);
-    if (cursor.epoch !== this.manifest.epoch) throw new AgoraError(`native room cursor belongs to epoch ${cursor.epoch}, not live epoch ${this.manifest.epoch}; recover explicitly without advancing`);
-    if (cursor.sequence > this.records.length) throw new AgoraError(`native room cursor ${cursor.sequence} exceeds committed sequence ${this.records.length}; recover explicitly without advancing`);
-    return messages(this.records.slice(cursor.sequence, cursor.sequence + limit));
+    // The plan (which sequences a read delivers, or a refusal that advances nothing) is decided by
+    // the kernel generated from spec/cursor.bend, whose laws the checker proves: a foreign epoch and
+    // a future sequence are refused, and a delivery is exactly the rows after the cursor, capped by
+    // the limit and by the committed sequence (spec/LAWS.bend).
+    const plan = Kernel.plan(cursor.epoch === this.manifest.epoch, BigInt(this.records.length), BigInt(cursor.sequence), BigInt(limit));
+    if (plan.$ === "RefusedEpoch") throw new AgoraError(`native room cursor belongs to epoch ${cursor.epoch}, not live epoch ${this.manifest.epoch}; recover explicitly without advancing`);
+    if (plan.$ === "RefusedFuture") throw new AgoraError(`native room cursor ${cursor.sequence} exceeds committed sequence ${this.records.length}; recover explicitly without advancing`);
+    return messages(this.records.slice(Number(plan.from) - 1, Number(plan.to)));
   }
 
   /** @returns {{ subject: string, accountId: string, cursor: string, leaseId: string, fence: string, expiresAt: string, leaseMs: number }[]} */
