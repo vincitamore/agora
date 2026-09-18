@@ -1,0 +1,5 @@
+{
+  "case": "message-missing",
+  "opens": false,
+  "refusal": "message identity does not match"
+}

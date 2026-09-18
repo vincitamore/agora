@@ -4,7 +4,8 @@
 // named edit of that good room (a truncated last frame, a length header that overruns, a
 // checksum that no longer matches, a payload that is not JSON, a manifest field gone or wrong,
 // a boundary that ends inside a frame or names a foreign epoch or disagrees with the log, a
-// writer lock naming a dead endpoint or unparseable). Every case carries an EXPECT.json naming
+// writer lock naming a dead endpoint or unparseable; and, behind a re-sealed frame, one edit per
+// field the scan validates: record, message, board and boundary fields). Every case carries an EXPECT.json naming
 // what `NativeRoomStore.open` must say, so the test opens the committed bytes offline and the
 // bytes stay traceable to the edit that made them.
 //
@@ -43,6 +44,41 @@ function editJson(p, f) { const o = JSON.parse(readFileSync(p, "utf8")); f(o); w
 function patchBytes(p, at, buf) { const b = readFileSync(p); buf.copy(b, at); writeFileSync(p, b); }
 
 /**
+ * Replace the last frame's payload with `text` (valid JSON that is not a record) and re-seal the
+ * frame, so the record check, not the checksum or the parser, is what refuses.
+ * @param {Paths} p @param {string} text
+ */
+function replaceLastPayload({ frames, boundary }, text) {
+  const { last, bytes } = lastFrame(frames); const len = bytes.readUInt32BE(last); const payload = Buffer.from(text, "utf8");
+  const header = Buffer.alloc(4); header.writeUInt32BE(payload.length, 0);
+  writeFileSync(frames, Buffer.concat([bytes.subarray(0, last), header, payload, createHash("sha256").update(payload).digest()]));
+  editJson(boundary, (o) => { o.end = o.end + (payload.length - len); });
+}
+
+/**
+ * Edit the record inside frame `index` (0-based) as JSON and re-seal the frame: a fresh length
+ * header and checksum, so the scan accepts the bytes and the edit reaches the field validation
+ * behind them. The boundary's end moves by the size delta; its digest is left alone, so a case
+ * that edits the last record keeps the boundary agreeing with the record it acknowledges.
+ * @param {Paths} p @param {number} index @param {(record: any) => void} f
+ */
+function editRecord({ frames, boundary }, index, f) {
+  const bytes = readFileSync(frames);
+  const parts = [];
+  let pos = 0;
+  while (pos + 4 <= bytes.length) { const len = bytes.readUInt32BE(pos); parts.push(bytes.subarray(pos, pos + 4 + len + 32)); pos += 4 + len + 32; }
+  const frame = parts[index];
+  const record = JSON.parse(frame.subarray(4, 4 + frame.readUInt32BE(0)).toString("utf8"));
+  f(record);
+  const payload = Buffer.from(JSON.stringify(record), "utf8");
+  const header = Buffer.alloc(4); header.writeUInt32BE(payload.length, 0);
+  parts[index] = Buffer.concat([header, payload, createHash("sha256").update(payload).digest()]);
+  const next = Buffer.concat(parts);
+  writeFileSync(frames, next);
+  editJson(boundary, (o) => { o.end = o.end + (next.length - bytes.length); });
+}
+
+/**
  * each case: a named edit of the good room and what open must say (null: opens)
  * @typedef {{ dir: string, frames: string, manifest: string, boundary: string, lock: string }} Paths
  * @type {Record<string, { expect: string | null, edit: (p: Paths) => void }>}
@@ -56,7 +92,7 @@ export const CASES = {
   "manifest-record-limit-zero": { expect: "manifest is invalid", edit: ({ manifest }) => editJson(manifest, (o) => { o.recordLimit = 0; }) },
   "manifest-room-mismatch": { expect: "manifest is invalid", edit: ({ manifest }) => editJson(manifest, (o) => { o.roomId = "0".repeat(32); }) },
   "manifest-not-json": { expect: "has no valid manifest", edit: ({ manifest }) => writeFileSync(manifest, "{not json") },
-  "boundary-ends-inside-frame": { expect: "ends inside a", edit: ({ boundary }) => editJson(boundary, (o) => { o.end = o.end - 2; }) },
+  "boundary-ends-inside-frame": { expect: "ends inside a record", edit: ({ boundary }) => editJson(boundary, (o) => { o.end = o.end - 2; }) },
   "boundary-sequence-negative": { expect: "committed boundary is invalid", edit: ({ boundary }) => editJson(boundary, (o) => { o.sequence = -1; }) },
   "boundary-digest-disagrees": { expect: "does not match its acknowledged sequence/digest boundary", edit: ({ boundary }) => editJson(boundary, (o) => { o.digest = "sha256:" + "0".repeat(64); }) },
   "boundary-foreign-epoch": { expect: "committed boundary is invalid", edit: ({ boundary }) => editJson(boundary, (o) => { o.epoch = "0".repeat(32); }) },
@@ -68,6 +104,46 @@ export const CASES = {
   } },
   "lock-unparseable": { expect: "writer lock", edit: ({ lock }) => writeFileSync(lock, "not json") },
   "lock-dead-endpoint": { expect: null, edit: () => {} },
+  // wave 2: the fields the scan validates behind a well-formed frame. Frame 3 is the board claim,
+  // frame 4 the last chat message; each edit re-seals its frame so the checksum passes and the
+  // field check is what refuses.
+  "record-not-object": { expect: "record for another room or protocol version", edit: (p) => replaceLastPayload(p, JSON.stringify("not a record")) },
+  "record-null": { expect: "record for another room or protocol version", edit: (p) => replaceLastPayload(p, "null") },
+  "record-foreign-room": { expect: "record for another room or protocol version", edit: (p) => editRecord(p, 4, (r) => { r.roomId = "0".repeat(32); }) },
+  "record-foreign-epoch": { expect: "record for another room or protocol version", edit: (p) => editRecord(p, 4, (r) => { r.epoch = "0".repeat(32); }) },
+  "record-wrong-version": { expect: "record for another room or protocol version", edit: (p) => editRecord(p, 4, (r) => { r.version = 999; }) },
+  "record-payload-digest-malformed": { expect: "invalid payload digest", edit: (p) => editRecord(p, 4, (r) => { r.payloadDigest = "sha256:short"; }) },
+  "record-account-id-malformed": { expect: "record account id must be", edit: (p) => editRecord(p, 4, (r) => { r.accountId = "zz"; }) },
+  "record-operation-id-malformed": { expect: "operation id must be", edit: (p) => editRecord(p, 4, (r) => { r.operationId = "x"; }) },
+  "record-digest-malformed": { expect: "record digest mismatch", edit: (p) => editRecord(p, 4, (r) => { r.recordDigest = "sha256:short"; }) },
+  "record-digest-wrong": { expect: "record digest mismatch", edit: (p) => { const d = "sha256:" + "1".repeat(64); editRecord(p, 4, (r) => { r.recordDigest = d; }); editJson(p.boundary, (o) => { o.digest = d; }); } },
+  "message-missing": { expect: "message identity does not match", edit: (p) => editRecord(p, 4, (r) => { delete r.message; }) },
+  "message-id-mismatch": { expect: "message identity does not match", edit: (p) => editRecord(p, 4, (r) => { r.message.id = "f".repeat(64); }) },
+  "message-author-mismatch": { expect: "message identity does not match", edit: (p) => editRecord(p, 4, (r) => { r.message.author.id = "b".repeat(32); }) },
+  "message-room-mismatch": { expect: "message identity does not match", edit: (p) => editRecord(p, 4, (r) => { r.message.room = "0".repeat(32); }) },
+  "message-cursor-mismatch": { expect: "message identity does not match", edit: (p) => editRecord(p, 4, (r) => { r.message.cursor = r.message.cursor.replace(/:\d+$/, ":99"); }) },
+  "board-id-mismatch": { expect: "board identity does not match", edit: (p) => editRecord(p, 3, (r) => { r.boardId = "f".repeat(64); }) },
+  "board-cursor-mismatch": { expect: "board identity does not match", edit: (p) => editRecord(p, 3, (r) => { r.cursor = r.cursor.replace(/:\d+$/, ":99"); }) },
+  "board-carries-message": { expect: "board record must not carry a chat message", edit: (p) => editRecord(p, 3, (r) => { r.message = { id: "x" }; }) },
+  "board-payload-invalid": { expect: "board record is invalid", edit: (p) => editRecord(p, 3, (r) => { r.board = { action: "dance" }; }) },
+  "boundary-not-json": { expect: "committed boundary", edit: ({ boundary }) => writeFileSync(boundary, "{not json") },
+  "boundary-wrong-version": { expect: "committed boundary is invalid", edit: ({ boundary }) => editJson(boundary, (o) => { o.version = 2; }) },
+  "boundary-foreign-room": { expect: "committed boundary is invalid", edit: ({ boundary }) => editJson(boundary, (o) => { o.roomId = "0".repeat(32); }) },
+  "boundary-sequence-fractional": { expect: "committed boundary is invalid", edit: ({ boundary }) => editJson(boundary, (o) => { o.sequence = 4.5; }) },
+  "boundary-sequence-past-limit": { expect: "committed boundary is invalid", edit: ({ boundary, manifest }) => editJson(manifest, (o) => { o.recordLimit = JSON.parse(readFileSync(boundary, "utf8")).sequence - 1; }) },
+  "boundary-sequence-at-limit": { expect: null, edit: ({ boundary, manifest }) => editJson(manifest, (o) => { o.recordLimit = JSON.parse(readFileSync(boundary, "utf8")).sequence; }) },
+  "boundary-end-negative": { expect: "committed boundary is invalid", edit: ({ boundary }) => editJson(boundary, (o) => { o.end = -1; }) },
+  "boundary-end-fractional": { expect: "committed boundary is invalid", edit: ({ boundary }) => editJson(boundary, (o) => { o.end = o.end - 0.5; }) },
+  "boundary-digest-malformed": { expect: "committed boundary is invalid", edit: ({ boundary }) => editJson(boundary, (o) => { o.digest = "sha256:short"; }) },
+  "boundary-ends-after-header": { expect: "ends inside a record", edit: ({ frames, boundary }) => { const { last } = lastFrame(frames); editJson(boundary, (o) => { o.end = last + 4; }); } },
+  "record-one-byte": { expect: "record for another room or protocol version", edit: (p) => replaceLastPayload(p, "1") },
+  "boundary-ends-inside-header": { expect: "ends inside a header", edit: ({ frames, boundary }) => { const { last } = lastFrame(frames); editJson(boundary, (o) => { o.end = last + 2; }); } },
+  "boundary-ends-at-frame": { expect: null, edit: ({ frames, boundary }) => {
+    // the boundary acknowledges four of the five frames: the fifth stays on disk unacknowledged, and open accepts it
+    const { last, bytes } = lastFrame(frames); const len1 = bytes.readUInt32BE(0); const f1 = 4 + len1 + 32; const len2 = bytes.readUInt32BE(f1); const f2 = 4 + len2 + 32; const len3 = bytes.readUInt32BE(f1 + f2); const f3 = 4 + len3 + 32;
+    const digest3 = JSON.parse(bytes.subarray(f1 + f2 + 4, f1 + f2 + 4 + len3).toString("utf8")).recordDigest;
+    void last; editJson(boundary, (o) => { o.end = f1 + f2 + f3; o.sequence = 3; o.digest = digest3; });
+  } },
 };
 
 /** write the good room under a fixed clock and return its directory */

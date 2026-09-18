@@ -1,0 +1,5 @@
+{
+  "case": "record-payload-digest-malformed",
+  "opens": false,
+  "refusal": "invalid payload digest"
+}
