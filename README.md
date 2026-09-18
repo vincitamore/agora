@@ -621,7 +621,11 @@ is free; a free subject is fenced at the claim's own cursor; only the holder rel
 refused; a stale fence is refused; renew keeps the holder and extends the lease; break is a human
 verb that names what it drops, on a live holder; a break on an expired or absent holder is nothing to break; a refusal changes nothing). `src/native-board.kernel.mjs` is its
 compiled form and `native-store.mjs` `#appendBoard` asks it whether an act is admitted, with the
-error messages unchanged; the lease length a record carries stays the store's policy.
+error messages unchanged. The lease the store's policy computes is the lease the kernel judges
+with, and the holder the store keeps is the one the verdict names: its expiry is the kernel's
+`Nat.add(now, lease_ms)`, its fence must be the record's own cursor and its account and lease the
+ones the record names, or the append is refused before commit; a reopen re-derives from the record
+exactly that holder (`test/native-board-verdict-holder.test.mjs`).
 
 What a session's `carry` says still stands is the third kernel, and it is not agora's own:
 `spec/settlement.bend` is a byte-for-byte copy of the singulis settlement ledger (an append-only
