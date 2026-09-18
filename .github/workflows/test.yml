@@ -1,4 +1,6 @@
-# Run on local self-hosted Linux and Windows runners. macOS is suspended.
+# Run on the self-hosted Linux and Windows runners. macOS is suspended. A pull request from a fork
+# never reaches these runners (each job's `if`); the repository's Actions setting for fork pull
+# requests stays at requiring approval as the second lock.
 name: test
 on:
   push:
@@ -7,6 +9,10 @@ on:
 jobs:
   suite:
     name: ${{ matrix.os }}
+    # The runners are self-hosted, so a pull request runs on them only when its head is this
+    # repository (a member's branch); a fork's pull request is skipped here and gets nothing from
+    # these runners. Pushes to main always run.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -71,6 +77,10 @@ jobs:
             node -e 'let s=""; process.stdin.on("data", d => s += d).on("end", () => { const r = JSON.parse(s); if (r.alive !== false || r.watcherPid !== null || r.supervisorPid !== null) process.exit(1); })'
   tui:
     name: tui ${{ matrix.os }}
+    # The runners are self-hosted, so a pull request runs on them only when its head is this
+    # repository (a member's branch); a fork's pull request is skipped here and gets nothing from
+    # these runners. Pushes to main always run.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -96,6 +106,10 @@ jobs:
       - run: bunx tsc --noEmit -p .
   spawn:
     name: spawn ${{ matrix.os }}
+    # The runners are self-hosted, so a pull request runs on them only when its head is this
+    # repository (a member's branch); a fork's pull request is skipped here and gets nothing from
+    # these runners. Pushes to main always run.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
