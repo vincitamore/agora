@@ -5,6 +5,7 @@ import { armedAlive, readArmed, sessionScope } from "./session.mjs";
 import { after, boundedRoots, mergeAscending } from "./threads.mjs";
 import { matchesAddress, parseTrailers } from "./trailers.mjs";
 import Settlement from "./native-settlement.kernel.mjs";
+import { nat as kernelNat } from "./kernel-nat.mjs";
 
 /**
  * What a session hands to whoever holds the seat after it -- across a compaction, or to a
@@ -339,7 +340,7 @@ export function foldRoom(msgs, posted, who) {
         // `withdraws:` above is the same move said outright; this one stays for the block that
         // says it by answering.
         for (const id of answers) retract(id, m.id);
-        const fact = { $: "Fact", id: BigInt(verdictPosts.length + 1) };
+        const fact = { $: "Fact", id: kernelNat(verdictPosts.length + 1, "the verdict count") };
         facts.set(m.id, fact.id);
         facts.set(m.cursor, fact.id);
         verdictPosts.push({ verdict: t.value, exhibits, ...ref });
