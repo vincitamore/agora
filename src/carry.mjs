@@ -237,7 +237,8 @@ export function foldRoom(msgs, posted, who) {
    * asserts its own id as a fact on an append-only ledger, and a `withdraws:` (or a verdict
    * answering a verdict by `re:`) retracts that fact under a coordination step naming this
    * session, so `standing(ledger, fact)` is the verdict set and its complement is the superseded
-   * set. Nothing here re-implements the ledger's reading; the fold only records, in retraction
+   * set. The session is member 0 on both sides (the asserter and the only member of its own
+   * step), so by the kernel's LAW 5 its retractions unsettle and by LAW 4 nobody else's could. Nothing here re-implements the ledger's reading; the fold only records, in retraction
    * order, which post superseded which.
    * @type {Array<Ref & { verdict: string, exhibits: string[] }>}
    */
@@ -342,7 +343,7 @@ export function foldRoom(msgs, posted, who) {
         facts.set(m.id, fact.id);
         facts.set(m.cursor, fact.id);
         verdictPosts.push({ verdict: t.value, exhibits, ...ref });
-        ledger = { $: "Con", head: { $: "Assert", fact }, tail: ledger };
+        ledger = { $: "Con", head: { $: "Assert", fact, member: 0n }, tail: ledger };
       }
     }
     // under both names a later `withdraws:` may use: an agent that read the cursor off `post`
