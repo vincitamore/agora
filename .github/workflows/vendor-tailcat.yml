@@ -1,10 +1,51 @@
 name: vendor-tailcat
 on:
   workflow_dispatch:
+    inputs:
+      job:
+        description: "build re-vendors into vendor/tailcat and uploads the artifacts; verify rebuilds the pinned source and compares it to lock.json"
+        type: choice
+        default: verify
+        options: [verify, build]
 permissions:
   contents: read
 jobs:
+  verify:
+    if: ${{ inputs.job == 'verify' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: [self-hosted, linux, house]
+            target: linux
+          - runner: [self-hosted, windows, house]
+            target: windows
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: Read pinned source
+        id: pin
+        shell: bash
+        run: node -e 'const s=require("./vendor/tailcat/source.json"); require("fs").appendFileSync(process.env.GITHUB_OUTPUT, `revision=${s.revision}\ngo=${s.go}\n`);'
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: tailscale/tailcat
+          ref: ${{ steps.pin.outputs.revision }}
+          path: upstream-tailcat
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ steps.pin.outputs.go }}
+          cache-dependency-path: upstream-tailcat/go.sum
+      - name: Rebuild both architectures from the pinned source and compare to lock.json
+        run: node scripts/vendor-tailcat.mjs verify upstream-tailcat ${{ matrix.target }}
   build:
+    if: ${{ inputs.job == 'build' }}
     strategy:
       fail-fast: false
       matrix:
