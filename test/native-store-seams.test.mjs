@@ -116,10 +116,19 @@ test("the digest chain links each record to the one before it, so a reopened roo
   assert.equal(reopened.board()[0].accountId, HOST);
 });
 
-// Not pinned, on purpose: native-store.mjs:628 (the read default of 1000 rows) -- observable only
-// through a room of more than a thousand records, and a thousand fsync'd appends on the house
-// Windows runner trips the committed-boundary publication EPERM under load (an open alpha
-// investigation); the pin waits on that defect, and the bound above holds the limit's shape.
+test("a read defaults to the newest thousand rows (survivor 628), and a thousand fsync'd appends land under the rename retry", async (t) => {
+  // this test is also the live exhibit for the durable-write retry: before it, the committed-boundary
+  // publication refused with EPERM under the house Windows runner's load at about the thousandth append
+  const { store } = await room(t, { recordLimit: 1500 });
+  const started = Date.now();
+  for (let i = 1; i <= 1001; i++) await post(store, i, "x");
+  t.diagnostic(`1001 appends in ${Date.now() - started} ms`);
+  assert.equal(store.status().committed, 1001);
+  assert.equal(store.read().length, 1000, "the default limit is the newest thousand");
+  assert.equal(store.read({ since: `${EPOCH}:0` }).length, 1000, "and after a cursor the same default applies");
+  assert.equal(store.read({ since: `${EPOCH}:0` })[0].cursor, `${EPOCH}:1`, "after a cursor the thousand are the oldest after it");
+});
+
 // Equivalent mutants in the kernel-seam class, left green on purpose:
 //   native-store.mjs:503 (interned id + 1 -> + 2) -- interned ids are compared by equality only;
 //   native-store.mjs:505 (Math.max(0, ...) -> Math.max(1, ...) on a stored expiry) -- an expiry
