@@ -641,10 +641,17 @@ export class NativeRoomStore {
     return messages(this.records.slice(Number(plan.from) - 1, Number(plan.to)));
   }
 
-  /** @returns {{ subject: string, accountId: string, cursor: string, leaseId: string, fence: string, expiresAt: string, leaseMs: number }[]} */
+  /**
+   * The live holders: a lease that has expired is no holder to any verb (an expired subject is
+   * claimed, a stale renew is refused as not-the-holder), so it is not listed as held either.
+   * The stored record stays in the map until a claim replaces it, which is what `#liveHolder`
+   * reads through; measured by the model-based fuzz (scripts/fuzz-native-store.mjs) before the
+   * filter, board() listed leases no verb honoured.
+   * @returns {{ subject: string, accountId: string, cursor: string, leaseId: string, fence: string, expiresAt: string, leaseMs: number }[]}
+   */
   board() {
     if (this.closed) throw new AgoraError("native room store is closed");
-    return [...this.holders.entries()].map(([subject, h]) => ({ subject, ...h }));
+    return [...this.holders.entries()].filter(([subject]) => this.#liveHolder(subject)).map(([subject, h]) => ({ subject, ...h }));
   }
 
   /**
