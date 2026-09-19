@@ -1029,7 +1029,7 @@ test("the runtime hop is CHECKED: an assembly without a state root does not comp
 test("the typed hop catches an OMITTED root and not an undefined one, which is pinned here on purpose", async () => {
   // A known edge, kept where the next reader will meet it. Under this tsconfig (strict, no
   // `exactOptionalPropertyTypes`) an optional property admits an explicit `undefined`, so the three
-  // lines below type-check while the third one is false at runtime. Found by Opus/e2c against my
+  // lines below type-check while the third one is false at runtime. Found by a reviewer against my
   // own unqualified claim that the annotation makes a rootless assembly a compile error.
   //
   // Deliberately DIRECTIVE-FREE: a `@ts-expect-error` here would assert the gap is closed and go
@@ -1048,7 +1048,7 @@ test("the typed hop catches an OMITTED root and not an undefined one, which is p
   // is missing. A runtime check against this hop has to test the value, never the key.
   assert.equal(Object.hasOwn(folded, "stateRoot"), true);
 
-  // WHAT THE BACKSTOP ACTUALLY DOES, measured, because Opus/e2c asked that this cell not leave
+  // WHAT THE BACKSTOP ACTUALLY DOES, measured, because a reviewer asked that this cell not leave
   // "the resolver refuses cleanly" behind as a property we have. It does not. With the root
   // undefined it dies in `path.join` with a raw TypeError that names no state root, no Agora
   // concept and no remedy:
@@ -1082,7 +1082,7 @@ test("a swallowed close failure is RECORDED, the verb is unaffected, and absence
   await clean.close?.();
   assert.equal(clean.closeFailed, undefined, "a clean close reported a failure");
 
-  // Driven to 1, which is the requirement Opus/e2c put on the record before this head existed.
+  // Driven to 1, which is the requirement a reviewer put on the record before this head existed.
   const angry = nativeRemoteTransport(/** @type {any} */ ({ transport: "native-remote" }), {
     actor,
     remote: /** @type {any} */ ({ binding: room.binding, close: async () => { throw new Error("teardown exploded"); } }),
@@ -1211,7 +1211,7 @@ test("the idle clock stays out of the way while the channel carries", async (t) 
   // idleMs 500 -> the clock ticks every 250 ms, so the window below contains SEVERAL probes that
   // actually fire. An earlier draft used idleMs 60 against a 1 s interval floor and observed ZERO
   // probes in 400 ms: it asserted nothing at all about the clock while reading as though it did.
-  // Bruno/reader caught that (house :1586); it is the third cell-that-cannot-fail in this file and
+  // A second reader caught that; it is the third cell-that-cannot-fail in this file and
   // the comment stays so the next reader sizes the window against the interval, not against taste.
   let probes = 0;
   const sub = await openRemoteSubscription({ room, since: nativeCursor(EPOCH, 0),
@@ -1334,7 +1334,7 @@ test("an obsolete probe's late failure does not re-subscribe the healthy channel
 });
 
 test("a probe failure invalidates the REAL cached client, so the reattach dials instead of re-subscribing a corpse", async (t) => {
-  // Bruno/reader's measured HOLD on r1's repair (backroom 1788832062), rebuilt on the real rig:
+  // A second reader's measured HOLD on the first repair, rebuilt on the real rig:
   // a real RemoteRoom and a real NativeServiceClient, no substituted `room.client`. The channel is
   // made silent WITHOUT closing — the host stream stops reading — which is the only case that
   // reaches the cache, since a close would clear it.
@@ -1374,7 +1374,7 @@ test("a probe failure invalidates the REAL cached client, so the reattach dials 
 });
 
 test("a replacement completed DURING dropClient's teardown is not dialled over on the probe's return", async (t) => {
-  // Bruno/reader's third HOLD (backroom 1788832597), and the same race as the first two at a third
+  // A second reader's third HOLD, and the same race as the first two at a third
   // await: `dropClient` closes the old socket, whose close handler can attach a healthy replacement
   // while `resource.stop()` is still pending. The probe resumes holding a `client` that is now two
   // generations old, and without re-reading the fence it dials over a channel that is fine.
