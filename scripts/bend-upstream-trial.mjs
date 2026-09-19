@@ -22,7 +22,7 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -76,7 +76,9 @@ function fetchHead(dir, url, ref) {
 
 /** the committed tree of this repository as a detached scratch worktree (uncommitted edits are not part of a trial); removed by scratchDrop */
 function scratchCopy() {
-  const dir = join(mkdtempSync(join(tmpdir(), "agora-bend-trial-")), "tree");
+  // the long path, always: a Windows temp directory can come back in its 8.3 form (ALEXMO~1),
+  // and a test that compares a path it derived against one it was handed then fails by name
+  const dir = join(realpathSync.native(mkdtempSync(join(tmpdir(), "agora-bend-trial-"))), "tree");
   run("git", ["-C", ROOT, "worktree", "prune"]);
   const a = run("git", ["-C", ROOT, "worktree", "add", "-q", "--detach", dir, "HEAD"]);
   if (a.status !== 0) throw new Error(`git worktree add failed: ${a.err}`);
@@ -97,7 +99,9 @@ const tail = (s, n = 60) => s.trim().split(/\r?\n/).slice(-n).join("\n");
 
 function main(argv) {
   const o = parse(argv);
-  const head = fetchHead(resolve(o.into), o.upstream, o.ref);
+  mkdirSync(resolve(o.into), { recursive: true });
+  o.into = realpathSync.native(resolve(o.into));
+  const head = fetchHead(o.into, o.upstream, o.ref);
   const pinShort = PIN.sha.slice(0, 7);
   console.error(`pin  ${PIN.sha} (${PIN.version})`);
   console.error(`head ${head.sha} (${head.subject})`);
