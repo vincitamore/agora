@@ -83,6 +83,14 @@ function array_new(d, v) {
   return Array(2 ** Number(d)).fill(v);
 }
 
+// An unbalanced tree fails, as in C.
+function array_node(a, b) {
+  if (a.length !== b.length) {
+    throw "bend: runtime fail-stop";
+  }
+  return a.concat(b);
+}
+
 function array_swap(a, i, v) {
   const at = i % a.length;
   const old = a[at];
@@ -146,8 +154,7 @@ function $next$(since_0, p_0) {
   } else {
     const from_0 = p_0.from;
     const to_0 = p_0.to;
-    const to_1 = to_0;
-    return run_jump($Bool$pick$, [run_loop($Nat$is_gt$(from_0, to_1)), since_0, to_1]);
+    return run_jump($Bool$pick$, [run_loop($Nat$is_gt$(from_0, to_0)), since_0, to_0]);
   }
 }
 
@@ -159,9 +166,7 @@ function $delivered$(p_0) {
   } else {
     const from_0 = p_0.from;
     const to_0 = p_0.to;
-    const from_1 = from_0;
-    const to_1 = to_0;
-    return run_jump($Bool$pick$, [run_loop($Nat$is_gt$(from_1, to_1)), 0n, nat_chk((to_1 < from_1 ? 0n : to_1 - from_1) + 1n)]);
+    return run_jump($Bool$pick$, [run_loop($Nat$is_gt$(from_0, to_0)), 0n, nat_chk((to_0 < from_0 ? 0n : to_0 - from_0) + 1n)]);
   }
 }
 

@@ -83,6 +83,14 @@ function array_new(d, v) {
   return Array(2 ** Number(d)).fill(v);
 }
 
+// An unbalanced tree fails, as in C.
+function array_node(a, b) {
+  if (a.length !== b.length) {
+    throw "bend: runtime fail-stop";
+  }
+  return a.concat(b);
+}
+
 function array_swap(a, i, v) {
   const at = i % a.length;
   const old = a[at];
@@ -205,9 +213,7 @@ function $read$finish$(st_0) {
   } else {
     const b_0 = st_0.blocked;
     const k_0 = st_0.member;
-    const b_1 = b_0;
-    const k_1 = k_0;
-    return run_jump($Bool$pick$, [b_1, {$: "Unsettled"}, {$: "Settled", ["member"]: k_1}]);
+    return run_jump($Bool$pick$, [b_0, {$: "Unsettled"}, {$: "Settled", ["member"]: k_0}]);
   }
 }
 
@@ -243,8 +249,7 @@ function $read$retract$(ms_0, r_0) {
     return {$: "Unsettled"};
   } else {
     const m_0 = r_0.member;
-    const m_1 = m_0;
-    return run_jump($Bool$pick$, [run_loop($member_of$(m_1, ms_0)), {$: "Unsettled"}, {$: "Settled", ["member"]: m_1}]);
+    return run_jump($Bool$pick$, [run_loop($member_of$(m_0, ms_0)), {$: "Unsettled"}, {$: "Settled", ["member"]: m_0}]);
   }
 }
 

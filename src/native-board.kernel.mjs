@@ -83,6 +83,14 @@ function array_new(d, v) {
   return Array(2 ** Number(d)).fill(v);
 }
 
+// An unbalanced tree fails, as in C.
+function array_node(a, b) {
+  if (a.length !== b.length) {
+    throw "bend: runtime fail-stop";
+  }
+  return a.concat(b);
+}
+
 function array_swap(a, i, v) {
   const at = i % a.length;
   const old = a[at];
@@ -130,11 +138,7 @@ function $live$(h_0, now_0) {
     const lease_0 = h_0.lease;
     const fence_0 = h_0.fence;
     const expires_0 = h_0.expires;
-    const account_1 = account_0;
-    const lease_1 = lease_0;
-    const fence_1 = fence_0;
-    const expires_1 = expires_0;
-    return run_jump($Bool$pick$, [run_loop($Nat$is_gt$(expires_1, now_0)), {$: "Held", ["account"]: account_1, ["lease"]: lease_1, ["fence"]: fence_1, ["expires"]: expires_1}, {$: "NoHolder"}]);
+    return run_jump($Bool$pick$, [run_loop($Nat$is_gt$(expires_0, now_0)), {$: "Held", ["account"]: account_0, ["lease"]: lease_0, ["fence"]: fence_0, ["expires"]: expires_0}, {$: "NoHolder"}]);
   }
 }
 
@@ -146,9 +150,7 @@ function $owns$(account_0, lease_0, h_0) {
     const l_0 = h_0.lease;
     const f_0 = h_0.fence;
     const e_0 = h_0.expires;
-    const a_1 = a_0;
-    const l_1 = l_0;
-    return run_jump($Bool$and$, [run_loop($Nat$is_eq$(account_0, a_1)), run_loop($Nat$is_eq$(lease_0, l_1))]);
+    return run_jump($Bool$and$, [run_loop($Nat$is_eq$(account_0, a_0)), run_loop($Nat$is_eq$(lease_0, l_0))]);
   }
 }
 
@@ -160,8 +162,7 @@ function $fence_of$(h_0) {
     const l_0 = h_0.lease;
     const f_0 = h_0.fence;
     const e_0 = h_0.expires;
-    const f_1 = f_0;
-    return f_1;
+    return f_0;
   }
 }
 
@@ -210,28 +211,18 @@ function $judge$(a_0, stored_0, cursor_0, now_0) {
     const account_0 = a_0.account;
     const op_0 = a_0.op;
     const lease_ms_0 = a_0.lease_ms;
-    const account_1 = account_0;
-    const op_1 = op_0;
-    const lease_ms_1 = lease_ms_0;
-    return run_jump($judge$claim$, [run_loop($live$(stored_0, now_0)), account_1, op_1, lease_ms_1, cursor_0, now_0]);
+    return run_jump($judge$claim$, [run_loop($live$(stored_0, now_0)), account_0, op_0, lease_ms_0, cursor_0, now_0]);
   } else if (a_0.$ === "Renew") {
-    const account_2 = a_0.account;
+    const account_1 = a_0.account;
     const lease_0 = a_0.lease;
     const fence_0 = a_0.fence;
-    const lease_ms_2 = a_0.lease_ms;
-    const account_3 = account_2;
-    const lease_1 = lease_0;
-    const fence_1 = fence_0;
-    const lease_ms_3 = lease_ms_2;
-    return run_jump($judge$owned$, [run_loop($owns$(account_3, lease_1, run_loop($live$(stored_0, now_0)))), run_loop($Nat$is_eq$(fence_1, run_loop($fence_of$(run_loop($live$(stored_0, now_0)))))), {$: "Held", ["account"]: account_3, ["lease"]: lease_1, ["fence"]: cursor_0, ["expires"]: nat_chk(now_0 + lease_ms_3)}]);
+    const lease_ms_1 = a_0.lease_ms;
+    return run_jump($judge$owned$, [run_loop($owns$(account_1, lease_0, run_loop($live$(stored_0, now_0)))), run_loop($Nat$is_eq$(fence_0, run_loop($fence_of$(run_loop($live$(stored_0, now_0)))))), {$: "Held", ["account"]: account_1, ["lease"]: lease_0, ["fence"]: cursor_0, ["expires"]: nat_chk(now_0 + lease_ms_1)}]);
   } else if (a_0.$ === "Release") {
-    const account_4 = a_0.account;
-    const lease_2 = a_0.lease;
-    const fence_2 = a_0.fence;
-    const account_5 = account_4;
-    const lease_3 = lease_2;
-    const fence_3 = fence_2;
-    return run_jump($judge$owned$, [run_loop($owns$(account_5, lease_3, run_loop($live$(stored_0, now_0)))), run_loop($Nat$is_eq$(fence_3, run_loop($fence_of$(run_loop($live$(stored_0, now_0)))))), {$: "NoHolder"}]);
+    const account_2 = a_0.account;
+    const lease_1 = a_0.lease;
+    const fence_1 = a_0.fence;
+    return run_jump($judge$owned$, [run_loop($owns$(account_2, lease_1, run_loop($live$(stored_0, now_0)))), run_loop($Nat$is_eq$(fence_1, run_loop($fence_of$(run_loop($live$(stored_0, now_0)))))), {$: "NoHolder"}]);
   } else if (a_0.$ === "Break") {
     const human_0 = a_0.human;
     return run_jump($judge$break$, [human_0, run_loop($live$(stored_0, now_0))]);
