@@ -340,7 +340,7 @@ def main(animated=True):
            ("threshold",threshold,"THE COMMON GATE","A monumental entrance, with depth beyond it."))
     sheet=Image.new("RGB",(1800,1190),BG); d=ImageDraw.Draw(sheet)
     d.text((68,45),"AGORA",font=font(46,True),fill=INK['light'])
-    d.text((70,109),"ASTRA / META-WIZARD     ·     PLACES TO GATHER     ·     STUDIES 02",font=font(15),fill=(135,152,155))
+    d.text((70,109),"PLACES TO GATHER     ·     STUDIES 02",font=font(15),fill=(135,152,155))
     d.line((70,151,1730,151),fill=(41,58,63))
     checks={}
     for i,(name,builder,title,caption) in enumerate(cases):
