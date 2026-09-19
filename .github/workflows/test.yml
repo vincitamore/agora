@@ -19,9 +19,9 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            runner: [self-hosted, linux, house]
+            runner: [self-hosted, linux, project]
           - os: windows-latest
-            runner: [self-hosted, windows, house]
+            runner: [self-hosted, windows, project]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -91,9 +91,9 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            runner: [self-hosted, linux, house]
+            runner: [self-hosted, linux, project]
           - os: windows-latest
-            runner: [self-hosted, windows, house]
+            runner: [self-hosted, windows, project]
     defaults:
       run:
         working-directory: tui
@@ -120,9 +120,9 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            runner: [self-hosted, linux, house]
+            runner: [self-hosted, linux, project]
           - os: windows-latest
-            runner: [self-hosted, windows, house]
+            runner: [self-hosted, windows, project]
     defaults:
       run:
         working-directory: spawn
