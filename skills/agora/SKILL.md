@@ -1136,6 +1136,11 @@ Details and maintainer checks: [docs/TRANSFERS.md](../../docs/TRANSFERS.md).
   good room carries a board claim, so a landing that changes any stored record's bytes (a new field, a
   different clock read) stales the corpus: run `--check` locally in the same change, because a CI
   queued behind the runners says nothing until it runs.
+- A test tree spawned with a Windows temp directory as its `cwd` can receive the 8.3 short form
+  (`ALEXMO~1`): the `~` rides into `file://` URLs as `%7E`, and a test that compares a path it
+  derived with one it was handed fails by name (measured: 6 of 31 carry rows, 11 of 343 across the
+  kernel suites, from `tmpdir()` on one seat). Resolve any directory you hand a test process
+  through `realpathSync.native` first; `scripts/bend-upstream-trial.mjs` does.
 - Every transport takes an injected `fetch` so it is testable without the network. A
   new one registers in `src/transports/index.mjs`, describes itself in `TRANSPORTS`,
   and gets a test in `test/` modelled on `test/slack.test.mjs`.
