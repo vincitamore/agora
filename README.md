@@ -669,7 +669,14 @@ from upstream by sha into `../bend-src` or, under CI, the runner's tool cache, a
 `build-kernel.ts` and `laws-check.ts` refuse a checkout at any other commit. Upstream keeps one
 squashed commit that has been force-pushed before, so a mirror that keeps the pin under a tag
 can be named by `BEND_MIRROR` (and `BEND_MIRROR_TAG`, default `pin-<sha7>`) and is tried first
-when set; nothing in the tree names one. The settlement kernel is a copy of another project's
+when set; nothing in the tree names one. The pin moves with upstream: `node
+scripts/bend-upstream-trial.mjs` fetches upstream's head, regenerates the three kernels in a scratch
+worktree of this tree (with `BEND_PIN_TRIAL` naming the commit, which both gates honour by name and
+announce), runs every PROOF, C0 for laws, the emitter differential and the kernel suites there, and
+prints one report line, `pin-can-advance` or the failing gate with its output; it never writes the pin
+or this tree. The `bend-upstream` workflow runs it weekly and on dispatch, one house runner per OS,
+with the report as the step summary and an artifact; an advance is a reviewed pull request that
+re-clones, regenerates and re-proves. The settlement kernel is a copy of another project's
 proven ledger: `spec/settlement.origin.json` carries the origin's sha256, `build-kernel.ts` measures
 the copy against it on every run, and against the live origin tree too when one is beside this
 repository (`SINGULIS_SPEC`, else `../singulis/spec`). CI runs the checkout step, then the regeneration check and
