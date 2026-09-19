@@ -11,7 +11,7 @@ describe("ROOM frames", () => {
       const client = stubClient();
       const h = await mountApp({ client, initialAlias: "scratch" }, size);
       try {
-        let f = await h.until((x) => x.includes("Fable (agent)  cursor 7"));
+        let f = await h.until((x) => x.includes("Alice (agent)  cursor 7"));
         // every row exactly the terminal width: nothing wrapped, nothing overflowed
         for (const r of rows(f)) expect(r.length).toBe(size.width);
         expect(f).toContain("[1] ROOM");
@@ -23,7 +23,7 @@ describe("ROOM frames", () => {
         expect(f).toContain("i to compose");
         // the newest message is on screen with its derived line, exactly as the CLI prints it
         expect(f).toContain("→ verdict landed · exhibit gate: bun test green");
-        expect(f).toContain("❯ [2026-09-05T01:15:00.000Z] Fable (agent)  cursor 7");
+        expect(f).toContain("❯ [2026-09-05T01:15:00.000Z] Alice (agent)  cursor 7");
         // the seeded token shape never reaches a cell
         expect(f).toContain("[redacted]");
         expect(f).not.toMatch(/xox[abprse]-/);
@@ -33,10 +33,10 @@ describe("ROOM frames", () => {
         h.mockInput.pressArrow("up");
         h.mockInput.pressArrow("up");
         await h.settle();
-        f = await h.until((x) => x.includes("❯ [2026-09-05T01:05:00.000Z] Sol/codex (agent)  cursor 2"));
+        f = await h.until((x) => x.includes("❯ [2026-09-05T01:05:00.000Z] Cal/codex (agent)  cursor 2"));
         expect(f).toContain("▸ 2 replies");
-        expect(f).toContain("→ to Fable · re m1");
-        expect(f).not.toContain("bone (human)");
+        expect(f).toContain("→ to Alice · re m1");
+        expect(f).not.toContain("peer (human)");
 
         h.mockInput.pressEnter();
         f = await h.until((x) => x.includes("▾ 2 replies"));
@@ -44,7 +44,7 @@ describe("ROOM frames", () => {
         // a block taller than the window shows its head; PageDown scrolls the rest into view
         h.mockInput.pressKey("\x1b[6~");
         f = await h.until((x) => x.includes("works for me"));
-        expect(f).toContain("bone (human)");
+        expect(f).toContain("peer (human)");
         for (const r of rows(f)) expect(r.length).toBe(size.width);
 
         // fold it back with t
@@ -73,7 +73,7 @@ describe("ROOM frames", () => {
 
       // mouse is co-equal: the wheel moves the cursor, a click on the member bar switches
       await h.mockMouse.scroll(40, 15, "up");
-      f = await h.until((x) => x.includes("❯ [2026-09-05T01:12:00.000Z] Fable (agent)  cursor 6"));
+      f = await h.until((x) => x.includes("❯ [2026-09-05T01:12:00.000Z] Alice (agent)  cursor 6"));
       expect(f).toContain("cursor 6");
       const bar = f.replace(/\n$/, "").split("\n")[3];
       await h.mockMouse.click(bar.indexOf("[2] SEARCH") + 2, 3);
@@ -86,7 +86,7 @@ describe("ROOM frames", () => {
 
   test("a room with nothing in it says so and compose still offers itself", async () => {
     const { StubRoomClient } = await import("../lib/room-client");
-    const client = new StubRoomClient({ name: "Alex", rooms: { empty: [] } });
+    const client = new StubRoomClient({ name: "operator", rooms: { empty: [] } });
     const h = await mountApp({ client, initialAlias: "empty" }, { width: 80, height: 24 });
     try {
       const f = await h.until((x) => x.includes("nothing in this room yet"));

@@ -71,14 +71,14 @@ async function until(probe, what, ms = 8000) {
 async function fixture(t) {
   const root = await mkdtemp(path.join(tmpdir(), "agora-cli-native-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const service = new NativeRoomService({ root, accountId: ACCOUNT, seatLabel: "admin-pc" });
+  const service = new NativeRoomService({ root, accountId: ACCOUNT, seatLabel: "seat-a" });
   await service.start();
   await service.createRoom({ roomId: ROOM, epoch: EPOCH });
   t.after(() => service.stop());
   const cfgPath = path.join(root, "agora.json");
   await writeFile(cfgPath, JSON.stringify({ actor: { name: "seat", kind: "agent" }, rooms: { nat: { transport: "native", roomId: ROOM } } }));
-  const fable = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "fable", AGORA_ACTOR: "Fable/watch" };
-  const sol = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "sol", AGORA_ACTOR: "Sol/codex" };
+  const fable = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "fable", AGORA_ACTOR: "Alice/watch" };
+  const sol = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "sol", AGORA_ACTOR: "Cal/codex" };
   return { root, service, fable, sol, cursorFile: path.join(root, "sessions", "fable", "nat.cursor"), armedFile: path.join(root, "sessions", "fable", "armed", "nat.json") };
 }
 
@@ -211,12 +211,12 @@ test("cli: a watch on a native room rides the seat service and prints the poller
 
   r = await agora(["watch", "nat", "--once", "--json"], fable);
   assert.equal(r.code, 42, r.stderr);
-  assert.match(r.stderr, /subscribed to nat through the seat service \(admin-pc\)/);
+  assert.match(r.stderr, /subscribed to nat through the seat service \(seat-a\)/);
   const lines = typed(r.stdout);
   assert.equal(lines[0].type, "identity");
   const message = lines.find((l) => l.type === "message");
-  assert.equal(message.text, "hello from Sol\n\n-- Sol/codex");
-  assert.equal(message.signedAs, "Sol/codex");
+  assert.equal(message.text, "hello from Sol\n\n-- Cal/codex");
+  assert.equal(message.signedAs, "Cal/codex");
   assert.equal(message.cursor, `${EPOCH}:1`);
   assert.equal(message.author.id, ACCOUNT, "the host stamped the account; the bearer is the signature");
   const result = lines[lines.length - 1];
@@ -242,7 +242,7 @@ test("cli: a watch on a native room rides the seat service and prints the poller
 
   // --wake mine: plain talk is filtered, what names this bearer wakes
   await agora(["post", "nat", "plain talk"], sol);
-  await agora(["post", "nat", "for you", "--to", "Fable/watch"], sol);
+  await agora(["post", "nat", "for you", "--to", "Alice/watch"], sol);
   r = await agora(["watch", "nat", "--once", "--json", "--wake", "mine"], fable);
   assert.equal(r.code, 42, r.stderr);
   assert.deepEqual(typed(r.stdout).filter((l) => l.type === "message").map((l) => l.text.split("\n")[0]), ["for you"]);

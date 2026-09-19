@@ -1,4 +1,4 @@
-"""Agora / Places to gather. Original architectural braille studies by Astra.
+"""Agora / Places to gather. Original architectural braille studies, designed for the project.
 
 Python 3 + Pillow, build-time only. Run this file to regenerate its local assets.
 All architecture is constructed from projected geometry, never traced from art.

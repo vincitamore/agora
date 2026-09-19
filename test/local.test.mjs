@@ -15,14 +15,14 @@ test("local room: post, read, since, thread filter", async () => {
     assert.deepEqual(await t.read(), []);
     const a = await t.post("first");
     const b = await t.post("reply", { thread: a.id });
-    const c = await t.post("second\n\n-- bone");
+    const c = await t.post("second\n\n-- peer");
     assert.equal(a.cursor, "1");
     assert.equal(c.cursor, "3");
 
     const all = await t.read();
-    assert.deepEqual(all.map((m) => m.text), ["first", "reply", "second\n\n-- bone"]);
+    assert.deepEqual(all.map((m) => m.text), ["first", "reply", "second\n\n-- peer"]);
     assert.deepEqual(all.map((m) => m.cursor), ["1", "2", "3"]);
-    assert.equal(all[2].signedAs, "bone");
+    assert.equal(all[2].signedAs, "peer");
     assert.equal(all[0].author.name, "Claude (house)");
 
     const after = await t.read({ since: b.cursor });

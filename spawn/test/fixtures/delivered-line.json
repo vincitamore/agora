@@ -15,8 +15,8 @@
   "artifact": null,
   "provenance": {
     "stampedBy": "seat-service",
-    "seat": "opus-windows-primary",
-    "from": "sol@opus-windows-primary",
+    "seat": "seat-a",
+    "from": "sol@seat-a",
     "at": "2026-09-05T18:19:07Z"
   },
   "readiness": {
@@ -36,7 +36,7 @@
     "at": null
   },
   "disposition": "ack-pending",
-  "rendered": "[agora] dl-01JZ8Q9R3T7B from opus-windows-primary/sol · house · 7:1281-7:1284 · read with agora read house --since 7:1280",
+  "rendered": "[agora] dl-01JZ8Q9R3T7B from seat-a/sol · house · 7:1281-7:1284 · read with agora read house --since 7:1280",
   "lookup": {
     "verb": "agora inbox show dl-01JZ8Q9R3T7B",
     "boundTo": [

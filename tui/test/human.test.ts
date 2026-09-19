@@ -17,9 +17,9 @@ describe("human file", () => {
   test("absent reads as nothing; written once; read back as kind human", async () => {
     await withRoot(async (root) => {
       expect(await readHuman(root)).toBeUndefined();
-      const a = await writeHuman(root, "  Alex ");
-      expect(a).toEqual({ name: "Alex", kind: "human" });
-      expect(await readHuman(root)).toEqual({ name: "Alex", kind: "human" });
+      const a = await writeHuman(root, "  operator ");
+      expect(a).toEqual({ name: "operator", kind: "human" });
+      expect(await readHuman(root)).toEqual({ name: "operator", kind: "human" });
       const st = await stat(humanFile(root));
       if (process.platform !== "win32") expect(st.mode & 0o777).toBe(0o600);
       const leftovers = (await import("node:fs/promises")).readdir(path.dirname(humanFile(root)));
@@ -29,9 +29,9 @@ describe("human file", () => {
 
   test("a second write is refused and the first name stands", async () => {
     await withRoot(async (root) => {
-      await writeHuman(root, "Alex");
+      await writeHuman(root, "operator");
       await expect(writeHuman(root, "Someone")).rejects.toThrow(/already names/);
-      expect(await readHuman(root)).toEqual({ name: "Alex", kind: "human" });
+      expect(await readHuman(root)).toEqual({ name: "operator", kind: "human" });
     });
   });
 
@@ -44,10 +44,10 @@ describe("human file", () => {
   });
 
   test("names are one line, bounded, and never start with a signature dash", () => {
-    expect(humanNameProblem("Alex")).toBeUndefined();
+    expect(humanNameProblem("operator")).toBeUndefined();
     expect(humanNameProblem("")).toBeDefined();
     expect(humanNameProblem("a\nb")).toBeDefined();
-    expect(humanNameProblem("-- Alex")).toBeDefined();
+    expect(humanNameProblem("-- operator")).toBeDefined();
     expect(humanNameProblem("x".repeat(65))).toBeDefined();
   });
 });

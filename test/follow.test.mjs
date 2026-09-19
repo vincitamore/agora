@@ -111,14 +111,14 @@ test("follow admission keeps human deliveries and agent traffic addressed to thi
     delivery("unaddressed-agent", "agent"),
     delivery("other-agent", "agent", "Other/model"),
     delivery("model", "agent", "Sol"),
-    delivery("bearer", "agent", "Sol/codex"),
+    delivery("bearer", "agent", "Cal/codex"),
     delivery("seat-name", "agent", "socius_amore"),
     delivery("seat-mention", "agent", "<@USEAT>"),
     delivery("everyone", "system", "*"),
     delivery("unaddressed-system", "system"),
   ];
   assert.deepEqual(
-    followableMessages(msgs, "Sol/codex", { id: "USEAT", name: "socius_amore" }).map((m) => m.id),
+    followableMessages(msgs, "Cal/codex", { id: "USEAT", name: "socius_amore" }).map((m) => m.id),
     ["human-elsewhere", "model", "bearer", "seat-name", "seat-mention", "everyone"],
   );
 });

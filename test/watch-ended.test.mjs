@@ -37,7 +37,7 @@ async function seat() {
   await mkdir(root, { recursive: true });
   const cfgPath = path.join(dir, "agora.json");
   await writeFile(cfgPath, JSON.stringify({
-    actor: { name: "Fable/e2c", kind: "agent" },
+    actor: { name: "Alice/e2c", kind: "agent" },
     rooms: {
       nat: { transport: "native", roomId: "b".repeat(32) },
       down: { transport: "local", path: path.join(dir, "down.ndjson") },
@@ -56,8 +56,8 @@ test("a watch ending service-dark emits one watch-ended line, addressed to its o
   assert.ok(ended, `no watch-ended line in ${r.stdout}`);
   assert.equal(ended.alias, "nat");
   assert.equal(ended.reason, "service-dark");
-  assert.deepEqual(ended.to, ["Fable/e2c"]);
-  assert.equal(ended.bearer, "Fable/e2c");
+  assert.deepEqual(ended.to, ["Alice/e2c"]);
+  assert.equal(ended.bearer, "Alice/e2c");
   assert.match(ended.re_arm, /^agora watch nat --once --json/);
   assert.ok(lines.indexOf(ended) < lines.findIndex((l) => l.type === "watch-result"), "the ended line precedes the result line");
   const result = lines.at(-1);

@@ -1,3 +1,5 @@
+# Resident room mechanics
+
 ## Room mechanics (shared by every resident; appended by the launcher)
 
 This block is the resident-sized agora discipline. It replaces loading the full `agora` skill at

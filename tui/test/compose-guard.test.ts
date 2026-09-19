@@ -2,17 +2,17 @@ import { describe, expect, test } from "bun:test";
 import { composeRefusal, preparePost } from "../lib/compose-guard";
 import { PAT_SHAPE, TOKEN_SHAPE } from "./fixtures";
 
-const alex = { name: "Alex", kind: "human" as const };
+const operator = { name: "operator", kind: "human" as const };
 
 describe("composeRefusal", () => {
   test("empty and whitespace drafts are refused", () => {
-    expect(composeRefusal("", alex)).toBe("nothing to post");
-    expect(composeRefusal("   \n", alex)).toBe("nothing to post");
+    expect(composeRefusal("", operator)).toBe("nothing to post");
+    expect(composeRefusal("   \n", operator)).toBe("nothing to post");
   });
 
   test("a credential shape is refused without echoing the match", () => {
     for (const shape of [TOKEN_SHAPE, PAT_SHAPE, "github_pat_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"]) {
-      const why = composeRefusal(`here: ${shape}`, alex);
+      const why = composeRefusal(`here: ${shape}`, operator);
       expect(why).toBeDefined();
       expect(why).toContain("credential shape");
       expect(why).not.toContain(shape);
@@ -22,8 +22,8 @@ describe("composeRefusal", () => {
 
   test("the seat service nonce is refused when given", () => {
     const nonce = "0123456789abcdef0123456789abcdef";
-    expect(composeRefusal(`hello ${nonce}`, alex, { nonce })).toContain("nonce");
-    expect(composeRefusal("hello", alex, { nonce })).toBeUndefined();
+    expect(composeRefusal(`hello ${nonce}`, operator, { nonce })).toContain("nonce");
+    expect(composeRefusal("hello", operator, { nonce })).toBeUndefined();
   });
 
   test("an unnamed human cannot post", () => {
@@ -31,13 +31,13 @@ describe("composeRefusal", () => {
   });
 
   test("an ordinary draft passes", () => {
-    expect(composeRefusal("the bearer path is Fable/watch", alex)).toBeUndefined();
+    expect(composeRefusal("the bearer path is Alice/watch", operator)).toBeUndefined();
   });
 });
 
 describe("preparePost", () => {
   test("signs as the human, once", () => {
-    expect(preparePost("hello\n\n", alex)).toBe("hello\n\n-- Alex");
-    expect(preparePost("hello\n\n-- Alex", alex)).toBe("hello\n\n-- Alex");
+    expect(preparePost("hello\n\n", operator)).toBe("hello\n\n-- operator");
+    expect(preparePost("hello\n\n-- operator", operator)).toBe("hello\n\n-- operator");
   });
 });

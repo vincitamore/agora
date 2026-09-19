@@ -1,7 +1,7 @@
 {
-  "$fixture": "revision 5, from Astra's executed arithmetic (inbox/investigations/agora-spawn-depth-and-daily-budget-contracts.md): the alternating-two-seat bound-plus-one refusal control.",
+  "$fixture": "revision 5, from Bruno's executed arithmetic (inbox/investigations/agora-spawn-depth-and-daily-budget-contracts.md): the alternating-two-seat bound-plus-one refusal control.",
   "$whyThisExists": "min(parent.depth + 1, maxDepthFromForeignSeat) SATURATES. With cap 1 and maxDepth 2, six honest cross-seat hops record [1,1,1,1,1,1] and all pass, so the sequence is unbounded with no forged parent, no mutable policy and no compromised peer. Separate OS users do not fix it. A limit refuses excess ancestry; it never lowers recorded ancestry until it fits.",
-  "config": { "seatA": "opus-windows-primary", "seatB": "amore-dev-laptop", "maxDepthFromForeignSeat": 2, "maxDepth": 2, "bothSeatsHonest": true },
+  "config": { "seatA": "seat-a", "seatB": "seat-b", "maxDepthFromForeignSeat": 2, "maxDepth": 2, "bothSeatsHonest": true },
   "sequence": [
     { "hop": 1, "target": "seatB", "parentLineageDepth": 0, "expected": { "admitted": true, "recordedLineageDepth": 1 } },
     { "hop": 2, "target": "seatA", "parentLineageDepth": 1, "expected": { "admitted": true, "recordedLineageDepth": 2 } },

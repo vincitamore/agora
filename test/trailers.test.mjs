@@ -6,9 +6,9 @@ import { formatTrailers, matchesAddress, parseTrailers, TRAILER_VALUE_MAX, trail
 
 test("a message with no block is all body", () => {
   assert.deepEqual(parseTrailers("just a line"), { body: "just a line", trailers: [], to: [] });
-  const signed = "just a line\n\n-- Fable/watch";
+  const signed = "just a line\n\n-- Alice/watch";
   assert.deepEqual(parseTrailers(signed), { body: signed, trailers: [], to: [] });
-  const prose = "I read the log.\nThe cause: one bad retry.\n\n-- Fable";
+  const prose = "I read the log.\nThe cause: one bad retry.\n\n-- Alice";
   assert.deepEqual(parseTrailers(prose).trailers, [], "prose that happens to hold a colon is not a claim");
 });
 
@@ -20,7 +20,7 @@ test("body, block and signature: all three, and the signature still parses as it
     "re: 1788449823.687169",
     "claim: worker/src/fetch.ts::retryFetch",
     "",
-    "-- Fable/watch",
+    "-- Alice/watch",
   ].join("\n");
   const r = parseTrailers(text);
   assert.equal(r.body, "the retry loop swallows the 429");
@@ -30,14 +30,14 @@ test("body, block and signature: all three, and the signature still parses as it
     { key: "claim", value: "worker/src/fetch.ts::retryFetch" },
   ]);
   assert.deepEqual(r.to, ["Codex"]);
-  assert.equal(parseSignature(text), "Fable/watch", "reading trailers changes nothing about the signature");
+  assert.equal(parseSignature(text), "Alice/watch", "reading trailers changes nothing about the signature");
 });
 
 test("a block with no signature parses, and a key is read whatever its case", () => {
-  const r = parseTrailers("holding this one\n\nTo: Fable/review\nBecause: it touches the settle path");
+  const r = parseTrailers("holding this one\n\nTo: Alice/review\nBecause: it touches the settle path");
   assert.equal(r.body, "holding this one");
   assert.deepEqual(r.trailers, [
-    { key: "to", value: "Fable/review" },
+    { key: "to", value: "Alice/review" },
     { key: "because", value: "it touches the settle path" },
   ]);
 });
@@ -46,7 +46,7 @@ test("no partial parses: one line that is not a trailer, or no known key, and th
   const oneOff = "body\n\nto: Codex\nand one line of prose";
   assert.deepEqual(parseTrailers(oneOff), { body: oneOff, trailers: [], to: [] });
 
-  const unknown = "body\n\nseverity: high\nowner: bone";
+  const unknown = "body\n\nseverity: high\nowner: peer";
   assert.deepEqual(parseTrailers(unknown).trailers, [], "a block of only unknown keys is not a block");
 
   const carried = parseTrailers("body\n\nto: Codex\nseverity: high");
@@ -75,14 +75,14 @@ test("what the emitter writes is what the parser reads back", () => {
     { key: "exhibit", value: "run 4412 line 88" },
     { key: "to", value: "Codex" },
     { key: "verdict", value: "the retry is the bug" },
-    { key: "to", value: "Fable/review" },
+    { key: "to", value: "Alice/review" },
   ];
   const block = formatTrailers(entries);
   assert.equal(
     block,
     [
       "to: Codex",
-      "to: Fable/review",
+      "to: Alice/review",
       "verdict: the retry is the bug",
       "exhibit: run 4412 line 88",
       "because: the stage log names one cause",
@@ -90,16 +90,16 @@ test("what the emitter writes is what the parser reads back", () => {
     ].join("\n"),
     "known keys in their fixed order, then anything else in the order it was given",
   );
-  const round = parseTrailers(`body\n\n${block}\n\n-- Fable`);
+  const round = parseTrailers(`body\n\n${block}\n\n-- Alice`);
   assert.deepEqual(round.trailers, [
     { key: "to", value: "Codex" },
-    { key: "to", value: "Fable/review" },
+    { key: "to", value: "Alice/review" },
     { key: "verdict", value: "the retry is the bug" },
     { key: "exhibit", value: "run 4412 line 88" },
     { key: "because", value: "the stage log names one cause" },
     { key: "severity", value: "high" },
   ]);
-  assert.deepEqual(round.to, ["Codex", "Fable/review"]);
+  assert.deepEqual(round.to, ["Codex", "Alice/review"]);
   const cap = { key: "because", value: "x".repeat(TRAILER_VALUE_MAX) };
   assert.deepEqual(
     parseTrailers(`body\n\n${formatTrailers([cap, { key: "to", value: "Codex" }])}`).trailers,
@@ -116,7 +116,7 @@ test("withdraws is a known trailer, and emitter and parser round-trip it", () =>
     "verdict: withdrawn",
     "exhibit: run 4419 line 12",
     "",
-    "-- Fable/watch",
+    "-- Alice/watch",
   ].join("\n");
   const r = parseTrailers(text);
   assert.equal(r.body, "that run was the wrong branch");
@@ -148,7 +148,7 @@ test("withdraws is a known trailer, and emitter and parser round-trip it", () =>
 });
 
 test("ack: none is a known trailer; honouring it is not the parser's job", () => {
-  const r = parseTrailers("heads up, no receipt needed\n\nack: none\n\n-- Fable/watch");
+  const r = parseTrailers("heads up, no receipt needed\n\nack: none\n\n-- Alice/watch");
   assert.equal(r.body, "heads up, no receipt needed");
   assert.deepEqual(r.trailers, [{ key: "ack", value: "none" }]);
   assert.deepEqual(formatTrailers(r.trailers), "ack: none");
@@ -157,26 +157,26 @@ test("ack: none is a known trailer; honouring it is not the parser's job", () =>
 test("an address matches a bearer by whole segments, from the left", () => {
   const seat = { id: "UBOT", name: "socius_amore" };
   const table = [
-    ["Fable", "Fable/watch", true],
-    ["Fable", "Fable", true],
-    ["fable", "Fable/watch", true],
-    ["Fable/watch", "Fable/watch", true],
-    ["FABLE/WATCH", "Fable/watch", true],
-    ["Fable/watch", "Fable", false],
-    ["Fable/watch", "Fable/review", false],
-    ["Fab", "Fable/watch", false],
-    ["Fable/wat", "Fable/watch", false],
+    ["Alice", "Alice/watch", true],
+    ["Alice", "Alice", true],
+    ["fable", "Alice/watch", true],
+    ["Alice/watch", "Alice/watch", true],
+    ["FABLE/WATCH", "Alice/watch", true],
+    ["Alice/watch", "Alice", false],
+    ["Alice/watch", "Alice/review", false],
+    ["Fab", "Alice/watch", false],
+    ["Alice/wat", "Alice/watch", false],
     ["*", "anyone/at/all", true],
-    ["", "Fable", false],
+    ["", "Alice", false],
   ];
   for (const [address, bearer, want] of table)
     assert.equal(matchesAddress(String(address), String(bearer), seat), want, `${address} -> ${bearer}`);
 
   // a platform mention resolves to the bot user: it reaches the seat, never one bearer
-  assert.equal(matchesAddress("<@UBOT>", "Fable/watch", seat), true);
-  assert.equal(matchesAddress("<@UBOT|socius>", "Fable/watch", seat), true);
-  assert.equal(matchesAddress("<@UOTHER>", "Fable/watch", seat), false);
-  assert.equal(matchesAddress("<@UBOT>", "Fable/watch", undefined), false, "with no seat there is nothing to match");
-  assert.equal(matchesAddress("socius_amore", "Fable/watch", seat), true, "the seat's own name reaches whoever holds it");
-  assert.equal(matchesAddress("socius_amore", "Fable/watch", undefined), false);
+  assert.equal(matchesAddress("<@UBOT>", "Alice/watch", seat), true);
+  assert.equal(matchesAddress("<@UBOT|socius>", "Alice/watch", seat), true);
+  assert.equal(matchesAddress("<@UOTHER>", "Alice/watch", seat), false);
+  assert.equal(matchesAddress("<@UBOT>", "Alice/watch", undefined), false, "with no seat there is nothing to match");
+  assert.equal(matchesAddress("socius_amore", "Alice/watch", seat), true, "the seat's own name reaches whoever holds it");
+  assert.equal(matchesAddress("socius_amore", "Alice/watch", undefined), false);
 });

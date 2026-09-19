@@ -68,8 +68,7 @@ on a harness whose input **includes** cache, `uncached-input` is `invalid` with
 fixture that happens to pass:
 
 - **Claude Code** — exclusive. Anthropic `total_input = cache_read + cache_creation
-  + input_tokens`. Cited:
-  `knowledge/claude-tooling/cli/anthropic-prompt-caching-mechanics-and-pricing`.
+  + input_tokens`, as Anthropic's prompt-caching documentation states.
 - **OMP** — exclusive. Measured: `totalTokens = input + output + cacheRead +
   cacheWrite` (142+600+64000+0 = 64742, and two siblings). `input` sits beside
   the cache pools, never includes them.

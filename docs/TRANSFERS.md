@@ -92,8 +92,13 @@ The receipt digest binds recipient identity and file metadata, not the route add
 A sender-controlled address can expose the recipient's public node key to that endpoint;
 file size and digest verification still precede commit.
 
+The pinned Tailcat CLI keeps only the first node of a `--region` list when it serves: the
+region is truncated before the server address is published, so listing a second relay does
+not give connection failover through the CLI. A second endpoint is a separate route, not a
+transparent continuation of the first.
+
 An ephemeral offer requires its sender to stay online. These offers are distinct from
-durable native-room attachments; this unit does not promise offline delivery or host failover.
+durable native-room attachments; this feature does not promise offline delivery or host failover.
 Cached receive bytes remain local after the offer expires.
 
 ## Maintainer gates

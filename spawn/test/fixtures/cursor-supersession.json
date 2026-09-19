@@ -4,7 +4,7 @@
   "positive": {
     "$case": "mint at sequence 10, an armed subscriber later delivers through 20, the wake range 11-20 becomes a redundant poke",
     "delivery": { "deliveryId": "dl-01JZ8QA1", "recipient": { "spawnId": "spawn-01JZ8Q4K7N2X", "registration": "reg-7c1a", "generation": 3 }, "room": "house", "range": { "after": "7:10", "through": "7:20" } },
-    "coverageProof": { "recipient": { "registration": "reg-7c1a", "generation": 3 }, "room": { "host": "opus-windows-primary", "roomId": "house", "epoch": 7 }, "range": { "after": "7:10", "through": "7:20" }, "progressId": "prog-4471", "admissionId": "adm-9920", "source": "P1/P4 authenticated progress owner", "gapFree": true },
+    "coverageProof": { "recipient": { "registration": "reg-7c1a", "generation": 3 }, "room": { "host": "seat-a", "roomId": "house", "epoch": 7 }, "range": { "after": "7:10", "through": "7:20" }, "progressId": "prog-4471", "admissionId": "adm-9920", "source": "P1/P4 authenticated progress owner", "gapFree": true },
     "expected": { "answer": "superseded-by-cursor", "exit": 1, "answerIsAField": true, "writes": "nothing: no ACK, no reader position", "claims": "a redundant poke was saved", "doesNotClaim": ["agent acknowledgement", "business completion", "deletion of any canonical event"] }
   },
   "inverse": {

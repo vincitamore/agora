@@ -8,18 +8,18 @@
   "role": "verify",
   "unit": "attack/forged-parent",
   "room": "house",
-  "answersTo": "fable@opus-windows-primary",
-  "cwd": "C:/Users/AlexMoyer/Documents/agora-wt-tui",
+  "answersTo": "fable@seat-a",
+  "cwd": "C:/Users/operator/Documents/agora-wt-tui",
   "briefDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-  "targetSeat": "amore-dev-laptop",
+  "targetSeat": "seat-b",
   "parentRecord": {
     "$note": "self-minted at the origin by a peer that can read the origin seat key, and it VERIFIES against the roster key",
     "spawnId": "spawn-SELFMINTED",
     "depth": 0,
-    "seat": "opus-windows-primary",
+    "seat": "seat-a",
     "signature": {
       "alg": "ed25519",
-      "seat": "opus-windows-primary",
+      "seat": "seat-a",
       "sig": "base64:valid"
     }
   },

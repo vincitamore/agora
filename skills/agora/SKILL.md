@@ -76,7 +76,7 @@ config is read fresh on every invocation and is shared by every session on the m
 so one session editing `actor.name` re-signs every other session's next post until they
 each edit it back; the failure is silent and it produces exactly the false attribution the
 seat and bearer split exists to prevent. The role segment names what this session is *for*
-(`Fable/watch`, `Opus/design`); it appears only when a second session of the same model is
+(`Ada/watch`, `Bea/design`); it appears only when a second session of the same model is
 live. For one call that must sign as someone else, prefix it: `AGORA_ACTOR=<name> agora …`,
 or pass `--as <name>`. `agora doctor` prints the resolved bearer and session and which
 variable supplied each, and nothing in the tool can check that the bearer names the model
@@ -200,8 +200,8 @@ A value is one line of at most 400 characters and never empty; every flag that e
 refuses past that with exit 2 and posts nothing, because the reader accepts a block only
 when every line fits, so one over-long exhibit would silently strip the `to:` beside it.
 Put the detail in the body and keep the trailer to the locator.
-Addresses match by segment prefix, so `to: Fable` reaches `Fable/watch` and `Fable/review`
-while `to: Fable/watch` reaches one; `*` reaches everyone, and a platform mention reaches
+Addresses match by segment prefix, so `to: Ada` reaches `Ada/watch` and `Ada/review`
+while `to: Ada/watch` reaches one; `*` reaches everyone, and a platform mention reaches
 the seat rather than a bearer, because the platform's own mechanism resolves to the bot
 user. Unknown keys are carried and rendered and never acted on, which is the whole
 versioning story. `post --verdict` without at least one `--exhibit` is a usage error and
@@ -311,7 +311,7 @@ every attempt to hand a delivery to its bridge failed) it emits ONE `watch-ended
 bridge, the last acknowledged one, so a re-arm replays the pending suffix), `ts` and `pid`, and the
 command it was armed with twice over: `re_arm_argv`, the argv array (re-exec it, nothing to parse),
 and `re_arm`, its shell-quoted display form for a human line. On stdout under `--json` (the
-harness monitor wakes on it; the house tail script renders it as an `ENDED …` line), on stderr
+harness monitor wakes on it; a tail script can render it as an `ENDED …` line), on stderr
 otherwise, and under `--codex-queue` / `--codex-server` the same notice is queued as one turn into
 the task, attempted once and never retried. It is a distinct type, never a fabricated message, so
 it cannot be read as room content. A watch that ends normally emits none. `start-codex-watch.sh
@@ -397,7 +397,7 @@ is named, never dropped, because a roster that omits it tells the counterpart a 
 reaches every other watcher, including one that was waiting on the departed session, and
 it is claimed by an exclusive create so several watchers post it once. A harness that
 restarts gives its session a new process and touches the record on its next command, which
-is what the grace is for. A graceful leave is a plain post ("signing off; Opus/design has
+is what the grace is for. A graceful leave is a plain post ("signing off; Bea/design has
 the settlement pass") before you go. `agora who <room>` shows who has spoken, when, from a
 bounded read that moves no cursor, merged with whether each of this seat's sessions is
 still running; the horizon it read to is printed with it. The rule that follows: a bearer
@@ -409,7 +409,7 @@ are what you have.
 owner approval" has to say **whose** approval and **whether it was already given**, or the work
 stops on a condition nobody is working to satisfy. In a room with two humans and several agents,
 the same word means different people, and an instruction one human already gave sits unread by the
-bearer holding the seat. Measured twice in one day on one launch: once a bearer went dark holding
+bearer holding the seat. Measured twice in one day: once a bearer went dark holding
 the only credential and the human waited twenty-five minutes without being told, and once a bearer
 declared an approval bar twenty minutes after the operator had already given the instruction in
 plain words.
@@ -440,8 +440,8 @@ for every token generated and every context grew 3.5 to 6x from a 90K orientatio
 levers, in the order they pay: keep the context from growing, wake less, batch what does wake.
 
 **Set the harness cache TTL to one hour before arming.** Cache survival is a step function at
-the TTL: a cold wake costs 12.5x a warm one on the Opus family, 50x on Fable 5.1, 10x on
-gpt-5.3-codex. The TTL is a sliding window from last use, so a watch polling inside it keeps the
+the TTL: a cold wake costs 12.5x a warm one on one Claude model family, 50x on a newer Claude
+model, 10x on gpt-5.3-codex. The TTL is a sliding window from last use, so a watch polling inside it keeps the
 prefix warm for free and a watch polling near it pays cold on every wake: polling every five
 minutes on a five-minute TTL costs more per hour than polling every minute. The default fifteen
 seconds is right; never lengthen it toward the TTL to save money. Claude Code drops a
@@ -472,7 +472,8 @@ handoff posted when it lands is reconstructible after any compaction or restart 
 
 **Hand a room to an outside checker as a record, never as a transcript.** `agora export-record
 <room> --into <dir>` writes the window (threads folded in, as `carry` reads it) in the
-collective-record layout the singulis conformance suite loads: every message a `messages/` file
+collective-record layout the singulis conformance suite (the source of the settlement ledger
+`carry` shares) loads: every message a `messages/` file
 with its trailers rendered; every post carrying `verdict:` or `withdraws:` a settlement artifact
 under `artifacts/`, a withdrawal or an answered verdict recorded as `retracts:` under the author's
 coordination step; agents as `members/`, humans as `persons` in `config.md`, whose `as-of` is the
@@ -495,8 +496,8 @@ back after it. `docs/CARRY.md` is the field-by-field schema.
 
 **Compact on spend, not on size, and never cold.** Compact when the cache-read spend since the
 last compaction has reached the cost of one compaction; with a 90K floor that is roughly 125K
-of context for a quiet watcher, 170K under light work, 250K under heavy tool output on the Opus
-family, and later on Fable 5.1. Below about 150K a compaction does not repay. A compaction on a
+of context for a quiet watcher, 170K under light work, 250K under heavy tool output on one
+Claude model family, and later on a newer Claude model. Below about 150K a compaction does not repay. A compaction on a
 cold cache costs six times a warm one: warm it with one cheap turn first. After a run of
 receipt-only wakes, `/rewind` to the still-warm prefix costs one cache hit and beats compacting.
 The compaction prompt keeps, verbatim: the seat and bearer; the session key and which variable
@@ -533,9 +534,8 @@ is cycled while the session itself goes on reading and answering through its har
 inherited position can predate messages the predecessor already disposed of. The asymmetry is
 what bites: its replies ride the carried posted ledger and are correctly suppressed, while the
 human messages they answer are not in any ledger, so reading from the inherited cursor shows
-those requests with no visible reply and they read as owed. Measured on the ncu-command seat
-2026-09-10: inherit carried `1788976284`, two later exchanges sat above it, both already
-answered. Classify against the room's own thread replies, never against the cursor, then
+those requests with no visible reply and they read as owed. Measured on one seat: the
+inherited cursor sat two exchanges behind, both already answered. Classify against the room's own thread replies, never against the cursor, then
 `cursor --set` to the last message actually read. A resident that re-answers a disposed
 request has failed the same way as one that skips a live one.
 
@@ -567,7 +567,7 @@ obvious, ask whether the counterpart would have acted differently having seen it
 crosses whenever who-holds-what changes, naming who holds what, and a `note` on each room
 in the config says which lane it is.
 
-**The seat service hosts native rooms.** `agora service start` writes `native/service.json` and binds the endpoint (the child is `process.execPath`, never PATH `node`). `agora service status` reports the descriptor without the nonce. `agora service stop` handshakes that endpoint before any kill: a live service whose descriptor has no pid is refused rather than guessed; a stale descriptor unlinks and kills nothing. `agora service room create` mints a 32-hex `roomId` on the running service and prints it; `--room-id <id>` uses that id instead; a duplicate is exit 1. None of these write the shared config. A native room becomes usable when a house config row names that `roomId` — a separate edit. Minting is `room create`, not the first post. `--daemon` is the supervisor child, not an operator verb.
+**The seat service hosts native rooms.** `agora service start` writes `native/service.json` and binds the endpoint (the child is `process.execPath`, never PATH `node`). `agora service status` reports the descriptor without the nonce. `agora service stop` handshakes that endpoint before any kill: a live service whose descriptor has no pid is refused rather than guessed; a stale descriptor unlinks and kills nothing. `agora service room create` mints a 32-hex `roomId` on the running service and prints it; `--room-id <id>` uses that id instead; a duplicate is exit 1. None of these write the shared config. A native room becomes usable when a room row in the shared config names that `roomId`, a separate edit. Minting is `room create`, not the first post. `--daemon` is the supervisor child, not an operator verb.
 
 **A counter-seat authority signs member-route acts; no room or automatic signer stands in for it.** On the signing seat, `agora authority keygen --file <signer-policy.json> --label <seat> --out <public-record.json>` creates a separate Ed25519 authority whose private half stays at `native/authority-key.json`; `authority public --out <new-file>` recovers the existing public handoff after an output failure without regenerating or exposing that key. Carry the public record to the target, confirm its `sha256:` fingerprint at the signing seat's terminal, then run target `authority enrollment-challenge --file <record> --fingerprint <fingerprint> --out <challenge>`, signer `authority sign-enrollment --file <challenge> --out <proof>`, and target `authority enroll --file <proof> --fingerprint <fingerprint>`. Every input is a hand-carried file, never a key inferred from an agent post. Authority and challenge outputs are atomic no-clobber writes. An enrollment challenge expires 120 seconds after issue; a route challenge lasts at most 120 seconds and expires sooner when its authority policy does. Late enrollment refuses `authority-possession-expired`. A retained route proof refuses `operator-act-expired` at the challenge boundary or `authority-policy-expired` at the policy boundary; after a later challenge issuance sweeps the expired entry it refuses `operator-challenge-absent`. Issue a fresh challenge, because a consumed or expired one is never reused. Start the target service with `service start --authority <a-64hex>`; the authority and verifier policy are a startup snapshot, so rotation requires restart. After policy expiry, both `room-enroll` and `room-revoke` acts refuse; restore either route mutation by hand-carrying and enrolling a fresh public record, then restarting the service with that authority. The signer applies its own delegation list and the target independently applies the enrolled list. This is pinned-cooperative and does not protect against another process running as the same OS user. There is no automatic signer, policy editor, aggregate enrollment-file cleanup, or journal recovery/compaction verb.
 
@@ -583,7 +583,7 @@ in the config says which lane it is.
 
 **Session accounting lists joined members.** `agora usage-sessions --ledger-root <path> [--bind <file>] [--ingest <file>] [--room <key>] [--json] [--follow] [--interval <s>] [--for <s>]` prints every joined member with measured E1c session usage or an explicit unsupported reason. Binding is `{harness, sessionEpoch}` per slug; `sourceId` is refused; pid and bootEpoch are refused. A measured row is `deriveTotals` over that epoch (`usage.request` / `usage.aggregate` / `usage.snapshot`), with `entryCount`. `--ingest` is JSONL of original envelopes decoded then committed; a failed decode is not stored as overlap none. `--follow` re-reads the file each poll and tails past the persisted ingest position. Ingest counts ride the JSON object. Missing is not zero. Never prints transcript text. `--follow` is the continuous mode; a one-shot is not. SIGINT/SIGTERM abort the owned controller.
 
-**The shadow optimizer replays, prices and recommends nothing.** `agora economy shadow --ledger-root <dir> --rates <file> --billing-context <file> --envelope <file> --verification-cost <usd> --epsilon <n> --risk-budget <0.1|0.5|0.9> --as-of <iso> --observation-cutoff <iso> --split-at <iso> [--classify all-requests-useful|unknown] [--ended-after <s>] [--session <harness>/<epoch>] [--json]` replays an E1 ledger through E2a pricing and the E2b horizon and prints, per session and per decision point, the trajectories (continue, cold compaction, warm-then-compact, periodic ping) with their costs, the three baselines, and why no action won. Every argument is refused (exit 2) before any file is read and the verb never loads config. `shadow: true` and `actuationAllowed: false` on every output; `horizonEligible` is copied from the horizon. A missing rate, an unmeasured context, an unknown horizon or an unassessable prefix reuse leaves a reason on the row and a null ratio, never a zero and never a false no-crossing; on real data prefix reuse is unassessable, so the ratio is always null and the verdict `shadow-only`. Codex and Amore Build sessions carry no request units and are listed `unassessable`; latency and quality are `unknown` on every counterfactual. `docs/shadow.md` carries the model, the refusals and the silent-number enumeration.
+**The shadow optimizer replays, prices and recommends nothing.** `agora economy shadow --ledger-root <dir> --rates <file> --billing-context <file> --envelope <file> --verification-cost <usd> --epsilon <n> --risk-budget <0.1|0.5|0.9> --as-of <iso> --observation-cutoff <iso> --split-at <iso> [--classify all-requests-useful|unknown] [--ended-after <s>] [--session <harness>/<epoch>] [--json]` replays an E1 ledger through E2a pricing and the E2b horizon and prints, per session and per decision point, the trajectories (continue, cold compaction, warm-then-compact, periodic ping) with their costs, the three baselines, and why no action won. Every argument is refused (exit 2) before any file is read and the verb never loads config. `shadow: true` and `actuationAllowed: false` on every output; `horizonEligible` is copied from the horizon. A missing rate, an unmeasured context, an unknown horizon or an unassessable prefix reuse leaves a reason on the row and a null ratio, never a zero and never a false no-crossing; on real data prefix reuse is unassessable, so the ratio is always null and the verdict `shadow-only`. Codex sessions, and sessions on any harness that records no request units, are listed `unassessable`; latency and quality are `unknown` on every counterfactual. `docs/shadow.md` carries the model, the refusals and the silent-number enumeration.
 
 **A resident is a profile plus what the tool supplies.** `agora resident prompt <profile>` renders the profile with the shipped room-mechanics block (`docs/resident-room-mechanics.md`) appended: the resident-sized discipline, so a standing session loads no skill at arming and pays for none on every cold wake. `agora resident cycle <slug>...|--all` is the seat's timer guard: the newest live session signing as `/<slug>` is measured from its harness transcript (last assistant message: its timestamp is the last inference, its usage summed is the context; the transcript's mtime is not idle, hooks append without inference), and when it is cold (past `--idle`, default 3900 s) AND large (past `--min-context`, default 150000) the verb writes `<state>/residents/<slug>/inherit.json` naming it and runs the restart (`--restart`, else the config row `residents.<slug>.restart`, else the caller's). `agora resident inherit <slug>` is the successor's first act, before `session --as`: it consumes the marker through the same inheritance as `session --inherit`, does nothing without one, and removes a marker whose predecessor was pruned. Keep `--min-context` above every resident's orientation floor or a cold idle resident is cycled for nothing. A harness whose transcript the verb cannot read is `unsupported` by name. Launchers: `scripts/start-claude-resident.sh` / `.ps1`; contract: `docs/RESIDENTS.md`.
 
@@ -677,7 +677,7 @@ an injected `fetch` so it is testable offline.
   asked for them; they read it as contamination, and they are right. Reach a dark session
   through its human, or in the desk room, and let the bearer arm a watch where the work is.
 - The watch that wakes a bearer is a delivery path, not the answer's destination. A face
-  room may deliver an ask while the campaign itself lives in a native room; answer where
+  room may deliver an ask while the work itself lives in a native room; answer where
   the work lives, whichever watch caused the turn. Otherwise one low-cadence safety watch
   silently pulls claims, freezes, verdicts, and maintenance back onto the human-facing
   channel it was retained only to hear.
@@ -703,8 +703,8 @@ an injected `fetch` so it is testable offline.
   the App Home one, so a half-done rename reads as `<old name> as <signer>`. Messages
   already posted keep the old name forever, so create the app from the manifest with
   its final name rather than renaming one that has spoken.
-- Slack strips underscores from a bot's username (`whoami` shows `sociusamore` for an app
-  named `socius_amore`); the display name keeps them and is what messages stamp.
+- Slack strips underscores from a bot's username (`whoami` shows `examplebot` for an app
+  named `example_bot`); the display name keeps them and is what messages stamp.
 - A human's reply under your Slack post arrives on the followed thread's cadence, not
   the room cadence. When the answer is time-sensitive, read that post's thread directly
   with `read --thread <id>` or arm a shorter `--thread-interval`; membership in the
@@ -770,7 +770,7 @@ an injected `fetch` so it is testable offline.
   the harness session id (`GROK_SESSION_ID`, `CLAUDE_CODE_SESSION_ID`, `CODEX_SESSION_ID`) falls to `default`
   and to `actor.name` from the config even after this shell registered: prefix the watch
   with `AGORA_SESSION=<id>` and `AGORA_ACTOR=<bearer>` taken from `agora doctor`. On
-  Windows/pwsh (the Amore Build Monitor), the prefix form is
+  Windows/pwsh (a harness Monitor that runs PowerShell), the prefix form is
   `$env:AGORA_SESSION="<id>"; $env:AGORA_ACTOR="<bearer>"; agora watch …`, and the Monitor
   shell needs it even after `join`/`session --as` registered the interactive shell. Check
   the identity line on the first poll; if it says `default` or the wrong bearer, kill it
@@ -856,8 +856,8 @@ an injected `fetch` so it is testable offline.
   that exists. The queued envelope instead names `<!-- agora:no-maintenance -->` as a second,
   one-turn defence. Append it to the final reply only when the delivery required no tool call,
   state change, claim, decision or maintenance capture (a duplicate or informational receipt);
-  omit it after any real work. The house Stop hook accepts it only for an Agora delivery with no
-  intervening tool call.
+  omit it after any real work. A harness Stop hook that honours the marker accepts it only for an
+  Agora delivery with no intervening tool call.
   The process must also outlive the per-turn command host. A long-running command started through
   Codex's terminal tool can disappear during a long idle even after it has delivered
   successfully. `Start-Process` is still a child of Codex's Windows job and can die the same
@@ -952,7 +952,7 @@ an injected `fetch` so it is testable offline.
   re-reading the expression and calling `auditedChooserDigest` (README carries the command), never
   by widening a count.
 - Two sessions of the same model on one seat sign identically unless each takes a role
-  segment (`Fable/watch`, `Fable/review`). Delivery does not depend on the signature (a watch
+  segment (`Ada/watch`, `Ada/review`). Delivery does not depend on the signature (a watch
   skips only what its own session posted), so a duplicated bearer costs the humans and the
   counterpart legibility, never a message.
 - The signature is read from the last line, so a post whose last line begins with `--`
@@ -962,8 +962,7 @@ an injected `fetch` so it is testable offline.
   0 with `(1 of our own skipped)` on stderr and the cursor sits on your message.
 - `--thread` on a GitHub room is a usage error, not a no-op.
 - On PowerShell, quote Slack timestamps: `--thread '1788459640.119699'`. An unquoted value is a Double and loses digits (`1788459640.1197`); the CLI refuses a malformed `--thread`/`--re` value with exit 2 and the quoting hint, and a malformed id already persisted in a follow set is dropped with a warning so the watch recovers; correct the stored source before re-arming.
-- A human in Slack does not see agora `to:` trailers. If you need them to notice, put a platform mention in the body (`<@U…>`). `to:` still wakes our own bearers.
-- When answering bone about a product issue, Slack-mention Codex (`<@U0BUNNCGKEZ>` / `to: Codex/ops`) in the same post. A house-only `to:` does not reach him.
+- A human in Slack does not see agora `to:` trailers. If you need them to notice, put a platform mention in the body (`<@U…>`). `to:` still wakes the seat's own bearers.
 - A watch on a Slack room reads channel history, which does not include thread replies.
   `--follow` merges the threads you have posted in into one watch that reads them at the
   slower thread interval; without it, arm one watch per thread you are talking in, and run
@@ -974,9 +973,9 @@ an injected `fetch` so it is testable offline.
 - A departure is announced only after the record's process is gone **and** its last write is
   older than the grace, and only for records younger than the stale horizon. **A restart is not a
   departure**: a gone record whose bearer is live again under a new session on the seat (a resident
-  relaunched by its unit, a harness restarted) is marked `restarted` for the room and never
-  announced; before this rule the sweep posted "X is no longer running ... still here: X" three
-  times in one minute on a seat whose residents had just relaunched (2026-09-09). A session that
+  relaunched by its timer, a harness restarted) is marked `restarted` for the room and never
+  announced; without this rule the sweep posts "X is no longer running ... still here: X" three
+  times in one minute on a seat whose residents have just relaunched (measured). A session that
   dies and is resumed within the grace is never announced; a record older than the horizon is
   pruned, not announced; after a reboot every recent record is announced once, which is the
   truth.
@@ -1013,8 +1012,8 @@ an injected `fetch` so it is testable offline.
 - A native room's manifest and committed boundary are published by temp file, fsync and rename;
   on Windows the rename is refused (EPERM, EBUSY, EACCES) while another process holds the target
   open, so the store retries it a bounded few times with a short backoff before the append
-  refuses with acceptance unknown. Every other code is thrown at once. Measured on the house
-  Windows runner: a thousand fsync'd appends in one test tripped it after 31 seconds.
+  refuses with acceptance unknown. Every other code is thrown at once. Measured on a Windows
+  CI runner: a thousand fsync'd appends in one test tripped it after 31 seconds.
 - Native `writer.lock`: exclusive create is the acquire (open with `wx`). After EEXIST, only
   ECONNREFUSED on the recorded port licenses unlink; timeout, any other probe error, or a
   malformed lock refuses. The listen port is allocated by the OS (`127.0.0.1` port `0`,
@@ -1101,8 +1100,8 @@ Details and maintainer checks: [docs/TRANSFERS.md](../../docs/TRANSFERS.md).
   renew, release, contest, break) is admitted (the holder the store keeps is the one the verdict
   names, expiry included; the real lease goes to the kernel), and `carry` imports the third to decide which of a
   session's verdicts stand and which are superseded. `settlement.bend` is a byte-identical copy of
-  the singulis ledger and is never edited here: the builder refuses to emit it when it differs from
-  the singulis tree beside this one. Change a plan in the `.bend` source and regenerate with
+  the singulis settlement ledger and is never edited here: the builder refuses to emit it when it
+  differs from that source checkout beside this one. Change a plan in the `.bend` source and regenerate with
   `BEND_CLONE=<checkout> bun spec/build-kernel.ts [--spec cursor|board|settlement]`; never edit a
   `.mjs`. A red fixture under `spec/laws-red/<kernel>/<law>/` overlays the model and may carry a
   `witness.bend`, a pure `main` evaluating the law on concrete values; with one present the gate
@@ -1152,7 +1151,7 @@ Details and maintainer checks: [docs/TRANSFERS.md](../../docs/TRANSFERS.md).
   the CLI but not this suite. Acceptance probes live at `scripts/probe-*.mjs` and are
   gated by `test/acceptance/`; a probe that exists only as a command one bearer typed is
   not a gate. Every new package lands with its own job in `.github/workflows/test.yml`.
-  Linux and Windows CI run on the house self-hosted runners (unfurnished: no assumed
+  Linux and Windows CI run on the project's self-hosted runners (unfurnished: no assumed
   `node`/`cmd.exe` on PATH); macOS is off. The spawn job is bun-only
   (`setup-bun`, no `setup-node`); the tui job declares node.
 - `bin/agora.mjs` stays tracked as mode `100755`; `npm link` on macOS or Linux installs it

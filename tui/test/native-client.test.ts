@@ -27,7 +27,7 @@ import { TOKEN_SHAPE } from "./fixtures";
 const ROOM = "6".repeat(32);
 const EPOCH = "7".repeat(32);
 const ACCOUNT = "seat_account_0002";
-const ALEX = { name: "Alex", kind: "human" as const };
+const OPERATOR = { name: "operator", kind: "human" as const };
 const NATIVE_VIEW = (stateRoot: string) => ({ stateRoot, rooms: [], native: [{ alias: "house", transport: "native" as const, room: ROOM, roomId: ROOM }], elsewhere: [] });
 
 const cleanups: Array<() => Promise<void> | void> = [];
@@ -38,7 +38,7 @@ afterEach(async () => {
 async function realService() {
   const root = await mkdtemp(path.join(tmpdir(), "agora-tui-native-"));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
-  const service = new NativeRoomService({ root, accountId: ACCOUNT, seatLabel: "admin-pc" });
+  const service = new NativeRoomService({ root, accountId: ACCOUNT, seatLabel: "seat-a" });
   const descriptor = await service.start();
   await service.createRoom({ roomId: ROOM, epoch: EPOCH });
   cleanups.push(() => service.stop());
@@ -67,21 +67,21 @@ const untilTrue = async (pred: () => boolean, ms = 3000) => {
 describe("NativeRoomClient against the real seat service", () => {
   test("hello through the descriptor, the human's post lands kind human under the seat account with a receipt that answers the operation, and read to is the checkpoint", async () => {
     const { root, descriptor, post } = await realService();
-    const client = new NativeRoomClient(ALEX, NATIVE_VIEW(root), { waitMs: 50 });
+    const client = new NativeRoomClient(OPERATOR, NATIVE_VIEW(root), { waitMs: 50 });
     cleanups.push(() => client.close());
     expect(await client.rooms()).toEqual([{ alias: "house", transport: "native", room: ROOM, roomId: ROOM, note: undefined }]);
 
-    await post("Sol/codex", "first, from a peer\n\nto: Alex\n\n-- Sol/codex");
+    await post("Cal/codex", "first, from a peer\n\nto: operator\n\n-- Cal/codex");
     const before = await client.read("house");
     expect(before.messages.map((m) => m.text.split("\n")[0])).toEqual(["first, from a peer"]);
-    expect(before.horizon.source).toBe("seat service admin-pc");
+    expect(before.horizon.source).toBe("seat service seat-a");
     // read to: the checkpoint's position, a cursor
     expect(before.horizon.readTo).toBe(`${EPOCH}:1`);
     expect(before.horizon.oldestCursor).toBe(`${EPOCH}:1`);
 
     const draft = "hello from the human\n";
-    expect(composeRefusal(draft, ALEX)).toBeUndefined();
-    const r = await client.post("house", preparePost(draft, ALEX));
+    expect(composeRefusal(draft, OPERATOR)).toBeUndefined();
+    const r = await client.post("house", preparePost(draft, OPERATOR));
     expect(r.cursor).toBe(`${EPOCH}:2`);
     expect(r.duplicate).toBe(false);
     expect(r.id).toMatch(/^[a-f0-9]{64}$/);
@@ -90,14 +90,14 @@ describe("NativeRoomClient against the real seat service", () => {
     const after = await client.read("house");
     const mine = after.messages[1]!;
     // the service stamps the author: the seat's account as id, the human's name and kind
-    expect(mine.author).toEqual({ id: descriptor.accountId, name: "Alex", kind: "human" });
-    expect(mine.signedAs).toBe("Alex");
-    expect(mine.text).toBe("hello from the human\n\n-- Alex");
+    expect(mine.author).toEqual({ id: descriptor.accountId, name: "operator", kind: "human" });
+    expect(mine.signedAs).toBe("operator");
+    expect(mine.text).toBe("hello from the human\n\n-- operator");
     expect(mine.id).toBe(r.id);
     expect(after.horizon.readTo).toBe(`${EPOCH}:2`);
 
     // a second, identical draft after a sent one is a new operation: it lands again, not deduplicated
-    const r2 = await client.post("house", preparePost(draft, ALEX));
+    const r2 = await client.post("house", preparePost(draft, OPERATOR));
     expect(r2.cursor).toBe(`${EPOCH}:3`);
     expect(r2.operationId).not.toBe(r.operationId);
     expect(r2.duplicate).toBe(false);
@@ -105,19 +105,19 @@ describe("NativeRoomClient against the real seat service", () => {
 
   test("subscribe delivers events after read to, and the service stopping is dark: on the subscription, on the next read, on the next post", async () => {
     const { root, service, post } = await realService();
-    const client = new NativeRoomClient(ALEX, NATIVE_VIEW(root), { waitMs: 50 });
+    const client = new NativeRoomClient(OPERATOR, NATIVE_VIEW(root), { waitMs: 50 });
     cleanups.push(() => client.close());
-    await post("Sol/codex", "one");
+    await post("Cal/codex", "one");
     const first = await client.read("house");
     const got: Message[] = [];
     let fault: RoomFault | undefined;
     const sub = await client.subscribe("house", first.horizon.readTo!, { onMessages: (m) => got.push(...m), onFault: (f) => (fault = f) });
     cleanups.push(() => sub.close());
-    await post("Sol/codex", "two");
-    await post("Sol/codex", "three");
+    await post("Cal/codex", "two");
+    await post("Cal/codex", "three");
     await untilTrue(() => got.length >= 2);
     expect(got.map((m) => [m.text, m.cursor])).toEqual([["two", `${EPOCH}:2`], ["three", `${EPOCH}:3`]]);
-    expect(got[0]!.author).toEqual({ id: ACCOUNT, name: "Sol/codex", kind: "agent" });
+    expect(got[0]!.author).toEqual({ id: ACCOUNT, name: "Cal/codex", kind: "agent" });
     expect(fault).toBeUndefined();
 
     await service.stop();
@@ -131,7 +131,7 @@ describe("NativeRoomClient against the real seat service", () => {
     expect(readFault).toBeInstanceOf(RoomFaultError);
     expect((readFault as RoomFaultError).kind).toBe("dark");
     let postFault: unknown;
-    await client.post("house", "late\n\n-- Alex").catch((e) => (postFault = e));
+    await client.post("house", "late\n\n-- operator").catch((e) => (postFault = e));
     expect(postFault).toBeInstanceOf(PostFaultError);
     expect((postFault as PostFaultError).outcome).toBe("dark");
     expect((postFault as PostFaultError).reason).toContain("nothing was posted and no cursor was issued");
@@ -139,9 +139,9 @@ describe("NativeRoomClient against the real seat service", () => {
 
   test("a refused cursor on a live socket is refused, not dark, and the socket stays usable", async () => {
     const { root, post } = await realService();
-    const client = new NativeRoomClient(ALEX, NATIVE_VIEW(root), { waitMs: 50 });
+    const client = new NativeRoomClient(OPERATOR, NATIVE_VIEW(root), { waitMs: 50 });
     cleanups.push(() => client.close());
-    await post("Sol/codex", "one");
+    await post("Cal/codex", "one");
     const foreign = `${"8".repeat(32)}:0`;
     let e: unknown;
     await client.read("house", { since: foreign }).catch((x) => (e = x));
@@ -158,9 +158,9 @@ describe("NativeRoomClient against the real seat service", () => {
 
   test("search and roster are seams: the service's own refusal, never a pretended answer; and the nonce is refused in a draft without being echoed", async () => {
     const { root, descriptor, post } = await realService();
-    const client = new NativeRoomClient(ALEX, NATIVE_VIEW(root), { waitMs: 50 });
+    const client = new NativeRoomClient(OPERATOR, NATIVE_VIEW(root), { waitMs: 50 });
     cleanups.push(() => client.close());
-    await post("Sol/codex", "searchable");
+    await post("Cal/codex", "searchable");
     let e: unknown;
     await client.search("house", "search").catch((x) => (e = x));
     expect(e).toBeInstanceOf(SeamUnservedError);
@@ -183,9 +183,9 @@ describe("NativeRoomClient against the real seat service", () => {
 describe("NativeRoomClient against the fake for what the real one cannot do on command", () => {
   test("read to is the coverage's toInclusive, past the last message when coverage says so, and committedThrough rides along", async () => {
     const { root, service } = await fake({ coverageAhead: 2 });
-    service.seed({ name: "Sol/codex", kind: "agent" }, "one");
-    service.seed({ name: "Sol/codex", kind: "agent" }, "two");
-    const client = new NativeRoomClient(ALEX, NATIVE_VIEW(root), { waitMs: 50 });
+    service.seed({ name: "Cal/codex", kind: "agent" }, "one");
+    service.seed({ name: "Cal/codex", kind: "agent" }, "two");
+    const client = new NativeRoomClient(OPERATOR, NATIVE_VIEW(root), { waitMs: 50 });
     cleanups.push(() => client.close());
     const r = await client.read("house");
     expect(r.messages.map((m) => m.cursor)).toEqual([`${EPOCH}:1`, `${EPOCH}:2`]);
@@ -198,9 +198,9 @@ describe("NativeRoomClient against the fake for what the real one cannot do on c
 
   test("acceptance unknown is retried under the same operation id, and an identical resend reuses it until one ack arrives", async () => {
     const { root, service } = await fake({ holdAppend: true });
-    const client = new NativeRoomClient(ALEX, NATIVE_VIEW(root), { waitMs: 50 });
+    const client = new NativeRoomClient(OPERATOR, NATIVE_VIEW(root), { waitMs: 50 });
     cleanups.push(() => client.close());
-    const text = "did this land?\n\n-- Alex";
+    const text = "did this land?\n\n-- operator";
     const pending = client.post("house", text);
     let fault: unknown;
     pending.catch((e) => (fault = e));
@@ -237,24 +237,24 @@ describe("NativeRoomClient against the fake for what the real one cannot do on c
   test("a receipt that does not answer the operation is refused: the id must derive from the room, the seat account and this operation", async () => {
     const { root, service } = await fake();
     service.setForgeReceipt(true);
-    const client = new NativeRoomClient(ALEX, NATIVE_VIEW(root), { waitMs: 50 });
+    const client = new NativeRoomClient(OPERATOR, NATIVE_VIEW(root), { waitMs: 50 });
     cleanups.push(() => client.close());
     await client.read("house");
     let e: unknown;
-    await client.post("house", "x\n\n-- Alex").catch((x) => (e = x));
+    await client.post("house", "x\n\n-- operator").catch((x) => (e = x));
     expect(e).toBeInstanceOf(PostFaultError);
     expect((e as PostFaultError).outcome).toBe("refused");
     expect((e as PostFaultError).reason).toContain("does not answer this operation");
     // the forged receipt never became a sent: the same words go again as a new operation and land
     service.setForgeReceipt(false);
-    const r = await client.post("house", "x\n\n-- Alex");
+    const r = await client.post("house", "x\n\n-- operator");
     expect(r.duplicate).toBe(false);
     expect(r.cursor).toBe(`${EPOCH}:2`);
   }, 15_000);
 
   test("no token and no nonce crosses the wire in any request, and the config's token fields are never read", async () => {
     const { root, service } = await fake();
-    service.seed({ name: "Sol/codex", kind: "agent" }, `a shape in a body: ${TOKEN_SHAPE}`);
+    service.seed({ name: "Cal/codex", kind: "agent" }, `a shape in a body: ${TOKEN_SHAPE}`);
     const configPath = path.join(root, "agora.json");
     const config = {
       actor: { name: "SeatBot", kind: "agent" },
@@ -278,14 +278,14 @@ describe("NativeRoomClient against the fake for what the real one cannot do on c
     expect(JSON.stringify(view)).not.toContain("tokenEnv");
     expect(JSON.stringify(view)).not.toContain("SeatBot");
 
-    const client = new SeatRoomClient(ALEX, view, { native: { waitMs: 50 } });
+    const client = new SeatRoomClient(OPERATOR, view, { native: { waitMs: 50 } });
     cleanups.push(() => client.close());
     expect(client.clientFor("house").kind).toBe("native");
     expect(client.clientFor("scratch").kind).toBe("local");
     const r = await client.read("house");
     expect(r.messages).toHaveLength(1);
     expect(r.horizon.source).toBe("seat service fake-seat");
-    await client.post("house", "from the human\n\n-- Alex");
+    await client.post("house", "from the human\n\n-- operator");
     await client.search("house", "shape").catch(() => undefined);
     const sub = await client.subscribe("house", r.horizon.readTo!, { onMessages: () => undefined, onFault: () => undefined });
     cleanups.push(() => sub?.close());
@@ -302,7 +302,7 @@ describe("NativeRoomClient against the fake for what the real one cannot do on c
     expect(JSON.stringify(service.hellos)).not.toContain(service.nonce);
     const append = service.frames.find((f) => f.type === "append")!.operation as Record<string, unknown>;
     expect(append.authorKind).toBe("human");
-    expect(append.authorName).toBe("Alex");
+    expect(append.authorName).toBe("operator");
     expect(Object.keys(append).sort()).toEqual(["authorKind", "authorName", "operationId", "text"]);
     // the shared config is unchanged
     expect(JSON.parse(await readFile(configPath, "utf8"))).toEqual(config);

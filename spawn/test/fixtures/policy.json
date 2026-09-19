@@ -6,8 +6,8 @@
   "profile": "cooperative",
   "profileStatement": "Every spawned peer runs as this OS user. Policy and record are accountability, not security: a peer can read every secret this user can read, including the seat key, and can reach a pane below the API. The pane authority CANNOT attribute live input. Read bytes plus a write ledger do not identify an input event, because ordinary application output and untracked input produce identical master bytes; the output-anomaly counter is a heuristic whose false-positive and false-negative rates are controlled-fixture results only, and it is never evidence that a particular input did or did not happen. Enforcement waits on a separate OS user per peer.",
   "allowSpawners": [
-    "fable@opus-windows-primary",
-    "sol@opus-windows-primary"
+    "fable@seat-a",
+    "sol@seat-a"
   ],
   "allowHarnesses": [
     "claude",

@@ -29,7 +29,7 @@ describe("buildLines", () => {
     const derived = lines.find((l) => l.tone === "derived" && l.entry === 1)!;
     expect(header.text).toBe(headerLine(d));
     expect(derived.text).toBe(trailerLine(d).replace(/\n$/, ""));
-    expect(derived.text).toBe("  → to Fable · re m1");
+    expect(derived.text).toBe("  → to Alice · re m1");
   });
 
   test("folded thread shows a fold line and no reply lines; unfolded shows the replies indented", () => {
@@ -41,7 +41,7 @@ describe("buildLines", () => {
     expect(open.some((l) => l.tone === "fold" && l.text.includes("▾ 2 replies"))).toBe(true);
     const replyHeaders = open.filter((l) => l.reply && l.tone === "header");
     expect(replyHeaders).toHaveLength(2);
-    expect(replyHeaders[1].text).toContain("bone (human)");
+    expect(replyHeaders[1].text).toContain("peer (human)");
     expect(replyHeaders[1].text.startsWith("  [")).toBe(true);
   });
 
@@ -50,7 +50,7 @@ describe("buildLines", () => {
     const joined = lines.map((l) => l.text).join("\n");
     expect(joined).not.toContain(TOKEN_SHAPE);
     expect(joined).toContain("[redacted]");
-    expect(joined).toContain("\n    -- Fable");
+    expect(joined).toContain("\n    -- Alice");
   });
 
   test("attachments render as the CLI renders them, path and error alike", () => {
@@ -67,7 +67,7 @@ describe("searchMessages", () => {
     const msgs = seededRoom();
     expect(searchMessages(msgs, "SLICE").map((m) => m.id)).toEqual(["m1"]);
     expect(searchMessages(msgs, "tui").map((m) => m.id)).toEqual(["m1", "m3"]);
-    expect(searchMessages(msgs, "bone").map((m) => m.id)).toEqual(["m4"]);
+    expect(searchMessages(msgs, "peer").map((m) => m.id)).toEqual(["m4"]);
     expect(searchMessages(msgs, "")).toEqual([]);
     expect(searchMessages(msgs, "tui", { kind: "human" })).toEqual([]);
   });

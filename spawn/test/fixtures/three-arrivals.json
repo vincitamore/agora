@@ -16,7 +16,7 @@
       "kind": "delivered",
       "path": "pane authority write, service-authored",
       "bytesThroughPTY": true,
-      "surface": "[agora] dl-01JZ8Q9R3T7B from opus-windows-primary/sol · house · 7:1281-7:1284 · read with agora read house --since 7:1280",
+      "surface": "[agora] dl-01JZ8Q9R3T7B from seat-a/sol · house · 7:1281-7:1284 · read with agora read house --since 7:1280",
       "distinguishedBy": "the carried deliveryId resolves against this recipient and generation and answers 'fresh'; the prefix alone proves nothing",
       "acknowledgement": {
         "required": true,

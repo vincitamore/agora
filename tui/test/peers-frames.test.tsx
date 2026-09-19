@@ -7,11 +7,11 @@ describe("PEERS", () => {
     const client = stubClient();
     const h = await mountApp({ client, initialAlias: "scratch" }, { width: 120, height: 30 });
     try {
-      await h.until((x) => x.includes("Fable (agent)"));
+      await h.until((x) => x.includes("Alice (agent)"));
       h.mockInput.pressKey("3");
       const f = await h.until((x) => x.includes("BEARER") && x.includes("Grok/general"));
       expect(f).toContain("⁂ PEERS this seat only");
-      expect(f).toMatch(/● Fable\/agora-orchest…\s+live\s+4242/);
+      expect(f).toMatch(/● Alice\/agora-orchest…\s+live\s+4242/);
       expect(f).toMatch(/◐ Sol\/codex\s+dark\s+5151/);
       expect(f).toMatch(/○ Grok\/general\s+unknown\s+-/);
       expect(f).toContain('"orchestrator"');
@@ -19,7 +19,7 @@ describe("PEERS", () => {
       // the ROOM header carries the same presence, derived at read time
       h.mockInput.pressKey("1");
       const room = await h.until((x) => x.includes("▣ ROOM scratch"));
-      expect(room).toContain("PEERS ● Fable/agora-orchestrator  ◐ Sol/codex  ○ Grok/general · this seat only");
+      expect(room).toContain("PEERS ● Alice/agora-orchestrator  ◐ Cal/codex  ○ Grok/general · this seat only");
     } finally {
       h.destroy();
     }
@@ -27,7 +27,7 @@ describe("PEERS", () => {
 
   test("no records reads as no sessions, never as an error", async () => {
     const { StubRoomClient } = await import("../lib/room-client");
-    const client = new StubRoomClient({ name: "Alex", rooms: { scratch: [] }, peers: [] });
+    const client = new StubRoomClient({ name: "operator", rooms: { scratch: [] }, peers: [] });
     const h = await mountApp({ client, initialAlias: "scratch" }, { width: 80, height: 24 });
     try {
       await h.until((x) => x.includes("nothing in this room yet"));

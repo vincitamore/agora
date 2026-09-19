@@ -182,7 +182,7 @@ test('the cutoff is required, because censoring without one is not censoring', (
 
 test('a split at or after the observation cutoff is refused', () => {
   const many = cohort(MIN_COMPARABLE + 2, 3);
-  // Fable's exact reproduction: cutoff before the split. Previously accepted, and it emitted
+  // Alice's exact reproduction: cutoff before the split. Previously accepted, and it emitted
   // remainingCalls 5/5/5 -- which was curve.length, not a quantile of anything.
   assert.throws(
     () => estimateHorizon(many, { observationCutoff: iso(5000), split: { at: iso(9000) }, subject: SUBJECT }),

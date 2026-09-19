@@ -109,7 +109,7 @@ async function rig(t, over = {}) {
   const seatRoot = await mkdtemp(path.join(tmpdir(), "agora-t2-seat-"));
   t.after(() => rm(hostRoot, { recursive: true, force: true }));
   t.after(() => rm(seatRoot, { recursive: true, force: true }));
-  const service = await authorityFixtureService({ root: hostRoot, accountId: HOST_ACCOUNT, seatLabel: "admin-pc" },
+  const service = await authorityFixtureService({ root: hostRoot, accountId: HOST_ACCOUNT, seatLabel: "seat-a" },
     [{ roomId: ROOM, publicNodeKeys: [KEY, OTHER_KEY] }]);
   await service.start();
   await service.createRoom({ roomId: ROOM, epoch: EPOCH });
@@ -399,7 +399,7 @@ test("a host that speaks the LOCAL handshake is refused by name, not fallen thro
   const toClient = new PassThrough();
   const stream = Duplex.from({ readable: toClient, writable: toHost });
   toClient.write(encodeNativeFrame({ protocol: NATIVE_PROTOCOL, type: "server-hello", bootEpoch: "f".repeat(32),
-    requestId: "1".repeat(32), serverChallenge: "2".repeat(32), accountId: HOST_ACCOUNT, seatLabel: "admin-pc", proof: "0".repeat(64) }));
+    requestId: "1".repeat(32), serverChallenge: "2".repeat(32), accountId: HOST_ACCOUNT, seatLabel: "seat-a", proof: "0".repeat(64) }));
   await assert.rejects(completeMemberHandshake({ stream, binding: b, secret, timeoutMs: 2000 }), /member-phase-refused/);
 });
 
@@ -1211,7 +1211,7 @@ test("the idle clock stays out of the way while the channel carries", async (t) 
   // idleMs 500 -> the clock ticks every 250 ms, so the window below contains SEVERAL probes that
   // actually fire. An earlier draft used idleMs 60 against a 1 s interval floor and observed ZERO
   // probes in 400 ms: it asserted nothing at all about the clock while reading as though it did.
-  // Astra/reader caught that (house :1586); it is the third cell-that-cannot-fail in this file and
+  // Bruno/reader caught that (house :1586); it is the third cell-that-cannot-fail in this file and
   // the comment stays so the next reader sizes the window against the interval, not against taste.
   let probes = 0;
   const sub = await openRemoteSubscription({ room, since: nativeCursor(EPOCH, 0),
@@ -1272,7 +1272,7 @@ test("the idle clock is REF'd: a process holding nothing else still reports the 
 });
 
 test("an obsolete probe's late failure does not re-subscribe the healthy channel that replaced it", async (t) => {
-  // Astra/reader's HOLD on 484b62a, reproduced here with promises rather than timing so the
+  // Bruno/reader's HOLD on 484b62a, reproduced here with promises rather than timing so the
   // ordering is forced, not raced: the old probe is pending, its socket closes, the close path
   // attaches a healthy replacement, and only THEN does the old probe reject. Before the identity
   // fence, `reattaching` was already false again by that point, so the stale failure dialled and
@@ -1334,7 +1334,7 @@ test("an obsolete probe's late failure does not re-subscribe the healthy channel
 });
 
 test("a probe failure invalidates the REAL cached client, so the reattach dials instead of re-subscribing a corpse", async (t) => {
-  // Astra/reader's measured HOLD on r1's repair (backroom 1788832062), rebuilt on the real rig:
+  // Bruno/reader's measured HOLD on r1's repair (backroom 1788832062), rebuilt on the real rig:
   // a real RemoteRoom and a real NativeServiceClient, no substituted `room.client`. The channel is
   // made silent WITHOUT closing — the host stream stops reading — which is the only case that
   // reaches the cache, since a close would clear it.
@@ -1374,7 +1374,7 @@ test("a probe failure invalidates the REAL cached client, so the reattach dials 
 });
 
 test("a replacement completed DURING dropClient's teardown is not dialled over on the probe's return", async (t) => {
-  // Astra/reader's third HOLD (backroom 1788832597), and the same race as the first two at a third
+  // Bruno/reader's third HOLD (backroom 1788832597), and the same race as the first two at a third
   // await: `dropClient` closes the old socket, whose close handler can attach a healthy replacement
   // while `resource.stop()` is still pending. The probe resumes holding a `client` that is now two
   // generations old, and without re-reading the fence it dials over a channel that is fine.

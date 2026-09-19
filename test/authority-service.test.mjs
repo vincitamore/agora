@@ -148,7 +148,7 @@ test('journal synchronously reserves replay identity and retains intent without 
   const f = await fixture(t);
   const p = await f.service.createRouteChallenge({ action: 'room-enroll', roomId: ROOM, publicNodeKey: MEMBER });
   const journal = f.journal, proof = f.signed(p.challenge);
-  const first = journal.begin(p.request, proof, { bearer: 'Astra/uber-wizard', sessionSlug: 'claimed-session' }, NOW);
+  const first = journal.begin(p.request, proof, { bearer: 'Bruno/uber-wizard', sessionSlug: 'claimed-session' }, NOW);
   assert.throws(() => journal.begin(p.request, proof, {}, NOW), refusal('operator-act-replayed'));
   await first;
   await f.service.stop();
@@ -158,7 +158,7 @@ test('journal synchronously reserves replay identity and retains intent without 
   const status = loaded.status(p.request.operationId);
   assert.equal(status.authorization, 'delegation-policy');
   assert.equal(status.authenticatedPrincipal.id, ACCOUNT);
-  assert.deepEqual(status.attributionClaims, { bearer: 'Astra/uber-wizard', sessionSlug: 'claimed-session' });
+  assert.deepEqual(status.attributionClaims, { bearer: 'Bruno/uber-wizard', sessionSlug: 'claimed-session' });
   assert.ok(!('signature' in status));
 });
 

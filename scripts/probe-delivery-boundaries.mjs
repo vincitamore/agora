@@ -1,4 +1,4 @@
-// Offline acceptance probes for docs/ROADMAP.md. No config, credentials, or live rooms.
+// Offline acceptance probes for the delivery boundaries (the committed-boundary and queue-checkpoint contracts). No config, credentials, or live rooms.
 // Exit 1 names an unmet acceptance bar; exit 0 means every probe passed.
 import { slackTransport } from "../src/transports/slack.mjs";
 import { foldRoom } from "../src/carry.mjs";
