@@ -29,7 +29,6 @@ jobs:
           node-version: 22
       - name: Read pinned source
         id: pin
-        shell: bash
         run: node -e 'const s=require("./vendor/tailcat/source.json"); require("fs").appendFileSync(process.env.GITHUB_OUTPUT, `revision=${s.revision}\ngo=${s.go}\n`);'
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -63,7 +62,6 @@ jobs:
           node-version: 22
       - name: Read pinned source
         id: pin
-        shell: bash
         run: node -e 'const s=require("./vendor/tailcat/source.json"); require("fs").appendFileSync(process.env.GITHUB_OUTPUT, `revision=${s.revision}\ngo=${s.go}\n`);'
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
