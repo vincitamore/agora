@@ -1,6 +1,8 @@
 {
-  "sha": "8008146ab90abb98b496fa2a6ffe555da7fb0dd5",
-  "version": "Bend 2.0.4",
+  "sha": "2b9fc8d6e30d21ef0cd6bd122e8cf370cc8f5a8a",
+  "version": "Bend 2.0.10",
   "upstream": "https://github.com/bendlang/bend",
-  "note": "The commit every kernel here is proved against. scripts/bend-checkout.mjs fetches it from upstream by sha; spec/build-kernel.ts and spec/laws-check.ts refuse a checkout at any other commit. Upstream keeps one squashed commit that has been force-pushed before, so the sha can vanish there; a mirror that keeps it under a tag is named by BEND_MIRROR (a git URL) and BEND_MIRROR_TAG when you have one, and is tried first when set. Move the pin by re-cloning, re-running every PROOF, and pushing the new commit to your mirror under a new tag."
+  "mirror": "https://github.com/vincitamore/bend",
+  "tag": "pin-2b9fc8d",
+  "note": "The commit every kernel here is proved against. scripts/bend-checkout.mjs fetches it from upstream by sha, then from the public mirror by tag (a fork of upstream that keeps every pin under a pin-<sha7> tag, because upstream has force-pushed before and a sha can vanish there), then from BEND_MIRROR (a git URL, with BEND_MIRROR_TAG) when set, which is tried first; spec/build-kernel.ts and spec/laws-check.ts refuse a checkout at any other commit. The pin moves with upstream: the bend-upstream workflow reports when upstream's head still proves every law and regenerates the kernels, and an advance is one pull request that sets this sha and version, regenerates the kernels, and pushes the new pin-<sha7> tag to the mirror."
 }
