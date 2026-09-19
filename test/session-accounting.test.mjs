@@ -218,14 +218,14 @@ test('four harness envelopes ingest; a failed decode is not stored as overlap no
       [
         { slug: 'claude', dir, record: { bearer: 'Opus/a' }, state: 'live' },
         { slug: 'codex', dir, record: { bearer: 'Codex/a' }, state: 'live' },
-        { slug: 'bravo', dir, record: { bearer: 'Grok/a' }, state: 'live' },
+        { slug: 'amore-build', dir, record: { bearer: 'Grok/a' }, state: 'live' },
       ],
       {
         roomKey: 'house',
         bindings: {
           claude: { harness: 'claude-code', sessionEpoch: EPOCH },
           codex: { harness: 'codex', sessionEpoch: EPOCH },
-          bravo: { harness: 'amore-build', sessionEpoch: EPOCH },
+          'amore-build': { harness: 'amore-build', sessionEpoch: EPOCH },
         },
         snapshot: snap,
       },
@@ -235,15 +235,15 @@ test('four harness envelopes ingest; a failed decode is not stored as overlap no
     assert.equal(rows.some((r) => r.status === 'provisional'), true);
     const claude = /** @type {any} */ (rows[0].usage);
     const codex = /** @type {any} */ (rows[1].usage);
-    const bravo = /** @type {any} */ (rows[2].usage);
+    const amoreBuild = /** @type {any} */ (rows[2].usage);
     assert.equal(claude.request.provisional.length, 1);
     assert.equal(claude.request.provisional[0].components.output.value, 20);
     assert.equal(Object.hasOwn(claude.request.components, 'output'), false);
     assert.equal(codex.snapshot.provisional.length, 1);
     assert.equal(codex.snapshot.provisional[0].components.output.value, 7);
     assert.equal(codex.request.provisional.length, 0);
-    assert.equal(bravo.aggregate.components.output.value, 30);
-    assert.equal(Object.hasOwn(bravo.request.components, 'output'), false);
+    assert.equal(amoreBuild.aggregate.components.output.value, 30);
+    assert.equal(Object.hasOwn(amoreBuild.request.components, 'output'), false);
     assert.equal(rows[0].entryCount, 1);
     assert.equal(rows[2].status, 'confirmed');
   } finally {

@@ -72,7 +72,7 @@ test("release, a human break and a contest keep the kernel's reading: no holder,
   await store.append({ kind: "board", operationId: OP(3), payload: { action: "release", subject: "work:a", leaseId: h.leaseId, fence: h.fence } }, { accountId: HOST });
   assert.deepEqual(store.board(), [], "released");
   await store.append({ kind: "board", operationId: OP(4), payload: { action: "claim", subject: "work:b" } }, { accountId: PEER });
-  await store.append({ kind: "board", operationId: OP(5), payload: { action: "break", subject: "work:b" }, authorKind: "human", authorName: "Alex" }, { accountId: HOST });
+  await store.append({ kind: "board", operationId: OP(5), payload: { action: "break", subject: "work:b" }, authorKind: "human", authorName: "operator" }, { accountId: HOST });
   assert.deepEqual(store.board(), [], "broken by a human");
 });
 

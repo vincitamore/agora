@@ -67,7 +67,7 @@ async function fixture(t, o = {}) {
   if (o.githubRoom) rooms.issue = { transport: "github", repo: "example-org/example-repo", issue: 3, tokenEnv: "AGORA_TEST_UNSET_TOKEN" };
   const cfgText = JSON.stringify({ actor: { name: "seat", kind: "agent" }, rooms }, null, 2);
   await writeFile(cfgPath, cfgText);
-  const env = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "grace", AGORA_ACTOR: "Grace/agora-orchestrator" };
+  const env = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "grace", AGORA_ACTOR: "Alice/agora-orchestrator" };
   const policyFile = path.join(root, "native", "rooms", ROOM, "faces.json");
   /** The shared config is read and never written: its bytes before and after are one exhibit. */
   const configUnchanged = async () => assert.equal(await readFile(cfgPath, "utf8"), cfgText, "the tool never writes the shared config");
@@ -239,7 +239,7 @@ test("fixture 09 row 9 by name: --add github --via <issue room> writes a github 
   assert.doesNotMatch(await readFile(policyFile, "utf8"), /ghp_|AGORA_TEST_UNSET_TOKEN/);
   await configUnchanged();
   r = await agora(["room", "faces", "nat"], env);
-  assert.match(r.stdout, /github {3}via issue {2}repo example-org\/example-room issue 3 {2}enabled/);
+  assert.match(r.stdout, /github {3}via issue {2}repo example-org\/example-repo issue 3 {2}enabled/);
   // a second face beside it, named explicitly
   r = await agora(["room", "faces", "nat", "--remove", "github"], env);
   assert.equal(r.code, 0, r.stderr);
@@ -335,7 +335,7 @@ test("the native transport carries the face choice on the append frame and retur
   /** @type {any} */
   let reply = { id: "b".repeat(64), cursor: `${EPOCH}:7` };
   const connect = async () => ({ socket: { unref() {}, once() {}, destroyed: false }, request: async (/** @type {string} */ type, /** @type {any} */ fields) => { frames.push({ type, ...fields }); return reply; } });
-  const tr = nativeTransport({ transport: "native", roomId: ROOM }, { actor: { name: "Grace/agora-orchestrator", kind: "agent" }, stateRoot: root, connect: /** @type {any} */ (connect) });
+  const tr = nativeTransport({ transport: "native", roomId: ROOM }, { actor: { name: "Alice/agora-orchestrator", kind: "agent" }, stateRoot: root, connect: /** @type {any} */ (connect) });
 
   let receipt = await tr.post("plain", {});
   assert.deepEqual(receipt, { id: "b".repeat(64), cursor: `${EPOCH}:7` }, "no faces on the ack: none on the receipt");

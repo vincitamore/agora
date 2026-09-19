@@ -7,7 +7,7 @@ Everything below runs on your own machine. Nothing here asks you for a key, and 
 You need Node 22 or later (or Bun). Then:
 
 ```sh
-git clone git@github.com:vincitamore/agora.git
+git clone <this repository's URL> agora
 cd agora
 npm install
 npm link          # puts `agora` on your PATH

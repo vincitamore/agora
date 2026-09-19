@@ -124,7 +124,7 @@ test("watch skips what this session posted (the ledger), advances past it, and -
 function seat(history) {
   const { fetch } = fakeFetch([
     ["auth.test", () => ({ body: { ok: true, user_id: "UBOT", user: "examplebot" } })],
-    ["users.info", (url) => ({ body: { ok: true, user: { id: url.searchParams.get("user"), real_name: "alex" } } })],
+    ["users.info", (url) => ({ body: { ok: true, user: { id: url.searchParams.get("user"), real_name: "operator" } } })],
     ["conversations.history", (url) => {
       const oldest = Number(url.searchParams.get("oldest") ?? 0);
       return { body: { ok: true, messages: [...history].reverse().filter((m) => Number(m.ts) > oldest), has_more: false } };
@@ -139,16 +139,16 @@ test("two bearers on one bot: a bearer's watch delivers its sibling's posts and 
   try {
     const t = seat([
       { ts: "1.000100", text: "hey", user: "U2" },
-      fromSeat("1.000200", "watch armed\n\n-- Grace/watch"),
+      fromSeat("1.000200", "watch armed\n\n-- Alice/watch"),
       { ts: "1.000300", text: "candidate up\n\n-- Codex", user: "UOTHER", bot_id: "B2" },
       fromSeat("1.000400", "the design is settled\n\n-- Opus/design"),
     ]);
-    const posted = new Set(["1.000200"]); // Grace/watch's own ledger
+    const posted = new Set(["1.000200"]); // Alice/watch's own ledger
     /** @type {string[]} */
     const seen = [];
     const r = await watch(t, { stateDir: path.join(dir, "s"), key: "c", mode: "once", own: () => posted, onBatch: (m) => { seen.push(...m.map((x) => x.signedAs ?? x.author.name)); } });
     assert.equal(r.fired, true);
-    assert.deepEqual(seen, ["alex", "Codex", "Opus/design"]);
+    assert.deepEqual(seen, ["operator", "Codex", "Opus/design"]);
     assert.equal(r.skipped, 1);
     assert.equal(await readCursor(path.join(dir, "s"), "c"), "1.000400");
   } finally {
@@ -160,8 +160,8 @@ test("two sessions of one model, signing identically: each delivers the other's 
   const { dir, cleanup } = await tmp();
   try {
     const t = seat([
-      fromSeat("1.000100", "I took the download stage\n\n-- Grace"),
-      fromSeat("1.000200", "I am on the audit\n\n-- Grace"),
+      fromSeat("1.000100", "I took the download stage\n\n-- Alice"),
+      fromSeat("1.000200", "I am on the audit\n\n-- Alice"),
     ]);
     const a = new Set(["1.000100"]);
     const b = new Set(["1.000200"]);
@@ -199,12 +199,12 @@ test("wake: the reader's filter drops what it chose not to wake on, counts it as
   const { dir, cleanup } = await tmp();
   try {
     const t = localTransport({ transport: "local", path: path.join(dir, "r.ndjson") }, { actor: { name: "Codex", kind: "agent" } });
-    await t.post("for the other one\n\nto: Grace/review");
-    await t.post("for me\n\nto: Grace/watch");
+    await t.post("for the other one\n\nto: Alice/review");
+    await t.post("for me\n\nto: Alice/watch");
     await t.post("for nobody in particular");
     /** @type {string[]} */
     const seen = [];
-    const wake = (/** @type {import('../src/core.mjs').Message} */ m) => !/to: Grace\/review/.test(m.text);
+    const wake = (/** @type {import('../src/core.mjs').Message} */ m) => !/to: Alice\/review/.test(m.text);
     const r = await watch(t, { stateDir: path.join(dir, "s"), key: "r", mode: "once", wake, onBatch: (m) => { seen.push(...m.map((x) => x.text.split("\n")[0])); } });
     assert.deepEqual(seen, ["for me", "for nobody in particular"]);
     assert.equal(r.filtered, 1);

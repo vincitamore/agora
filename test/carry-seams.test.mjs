@@ -119,15 +119,15 @@ test("carryState: an armed file that is not a record is skipped (survivor 67: !r
 test("foldRoom: the horizon names the window's ends and this session's last own post (survivors 393, 394, 395)", () => {
   const msgs = [
     msg("m1", "first\n\n-- Peer/dev", { who: "peer" }),
-    msg("m2", "mine\n\n-- Grace/watch"),
+    msg("m2", "mine\n\n-- Alice/watch"),
     msg("m3", "last\n\n-- Peer/dev", { who: "peer" }),
   ];
-  const c = foldRoom(msgs, new Set(["m2"]), { bearer: "Grace/watch" });
+  const c = foldRoom(msgs, new Set(["m2"]), { bearer: "Alice/watch" });
   assert.equal(c.horizon.oldest, msgs[0].ts);
   assert.equal(c.horizon.newest, msgs[2].ts);
   assert.deepEqual(c.horizon.lastOwn, { id: "m2", cursor: "2", ts: msgs[1].ts });
   assert.equal(c.horizon.own, 1);
-  const none = foldRoom(msgs, new Set(), { bearer: "Grace/watch" });
+  const none = foldRoom(msgs, new Set(), { bearer: "Alice/watch" });
   assert.equal(none.horizon.lastOwn, null, "no own post in the window is null, not the first message");
   const first = foldRoom(msgs, new Set(["m1"]), { bearer: "Peer/dev" });
   assert.deepEqual(first.horizon.lastOwn, { id: "m1", cursor: "1", ts: msgs[0].ts }, "an own post at index 0 is a last own post, not none");
@@ -135,11 +135,11 @@ test("foldRoom: the horizon names the window's ends and this session's last own 
 
 test("foldRoom: a trailer naming the same post twice retracts it once and answers it once (survivor 207: && -> ||)", () => {
   const msgs = [
-    msg("m1", "settled\n\nverdict: pass\nexhibit: run 1\n\n-- Grace/watch"),
-    msg("m2", "ask\n\nto: Grace/watch\n\n-- Peer/dev", { who: "peer" }),
-    msg("m3", "taking it back, twice named\n\nwithdraws: m1, m1\nre: m2, m2\n\n-- Grace/watch"),
+    msg("m1", "settled\n\nverdict: pass\nexhibit: run 1\n\n-- Alice/watch"),
+    msg("m2", "ask\n\nto: Alice/watch\n\n-- Peer/dev", { who: "peer" }),
+    msg("m3", "taking it back, twice named\n\nwithdraws: m1, m1\nre: m2, m2\n\n-- Alice/watch"),
   ];
-  const c = foldRoom(msgs, new Set(["m1", "m3"]), { bearer: "Grace/watch" });
+  const c = foldRoom(msgs, new Set(["m1", "m3"]), { bearer: "Alice/watch" });
   assert.deepEqual(c.superseded.map((v) => v.id), ["m1"], "one supersession for one post, however many times the trailer names it");
   assert.deepEqual(c.verdicts, []);
   assert.deepEqual(c.owed, [], "m2 is answered by name");

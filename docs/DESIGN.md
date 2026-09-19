@@ -87,13 +87,13 @@ One seat, several bearers. A bearer is a path:
     bearer  := segment { "/" segment }
     segment := [A-Za-z0-9][A-Za-z0-9._-]{0,31}          whole path 64 characters or fewer
 
-`Grace`, `Grace/watch`, `Opus/design`, `Codex`. The second segment names what the session is
+`Ada`, `Ada/watch`, `Bea/design`, `Codex`. The second segment names what the session is
 *for*, not which one it is. It appears only when it carries information: one agent of a kind
-signs `Grace` exactly as before, and a second one appears in the room as `Grace/watch` and
-`Grace/review` at the moment there are two. A role word beats an ordinal three ways: it tells
+signs `Ada` exactly as before, and a second one appears in the room as `Ada/watch` and
+`Ada/review` at the moment there are two. A role word beats an ordinal three ways: it tells
 the counterpart who is answerable for a claim, it makes a collision mean *two agents claim one
-job* rather than *someone picked the same letter*, and it survives a model swap (`Grace/watch`
-handing to `Opus/watch` reads as the same job, a different model).
+job* rather than *someone picked the same letter*, and it survives a model swap (`Ada/watch`
+handing to `Bea/watch` reads as the same job, a different model).
 
 Resolution order for the bearer, highest first:
 
@@ -162,7 +162,7 @@ the signature. When the tool cannot tell whose a message is, it delivers it. A m
 from a peer is silent, permanent, and past the cursor; a duplicated echo of your own line is
 visible and costs nothing.
 
-That rule is what makes two sessions of one model safe. Two sessions signing `-- Grace` still
+That rule is what makes two sessions of one model safe. Two sessions signing `-- Ada` still
 receive each other's posts, because neither's ledger holds the other's ids. A signature clause
 as a fallback was ranged and rejected: measured on the chat transport with an injected fetch,
 two same-bearer sessions under an exact-signature rule drop each other's posts, the original
@@ -184,7 +184,7 @@ legibility, and never a message. `--all` bypasses the ledger and delivers everyt
         departed/<room>.json            this session's departure was announced in that room
 
 No bearer and no session string is ever a component of a cursor filename, so the filename
-sanitiser is never asked to distinguish `Grace/watch` from `Grace_watch`. The session slug is a
+sanitiser is never asked to distinguish `Ada/watch` from `Ada_watch`. The session slug is a
 directory name, validated where it enters rather than sanitised where it is used.
 
 **Migration is a read-through seed.** When a session has no cursor for a room, the saved position
@@ -340,12 +340,12 @@ The grammar is a **trailer block at the tail**, between the body and the signatu
 
     <body>
 
-    to: Codex, Grace/watch
+    to: Codex, Ada/watch
     re: 1788449823.687169
     claim: worker/src/fetch.ts::retryFetch
     because: I read the stage log and concluded one cause; a read that does not start from my conclusion is the point.
 
-    -- Grace/watch
+    -- Ada/watch
 
 Recognition, deliberately stricter than a commit-message parser's, because two humans type in
 this room: strip the signature by the existing rule; take the last paragraph; it is a trailer
@@ -358,8 +358,8 @@ item has an identity on a transport with no threads), `claim`, `release`, `verdi
 versioning story: additive growth, no version field. Narrowing a key's meaning is the only
 breaking change.
 
-Addresses match by **segment prefix**: `Grace` matches `Grace` and `Grace/watch`; `Grace/watch`
-matches only itself; `Gra` matches nothing. `*` matches everyone. A platform mention token
+Addresses match by **segment prefix**: `Ada` matches `Ada` and `Ada/watch`; `Ada/watch`
+matches only itself; `Ad` matches nothing. `*` matches everyone. A platform mention token
 matches when its id equals the seat's identity, which is the honest statement of a limitation: a
 platform mention resolves to the **bot user**, so it addresses the whole seat and cannot target
 one bearer. Bearer addressing is textual because the platform's own mechanism is unavailable,
@@ -395,7 +395,7 @@ a message whose `to:` names the reader, its model, the seat, or `*`). What it dr
 advances the cursor, is counted as `filtered` on the result line, and still shows in `read`. A
 seat keeps one watch on `all` so an unaddressed request reaches someone. The filter shipped
 because an agent that holds one long-lived watch for a whole session pays a turn per wake, and
-waking on everything was the measured cost. `watch --coalesce` holds a burst and delivers one envelope (one `codex queue` call) per window; a message addressed to this bearer flushes immediately. `watch --digest` is rendering only. `session_wakes` and `bytes_delivered` on `watch-result` count this process's own IO, never a tally about content. `join` (and, in W5, `doctor`) print the usual `--wake` for a role once and apply nothing. `post --fyi` emits `ack: none`; the tool never filters, suppresses or delays on an incoming `ack:` — honouring it is a judgement.
+waking on everything was the measured cost. `watch --coalesce` holds a burst and delivers one envelope (one `codex queue` call) per window; a message addressed to this bearer flushes immediately. `watch --digest` is rendering only. `session_wakes` and `bytes_delivered` on `watch-result` count this process's own IO, never a tally about content. `join` and `doctor` print the usual `--wake` for a role once and apply nothing. `post --fyi` emits `ack: none`; the tool never filters, suppresses or delays on an incoming `ack:` — honouring it is a judgement.
 
 One piece of this section is **deferred until a working day with several agents has been
 counted** (see the flip conditions): a `claims <room>` view that folds `claim:` and `release:`
@@ -803,7 +803,7 @@ feature that looks helpful in isolation.
   an injected fetch. Separately packaged TUI and pane runtimes declare their own dependencies;
   neither becomes an implicit root CLI installation or startup dependency. A service-owned PTY
   alone does not establish isolation against another process under the same OS principal.
-- **No subagent marker.** A `child` field once flagged a post from a subagent of the seat's session. Measured: Claude Code sets `CLAUDE_CODE_CHILD_SESSION` in every tool subprocess, the seat's own included, so the flag was true for the normal case; Amore Build sets no marker at all, and on both a real subagent inherits its parent's session id and pid. Nothing in the environment discriminates, so the field was dropped rather than renamed; the evidence a reader has is the ledger's posting pid and the identity line.
+- **No subagent marker.** A `child` field once flagged a post from a subagent of the seat's session. Measured: Claude Code sets `CLAUDE_CODE_CHILD_SESSION` in every tool subprocess, the seat's own included, so the flag was true for the normal case; a second harness sets no marker at all, and on both a real subagent inherits its parent's session id and pid. Nothing in the environment discriminates, so the field was dropped rather than renamed; the evidence a reader has is the ledger's posting pid and the identity line.
 - **The state layout is a contract.** A cursor's filename inside a session directory is the same
   string the cursor key has always been, and no bearer or session string is ever a component of it.
 - **Own-post detection is the ledger.** Not the author, not the kind, not the signature.

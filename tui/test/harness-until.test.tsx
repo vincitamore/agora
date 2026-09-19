@@ -12,7 +12,7 @@ import { seededRoom } from "./fixtures";
 
 describe("harness until()", () => {
   test("resolves with the first frame the predicate accepts", async () => {
-    const client = new StubRoomClient({ name: "Alex", rooms: { scratch: seededRoom() } });
+    const client = new StubRoomClient({ name: "operator", rooms: { scratch: seededRoom() } });
     const h = await mountApp({ client, initialAlias: "scratch" }, { width: 100, height: 30 });
     try {
       const f = await h.until((x) => x.includes("ROOM"));
@@ -23,7 +23,7 @@ describe("harness until()", () => {
   });
 
   test("throws with the last frame when nothing matched inside the budget, never an unmatched frame", async () => {
-    const client = new StubRoomClient({ name: "Alex", rooms: { scratch: seededRoom() } });
+    const client = new StubRoomClient({ name: "operator", rooms: { scratch: seededRoom() } });
     const h = await mountApp({ client, initialAlias: "scratch" }, { width: 100, height: 30 });
     try {
       let thrown: unknown = null;

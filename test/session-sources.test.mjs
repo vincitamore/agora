@@ -398,7 +398,7 @@ test('codex cache exceeding input is invalid uncached, not clamped to zero', () 
   assert.deepEqual(component(result.records[0], 'uncached-input'), invalidCount('cache-exceeds-input'));
 });
 
-test('bravo emits one aggregate record per model and does not invent requests', () => {
+test('amore-build emits one aggregate record per model and does not invent requests', () => {
   const result = supported(decode('amore-build', amoreEnvelope({
     'grok-4.6': { inputTokens: 120, outputTokens: 30, cachedReadTokens: 50, cacheCreationTokens: 10, modelCalls: 3 },
     'grok-4.5': { inputTokens: 40, outputTokens: 8, cachedReadTokens: 0, cacheCreationTokens: 0, modelCalls: 1 },
@@ -421,7 +421,7 @@ test('bravo emits one aggregate record per model and does not invent requests', 
   assert.equal(Object.hasOwn(first, 'sourceReportedCost'), false);
 });
 
-test('bravo costUsdTicks is kept as usd-ticks and is never converted to dollars', () => {
+test('amore-build costUsdTicks is kept as usd-ticks and is never converted to dollars', () => {
   const result = supported(decode('amore-build', amoreEnvelope({
     'grok-4.6': { inputTokens: 10, outputTokens: 2, cachedReadTokens: 0, cacheCreationTokens: 0, costUsdTicks: 1_250_000_000 },
   })));
@@ -508,7 +508,7 @@ test('a ledger holding both sourceReportedCost and sourceReportedReasoning close
   }
 });
 
-test('bravo missing prompt_id is identity-missing; empty modelUsage is unsupported', () => {
+test('amore-build missing prompt_id is identity-missing; empty modelUsage is unsupported', () => {
   const noPrompt = rejected(decode('amore-build', {
     timestamp: OBSERVED,
     params: { update: { sessionUpdate: 'turn_completed', usage: { modelUsage: { 'grok-4.6': { inputTokens: 1, outputTokens: 1 } } } } },

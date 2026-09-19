@@ -43,7 +43,7 @@ test("beforeSend receives the id the receipt will carry, before the append reach
     },
   });
   const transport = nativeTransport({ transport: "native", roomId: ROOM }, {
-    actor: { name: "Grace/test", kind: "agent" },
+    actor: { name: "Alice/test", kind: "agent" },
     stateRoot: root,
     connect: /** @type {any} */ (connect),
   });

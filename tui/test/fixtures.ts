@@ -6,7 +6,7 @@
 
 import { StubRoomClient, type Message, type PeerRow } from "../lib/room-client";
 
-export const HUMAN = "Alex";
+export const HUMAN = "operator";
 
 /** A token shape that `redact()` rewrites; never a real credential. */
 export const TOKEN_SHAPE = "xoxb-000000000000-000000000000-AAAAAAAAAAAAAAAAAAAAAAAA";
@@ -16,15 +16,15 @@ function m(partial: Partial<Message> & Pick<Message, "id" | "text" | "author" | 
   return { room: "stub:scratch", cursor: "0", ...partial };
 }
 
-export const GRACE = { id: "Grace", name: "Grace", kind: "agent" as const };
+export const GRACE = { id: "Alice", name: "Alice", kind: "agent" as const };
 export const SOL = { id: "Cal/codex", name: "Cal/codex", kind: "agent" as const };
 export const PEER = { id: "peer", name: "peer", kind: "human" as const };
 
 export function seededRoom(): Message[] {
   return [
-    m({ id: "m1", author: GRACE, ts: "2026-09-05T01:00:00.000Z", text: "Starting the TUI slice against the local fixture.\n\nclaim: work:tui-first-slice\n\n-- Grace" }),
-    m({ id: "m2", author: SOL, ts: "2026-09-05T01:05:00.000Z", text: "The native store lands on sol/native-room-service; the seat service serves read and append.\n\nto: Grace\nre: m1\n\n-- Cal/codex" }),
-    m({ id: "m3", author: GRACE, ts: "2026-09-05T01:06:00.000Z", thread: "m2", text: "Read. The TUI imports the local transport for now.\n\n-- Grace" }),
+    m({ id: "m1", author: GRACE, ts: "2026-09-05T01:00:00.000Z", text: "Starting the TUI slice against the local fixture.\n\nclaim: work:tui-first-slice\n\n-- Alice" }),
+    m({ id: "m2", author: SOL, ts: "2026-09-05T01:05:00.000Z", text: "The native store lands on sol/native-room-service; the seat service serves read and append.\n\nto: Alice\nre: m1\n\n-- Cal/codex" }),
+    m({ id: "m3", author: GRACE, ts: "2026-09-05T01:06:00.000Z", thread: "m2", text: "Read. The TUI imports the local transport for now.\n\n-- Alice" }),
     m({ id: "m4", author: PEER, ts: "2026-09-05T01:07:00.000Z", thread: "m2", text: "works for me\n\n-- peer" }),
     m({
       id: "m5",
@@ -36,14 +36,14 @@ export function seededRoom(): Message[] {
         { id: "f2", name: "log.txt", kind: "file", mimetype: "text/plain", size: 1200, error: "bytes unavailable: the offer expired before this seat fetched it" },
       ],
     }),
-    m({ id: "m6", author: GRACE, ts: "2026-09-05T01:12:00.000Z", text: `Never paste a token; this one is a shape only: ${TOKEN_SHAPE} and ${PAT_SHAPE}\n\n-- Grace` }),
-    m({ id: "m7", author: GRACE, ts: "2026-09-05T01:15:00.000Z", text: "Verdict on the slot count: measured, not derived.\n\nverdict: landed\nexhibit: gate: bun test green\n\n-- Grace" }),
+    m({ id: "m6", author: GRACE, ts: "2026-09-05T01:12:00.000Z", text: `Never paste a token; this one is a shape only: ${TOKEN_SHAPE} and ${PAT_SHAPE}\n\n-- Alice` }),
+    m({ id: "m7", author: GRACE, ts: "2026-09-05T01:15:00.000Z", text: "Verdict on the slot count: measured, not derived.\n\nverdict: landed\nexhibit: gate: bun test green\n\n-- Alice" }),
   ];
 }
 
 export function seededPeers(): PeerRow[] {
   return [
-    { bearer: "Grace/agora-orchestrator", slug: "claude-code-aaaa", state: "live", pid: 4242, lastSeen: "2026-09-05T01:14:00.000Z", label: "orchestrator" },
+    { bearer: "Alice/agora-orchestrator", slug: "claude-code-aaaa", state: "live", pid: 4242, lastSeen: "2026-09-05T01:14:00.000Z", label: "orchestrator" },
     { bearer: "Cal/codex", slug: "codex-bbbb", state: "dark", pid: 5151, lastSeen: "2026-09-04T22:00:00.000Z" },
     { bearer: "Grok/general", slug: "grok-cccc", state: "unknown", lastSeen: "2026-09-05T00:30:00.000Z" },
   ];

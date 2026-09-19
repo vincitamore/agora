@@ -1,8 +1,8 @@
 # The shadow optimizer
 
-`src/economy/shadow.mjs` and `src/economy/baselines.mjs` are the E2c unit, and `agora economy
-shadow` is its verb. It replays an E1 ledger through E2a pricing (`priceUsage`) and the E2b
-horizon (`estimateHorizon`) and emits, for every decision point of every session, the competing
+`src/economy/shadow.mjs` and `src/economy/baselines.mjs` implement the shadow optimizer, and
+`agora economy shadow` is its verb. It replays a usage ledger through rate-table pricing
+(`priceUsage`) and the horizon estimator (`estimateHorizon`) and emits, for every decision point of every session, the competing
 trajectories with their costs, the three baselines, and why no action won.
 
 The implementation anchors for that summary are `src/economy/shadow.mjs:278-316` (input
@@ -26,12 +26,12 @@ agora economy shadow --ledger-root <dir> --rates <file> --billing-context <file>
 Every argument is refused, missing or malformed, with exit 2 before any file is read, and the verb
 never loads the seat's config: a machine with no `agora.json` replays a ledger. Timestamps are
 ISO-8601 UTC with milliseconds, the form the ledger stores. `--risk-budget` is one of the three
-quantiles E2b exposes and selects which one the conservative scenario reads; it is not
+quantiles the horizon estimator exposes and selects which one the conservative scenario reads; it is not
 interpolated. `--verification-cost` is finite and non-negative; zero is admitted only as the
 literal and is labelled `explicit-zero` on every line that rests on it, and it is charged at zero
 future calls too.
 
-`--rates` is an E2a rate table in the shape accepted by `loadRateTable` and `priceUsage`
+`--rates` is a rate table in the shape accepted by `loadRateTable` and `priceUsage`
 (`src/usage/rates.mjs`, consumed by `src/economy/shadow.mjs:278-282`). There is no default: the
 table priced against is named in the invocation. Illustrative rows price nothing here; the verb has no
 `--allow-illustrative`.
@@ -52,7 +52,7 @@ unknown where no sourced record exists, which leaves their API-equivalent column
 `--envelope` carries the scenario dimensions the caller ASSUMES, each `{ value, source }`:
 `summaryTokens`, `postCompactionTokens`, `recoveryTokens`, `pingTokens`, `cacheTtlSeconds`.
 `data/shadow-envelope.example.json` is one such file with its assumptions sourced to the design
-record. A file naming `prefixReuse` is refused: E2 rules prefix reuse unassessable until a
+record. A file naming `prefixReuse` is refused: prefix reuse is unassessable until a
 resident-context seam exists, and an envelope that carried it would be an assumption dressed as a
 measurement.
 
@@ -116,7 +116,7 @@ present, every envelope dimension is measured or assumed with a source, the requ
 both costs are known points. Then `crossing` is `least > 1 + epsilon`. Otherwise the ratio is null
 with the first reason and the verdict is `shadow-only`. **On real data prefix reuse is
 unassessable, so every future read is an interval and the ratio is always null**: that is the
-honest E2 result, and the verb has no way to change it. The library's `prefixReuse: { value,
+honest result, and the verb has no way to change it. The library's `prefixReuse: { value,
 source }` option exists so tests can exercise the crossing arithmetic under a stated assumption;
 the verb never passes it.
 
@@ -165,7 +165,7 @@ Paths that would return a well-formed number instead of an error, each pinned by
 - (b) `remainingCalls.<q>` absent (open-ended, or `stoppingUnavailable`): savings and ratio null,
   `crossing` null, never NaN and never a false no-crossing.
 - (c) partial coverage: `lower-bound` with the unpriced tokens, never `known`.
-- (d) `usdPerMillion: 0` (E2a admits it): the selected row is printed whole on the decision and
+- (d) `usdPerMillion: 0` (the rate table admits it): the selected row is printed whole on the decision and
   `zeroRateComponents` names the free component.
 - (e) verification cost 0: `explicit-zero` on the decision, the envelope labels, and `K`.
 - (f) `conflict` and `gap` entries: counted as calls, unpriced with the status.
@@ -177,7 +177,7 @@ The omission twin, paths that discard input without a marker: a session with no 
 entries and a session with an untimed entry are both listed with their marker (13, 14 in the
 suite), and `skippedNonRequest` reports what `historiesFromLedger` did not count.
 
-## Source map and E2 progression status
+## Source map and actuation status
 
 This is a shadow-only report, not an authorization to act: the top-level and decision outputs set
 `shadow: true` and `actuationAllowed: false` (`src/economy/shadow.mjs:352-364`, `401-425`,
@@ -201,17 +201,17 @@ config-less preflight, input failures and real-ledger replay are exercised at
 `test/shadow.test.mjs:571-668`. The example input shapes are
 `data/billing-contexts.example.json:1-34` and `data/shadow-envelope.example.json:1-6`.
 
-The E2 progression decision remains **open**. E2c deliberately reports shadow output and refuses
-to actuate; it does not decide whether an all-unknown real-data result is an acceptable E2 result
-or whether missing rates, resident-context measurements, horizon evidence, or prefix-reuse
-evidence must be collected first. That decision belongs to orchestration after reading this
-evidence, not to this docs pass. The implementation's fail-closed gates are
+Whether to move beyond shadow output remains **open**. The verb deliberately reports shadow
+output and refuses to actuate; it does not decide whether an all-unknown real-data result is
+acceptable or whether missing rates, resident-context measurements, horizon evidence, or
+prefix-reuse evidence must be collected first. That decision belongs to the operator after
+reading this evidence. The implementation's fail-closed gates are
 `src/economy/shadow.mjs:426-450`, `510-516`; no prose here upgrades `shadow-only` to a deployment
 decision.
 
 ## Epsilon and the risk budget
 
-`epsilon` is an explicit input. F1 ties it to held-out forecast residuals and the risk budget; the
+`epsilon` is an explicit input tied to held-out forecast residuals and the risk budget: the
 horizon exposes `calibration.residualSummary` (p10/p50/p90 residuals in calls) and every decision
 carries the horizon it read, so a caller derives `epsilon` from the relative spread of those
 residuals at the selected quantile and states the derivation in its own record. The verb does not

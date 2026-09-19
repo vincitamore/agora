@@ -3,7 +3,7 @@
   "$revised": "2026-09-05, on an executed exhibit",
   "$withdrawn": {
     "claim": "detector.reliable = 'cooked-mode children': unexplained read bytes are a bypassed input event",
-    "falsifiedBy": "alpha scripts/agora-pty-observation-review.py, isolated Linux PTY, ICANON+ECHO",
+    "falsifiedBy": "seat-a scripts/agora-pty-observation-review.py, isolated Linux PTY, ICANON+ECHO",
     "exhibit": "untracked master input and ordinary slave-side application output produce the identical master observation under the same empty authority-write ledger; only the first delivers input at the slave",
     "defect": "this matrix had no ordinary-output control, so the claim was never run against the case that breaks it",
     "investigation": "inbox/investigations/agora-pane-echo-is-not-input-attribution.md"

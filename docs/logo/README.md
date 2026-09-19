@@ -1,7 +1,7 @@
 # Common Gate
 
 Agora's chosen mark: a gold braille gateway, supported columns and an open,
-illuminated passage. Designed by the designer and selected by the project
+illuminated passage. Designed for the project and selected by the project
 owner after two rounds of architectural studies.
 
 ![Common Gate](mark/threshold-compact.gif)

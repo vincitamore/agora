@@ -1,4 +1,4 @@
-# Places to gather — the designer, round two
+# Places to gather: the architectural studies, round two
 
 Three new studies, responding to the preference for detailed architectural
 renderings over the first round's abstract marks. These are original projected

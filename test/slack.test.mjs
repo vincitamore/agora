@@ -94,7 +94,7 @@ test("slack image attachments are authenticated into bounded local media without
       thumb_360: "https://files.slack.com/files-tmb/T1-F0123IMAGE/screen-shot-360.jpg",
     };
     const api = fakeFetch([
-      ["users.info", () => ({ body: { ok: true, user: { id: "U2", real_name: "Alex" } } })],
+      ["users.info", () => ({ body: { ok: true, user: { id: "U2", real_name: "operator" } } })],
       ["conversations.history", () => ({ body: { ok: true, messages: [{ ts: "1756900000.000100", user: "U2", text: "look", files: [file] }], has_more: false } })],
     ]);
     /** @type {RequestInit | undefined} */
@@ -139,7 +139,7 @@ test("slack still delivers attachment metadata when image bytes are unavailable 
       { id: "FDOC", name: "notes.txt", mimetype: "text/plain", size: 4, url_private: "https://files.slack.com/doc" },
     ];
     const api = fakeFetch([
-      ["users.info", () => ({ body: { ok: true, user: { id: "U2", real_name: "Alex" } } })],
+      ["users.info", () => ({ body: { ok: true, user: { id: "U2", real_name: "operator" } } })],
       ["conversations.history", () => ({ body: { ok: true, messages: [{ ts: "1756900000.000100", user: "U2", text: "files", files }], has_more: false } })],
     ]);
     const fetchFile = /** @type {typeof globalThis.fetch} */ (async (input, init) => String(input).startsWith("https://files.slack.com/")

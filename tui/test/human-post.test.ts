@@ -35,18 +35,18 @@ describe("human post round trip", () => {
         "utf8",
       );
       expect(await readHuman(stateRoot)).toBeUndefined();
-      const human = await writeHuman(stateRoot, "Alex");
+      const human = await writeHuman(stateRoot, "operator");
 
       const view = await roomsFromConfig(configPath);
       expect(view.stateRoot).toBe(stateRoot);
       expect(view.rooms.map((r) => r.alias)).toEqual(["scratch"]);
       const client = new LocalRoomClient(human, view);
-      expect(client.actor()).toEqual({ name: "Alex", kind: "human" });
+      expect(client.actor()).toEqual({ name: "operator", kind: "human" });
 
       // a peer's agent post first, so the human's is not the only record
       const { localTransport } = await import("../../src/transports/local.mjs");
-      const peer = localTransport({ transport: "local", path: roomPath }, { actor: { name: "Grace", kind: "agent" } });
-      await peer.post("hello from the seat\n\nto: Alex\n\n-- Grace");
+      const peer = localTransport({ transport: "local", path: roomPath }, { actor: { name: "Alice", kind: "agent" } });
+      await peer.post("hello from the seat\n\nto: operator\n\n-- Alice");
 
       const draft = "hello back\n";
       expect(composeRefusal(draft, human)).toBeUndefined();
@@ -56,16 +56,16 @@ describe("human post round trip", () => {
       // read back through the transport
       const back = await client.read("scratch");
       const mine = back.messages[1];
-      expect(mine.author).toEqual({ id: "Alex", name: "Alex", kind: "human" });
-      expect(mine.signedAs).toBe("Alex");
-      expect(mine.text).toBe("hello back\n\n-- Alex");
+      expect(mine.author).toEqual({ id: "operator", name: "operator", kind: "human" });
+      expect(mine.signedAs).toBe("operator");
+      expect(mine.text).toBe("hello back\n\n-- operator");
       expect(back.horizon.oldestCursor).toBe("1");
       expect(back.horizon.source).toBe("local file");
 
       // the raw record on disk carries the kind the transport stamped
       const raw = (await readFile(roomPath, "utf8")).trim().split("\n").map((l) => JSON.parse(l));
       expect(raw[1].author.kind).toBe("human");
-      expect(raw[1].author.name).toBe("Alex");
+      expect(raw[1].author.name).toBe("operator");
 
       // cross-process: the CLI, under a config whose actor is an agent, reads the human's post as the human's
       const { stdout } = await run("node", [CLI, "read", "scratch", "--json"], {
@@ -75,10 +75,10 @@ describe("human post round trip", () => {
       const rows = stdout.trim().split(/\r?\n/).map((l) => JSON.parse(l));
       expect(rows).toHaveLength(2);
       expect(rows[1].type).toBe("message");
-      expect(rows[1].author).toEqual({ id: "Alex", name: "Alex", kind: "human" });
-      expect(rows[1].signedAs).toBe("Alex");
-      expect(rows[0].author.name).toBe("Grace");
-      expect(rows[0].to).toEqual(["Alex"]);
+      expect(rows[1].author).toEqual({ id: "operator", name: "operator", kind: "human" });
+      expect(rows[1].signedAs).toBe("operator");
+      expect(rows[0].author.name).toBe("Alice");
+      expect(rows[0].to).toEqual(["operator"]);
       expect(JSON.stringify(rows)).not.toContain("SeatBot");
 
       // the shared config was never written

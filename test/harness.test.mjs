@@ -13,11 +13,11 @@ test("the descriptor table names Claude Code and Codex session transcript source
 });
 
 test("the sentinel sits only beside an existing Claude Code transcript", async () => {
-  assert.equal(claudeProjectSlug("C:\\Users\\operator\\Documents\\alpha"), "C--Users-operator-Documents-opus");
-  assert.equal(claudeProjectSlug("/home/operator/org-a"), "-home-deck-opus");
+  assert.equal(claudeProjectSlug("C:\\Users\\operator\\Documents\\org-a"), "C--Users-operator-Documents-org-a");
+  assert.equal(claudeProjectSlug("/home/operator/org-a"), "-home-operator-org-a");
   const home = await mkdtemp(path.join(os.tmpdir(), "agora-harness-"));
   try {
-    const cwd = path.join(home, "work", "alpha");
+    const cwd = path.join(home, "work", "org-a");
     const id = "dd3eb167-c198-4799-96de-7e58c12194d8";
     const dir = path.join(home, ".claude", "projects", claudeProjectSlug(cwd));
     assert.equal(watchModeSentinel({ CLAUDE_CODE_SESSION_ID: id }, cwd, home), null, "absence never creates a guessed path");

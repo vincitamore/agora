@@ -41,8 +41,8 @@ test("redact strips credential shapes, and leaves the tool's own vocabulary alon
   assert.equal(redact("plain"), "plain");
   // the patterns are shapes, never the words around them: `bearer` is this tool's noun for a
   // signing identity, and the context pattern that used to be here ate the word after it
-  assert.equal(redact("--as must be a bearer path like Grace or Grace/watch"), "--as must be a bearer path like Grace or Grace/watch");
-  assert.equal(redact("the bearer Grace/agora-orchestrator is gone"), "the bearer Grace/agora-orchestrator is gone");
+  assert.equal(redact("--as must be a bearer path like Alice or Alice/watch"), "--as must be a bearer path like Alice or Alice/watch");
+  assert.equal(redact("the bearer Alice/agora-orchestrator is gone"), "the bearer Alice/agora-orchestrator is gone");
   assert.equal(redact("Authorization: Bearer xoxb-1-2-secret"), "Authorization: Bearer [redacted]", "a token inside a header is still caught by its shape");
 });
 

@@ -7,7 +7,7 @@ import { fakeFetch } from "./helpers.mjs";
 const events = [
   { id: "50", type: "PushEvent", actor: { login: "peer" }, repo: { name: "example-org/example-repo" }, created_at: "2026-09-03T10:05:00Z",
     payload: { ref: "refs/heads/main", before: "aaaaaaa1", head: "bbbbbbb2", commits: [{ sha: "bbbbbbb2222", message: "worker: retry the provider fetch\n\nlonger body" }, { sha: "ccccccc3333", message: "tests" }] } },
-  { id: "40", type: "PullRequestEvent", actor: { login: "vincitamore" }, repo: { name: "example-org/example-repo" }, created_at: "2026-09-03T10:04:00Z",
+  { id: "40", type: "PullRequestEvent", actor: { login: "operator" }, repo: { name: "example-org/example-repo" }, created_at: "2026-09-03T10:04:00Z",
     payload: { action: "opened", number: 14, pull_request: { number: 14, title: "Fix the escaped exception", html_url: "https://github.com/example-org/example-repo/pull/14", head: { ref: "fix-escape" }, base: { ref: "main" } } } },
   { id: "30", type: "IssueCommentEvent", actor: { login: "codex[bot]" }, repo: { name: "example-org/example-repo" }, created_at: "2026-09-03T10:03:00Z",
     payload: { action: "created", issue: { number: 3, html_url: "https://github.com/example-org/example-repo/issues/3" }, comment: { body: "candidate is up\n\n-- Codex", html_url: "https://github.com/example-org/example-repo/issues/3#issuecomment-1" } } },
@@ -20,7 +20,7 @@ function make(room = {}) {
   /** @type {string[]} */
   const etags = [];
   const { fetch, calls } = fakeFetch([
-    ["/user", () => ({ body: { id: 7, login: "vincitamore" } })],
+    ["/user", () => ({ body: { id: 7, login: "operator" } })],
     ["/events", (url, init) => {
       const sent = /** @type {Record<string, string>} */ (init?.headers ?? {})["if-none-match"];
       etags.push(sent ?? "");
@@ -82,8 +82,8 @@ test("github-events: reads are conditional and a feed refuses to post", async ()
   assert.deepEqual((await t.read({ since: "30" })).map((m) => m.id), ["40", "50"], "a lagging cursor re-filters the cached page");
   await assert.rejects(() => t.post("hello"), /read-only/);
   await assert.rejects(() => t.read({ thread: "x" }), /no threads/);
-  assert.deepEqual(await t.whoami(), { id: "7", name: "vincitamore" });
-  assert.deepEqual(await t.whoami(), { id: "7", name: "vincitamore" }, "whoami is not conditional; a second call is the same identity");
+  assert.deepEqual(await t.whoami(), { id: "7", name: "operator" });
+  assert.deepEqual(await t.whoami(), { id: "7", name: "operator" }, "whoami is not conditional; a second call is the same identity");
 });
 
 test("github-events whoami never sends a validator, so a 304 cannot become id 'undefined'", async () => {
@@ -94,11 +94,11 @@ test("github-events whoami never sends a validator, so a 304 cannot become id 'u
       const tag = /** @type {Record<string, string>} */ (init?.headers ?? {})["if-none-match"];
       sent.push(tag ?? "");
       if (tag) return { status: 304 };
-      return { body: { id: 7, login: "vincitamore" }, headers: { etag: '"u"' } };
+      return { body: { id: 7, login: "operator" }, headers: { etag: '"u"' } };
     }],
   ]);
   const t = githubEventsTransport({ transport: "github-events", repo: "a/b" }, { token: "t", fetch });
-  assert.deepEqual(await t.whoami(), { id: "7", name: "vincitamore" });
-  assert.deepEqual(await t.whoami(), { id: "7", name: "vincitamore" });
+  assert.deepEqual(await t.whoami(), { id: "7", name: "operator" });
+  assert.deepEqual(await t.whoami(), { id: "7", name: "operator" });
   assert.deepEqual(sent, ["", ""], "neither call is conditional");
 });

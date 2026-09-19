@@ -32,7 +32,7 @@ describe("native frames", () => {
       expect(live).toContain(`read to ${NATIVE_EPOCH}:7`);
       expect(live).not.toContain(`read to ${NATIVE_EPOCH}:6`);
       expect(live).toContain("native room · live");
-      expect(live).toContain("Grace (agent)");
+      expect(live).toContain("Alice (agent)");
       expect(live).toContain("→ verdict landed · exhibit gate: bun test green");
       expect(live).toContain("[redacted]");
       expect(live).not.toMatch(/xox[abprse]-/);
@@ -46,16 +46,16 @@ describe("native frames", () => {
 
       const sent = get("native-compose-sent");
       expect(sent).toContain("posted ");
-      expect(sent).toContain("Alex (human)");
+      expect(sent).toContain("operator (human)");
       expect(sent).toContain("a line through the service");
-      expect(sent).toContain("-- Alex");
-      expect(sent).not.toContain("COMPOSE as Alex");
+      expect(sent).toContain("-- operator");
+      expect(sent).not.toContain("COMPOSE as operator");
 
       const seam = get("native-search-seam");
       expect(seam).toContain("horizon: house · seat service search is not served yet (a seam)");
       // the horizon row is one line, cut at the terminal's width; the rest shows where it fits
       if (size.width >= 120) expect(seam).toContain("(a seam) · searched the loaded window in memory");
-      expect(seam).toContain("Alex (human)");
+      expect(seam).toContain("operator (human)");
       expect(seam).not.toMatch(TALLY);
 
       const peers = get("native-peers");
@@ -70,14 +70,14 @@ describe("native frames", () => {
       expect(dark).not.toContain("room refused");
       expect(dark).not.toContain("· live");
       // the room read before the service went is still on screen, under the dark row
-      expect(dark).toContain("Alex (human)");
+      expect(dark).toContain("operator (human)");
 
       const refused = get("native-room-refused");
       expect(refused).toContain("room refused ·");
       expect(refused).toContain("request-refused");
       expect(refused).not.toContain("room dark");
       // the read answered, so the room is on screen under the refusal
-      expect(refused).toContain("Grace (agent)");
+      expect(refused).toContain("Alice (agent)");
     }
   }, 120_000);
 });
