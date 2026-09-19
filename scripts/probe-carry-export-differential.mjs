@@ -6,7 +6,7 @@
 // readings share one kernel and must agree on every author in every room; a disagreement is an
 // exhibit of a mapping defect (the class review caught in PR #188), never of the kernel.
 //
-//   node scripts/probe-carry-export-differential.mjs house backroom agora [--limit 1000] [--json]
+//   node scripts/probe-carry-export-differential.mjs room-a room-b room-c [--limit 1000] [--json]
 //
 // Reads only: the room is read through the CLI (`read --json --threads`), which moves no cursor.
 

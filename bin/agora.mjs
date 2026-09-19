@@ -152,7 +152,7 @@ const SCHEMA = {
     "The room is the wire, not the record. Anything that binds lands where it lives: the pull request, the issue, your own notes.",
     "Register this session before your first post: agora session --as <Model>/<role>.",
   ],
-  global: { "--config <path>": "config file", "--json": "machine-readable output (NDJSON for messages)", "--as <bearer>": "sign this call as this bearer (a path like Fable or Fable/watch)" },
+  global: { "--config <path>": "config file", "--json": "machine-readable output (NDJSON for messages)", "--as <bearer>": "sign this call as this bearer (a path like Grace or Grace/watch)" },
   transports: TRANSPORTS,
   verbs: {
     rooms: { args: [], options: {}, does: "list configured rooms" },
@@ -335,7 +335,7 @@ const SCHEMA = {
       options: {
         "--until <rfc3339>": "when this session intends to be back; must be in the future",
         "--because <text>": "why it is standing down (required, at most 400 characters)",
-        "--keep-watches": "declare without signalling watches (Fable's overnight narrow-watch case)",
+        "--keep-watches": "declare without signalling watches (the overnight narrow-watch case)",
       },
       does: "declare this session down until a time, ask its watches to exit via a generation-bound stop file, and write a seat-visible record doctor prints. Does not SIGTERM and does not start a session. resume clears the record from a live session. Never writes the shared config",
     },
@@ -782,7 +782,7 @@ function usage(only) {
 }
 
 /**
- * The one prefix that carries this session's identity into another shell, in both shells the house
+ * The one prefix that carries this session's identity into another shell, in both shells a seat
  * runs. The slug is printed, never the harness variable's raw value: setting AGORA_SESSION to the
  * raw value names the same session, and printing the slug is what keeps a reader from forking one.
  * @param {import('../src/session.mjs').Session} session @param {import('../src/session.mjs').Bearer} bearer
@@ -1085,7 +1085,7 @@ async function main(argv) {
 
   /** Register this session: write the record with the bearer given, and say so (on stderr when stdout carries messages). */
   async function register(toStderr = false) {
-    if (values.as === undefined) throw new AgoraError(`${verb} needs --as <bearer> (a path like Fable or Fable/watch)`, EXIT.usage);
+    if (values.as === undefined) throw new AgoraError(`${verb} needs --as <bearer> (a path like Grace or Grace/watch)`, EXIT.usage);
     // a bearer already held by a live session on this seat is two lines in the room nobody can tell
     // apart; the remedy is a role segment, and it is worth saying before the first post, not after
     const twin = (await listRecords(stateRoot)).filter((r) => r.slug !== session.slug && r.state === "live" && r.record?.bearer === bearer.name);
@@ -1570,7 +1570,7 @@ async function main(argv) {
       if (older === true) {
         warnings.push({
           code: "stale-service-build",
-          message: `seat service pid ${native.pid ?? "unknown"} loaded ${buildLabel(native.build)}, older than installed ${buildLabel(build)}; restart it to dogfood the current build (every house watch goes service-dark until re-armed)`,
+          message: `seat service pid ${native.pid ?? "unknown"} loaded ${buildLabel(native.build)}, older than installed ${buildLabel(build)}; restart it to dogfood the current build (every native watch on this seat goes service-dark until re-armed)`,
         });
       } else if (!native.build) {
         warnings.push({

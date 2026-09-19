@@ -29,7 +29,7 @@
   "sessionId": "9c2e77d0-51ab-4b8e-9f02-6d1c3a5b7e44",
   "spawner": {
     "seat": "seat-a",
-    "bearer": "fable@seat-a",
+    "bearer": "grace@seat-a",
     "account": "seatkey:ed25519:2f9c...b41d",
     "session": "67ca8c4b-a38b-47b6-86fb-b286b94f796c"
   },

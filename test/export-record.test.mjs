@@ -28,11 +28,11 @@ function msg(id, text, o = {}) {
 const fm = (text) => JSON.parse(/^---\n([\s\S]*?)\n---\n/.exec(text ?? "")?.[1] ?? "null");
 
 const WINDOW = [
-  msg("m1", "claiming the unit\n\nclaim: unit-a\n\n-- Alice/settle"),
-  msg("m2", "passes\n\nverdict: pass\nexhibit: run 1\n\n-- Alice/settle"),
-  msg("m3", "no wait\n\nwithdraws: e:2\n\n-- Alice/settle"),
-  msg("m4", "second look\n\nverdict: pass\nexhibit: run 2\n\n-- Alice/settle"),
-  msg("m5", "actually fails\n\nre: m4\nverdict: fail\nexhibit: run 3\n\n-- Alice/settle"),
+  msg("m1", "claiming the unit\n\nclaim: unit-a\n\n-- Grace/settle"),
+  msg("m2", "passes\n\nverdict: pass\nexhibit: run 1\n\n-- Grace/settle"),
+  msg("m3", "no wait\n\nwithdraws: e:2\n\n-- Grace/settle"),
+  msg("m4", "second look\n\nverdict: pass\nexhibit: run 2\n\n-- Grace/settle"),
+  msg("m5", "actually fails\n\nre: m4\nverdict: fail\nexhibit: run 3\n\n-- Grace/settle"),
   msg("m6", "how is it going?", { who: "U1", kind: "human" }),
   msg("m7", "their own verdict\n\nverdict: pass\nexhibit: their run\n\n-- Codex/ops", { who: "Codex/ops", thread: "m6" }),
 ];
@@ -41,14 +41,14 @@ const SOURCE = { alias: "house", transport: "native", room: "abc" };
 test("the mapping: messages verbatim, settlement artifacts for verdicts and withdrawals, members and persons", () => {
   const { files, summary } = buildRecord(WINDOW, SOURCE);
   assert.equal(summary.messages, 7);
-  assert.deepEqual(summary.members, ["Codex-ops", "Alice-settle"]);
+  assert.deepEqual(summary.members, ["Codex-ops", "Grace-settle"]);
   assert.deepEqual(summary.persons, ["U1"]);
   assert.equal(summary.artifacts, 6, "m2, m3.r1, m4, m5.r1, m5, m7");
   assert.equal(summary.retractions, 2, "m3 withdraws m2 by cursor; m5 answers verdict m4");
   const m3 = fm(files.get("artifacts/m3.r1.md"));
   assert.equal(m3.kind, "settlement");
   assert.equal(m3.retracts, "m2", "a cursor is resolved to the post's id inside the window");
-  assert.deepEqual(m3["coordination-step"], ["Alice-settle"]);
+  assert.deepEqual(m3["coordination-step"], ["Grace-settle"]);
   assert.equal(files.has("artifacts/m3.md"), false, "a withdrawal asserts nothing of its own");
   const m5r = fm(files.get("artifacts/m5.r1.md"));
   assert.equal(m5r.retracts, "m4");
@@ -65,7 +65,7 @@ test("the mapping: messages verbatim, settlement artifacts for verdicts and with
   const cfg = fm(files.get("config.md"));
   assert.equal(cfg["as-of"], WINDOW[6].ts, "the record's clock is the newest message");
   assert.deepEqual(cfg.persons, ["U1"]);
-  assert.equal(fm(files.get("members/Alice-settle.md")).posts, 5);
+  assert.equal(fm(files.get("members/Grace-settle.md")).posts, 5);
   assert.equal(files.has("members/U1.md"), false, "a human is a person, not a member");
 });
 
@@ -73,10 +73,10 @@ test("a retraction is written only for the author's own post in the window, as c
   // another author's `re:` + verdict contests m1 and withdraws nothing; a `withdraws:` naming a
   // stranger's post or a post outside the window retracts nothing (the second is counted)
   const cross = [
-    msg("m1", "passes\n\nverdict: pass\nexhibit: run 1\n\n-- Alice/settle"),
+    msg("m1", "passes\n\nverdict: pass\nexhibit: run 1\n\n-- Grace/settle"),
     msg("m2", "fails\n\nre: m1\nverdict: fail\nexhibit: their run\n\n-- Codex/ops", { who: "Codex/ops" }),
     msg("m3", "taking yours back\n\nwithdraws: m1\n\n-- Codex/ops", { who: "Codex/ops" }),
-    msg("m4", "taking a ghost back\n\nwithdraws: m99\n\n-- Alice/settle"),
+    msg("m4", "taking a ghost back\n\nwithdraws: m99\n\n-- Grace/settle"),
   ];
   const { files, summary } = buildRecord(cross, SOURCE);
   assert.equal(summary.retractions, 0);
@@ -86,11 +86,11 @@ test("a retraction is written only for the author's own post in the window, as c
   const { standing } = standingByExport(files);
   assert.deepEqual(standing.sort(), ["m1", "m2"], "both facts stand; a contest is not a withdrawal");
   const own = new Set(["m1", "m4"]);
-  assert.deepEqual(foldRoom(cross, own, { bearer: "Alice/settle" }).verdicts.map((v) => v.id), ["m1"], "carry agrees: m1 stands");
+  assert.deepEqual(foldRoom(cross, own, { bearer: "Grace/settle" }).verdicts.map((v) => v.id), ["m1"], "carry agrees: m1 stands");
 });
 
 test("member slugs are filesystem-safe and never empty", () => {
-  assert.equal(memberSlug("Alice/settle"), "Alice-settle");
+  assert.equal(memberSlug("Grace/settle"), "Grace-settle");
   assert.equal(memberSlug("  ///  "), "unnamed");
 });
 
@@ -124,11 +124,11 @@ function standingByExport(files) {
 }
 
 test("differential: carry's standing verdicts for one author equal the export's standing artifacts by that author", () => {
-  const own = new Set(WINDOW.filter((m) => m.signedAs === "Alice/settle").map((m) => m.id));
-  const c = foldRoom(WINDOW, own, { bearer: "Alice/settle" });
+  const own = new Set(WINDOW.filter((m) => m.signedAs === "Grace/settle").map((m) => m.id));
+  const c = foldRoom(WINDOW, own, { bearer: "Grace/settle" });
   const { files } = buildRecord(WINDOW, SOURCE);
   const { standing, arts } = standingByExport(files);
-  const mine = standing.filter((id) => arts.find((a) => a.id === id)?.fm.author === "Alice-settle").sort();
+  const mine = standing.filter((id) => arts.find((a) => a.id === id)?.fm.author === "Grace-settle").sort();
   assert.deepEqual(mine, c.verdicts.map((v) => v.id).sort());
   assert.deepEqual(c.superseded.map((v) => v.id).sort(), ["m2", "m4"]);
   assert.deepEqual(mine, ["m5"]);

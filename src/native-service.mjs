@@ -719,7 +719,7 @@ export class NativeRoomService {
           // Deliberately NOT a silent truncation. Returning the prefix that fits with a `truncated`
           // marker would fix `join` today at the cost of a partial read that every existing caller
           // reports as a whole one, since none of them read such a marker -- the exact silent
-          // default this house has been bitten by. Paging is the right answer and it is a unit with
+          // default this project has been bitten by. Paging is the right answer and it is a unit with
           // a client half; this is the floor under it, and it never lies about what it delivered.
           const fits = largestFittingCount(envelope, messages.length);
           if (!fits) {

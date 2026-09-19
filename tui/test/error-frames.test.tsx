@@ -65,7 +65,7 @@ describe("error strings reach the frame redacted", () => {
     client.failPost = true;
     const h = await mountApp({ client, initialAlias: "scratch" }, { width: 120, height: 30 });
     try {
-      await h.until((x) => x.includes("Alice (agent)  cursor 7"));
+      await h.until((x) => x.includes("Grace (agent)  cursor 7"));
       h.mockInput.pressKey("i");
       await h.until((x) => x.includes("COMPOSE as operator"));
       await h.mockInput.typeText("a clean draft");

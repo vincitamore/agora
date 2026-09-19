@@ -15,7 +15,7 @@ import { tmp } from './helpers.mjs';
 
 const mandate = { version: 1, id: 'campaign-c1', bearer: 'Bruno/uber-wizard', role: 'builder',
   units: [{ id: 'C1-BUILD', exhibit: 'backroom:1788832779.357259' }],
-  issuedBy: 'Alice/orchestration', issuedAt: '2026-09-08T02:00:00.000Z' };
+  issuedBy: 'Grace/orchestration', issuedAt: '2026-09-08T02:00:00.000Z' };
 
 test('carry mandate pins semantic fields, including the assigner and unit exhibit', () => {
   assert.deepEqual(validateMandate(mandate), mandate);

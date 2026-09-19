@@ -4,7 +4,7 @@
   "seat": "seat-a",
   "bearer": "verify@seat-a",
   "spawnId": "spawn-01JZ8Q4K7N2X",
-  "spawnedBy": "fable@seat-a",
+  "spawnedBy": "grace@seat-a",
   "harness": "claude",
   "model": "claude-opus-5",
   "pane": "claude/Opus-5/verify",

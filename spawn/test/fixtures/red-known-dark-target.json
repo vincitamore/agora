@@ -6,7 +6,7 @@
   "role": "verify",
   "unit": "attack/known-dark",
   "room": "house",
-  "answersTo": "fable@seat-a",
+  "answersTo": "grace@seat-a",
   "cwd": "~/src/agora",
   "briefDigest": "sha256:d3b0f81a72c4956ef0182ba64c7d3915e08b27ac5f1360dd94ae2b7c1058f6a3",
   "targetSeat": "cyberdeck",

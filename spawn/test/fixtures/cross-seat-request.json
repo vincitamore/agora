@@ -6,7 +6,7 @@
   "role": "transport",
   "unit": "agora-native-adapters/cross-seat-admission",
   "room": "house",
-  "answersTo": "fable@seat-a",
+  "answersTo": "grace@seat-a",
   "cwd": "~/src/agora",
   "briefDigest": "sha256:c7a1e5602b48d93f176ea20b5c8341fd9e06b72a4c1358df0ba6e29147c3d015",
   "targetSeat": "seat-b",

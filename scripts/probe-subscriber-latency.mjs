@@ -18,7 +18,7 @@ const service = new NativeRoomService({ root, accountId: "seat_account_lat1", se
 try {
   await service.start();
   await service.createRoom({ roomId: ROOM, epoch: EPOCH });
-  const peer = nativeTransport({ transport: "native", roomId: ROOM }, { actor: { name: "Sol/codex", kind: "agent" }, stateRoot: root });
+  const peer = nativeTransport({ transport: "native", roomId: ROOM }, { actor: { name: "Cal/codex", kind: "agent" }, stateRoot: root });
   const subscription = await openNativeSubscription({ stateRoot: root, roomId: ROOM, since: `${EPOCH}:0` });
   /** @type {number[]} */
   const latencies = [];

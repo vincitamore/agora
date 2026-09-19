@@ -8,7 +8,7 @@
   "role": "verify",
   "unit": "attack/forged-parent",
   "room": "house",
-  "answersTo": "fable@seat-a",
+  "answersTo": "grace@seat-a",
   "cwd": "C:/Users/operator/Documents/agora-wt-tui",
   "briefDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
   "targetSeat": "seat-b",

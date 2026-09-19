@@ -113,7 +113,7 @@ export function nativeRemoteTransport(room, { actor, remote, session }) {
   // rather than by each verb because a verb added later cannot forget what it never had to write.
   // Never throws, and no longer discards. `close()` runs after the verb's answer is written, so a
   // throw here would fail work that succeeded — but a swallowed teardown failure that reaches
-  // nobody is a leak with no witness, which is the note Opus/design left on L3. The failure is
+  // nobody is a leak with no witness, which is the note a reviewer left. The failure is
   // recorded and the CALLER decides where the operator is looking: `doctor` prints it in the
   // room's row (it closes each transport before building that row), and every other verb gets one
   // stderr line at the drain.

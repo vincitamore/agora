@@ -10,15 +10,15 @@ describe("SEARCH", () => {
     const client = stubClient();
     const h = await mountApp({ client, initialAlias: "scratch" }, { width: 140, height: 30 });
     try {
-      await h.until((x) => x.includes("Alice (agent)  cursor 7"));
+      await h.until((x) => x.includes("Grace (agent)  cursor 7"));
       h.mockInput.pressKey("2");
       await h.until((x) => x.includes("type to search text and author"));
       await h.settle();
       await h.mockInput.typeText("TUI");
       let f = await h.until((x) => x.includes("c3") && x.includes("Starting the TUI slice"));
       // two rows match `TUI` (m1 and the reply m3), rendered like ROOM rows
-      expect(f).toMatch(/Alice \(agent\)\s+c1\s+Starting the TUI slice/);
-      expect(f).toMatch(/Alice \(agent\)\s+c3\s+Read\. The TUI imports/);
+      expect(f).toMatch(/Grace \(agent\)\s+c1\s+Starting the TUI slice/);
+      expect(f).toMatch(/Grace \(agent\)\s+c3\s+Read\. The TUI imports/);
       expect(f).toContain("horizon: scratch · oldest loaded");
       expect(f).toContain("(cursor 1)");
       expect(f).toContain("older messages are not searched here");
@@ -26,7 +26,7 @@ describe("SEARCH", () => {
       for (const r of f.replace(/\n$/, "").split("\n")) expect(r.length).toBe(140);
 
       // three authors in the room, and no per-author figure anywhere
-      expect(f).not.toMatch(/Alice[^\n]*\b\d+\b[^\n]*(posts|messages)/i);
+      expect(f).not.toMatch(/Grace[^\n]*\b\d+\b[^\n]*(posts|messages)/i);
 
       // enter on the second row lands ROOM on that reply's thread, unfolded
       h.mockInput.pressArrow("down");
@@ -44,7 +44,7 @@ describe("SEARCH", () => {
     const client = stubClient();
     const h = await mountApp({ client, initialAlias: "scratch" }, { width: 90, height: 24 });
     try {
-      await h.until((x) => x.includes("Alice (agent)"));
+      await h.until((x) => x.includes("Grace (agent)"));
       h.mockInput.pressKey("2");
       await h.until((x) => x.includes("type to search text and author"));
       await h.settle();

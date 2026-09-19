@@ -110,7 +110,7 @@ test("follow admission keeps human deliveries and agent traffic addressed to thi
     delivery("human-elsewhere", "human", "Other/model"),
     delivery("unaddressed-agent", "agent"),
     delivery("other-agent", "agent", "Other/model"),
-    delivery("model", "agent", "Sol"),
+    delivery("model", "agent", "Cal"),
     delivery("bearer", "agent", "Cal/codex"),
     delivery("seat-name", "agent", "socius_amore"),
     delivery("seat-mention", "agent", "<@USEAT>"),

@@ -8,7 +8,7 @@ The CLI in the repo root stays zero-dependency. This is a second package with it
 
 ```
 npm run tui                 # from the repo root, the first native room in your config, else the first local one
-cd tui && bun run index.tsx house --name Alex
+cd tui && bun run index.tsx example-room --name operator
 ```
 
 Requirements: Bun, and an agora config (`AGORA_CONFIG`, `./agora.json`, or `~/.agora/config.json`) naming at least one `native` room (`transport: native`, a 32-hex `roomId`; the seat service must be running for it to answer) or one `local` room. On the first run the TUI asks for your name once and writes it to `native/human.json` under the agora state root (`AGORA_STATE`, the config's `state`, or `~/.agora/state`), mode 0600. `--name` does the same non-interactively when no record exists yet. A second run never renames you; remove the file to change it.

@@ -32,7 +32,7 @@ describe("native frames", () => {
       expect(live).toContain(`read to ${NATIVE_EPOCH}:7`);
       expect(live).not.toContain(`read to ${NATIVE_EPOCH}:6`);
       expect(live).toContain("native room · live");
-      expect(live).toContain("Alice (agent)");
+      expect(live).toContain("Grace (agent)");
       expect(live).toContain("→ verdict landed · exhibit gate: bun test green");
       expect(live).toContain("[redacted]");
       expect(live).not.toMatch(/xox[abprse]-/);
@@ -77,7 +77,7 @@ describe("native frames", () => {
       expect(refused).toContain("request-refused");
       expect(refused).not.toContain("room dark");
       // the read answered, so the room is on screen under the refusal
-      expect(refused).toContain("Alice (agent)");
+      expect(refused).toContain("Grace (agent)");
     }
   }, 120_000);
 });

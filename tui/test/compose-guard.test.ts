@@ -31,7 +31,7 @@ describe("composeRefusal", () => {
   });
 
   test("an ordinary draft passes", () => {
-    expect(composeRefusal("the bearer path is Alice/watch", operator)).toBeUndefined();
+    expect(composeRefusal("the bearer path is Grace/watch", operator)).toBeUndefined();
   });
 });
 
