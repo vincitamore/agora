@@ -118,7 +118,10 @@ function main(argv) {
     if (!ok) {
       failed = name;
       console.error(`${name} failed (exit ${r.status ?? r.spawnError?.message})`);
-      console.log(tail(r.out + "\n" + r.err, 80));
+      const all = r.out + "\n" + r.err;
+      const named = all.split(/\r?\n/).filter((l) => /^not ok |^# (pass|fail|skipped) /.test(l));
+      if (named.length) console.log(named.join("\n"));
+      console.log(tail(all, 80));
     }
   };
   gate("proofs", () => run("bun", [join(copy, "spec", "build-kernel.ts")], { cwd: copy, env }));
