@@ -705,7 +705,7 @@ admission is the `agora spawn --file <path>` verb over `src/spawn/request.mjs` a
 
 CI: `.github/workflows/test.yml`. Linux and Windows jobs run on the project's self-hosted
 runners; macOS is off. The spawn job is bun-only; the tui job declares
-node. Every new package lands with its own job. House runners stay unfurnished.
+node. Every new package lands with its own job. The project's runners stay unfurnished.
 
 A native room writer takes `writer.lock` by exclusive create (`wx`). After EEXIST, only
 ECONNREFUSED on the recorded port licenses unlink. The listen port is allocated by the
