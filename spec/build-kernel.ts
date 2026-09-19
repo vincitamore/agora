@@ -66,11 +66,16 @@ for (const name of names) {
   const proof = join(ROOT, k.proof).replaceAll("\\", "/");
   const out = join(ROOT, k.out);
 
-  // the gate: the checker's stdout must be exactly the green string
-  const gate = spawnSync("bun", [MAIN, proof], { encoding: "utf8", env: { ...process.env, BEND_HUB: "http://127.0.0.1:1" } });
-  const verdict = ((gate.stdout ?? "") + (gate.stderr ?? "")).trim();
+  // The gate: the checker's STDOUT must be exactly the green string. Only stdout, because the
+  // checker writes everything else to stderr: its type errors, and its once-a-day notice that a
+  // newer Bend exists. Merging the two let that notice fail a proof that had checked (measured
+  // 2026-09-19 on the Linux runner, where the day's check landed mid-run); BEND_NO_TELEMETRY
+  // stops the check being made at all, so a clone of this repository reaches no host but the
+  // ones its pin names. stderr is still reported, since a red proof says why there.
+  const gate = spawnSync("bun", [MAIN, proof], { encoding: "utf8", env: { ...process.env, BEND_HUB: "http://127.0.0.1:1", BEND_NO_TELEMETRY: "1" } });
+  const verdict = (gate.stdout ?? "").trim();
   if (verdict !== "All terms check.") {
-    console.error(`${k.proof} is not green:\n${verdict}`);
+    console.error(`${k.proof} is not green:\n${verdict}\n${(gate.stderr ?? "").trim()}`);
     failed = true;
     continue;
   }
