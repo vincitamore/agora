@@ -16,9 +16,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: [self-hosted, linux, house]
+          - runner: [self-hosted, linux, project]
             target: linux
-          - runner: [self-hosted, windows, house]
+          - runner: [self-hosted, windows, project]
             target: windows
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
@@ -49,9 +49,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: [self-hosted, linux, house]
+          - runner: [self-hosted, linux, project]
             target: linux
-          - runner: [self-hosted, windows, house]
+          - runner: [self-hosted, windows, project]
             target: windows
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
