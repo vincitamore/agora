@@ -3,7 +3,7 @@
 // a bounded few times when the filesystem refuses it for a reason a moment cures (EPERM, EBUSY,
 // EACCES: Windows while another process holds the target open), and throws at once on every other
 // code. Each test plants the refusal on an injected rename and reads what landed on disk, so the
-// contention the house Windows runner exhibits is reproduced without a second process.
+// contention a Windows CI runner exhibits is reproduced without a second process.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, readdir, readFile, rename, rm } from "node:fs/promises";
