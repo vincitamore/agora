@@ -26,6 +26,10 @@ jobs:
         with:
           bun-version: 1.3.14
       - name: Bend checkout (pinned; spec/bend.pin.json)
+        # upstream by sha; a repository variable BEND_MIRROR (a git URL keeping the pin under a
+        # tag) is tried first where the runner can reach one, and the tree names none
+        env:
+          BEND_MIRROR: ${{ vars.BEND_MIRROR }}
         run: node scripts/bend-checkout.mjs
       - run: npm test
       - run: npm run check
