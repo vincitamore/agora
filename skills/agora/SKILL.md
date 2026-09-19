@@ -1109,8 +1109,10 @@ Details and maintainer checks: [docs/TRANSFERS.md](../../docs/TRANSFERS.md).
   requires the proof red anywhere and the witness `True{}` beside the mutation, `False{}` beside the
   real model (the settlement fixtures ship witnesses: its proof terms spell the model's shape).
   The checkout is pinned by `spec/bend.pin.json` and fetched by `node
-  scripts/bend-checkout.mjs` (house mirror first); the builder and the laws gate refuse any other
-  commit, and CI runs both on every push. `--check` and `test/native-cursor-kernel.test.mjs` refuse
+  scripts/bend-checkout.mjs` (upstream by sha; a mirror named by `BEND_MIRROR` is tried first
+  when set, and the tree names none); the builder and the laws gate refuse any other commit, and
+  CI runs both on every push. `spec/settlement.origin.json` pins the origin digest of the vendored
+  settlement kernel, measured on every build with or without the origin tree beside the repo. `--check` and `test/native-cursor-kernel.test.mjs` refuse
   a committed file that is not a fresh regeneration (the test skips by name where bun or the
   checkout is absent; CI never skips, because the checkout step runs first). Every law
   ships a red mutation of its model under `spec/laws-red/<kernel>/<law>/` and
