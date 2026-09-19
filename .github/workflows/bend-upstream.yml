@@ -1,0 +1,50 @@
+# Try the kernels against upstream Bend's head every week (and on request) and report whether the
+# pin can advance: scripts/bend-upstream-trial.mjs fetches the head, regenerates the three kernels
+# in a scratch copy of this tree, runs every PROOF, C0 for laws, the emitter differential and the
+# kernel suites there, and prints one report line. It never edits spec/bend.pin.json; advancing the
+# pin is a reviewed pull request. The report is the step summary and an artifact per OS.
+name: bend-upstream
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "upstream ref to try (default HEAD)"
+        default: HEAD
+        type: string
+permissions:
+  contents: read
+jobs:
+  trial:
+    name: ${{ matrix.os }}
+    # self-hosted runners: never for a fork's pull request (the same guard as test.yml; this
+    # workflow has no pull_request trigger, so the guard is the rule stated, not a live branch)
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            runner: [self-hosted, linux, house]
+          - os: windows-latest
+            runner: [self-hosted, windows, house]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - name: Trial against upstream head
+        run: node scripts/bend-upstream-trial.mjs --ref "${{ inputs.ref || 'HEAD' }}" --into "${{ runner.temp }}/bend-head" --report "${{ runner.temp }}/bend-upstream-${{ matrix.os }}.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bend-upstream-${{ matrix.os }}
+          path: ${{ runner.temp }}/bend-upstream-${{ matrix.os }}.json
+          if-no-files-found: ignore
+          retention-days: 30
