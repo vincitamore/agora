@@ -77,7 +77,7 @@ async function fixture(t) {
   t.after(() => service.stop());
   const cfgPath = path.join(root, "agora.json");
   await writeFile(cfgPath, JSON.stringify({ actor: { name: "seat", kind: "agent" }, rooms: { nat: { transport: "native", roomId: ROOM } } }));
-  const grace = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "grace", AGORA_ACTOR: "Alice/watch" };
+  const grace = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "grace", AGORA_ACTOR: "Grace/watch" };
   const sol = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "sol", AGORA_ACTOR: "Cal/codex" };
   return { root, service, grace, sol, cursorFile: path.join(root, "sessions", "grace", "nat.cursor"), armedFile: path.join(root, "sessions", "grace", "armed", "nat.json") };
 }
@@ -242,7 +242,7 @@ test("cli: a watch on a native room rides the seat service and prints the poller
 
   // --wake mine: plain talk is filtered, what names this bearer wakes
   await agora(["post", "nat", "plain talk"], sol);
-  await agora(["post", "nat", "for you", "--to", "Alice/watch"], sol);
+  await agora(["post", "nat", "for you", "--to", "Grace/watch"], sol);
   r = await agora(["watch", "nat", "--once", "--json", "--wake", "mine"], grace);
   assert.equal(r.code, 42, r.stderr);
   assert.deepEqual(typed(r.stdout).filter((l) => l.type === "message").map((l) => l.text.split("\n")[0]), ["for you"]);

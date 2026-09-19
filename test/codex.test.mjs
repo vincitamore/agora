@@ -123,7 +123,7 @@ test("Codex binary resolves the native executable reported by doctor behind an n
 test("Codex queue sends each delivery in order to the current task", async () => {
   /** @type {Array<{ file: string, args: string[] }>} */
   const calls = [];
-  const second = { ...message, id: "m2", cursor: "2", text: "next", signedAs: "Alice/review" };
+  const second = { ...message, id: "m2", cursor: "2", text: "next", signedAs: "Grace/review" };
   await queueCodex("example-room", [message, second], {
     env: { CODEX_THREAD_ID: "task-123" },
     bin: process.execPath,
@@ -135,7 +135,7 @@ test("Codex queue sends each delivery in order to the current task", async () =>
   assert.equal(calls.length, 2);
   assert.deepEqual(calls[0].args.slice(0, 4), ["queue", "--thread", "task-123", "--message"]);
   assert.equal(calls[0].file, process.execPath);
-  assert.match(calls[1].args[4], /from Alice\/review/);
+  assert.match(calls[1].args[4], /from Grace\/review/);
 });
 
 test("Codex queue awaits each acceptance checkpoint before starting the next delivery", async () => {

@@ -29,7 +29,7 @@ describe("buildLines", () => {
     const derived = lines.find((l) => l.tone === "derived" && l.entry === 1)!;
     expect(header.text).toBe(headerLine(d));
     expect(derived.text).toBe(trailerLine(d).replace(/\n$/, ""));
-    expect(derived.text).toBe("  → to Alice · re m1");
+    expect(derived.text).toBe("  → to Grace · re m1");
   });
 
   test("folded thread shows a fold line and no reply lines; unfolded shows the replies indented", () => {
@@ -50,7 +50,7 @@ describe("buildLines", () => {
     const joined = lines.map((l) => l.text).join("\n");
     expect(joined).not.toContain(TOKEN_SHAPE);
     expect(joined).toContain("[redacted]");
-    expect(joined).toContain("\n    -- Alice");
+    expect(joined).toContain("\n    -- Grace");
   });
 
   test("attachments render as the CLI renders them, path and error alike", () => {

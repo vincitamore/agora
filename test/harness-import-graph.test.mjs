@@ -404,7 +404,7 @@ test("a detected load whose specifier will not parse is reported, not dropped", 
 });
 
 test("the escaped and unescaped spellings of one file never disagree about inertness", async (t) => {
-  // Alice/advisor's pair: the same file, spelled with and without the escape. Both must be
+  // Grace/advisor's pair: the same file, spelled with and without the escape. Both must be
   // classified — resolved or unknown — and neither may come back inert while the other does not.
   const { root, git } = await repo(t);
   await mkdir(path.join(root, "src"), { recursive: true });

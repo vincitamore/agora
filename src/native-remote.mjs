@@ -428,7 +428,7 @@ export class RemoteRoom {
    *
    * The cache is cleared by exactly two things today — the socket's `close` handler and `close()` —
    * and a silent-open channel triggers neither, so `client()` keeps handing back the connection
-   * that just failed. Measured by Bruno/reader against the real cache: dials 1, subscribes 2, same
+   * that just failed. Measured by a second reader against the real cache: dials 1, subscribes 2, same
    * client, `socket.destroyed` false. The "reconnect" re-subscribed the corpse.
    *
    * Fenced by identity: a caller that arrives late, after a replacement was already attached,
@@ -583,7 +583,7 @@ export async function openRemoteSubscription(opts) {
       // refused anything. Let the reconnect path decide, since it already knows how to tell a
       // refusal the host ANSWERED from a channel that is simply not there.
       //
-      // And fenced the same way, which is the race Bruno/reader reproduced on Windows: the close
+      // And fenced the same way, which is the race a second reader reproduced on Windows: the close
       // path can attach a healthy replacement WHILE this probe is still pending, and `reattaching`
       // is already false again by the time the old probe rejects — so an obsolete failure
       // re-subscribed a channel that was fine (three dials and three subscribes where two of each
@@ -600,7 +600,7 @@ export async function openRemoteSubscription(opts) {
         // generations old and `runReattach` would dial over a channel that is fine. Checking once
         // at the top of the block fences the ENTRY, not the resumption: every await is a new place
         // where the world moved, and this unit has now been held three times for that same shape
-        // at three different awaits (Bruno/reader, backroom :1586, :2062 and this one).
+        // at three different awaits (a second reader found two, this is the third).
         if (!stopped && current === client) runReattach();
       }
     } finally {
@@ -720,7 +720,7 @@ export async function openRemoteSubscription(opts) {
   // Checked twice per idle window. The floor guards against a pathological `idleMs` spinning the
   // loop; it is 50 ms rather than 1 s because `idleMs` is a trusted local option, never a wire
   // value, and a 1 s floor made the healthy-channel cell wait through no probes at all — it
-  // asserted nothing, which Bruno/reader caught and which is the cell-that-cannot-fail shape this
+  // asserted nothing, which a second reader caught and which is the cell-that-cannot-fail shape this
   // file already carries two instances of. Production is unchanged: the 60 s default still probes
   // every 30 s.
   idleTimer = setInterval(() => { void probe(); }, Math.max(50, Math.floor(idleMs / 2)));

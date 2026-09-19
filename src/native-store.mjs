@@ -40,7 +40,7 @@ function roomDirectory(root, roomId) {
  * The rename may be refused on Windows while another process holds the target open without
  * share-delete (an indexer, an antivirus scan, a reader mid-open): EPERM, EBUSY or EACCES with the
  * temp file intact and the target untouched, so trying again is safe and usually lands within
- * milliseconds. Measured on the house Windows runner: the committed-boundary publication of a
+ * milliseconds. Measured on a Windows CI runner: the committed-boundary publication of a
  * thousand fsync'd appends hit it after 31 seconds and the whole append refused with acceptance
  * unknown. Every other code (ENOENT, EXDEV, ENOSPC) is thrown at once, because there the rename
  * did not fail for a reason a moment cures. The same shape as core.mjs's `writeFileAtomic`.

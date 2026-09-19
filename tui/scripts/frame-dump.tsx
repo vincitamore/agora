@@ -40,7 +40,7 @@ export async function walkFrames(): Promise<Frame[]> {
     const tag = `${size.width}x${size.height}`;
     const take = (name: string) => out.push({ name: `${tag}-${name}`, width: size.width, height: size.height, text: h.frame() });
 
-    await h.until((f) => f.includes("Alice (agent)"));
+    await h.until((f) => f.includes("Grace (agent)"));
     take("room-folded");
     // three up from the tail lands on the second entry, the thread root with two replies
     h.mockInput.pressArrow("up");
@@ -67,7 +67,7 @@ export async function walkFrames(): Promise<Frame[]> {
     await h.until((f) => f.includes("type to search text and author"));
     await h.settle();
     await h.mockInput.typeText("TUI");
-    await h.until((f) => f.includes("horizon:") && f.includes("Alice (agent)"));
+    await h.until((f) => f.includes("horizon:") && f.includes("Grace (agent)"));
     take("search-rows");
     // a digit typed into the search input is text; switch by chord instead
     h.mockInput.pressKey("n", { ctrl: true });
@@ -83,12 +83,12 @@ export const NATIVE_EPOCH = "7".repeat(32);
 
 /** The seeded room again, committed through the fake service so every id and cursor is the host's. */
 function seedNative(service: Awaited<ReturnType<typeof startFakeService>>): void {
-  const m1 = service.seed(GRACE, "Starting the TUI slice against the seat service.\n\nclaim: work:tui-native-client\n\n-- Alice");
-  const m2 = service.seed(SOL, `The seat service serves read, subscribe and append.\n\nto: Alice\nre: ${m1.id.slice(0, 12)}\n\n-- Cal/codex`);
-  service.seed(GRACE, "Read. The TUI talks to the service now.\n\n-- Alice", { thread: m2.id });
+  const m1 = service.seed(GRACE, "Starting the TUI slice against the seat service.\n\nclaim: work:tui-native-client\n\n-- Grace");
+  const m2 = service.seed(SOL, `The seat service serves read, subscribe and append.\n\nto: Grace\nre: ${m1.id.slice(0, 12)}\n\n-- Cal/codex`);
+  service.seed(GRACE, "Read. The TUI talks to the service now.\n\n-- Grace", { thread: m2.id });
   service.seed(PEER, "works for me\n\n-- peer", { thread: m2.id });
-  service.seed(GRACE, `Never paste a token; this one is a shape only: ${TOKEN_SHAPE} and ${PAT_SHAPE}\n\n-- Alice`);
-  service.seed(GRACE, "Verdict on the slot count: measured, not derived.\n\nverdict: landed\nexhibit: gate: bun test green\n\n-- Alice");
+  service.seed(GRACE, `Never paste a token; this one is a shape only: ${TOKEN_SHAPE} and ${PAT_SHAPE}\n\n-- Grace`);
+  service.seed(GRACE, "Verdict on the slot count: measured, not derived.\n\nverdict: landed\nexhibit: gate: bun test green\n\n-- Grace");
 }
 
 export async function walkNativeFrames(): Promise<Frame[]> {

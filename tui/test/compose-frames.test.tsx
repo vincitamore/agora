@@ -8,7 +8,7 @@ describe("compose", () => {
     let quits = 0;
     const h = await mountApp({ client, initialAlias: "scratch", onQuit: () => void quits++ }, { width: 100, height: 30 });
     try {
-      await h.until((x) => x.includes("Alice (agent)  cursor 7"));
+      await h.until((x) => x.includes("Grace (agent)  cursor 7"));
       h.mockInput.pressKey("i");
       let f = await h.until((x) => x.includes("COMPOSE as operator"));
       // plain hotkeys are text while composing: q does not quit, digits do not switch members
@@ -42,7 +42,7 @@ describe("compose", () => {
     const client = stubClient();
     const h = await mountApp({ client, initialAlias: "scratch" }, { width: 110, height: 30 });
     try {
-      await h.until((x) => x.includes("Alice (agent)  cursor 7"));
+      await h.until((x) => x.includes("Grace (agent)  cursor 7"));
       h.mockInput.pressKey("i");
       await h.until((x) => x.includes("COMPOSE as operator"));
       await h.mockInput.typeText(`token here ${TOKEN_SHAPE}`);
@@ -72,7 +72,7 @@ describe("compose", () => {
     const client = stubClient();
     const h = await mountApp({ client, initialAlias: "scratch" }, { width: 100, height: 30 });
     try {
-      await h.until((x) => x.includes("Alice (agent)  cursor 7"));
+      await h.until((x) => x.includes("Grace (agent)  cursor 7"));
       h.mockInput.pressKey("i");
       await h.until((x) => x.includes("COMPOSE as operator"));
       h.mockInput.pressEnter({ meta: true });

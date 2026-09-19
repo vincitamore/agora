@@ -45,8 +45,8 @@ describe("human post round trip", () => {
 
       // a peer's agent post first, so the human's is not the only record
       const { localTransport } = await import("../../src/transports/local.mjs");
-      const peer = localTransport({ transport: "local", path: roomPath }, { actor: { name: "Alice", kind: "agent" } });
-      await peer.post("hello from the seat\n\nto: operator\n\n-- Alice");
+      const peer = localTransport({ transport: "local", path: roomPath }, { actor: { name: "Grace", kind: "agent" } });
+      await peer.post("hello from the seat\n\nto: operator\n\n-- Grace");
 
       const draft = "hello back\n";
       expect(composeRefusal(draft, human)).toBeUndefined();
@@ -77,7 +77,7 @@ describe("human post round trip", () => {
       expect(rows[1].type).toBe("message");
       expect(rows[1].author).toEqual({ id: "operator", name: "operator", kind: "human" });
       expect(rows[1].signedAs).toBe("operator");
-      expect(rows[0].author.name).toBe("Alice");
+      expect(rows[0].author.name).toBe("Grace");
       expect(rows[0].to).toEqual(["operator"]);
       expect(JSON.stringify(rows)).not.toContain("SeatBot");
 

@@ -6,7 +6,7 @@
 #
 # Renders the prompt (`agora resident prompt`: the profile plus the shipped room-mechanics block)
 # to the seat's state under residents/<slug>/, moves to --cwd (the tree the resident works in),
-# and runs Claude Code with the rendered file as the whole system prompt. A house launcher that
+# and runs Claude Code with the rendered file as the whole system prompt. A seat launcher that
 # exports its own markers wraps this script. See docs/RESIDENTS.md.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -67,7 +67,7 @@ async function fixture(t, o = {}) {
   if (o.githubRoom) rooms.issue = { transport: "github", repo: "example-org/example-repo", issue: 3, tokenEnv: "AGORA_TEST_UNSET_TOKEN" };
   const cfgText = JSON.stringify({ actor: { name: "seat", kind: "agent" }, rooms }, null, 2);
   await writeFile(cfgPath, cfgText);
-  const env = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "grace", AGORA_ACTOR: "Alice/agora-orchestrator" };
+  const env = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "grace", AGORA_ACTOR: "Grace/agora-orchestrator" };
   const policyFile = path.join(root, "native", "rooms", ROOM, "faces.json");
   /** The shared config is read and never written: its bytes before and after are one exhibit. */
   const configUnchanged = async () => assert.equal(await readFile(cfgPath, "utf8"), cfgText, "the tool never writes the shared config");
@@ -335,7 +335,7 @@ test("the native transport carries the face choice on the append frame and retur
   /** @type {any} */
   let reply = { id: "b".repeat(64), cursor: `${EPOCH}:7` };
   const connect = async () => ({ socket: { unref() {}, once() {}, destroyed: false }, request: async (/** @type {string} */ type, /** @type {any} */ fields) => { frames.push({ type, ...fields }); return reply; } });
-  const tr = nativeTransport({ transport: "native", roomId: ROOM }, { actor: { name: "Alice/agora-orchestrator", kind: "agent" }, stateRoot: root, connect: /** @type {any} */ (connect) });
+  const tr = nativeTransport({ transport: "native", roomId: ROOM }, { actor: { name: "Grace/agora-orchestrator", kind: "agent" }, stateRoot: root, connect: /** @type {any} */ (connect) });
 
   let receipt = await tr.post("plain", {});
   assert.deepEqual(receipt, { id: "b".repeat(64), cursor: `${EPOCH}:7` }, "no faces on the ack: none on the receipt");

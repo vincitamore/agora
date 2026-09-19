@@ -23,7 +23,7 @@ import { inheritCarryEvidence } from './carry-check.mjs';
  * root itself and `session --forget` deletes every session's cursors, ledgers and records.
  */
 export const SESSION_RE = /^(?!\.\.?$)[A-Za-z0-9._-]{1,64}$/;
-/** A bearer is a path: model, then optionally what this session is for. `Grace`, `Grace/watch`, `Opus/design`. */
+/** A bearer is a path: model, then optionally what this session is for. `Grace`, `Grace/watch`, `Bea/design`. */
 export const BEARER_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}(?:\/[A-Za-z0-9][A-Za-z0-9._-]{0,31})*$/;
 export const BEARER_MAX = 64;
 export const DEFAULT_SESSION_FROM = Object.freeze([

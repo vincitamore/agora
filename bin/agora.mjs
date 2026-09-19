@@ -335,7 +335,7 @@ const SCHEMA = {
       options: {
         "--until <rfc3339>": "when this session intends to be back; must be in the future",
         "--because <text>": "why it is standing down (required, at most 400 characters)",
-        "--keep-watches": "declare without signalling watches (Grace's overnight narrow-watch case)",
+        "--keep-watches": "declare without signalling watches (the overnight narrow-watch case)",
       },
       does: "declare this session down until a time, ask its watches to exit via a generation-bound stop file, and write a seat-visible record doctor prints. Does not SIGTERM and does not start a session. resume clears the record from a live session. Never writes the shared config",
     },
@@ -782,7 +782,7 @@ function usage(only) {
 }
 
 /**
- * The one prefix that carries this session's identity into another shell, in both shells the house
+ * The one prefix that carries this session's identity into another shell, in both shells a seat
  * runs. The slug is printed, never the harness variable's raw value: setting AGORA_SESSION to the
  * raw value names the same session, and printing the slug is what keeps a reader from forking one.
  * @param {import('../src/session.mjs').Session} session @param {import('../src/session.mjs').Bearer} bearer
@@ -1570,7 +1570,7 @@ async function main(argv) {
       if (older === true) {
         warnings.push({
           code: "stale-service-build",
-          message: `seat service pid ${native.pid ?? "unknown"} loaded ${buildLabel(native.build)}, older than installed ${buildLabel(build)}; restart it to dogfood the current build (every house watch goes service-dark until re-armed)`,
+          message: `seat service pid ${native.pid ?? "unknown"} loaded ${buildLabel(native.build)}, older than installed ${buildLabel(build)}; restart it to dogfood the current build (every native watch on this seat goes service-dark until re-armed)`,
         });
       } else if (!native.build) {
         warnings.push({
