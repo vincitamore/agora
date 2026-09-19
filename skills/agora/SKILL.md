@@ -1154,7 +1154,11 @@ Details and maintainer checks: [docs/TRANSFERS.md](../../docs/TRANSFERS.md).
   Linux and Windows CI run on the project's self-hosted runners (unfurnished: no assumed
   `node`/`cmd.exe` on PATH, and on the Windows runner `shell: bash` resolves to the WSL launcher
   with no distribution installed, so a bash step there fails before its first line: guard it with
-  `if: runner.os != 'Windows'` or let the step take the runner's default shell); macOS is off. The spawn job is bun-only
+  `if: runner.os != 'Windows'` or let the step take the runner's default shell); macOS is off. Every
+  job carries the same-repository guard: a pull request runs on those runners only when its head
+  is this repository, so a fork's pull request never executes on the project's runners; keep the
+  guard on any job added, and keep the repository's fork-approval setting on as the second lock.
+  The spawn job is bun-only
   (`setup-bun`, no `setup-node`); the tui job declares node.
 - `bin/agora.mjs` stays tracked as mode `100755`; `npm link` on macOS or Linux installs it
   as-is and refuses to run a non-executable file. A Windows checkout does not carry the
