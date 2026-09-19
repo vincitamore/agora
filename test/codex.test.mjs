@@ -9,8 +9,8 @@ const message = /** @type {import('../src/core.mjs').Message} */ ({
   id: "m1",
   cursor: "1788475881.165359",
   ts: "2026-09-03T22:51:21Z",
-  author: { id: "U1", name: "Alex", kind: "human" },
-  text: "please inspect this\n\n-- to: Codex-Sol/general",
+  author: { id: "U1", name: "operator", kind: "human" },
+  text: "please inspect this\n\n-- to: Codex-Cal/general",
 });
 
 test("Codex task identity prefers CODEX_THREAD_ID and falls back to CODEX_SESSION_ID", () => {
@@ -74,8 +74,8 @@ test("Codex warns only when the current thread differs from the stable seat sess
 });
 
 test("Codex prompt preserves the original delivery with a compact origin envelope", () => {
-  const prompt = codexPrompt("slopcannon", message);
-  assert.match(prompt, /^\[Agora delivery; room slopcannon; cursor 1788475881\.165359; from Alex\]/);
+  const prompt = codexPrompt("example-room", message);
+  assert.match(prompt, /^\[Agora delivery; room example-room; cursor 1788475881\.165359; from operator\]/);
   assert.match(prompt, /Codex no-op policy:[^\n]+<!-- agora:no-maintenance -->/);
   assert.ok(prompt.endsWith(message.text));
 });
@@ -123,8 +123,8 @@ test("Codex binary resolves the native executable reported by doctor behind an n
 test("Codex queue sends each delivery in order to the current task", async () => {
   /** @type {Array<{ file: string, args: string[] }>} */
   const calls = [];
-  const second = { ...message, id: "m2", cursor: "2", text: "next", signedAs: "Fable/review" };
-  await queueCodex("slopcannon", [message, second], {
+  const second = { ...message, id: "m2", cursor: "2", text: "next", signedAs: "Grace/review" };
+  await queueCodex("example-room", [message, second], {
     env: { CODEX_THREAD_ID: "task-123" },
     bin: process.execPath,
     run: /** @type {any} */ (async (/** @type {string} */ file, /** @type {string[]} */ args) => {
@@ -135,14 +135,14 @@ test("Codex queue sends each delivery in order to the current task", async () =>
   assert.equal(calls.length, 2);
   assert.deepEqual(calls[0].args.slice(0, 4), ["queue", "--thread", "task-123", "--message"]);
   assert.equal(calls[0].file, process.execPath);
-  assert.match(calls[1].args[4], /from Fable\/review/);
+  assert.match(calls[1].args[4], /from Grace\/review/);
 });
 
 test("Codex queue awaits each acceptance checkpoint before starting the next delivery", async () => {
   const second = { ...message, id: "m2", cursor: "2", text: "next" };
   /** @type {string[]} */
   const order = [];
-  await queueCodex("slopcannon", [message, second], {
+  await queueCodex("example-room", [message, second], {
     env: { CODEX_THREAD_ID: "task-123" },
     bin: process.execPath,
     run: /** @type {any} */ (async (/** @type {string} */ _file, /** @type {string[]} */ args) => {
@@ -165,7 +165,7 @@ test("Codex queue serializes a burst instead of starting later deliveries concur
   /** @type {string[]} */
   const started = [];
   const second = { ...message, id: "m2", cursor: "2", text: "next" };
-  const queued = queueCodex("slopcannon", [message, second], {
+  const queued = queueCodex("example-room", [message, second], {
     env: { CODEX_THREAD_ID: "task-123" },
     bin: process.execPath,
     run: /** @type {any} */ (async (/** @type {string} */ _file, /** @type {string[]} */ args) => {
@@ -184,14 +184,14 @@ test("Codex queue serializes a burst instead of starting later deliveries concur
 });
 
 test("Codex queue fails before consuming a delivery when no task id exists", async () => {
-  await assert.rejects(() => queueCodex("slopcannon", [message], { env: {} }), /CODEX_THREAD_ID.*CODEX_SESSION_ID/);
+  await assert.rejects(() => queueCodex("example-room", [message], { env: {} }), /CODEX_THREAD_ID.*CODEX_SESSION_ID/);
 });
 
 test("Codex queue keeps peer-authored shell metacharacters in one argv value", async () => {
   const text = 'literal & | " %VAR% stays data';
   /** @type {any[]} */
   const calls = [];
-  await queueCodex("slopcannon", [{ ...message, text }], {
+  await queueCodex("example-room", [{ ...message, text }], {
     env: { CODEX_SESSION_ID: "task-123" },
     bin: process.execPath,
     run: /** @type {any} */ (async (/** @type {string} */ file, /** @type {string[]} */ args, /** @type {Record<string, unknown>} */ options) => {

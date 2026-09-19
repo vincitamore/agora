@@ -244,7 +244,7 @@ export function parseSignature(text) {
  * Credential SHAPES, never the words around them. A context pattern (`Bearer <anything>`) catches
  * nothing these miss -- agora builds its authorization header as a lowercase key inside a request
  * object and never prints it -- and it ate the tool's own vocabulary: `bearer` is the noun for a
- * signing identity here, so `a bearer path like Fable` redacted the word after it in every error a
+ * signing identity here, so `a bearer path like Grace` redacted the word after it in every error a
  * newcomer sees. A transport added later contributes its provider's token shape to this list; that
  * clause is the whole safety argument for keeping the list shape-based.
  */

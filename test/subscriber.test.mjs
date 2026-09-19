@@ -14,14 +14,14 @@ import { matchesAddress, parseTrailers } from "../src/trailers.mjs";
 const ROOM = "6".repeat(32);
 const EPOCH = "7".repeat(32);
 const ACCOUNT = "seat_account_0002";
-const ME = { name: "Fable/watch", kind: /** @type {const} */ ("agent") };
-const PEER = { name: "Sol/codex", kind: /** @type {const} */ ("agent") };
+const ME = { name: "Grace/watch", kind: /** @type {const} */ ("agent") };
+const PEER = { name: "Cal/codex", kind: /** @type {const} */ ("agent") };
 
 /** @param {import('node:test').TestContext} t */
 async function fixture(t) {
   const root = await mkdtemp(path.join(tmpdir(), "agora-subscriber-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const service = new NativeRoomService({ root, accountId: ACCOUNT, seatLabel: "admin-pc" });
+  const service = new NativeRoomService({ root, accountId: ACCOUNT, seatLabel: "seat-a" });
   await service.start();
   await service.createRoom({ roomId: ROOM, epoch: EPOCH });
   t.after(() => service.stop());
@@ -44,7 +44,7 @@ test("a subscriber delivers from its cursor, skips its own post by the ledger, f
   const posted = new Set();
   posted.add((await mine.post("mine, on watch")).id);
   await peer.post("for someone else\n\nto: Opus/review");
-  await peer.post("for you\n\nto: Fable/watch");
+  await peer.post("for you\n\nto: Grace/watch");
   const subscription = await openNativeSubscription({ stateRoot: root, roomId: ROOM, since: `${EPOCH}:0` });
   t.after(() => subscription.close());
   /** @type {string[][]} */
@@ -68,8 +68,8 @@ test("a subscriber delivers from its cursor, skips its own post by the ledger, f
   assert.equal(cursorAtDelivery[0], undefined, "the cursor is written after delivery, not before");
 
   // two more, held into one coalesced window: one delivery, one cursor write after it
-  await peer.post("a\n\nto: Fable/watch");
-  await peer.post("b\n\nto: Fable/watch");
+  await peer.post("a\n\nto: Grace/watch");
+  await peer.post("b\n\nto: Grace/watch");
   r = await watch(through(subscription, mine), {
     stateDir: state, key: "nat", interval: 0.05, coalesceSeconds: 0.3,
     sleep: (ms) => subscription.wait(ms), own: () => posted, wake: wakeMine, onBatch,

@@ -19,7 +19,7 @@ function make({ rateLimitOnce = false, random = Math.random } = {}) {
   const slept = [];
   const { fetch, calls } = fakeFetch([
     ["auth.test", () => ({ body: { ok: true, user_id: "UBOT", user: "claude-house" } })],
-    ["users.info", (url) => ({ body: { ok: true, user: { id: url.searchParams.get("user"), real_name: "bone" } } })],
+    ["users.info", (url) => ({ body: { ok: true, user: { id: url.searchParams.get("user"), real_name: "peer" } } })],
     ["conversations.history", (url) => {
       if (limited) {
         limited = false;
@@ -44,7 +44,7 @@ test("slack room needs a channel id", () => {
 
 test("slack system subtypes are delivered as author.kind system, not skipped", async () => {
   const { fetch } = fakeFetch([
-    ["users.info", () => ({ body: { ok: true, user: { id: "U2", real_name: "bone" } } })],
+    ["users.info", () => ({ body: { ok: true, user: { id: "U2", real_name: "peer" } } })],
     ["conversations.history", () => ({
       body: {
         ok: true,
@@ -69,7 +69,7 @@ test("slack history: ascending, pages, skips joins and thread replies, names use
   const msgs = await t.read();
   assert.deepEqual(msgs.map((m) => m.text), ["parent", "candidate up\n\n-- Codex", "latest human"]);
   assert.deepEqual(msgs.map((m) => m.author.kind), ["human", "agent", "human"]);
-  assert.equal(msgs[0].author.name, "bone");
+  assert.equal(msgs[0].author.name, "peer");
   assert.equal(msgs[1].signedAs, "Codex");
   assert.equal(msgs[2].cursor, "1756900000.000400");
   assert.equal(msgs[2].ts, "2025-09-03T11:46:40.000Z");
@@ -94,7 +94,7 @@ test("slack image attachments are authenticated into bounded local media without
       thumb_360: "https://files.slack.com/files-tmb/T1-F0123IMAGE/screen-shot-360.jpg",
     };
     const api = fakeFetch([
-      ["users.info", () => ({ body: { ok: true, user: { id: "U2", real_name: "Alex" } } })],
+      ["users.info", () => ({ body: { ok: true, user: { id: "U2", real_name: "operator" } } })],
       ["conversations.history", () => ({ body: { ok: true, messages: [{ ts: "1756900000.000100", user: "U2", text: "look", files: [file] }], has_more: false } })],
     ]);
     /** @type {RequestInit | undefined} */
@@ -139,7 +139,7 @@ test("slack still delivers attachment metadata when image bytes are unavailable 
       { id: "FDOC", name: "notes.txt", mimetype: "text/plain", size: 4, url_private: "https://files.slack.com/doc" },
     ];
     const api = fakeFetch([
-      ["users.info", () => ({ body: { ok: true, user: { id: "U2", real_name: "Alex" } } })],
+      ["users.info", () => ({ body: { ok: true, user: { id: "U2", real_name: "operator" } } })],
       ["conversations.history", () => ({ body: { ok: true, messages: [{ ts: "1756900000.000100", user: "U2", text: "files", files }], has_more: false } })],
     ]);
     const fetchFile = /** @type {typeof globalThis.fetch} */ (async (input, init) => String(input).startsWith("https://files.slack.com/")
@@ -160,7 +160,7 @@ test("slack history without a cursor returns the newest messages up to the limit
   const many = Array.from({ length: 9 }, (_, i) => ({ ts: `1756900000.00${i + 1}000`, user: "U2", text: `m${i + 1}` }));
   const { fetch } = fakeFetch([
     ["auth.test", () => ({ body: { ok: true, user_id: "UBOT", user: "b" } })],
-    ["users.info", () => ({ body: { ok: true, user: { id: "U2", real_name: "bone" } } })],
+    ["users.info", () => ({ body: { ok: true, user: { id: "U2", real_name: "peer" } } })],
     ["conversations.history", (url) => {
       const oldest = Number(url.searchParams.get("oldest") ?? 0);
       const filtered = [...many].reverse().filter((m) => Number(m.ts) > oldest);
@@ -294,14 +294,14 @@ test("slack whoami and api errors", async () => {
 
 test("slack encodes & < > on post except mention/channel/url tokens, and decodes them on read", async () => {
   assert.equal(encodeSlackText("n > 1 and sessions/<s>/"), "n &gt; 1 and sessions/&lt;s&gt;/");
-  assert.equal(encodeSlackText("hi <@U0BUTHS6LUR> see <https://example.com|x>"), "hi <@U0BUTHS6LUR> see <https://example.com|x>");
+  assert.equal(encodeSlackText("hi <@U0123456780> see <https://example.com|x>"), "hi <@U0123456780> see <https://example.com|x>");
   assert.equal(decodeSlackText("n &gt; 1 and sessions/&lt;s&gt;/"), "n > 1 and sessions/<s>/");
   assert.equal(decodeSlackText("&amp;lt;"), "&lt;");
   const { t, calls } = make();
   await t.post("n > 1");
   assert.equal(JSON.parse(String(calls.at(-1)?.init?.body)).text, "n &gt; 1");
   const { fetch } = fakeFetch([
-    ["users.info", () => ({ body: { ok: true, user: { id: "U2", real_name: "bone" } } })],
+    ["users.info", () => ({ body: { ok: true, user: { id: "U2", real_name: "peer" } } })],
     ["conversations.history", () => ({ body: { ok: true, messages: [{ ts: "1756900000.000100", user: "U2", text: "n &gt; 1" }], has_more: false } })],
   ]);
   const t2 = slackTransport({ transport: "slack", channel: "C1" }, { token: "x", fetch });

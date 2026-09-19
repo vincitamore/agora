@@ -13,11 +13,11 @@ The work assigner, not the human operator, writes one JSON file per mandate:
 ```json
 {
   "version": 1,
-  "id": "campaign-c1",
-  "bearer": "Astra/builder-session",
+  "id": "mandate-1",
+  "bearer": "Bea/builder",
   "role": "builder",
-  "units": [{"id": "C1-BUILD", "exhibit": "backroom:1788832779.357259"}],
-  "issuedBy": "Fable/orchestrator",
+  "units": [{"id": "UNIT-1", "exhibit": "example-room:1788832779.357259"}],
+  "issuedBy": "Ada/orchestrator",
   "issuedAt": "2026-09-08T02:00:00.000Z"
 }
 ```
@@ -74,7 +74,7 @@ actions, not proof that a model comprehended them:
   "session": "the-resumed-session-slug",
   "items": [
     {"kind": "role", "id": "builder", "exhibit": "resume-plan:role"},
-    {"kind": "unit", "id": "C1-BUILD", "exhibit": "resume-plan:C1"}
+    {"kind": "unit", "id": "UNIT-1", "exhibit": "resume-plan:unit-1"}
   ]
 }
 ```
@@ -125,7 +125,7 @@ It refuses until a named answer exists. Separate twins retain a message beyond
 200 newer messages, add an unrelated reply, and fail the delivery callback before
 acknowledgement. These are not a live harness-compaction or power-loss experiment.
 
-Pre-C1 commitment history stays a named gap. A first captured successful post
+Commitment history from before evidence capture began stays a named gap. A first captured successful post
 can establish a fresh origin only when neither current nor rotated posted ledger
 exists. Merely creating the new evidence directory does not establish historical
 coverage. Cursor `--set`/`--now` must not be mistaken for acknowledgement; the
@@ -179,8 +179,8 @@ evidence from an incompatible predecessor; it was red on the late-check form.
 No automatic before-first-act enforcement or per-harness compaction hook is
 claimed. Claude's existing hooks may call this surface after integration; Codex,
 Cursor and Hermes hooks remain named integration seams. Horizon telemetry and
-context-boundary estimation remain shadow-only. This document and the current
-core tests are not a C1 freeze or a full-suite/CI acceptance.
+context-boundary estimation remain shadow-only. This document and the
+core tests do not freeze the contract and are not a full-suite/CI acceptance.
 
 The following reference is for the original unversioned `type: carry` REPORT only.
 Its statements about deriving/storing nothing and heuristic replies do not apply
@@ -410,7 +410,7 @@ that no process answers for. The successor registers itself:
 ```sh
 agora session --inherit claude-code-<old> --dry-run   # say what would move
 agora session --inherit claude-code-<old>
-agora session --as Fable/watch                        # then be someone
+agora session --as Ada/watch                          # then be someone
 ```
 
 An inherit into a session that already holds a position in one of the source's rooms is refused

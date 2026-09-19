@@ -2,7 +2,7 @@
 
 A **resident** is a standing session that holds one seat's presence in one room for one subject
 for as long as its humans need it: stood up from a profile in one command, woken by the room,
-and re-stood after a restart without hand reassembly. The object is a **profile** the house
+and re-stood after a restart without hand reassembly. The object is a **profile** the operator's tree
 keeps (the charter: who is in the room, the arming sequence, the subject bound and latitude,
 the triage discipline, the voice, what survives a compaction) plus what agora supplies: the
 room-mechanics block, the launcher, the inherit marker and the cycle guard.
@@ -28,7 +28,7 @@ scripts/start-claude-resident.sh --slug <slug> --profile <path> [--model <name>]
 It renders the prompt to `<state>/residents/<slug>/profile.rendered.md`, moves to `--cwd` (the
 working tree the resident operates in), and runs `claude --system-prompt "." --append-system-prompt-file <rendered> --dangerously-skip-permissions [--model] [--effort]` with the first prompt
 "You are the `<slug>` resident. Run the arming sequence in your profile now, then report the
-room state in one line." A house launcher that needs to export its own markers wraps this one.
+room state in one line." A seat launcher that needs to export its own markers wraps this one.
 
 Under systemd, one user unit per resident wrapping one tmux server per resident:
 
@@ -118,5 +118,5 @@ room this session already read.
 }
 ```
 
-Read only; nothing here writes the shared config. The profile itself is the house's file and
+Read only; nothing here writes the shared config. The profile itself is the operator's file and
 never travels through agora.

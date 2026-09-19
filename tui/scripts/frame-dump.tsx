@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { mountApp } from "../lib/harness";
 import { SeatRoomClient } from "../lib/seat-client";
-import { stubClient, FABLE, SOL, BONE, TOKEN_SHAPE, PAT_SHAPE } from "../test/fixtures";
+import { stubClient, GRACE, SOL, PEER, TOKEN_SHAPE, PAT_SHAPE } from "../test/fixtures";
 import { startFakeService } from "../test/fake-service";
 
 export const SIZES = [
@@ -40,14 +40,14 @@ export async function walkFrames(): Promise<Frame[]> {
     const tag = `${size.width}x${size.height}`;
     const take = (name: string) => out.push({ name: `${tag}-${name}`, width: size.width, height: size.height, text: h.frame() });
 
-    await h.until((f) => f.includes("Fable (agent)"));
+    await h.until((f) => f.includes("Grace (agent)"));
     take("room-folded");
     // three up from the tail lands on the second entry, the thread root with two replies
     h.mockInput.pressArrow("up");
     h.mockInput.pressArrow("up");
     h.mockInput.pressArrow("up");
     await h.settle();
-    await h.until((f) => f.includes("❯ [2026-09-05T01:05:00.000Z] Sol/codex (agent)  cursor 2"));
+    await h.until((f) => f.includes("❯ [2026-09-05T01:05:00.000Z] Cal/codex (agent)  cursor 2"));
     h.mockInput.pressEnter();
     await h.until((f) => f.includes("▾ 2 replies"));
     take("room-unfolded");
@@ -67,7 +67,7 @@ export async function walkFrames(): Promise<Frame[]> {
     await h.until((f) => f.includes("type to search text and author"));
     await h.settle();
     await h.mockInput.typeText("TUI");
-    await h.until((f) => f.includes("horizon:") && f.includes("Fable (agent)"));
+    await h.until((f) => f.includes("horizon:") && f.includes("Grace (agent)"));
     take("search-rows");
     // a digit typed into the search input is text; switch by chord instead
     h.mockInput.pressKey("n", { ctrl: true });
@@ -83,12 +83,12 @@ export const NATIVE_EPOCH = "7".repeat(32);
 
 /** The seeded room again, committed through the fake service so every id and cursor is the host's. */
 function seedNative(service: Awaited<ReturnType<typeof startFakeService>>): void {
-  const m1 = service.seed(FABLE, "Starting the TUI slice against the seat service.\n\nclaim: work:tui-native-client\n\n-- Fable");
-  const m2 = service.seed(SOL, `The seat service serves read, subscribe and append.\n\nto: Fable\nre: ${m1.id.slice(0, 12)}\n\n-- Sol/codex`);
-  service.seed(FABLE, "Read. The TUI talks to the service now.\n\n-- Fable", { thread: m2.id });
-  service.seed(BONE, "works for me\n\n-- bone", { thread: m2.id });
-  service.seed(FABLE, `Never paste a token; this one is a shape only: ${TOKEN_SHAPE} and ${PAT_SHAPE}\n\n-- Fable`);
-  service.seed(FABLE, "Verdict on the slot count: measured, not derived.\n\nverdict: landed\nexhibit: gate: bun test green\n\n-- Fable");
+  const m1 = service.seed(GRACE, "Starting the TUI slice against the seat service.\n\nclaim: work:tui-native-client\n\n-- Grace");
+  const m2 = service.seed(SOL, `The seat service serves read, subscribe and append.\n\nto: Grace\nre: ${m1.id.slice(0, 12)}\n\n-- Cal/codex`);
+  service.seed(GRACE, "Read. The TUI talks to the service now.\n\n-- Grace", { thread: m2.id });
+  service.seed(PEER, "works for me\n\n-- peer", { thread: m2.id });
+  service.seed(GRACE, `Never paste a token; this one is a shape only: ${TOKEN_SHAPE} and ${PAT_SHAPE}\n\n-- Grace`);
+  service.seed(GRACE, "Verdict on the slot count: measured, not derived.\n\nverdict: landed\nexhibit: gate: bun test green\n\n-- Grace");
 }
 
 export async function walkNativeFrames(): Promise<Frame[]> {
@@ -97,25 +97,25 @@ export async function walkNativeFrames(): Promise<Frame[]> {
     const root = await mkdtemp(path.join(tmpdir(), "agora-tui-native-frames-"));
     const tag = `${size.width}x${size.height}`;
     // one board-only event past the last message, so "read to" is visibly the coverage, not the tail
-    const service = await startFakeService({ root, roomId: NATIVE_ROOM, epoch: NATIVE_EPOCH, coverageAhead: 1, seatLabel: "admin-pc" });
+    const service = await startFakeService({ root, roomId: NATIVE_ROOM, epoch: NATIVE_EPOCH, coverageAhead: 1, seatLabel: "seat-a" });
     seedNative(service);
     const view = { stateRoot: root, rooms: [], native: [{ alias: "house", transport: "native" as const, room: NATIVE_ROOM, roomId: NATIVE_ROOM }], elsewhere: [] };
-    const client = new SeatRoomClient({ name: "Alex", kind: "human" }, view, { native: { waitMs: 50 } });
+    const client = new SeatRoomClient({ name: "operator", kind: "human" }, view, { native: { waitMs: 50 } });
     const h = await mountApp({ client, initialAlias: "house" }, size);
     const take = (name: string) => out.push({ name: `${tag}-${name}`, width: size.width, height: size.height, text: h.frame(), secrets: [service.nonce] });
     try {
       await h.until((f) => f.includes("native room · live") && f.includes(`read to ${NATIVE_EPOCH}:7`));
       take("native-room-live");
       // a peer's post arrives as an event frame; nothing was pressed
-      service.seed(SOL, "an event, pushed by the service\n\n-- Sol/codex");
+      service.seed(SOL, "an event, pushed by the service\n\n-- Cal/codex");
       await h.until((f) => f.includes("an event, pushed by the service"));
       take("native-room-event");
       h.mockInput.pressKey("i");
-      await h.until((f) => f.includes("COMPOSE as Alex"));
+      await h.until((f) => f.includes("COMPOSE as operator"));
       await h.mockInput.typeText("a line through the service");
       await h.settle();
       h.mockInput.pressEnter({ meta: true });
-      await h.until((f) => f.includes("posted ") && f.includes("Alex (human)"));
+      await h.until((f) => f.includes("posted ") && f.includes("operator (human)"));
       take("native-compose-sent");
       await h.settle(900);
       await h.until((f) => !f.includes("posted "));
@@ -146,10 +146,10 @@ export async function walkNativeFrames(): Promise<Frame[]> {
 
     // a second service that answers reads and refuses the subscription: refused, not dark
     const root2 = await mkdtemp(path.join(tmpdir(), "agora-tui-native-frames-"));
-    const refusing = await startFakeService({ root: root2, roomId: NATIVE_ROOM, epoch: NATIVE_EPOCH, refuse: ["subscribe"], seatLabel: "admin-pc" });
+    const refusing = await startFakeService({ root: root2, roomId: NATIVE_ROOM, epoch: NATIVE_EPOCH, refuse: ["subscribe"], seatLabel: "seat-a" });
     seedNative(refusing);
     const view2 = { stateRoot: root2, rooms: [], native: [{ alias: "house", transport: "native" as const, room: NATIVE_ROOM, roomId: NATIVE_ROOM }], elsewhere: [] };
-    const client2 = new SeatRoomClient({ name: "Alex", kind: "human" }, view2, { native: { waitMs: 50 } });
+    const client2 = new SeatRoomClient({ name: "operator", kind: "human" }, view2, { native: { waitMs: 50 } });
     const h2 = await mountApp({ client: client2, initialAlias: "house" }, size);
     try {
       await h2.until((f) => f.includes("room refused ·"));

@@ -23,7 +23,7 @@ import { inheritCarryEvidence } from './carry-check.mjs';
  * root itself and `session --forget` deletes every session's cursors, ledgers and records.
  */
 export const SESSION_RE = /^(?!\.\.?$)[A-Za-z0-9._-]{1,64}$/;
-/** A bearer is a path: model, then optionally what this session is for. `Fable`, `Fable/watch`, `Opus/design`. */
+/** A bearer is a path: model, then optionally what this session is for. `Grace`, `Grace/watch`, `Bea/design`. */
 export const BEARER_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}(?:\/[A-Za-z0-9][A-Za-z0-9._-]{0,31})*$/;
 export const BEARER_MAX = 64;
 export const DEFAULT_SESSION_FROM = Object.freeze([
@@ -129,7 +129,7 @@ export function resolveBearer(cfg, { as, env, record }) {
     : { name: cfg.actor.name, source: "config" };
   const name = pick.name.trim();
   if (pick.source !== "config" && (!BEARER_RE.test(name) || name.length > BEARER_MAX))
-    throw new AgoraError(`${pick.source} must be a bearer path like Fable or Fable/watch (letters, digits, . _ -; segments joined by /; at most ${BEARER_MAX} characters)`, EXIT.usage);
+    throw new AgoraError(`${pick.source} must be a bearer path like Grace or Grace/watch (letters, digits, . _ -; segments joined by /; at most ${BEARER_MAX} characters)`, EXIT.usage);
   return { name, source: pick.source };
 }
 

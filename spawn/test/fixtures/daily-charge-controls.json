@@ -1,5 +1,5 @@
 {
-  "$fixture": "revision 5, from Astra's executed arithmetic: sequential, restart, boundary and rollover controls for the daily orientation charge.",
+  "$fixture": "revision 5, from Bruno's executed arithmetic: sequential, restart, boundary and rollover controls for the daily orientation charge.",
   "$whyThisExists": "Revision 3 summed orientationTokens over LIVE spawns. Seven sequential peers at 90,308 spend 632,156 against a 600,000 cap while every live total read at admission is 0, and maxPerHour 6 spread over two hours catches none of them. Live occupancy is not a charge ledger.",
   "config": { "maxOrientationTokensPerDay": 600000, "estimatePerPeer": 90308, "maxPerHour": 6, "window": "UTC day", "ledger": "<state>/spawn/charges/<window>.jsonl" },
   "sequential": {

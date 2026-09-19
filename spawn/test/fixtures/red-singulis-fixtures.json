@@ -12,7 +12,7 @@
   },
   "red-missing-standard": {
     "red": "the lattice is absent at the resolved cwd and the spawn proceeds anyway",
-    "overlay": { "cwd": "C:/Users/AlexMoyer/Documents/not-a-tree", "expected": "exit 1 before pane.open; a record at state spawned is red" },
+    "overlay": { "cwd": "C:/Users/operator/Documents/not-a-tree", "expected": "exit 1 before pane.open; a record at state spawned is red" },
     "mustRedden": ["PC5"]
   },
   "red-unpinned-composition": {
@@ -27,7 +27,7 @@
   },
   "red-self-selected-reader": {
     "red": "the designated first reader is the author, or the reader selected itself",
-    "overlay": { "answersTo": "verify@opus-windows-primary", "spawner": { "bearer": "verify@opus-windows-primary" } },
+    "overlay": { "answersTo": "verify@seat-a", "spawner": { "bearer": "verify@seat-a" } },
     "mustRedden": ["K17"]
   },
   "red-out-degree": {

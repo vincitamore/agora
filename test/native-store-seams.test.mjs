@@ -57,7 +57,7 @@ test("a renew's receipt says held, and a human break's record carries the holder
   assert.equal(renewed.held, true);
   assert.equal(renewed.leaseId, first.leaseId);
   assert.equal(/** @type {any} */ (store.records.at(-1)).broken, undefined, "a renew over a held subject is not a break: no dropped holder on its record");
-  const broken = /** @type {any} */ (await store.append({ kind: "board", operationId: OP(3), payload: { action: "break", subject: "work:seam" }, authorKind: "human", authorName: "Alex" }, { accountId: PEER }));
+  const broken = /** @type {any} */ (await store.append({ kind: "board", operationId: OP(3), payload: { action: "break", subject: "work:seam" }, authorKind: "human", authorName: "operator" }, { accountId: PEER }));
   assert.equal(broken.broken, true);
   assert.equal(broken.holder?.accountId, HOST);
   const record = /** @type {any} */ (store.records.at(-1));
@@ -118,7 +118,7 @@ test("the digest chain links each record to the one before it, so a reopened roo
 
 test("a read defaults to the newest thousand rows (survivor 628), and a thousand fsync'd appends land under the rename retry", async (t) => {
   // this test is also the live exhibit for the durable-write retry: before it, the committed-boundary
-  // publication refused with EPERM under the house Windows runner's load at about the thousandth append
+  // publication refused with EPERM under a Windows CI runner's load at about the thousandth append
   const { store } = await room(t, { recordLimit: 1500 });
   const started = Date.now();
   for (let i = 1; i <= 1001; i++) await post(store, i, "x");

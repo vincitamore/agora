@@ -13,9 +13,9 @@ import { NativeRoomService } from '../src/native-service.mjs';
 import { appendCarryEvent, beginCarryPost, captureCarryPost, carryRefKey, checkCarryBoundary, inheritCarryEvidence, mandateDigest, readCarryEvidence, readMandate, recordCarryCursorMove, requireCarrySuccessor, sealCarryBoundary, validateCarryEvent, validateMandate } from '../src/carry-check.mjs';
 import { tmp } from './helpers.mjs';
 
-const mandate = { version: 1, id: 'campaign-c1', bearer: 'Astra/uber-wizard', role: 'builder',
+const mandate = { version: 1, id: 'campaign-c1', bearer: 'Bruno/uber-wizard', role: 'builder',
   units: [{ id: 'C1-BUILD', exhibit: 'backroom:1788832779.357259' }],
-  issuedBy: 'Fable/orchestration', issuedAt: '2026-09-08T02:00:00.000Z' };
+  issuedBy: 'Grace/orchestration', issuedAt: '2026-09-08T02:00:00.000Z' };
 
 test('carry mandate pins semantic fields, including the assigner and unit exhibit', () => {
   assert.deepEqual(validateMandate(mandate), mandate);
@@ -205,7 +205,7 @@ test('real addressed watch delivery is prepared before the callback and acknowle
       await writeRecord(t.dir, { slug: path.basename(t.dir), source: 'AGORA_SESSION', explicit: true }, { bearer: mandate.bearer });
       const m = { id: 'addressed-1', cursor: '1', room: 'room', ts: mandate.issuedAt,
         author: { id: 'peer', name: 'Peer', kind: /** @type {'agent'} */ ('agent') },
-        text: 'Please discharge this obligation.\n\nto: Astra/uber-wizard\n\n-- Peer/reader' };
+        text: 'Please discharge this obligation.\n\nto: Bruno/uber-wizard\n\n-- Peer/reader' };
       const other = { ...m, id: 'other-1', cursor: '2', text: 'Unrelated\n\nto: Someone/else\n\n-- Peer/reader' };
       const transport = /** @type {import('../src/core.mjs').Transport} */ ({
         kind: 'local', room: 'room', threads: false,
@@ -343,7 +343,7 @@ test('failed delivery callback keeps prepared evidence unconfirmed and does not 
     await writeRecord(t.dir, { slug: path.basename(t.dir), source: 'AGORA_SESSION', explicit: true }, { bearer: mandate.bearer });
     const m = { id: 'in-flight', cursor: '1', room: 'room', ts: mandate.issuedAt,
       author: { id: 'peer', name: 'Peer', kind: /** @type {'agent'} */ ('agent') },
-      text: 'Required\n\nto: Astra/uber-wizard\n\n-- Peer/reader' };
+      text: 'Required\n\nto: Bruno/uber-wizard\n\n-- Peer/reader' };
     const transport = /** @type {import('../src/core.mjs').Transport} */ ({ kind: 'local', room: 'room', threads: false,
       whoami: async () => ({ id: 'seat', name: 'Seat' }), read: async () => [m] });
     await assert.rejects(() => watch(transport, { stateDir: t.dir, key: 'room', mode: 'once',
@@ -363,13 +363,13 @@ test('sealed boundaries pin the assigner source, retain releases, and never infe
       await writeFile(source, JSON.stringify(mandate));
       if (legacy) await writeFile(path.join(t.dir, 'posted.1.jsonl'), 'old-post\n');
       const session = { slug: 's1', source: 'AGORA_SESSION' };
-      await captureCarryPost(t.dir, 'room', session, mandate.bearer, 'Taking\n\nclaim: C1\n\n-- Astra/uber-wizard', { id: 'claim-post', cursor: '1' });
+      await captureCarryPost(t.dir, 'room', session, mandate.bearer, 'Taking\n\nclaim: C1\n\n-- Bruno/uber-wizard', { id: 'claim-post', cursor: '1' });
       const first = await sealCarryBoundary(t.dir, path.join(t.dir, 'first.json'), { session, bearer: mandate.bearer, mandatePath: source, cursors: [] });
       assert.equal(first.claims.length, 1);
       assert.deepEqual(first.gaps, legacy ? ['commitment-history-coverage-unknown'] : []);
       assert.equal(first.mandateDigest, mandateDigest(mandate));
       await assert.rejects(() => sealCarryBoundary(t.dir, path.join(t.dir, 'first.json'), { session, bearer: mandate.bearer, mandatePath: source, cursors: [] }), { code: 'EEXIST' });
-      await captureCarryPost(t.dir, 'room', session, mandate.bearer, 'Done\n\nrelease: C1\n\n-- Astra/uber-wizard', { id: 'release-post', cursor: '2' });
+      await captureCarryPost(t.dir, 'room', session, mandate.bearer, 'Done\n\nrelease: C1\n\n-- Bruno/uber-wizard', { id: 'release-post', cursor: '2' });
       const second = await sealCarryBoundary(t.dir, path.join(t.dir, 'second.json'), { session, bearer: mandate.bearer, mandatePath: source, cursors: [] });
       assert.equal(second.claims.length, 0);
       assert.equal(second.retractions.length, 1);
@@ -385,10 +385,10 @@ test('only a successful named own post discharges a durable delivery; unrelated 
     const { actual, boundary } = fixture();
     for (const event of actual.evidence.filter(e => e.kind !== 'answer')) await appendCarryEvent(t.dir, event);
     const session = { slug: 's1', source: 'AGORA_SESSION' };
-    await captureCarryPost(t.dir, 'backroom', session, mandate.bearer, 'Unrelated update\n\n-- Astra/uber-wizard', { id: 'other', cursor: '2' });
+    await captureCarryPost(t.dir, 'backroom', session, mandate.bearer, 'Unrelated update\n\n-- Bruno/uber-wizard', { id: 'other', cursor: '2' });
     actual.evidence = (await readCarryEvidence(t.dir)).events;
     assert.deepEqual(checkCarryBoundary(boundary, actual).issues.map(i => i.code), ['delivery-unanswered']);
-    await captureCarryPost(t.dir, 'backroom', session, mandate.bearer, 'Answered\n\nre: m1\n\n-- Astra/uber-wizard', { id: 'answer', cursor: '3' });
+    await captureCarryPost(t.dir, 'backroom', session, mandate.bearer, 'Answered\n\nre: m1\n\n-- Bruno/uber-wizard', { id: 'answer', cursor: '3' });
     actual.evidence = (await readCarryEvidence(t.dir)).events;
     assert.equal(checkCarryBoundary(boundary, actual).ok, true);
   } finally { await t.cleanup(); }
@@ -563,7 +563,7 @@ test('a post crash between send and capture cannot erase its commitment behind a
     const { boundary, actual } = fixture();
     const session = { slug: 's1', source: 'AGORA_SESSION' };
     boundary.claims = []; boundary.retractions = []; boundary.deliveries = []; boundary.watermark = [];
-    const text = 'Body not admitted to the recovery record\n\nclaim: C1\n\n-- Astra/uber-wizard';
+    const text = 'Body not admitted to the recovery record\n\nclaim: C1\n\n-- Bruno/uber-wizard';
     const intent = await beginCarryPost(t.dir, 'backroom', session, mandate.bearer, text);
     actual.evidence = (await readCarryEvidence(t.dir)).events;
     assert.equal(JSON.stringify(actual.evidence).includes('Body not admitted'), false);

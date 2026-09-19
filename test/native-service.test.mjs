@@ -73,7 +73,7 @@ async function openTestDatabase(file) {
 async function fixture(t) {
   const root = await mkdtemp(path.join(tmpdir(), "agora-native-service-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const service = new NativeRoomService({ root, accountId: ACCOUNT, seatLabel: "admin-pc" });
+  const service = new NativeRoomService({ root, accountId: ACCOUNT, seatLabel: "seat-a" });
   const endpoint = await service.start();
   await service.createRoom({ roomId: ROOM, epoch: EPOCH });
   t.after(() => service.stop());
@@ -113,7 +113,7 @@ test("one seat service fans a committed event to independent local subscribers",
     b.subscribe(ROOM, `${EPOCH}:0`, (message) => resolveB(message)),
   ]);
   const receipt = await a.request("append", { roomId: ROOM, operation: {
-    operationId: "operation_service_01", authorName: "Sol/codex", text: "hello",
+    operationId: "operation_service_01", authorName: "Cal/codex", text: "hello",
   } });
   assert.equal(receipt.cursor, `${EPOCH}:1`);
   const [messageA, messageB] = await Promise.all([seenA, seenB]);
@@ -128,7 +128,7 @@ test("a later local session replays host-accepted messages from its own cursor",
   const writer = await NativeServiceClient.connect(/** @type {any} */ (endpoint));
   t.after(() => writer.close());
   await writer.request("append", { roomId: ROOM, operation: {
-    operationId: "operation_replay_001", authorName: "Sol/codex", text: "kept",
+    operationId: "operation_replay_001", authorName: "Cal/codex", text: "kept",
   } });
   const reader = await NativeServiceClient.connect(/** @type {any} */ (endpoint));
   t.after(() => reader.close());
@@ -141,7 +141,7 @@ test("stable retries through the service reconcile an unknown receipt without a 
   const { endpoint } = await fixture(t);
   const client = await NativeServiceClient.connect(/** @type {any} */ (endpoint));
   t.after(() => client.close());
-  const operation = { operationId: "operation_unknown_01", authorName: "Sol/codex", text: "once" };
+  const operation = { operationId: "operation_unknown_01", authorName: "Cal/codex", text: "once" };
   const first = await client.request("append", { roomId: ROOM, operation });
   const retry = await client.request("append", { roomId: ROOM, operation });
   assert.equal(first.cursor, retry.cursor);
@@ -161,7 +161,7 @@ test("concurrent first access opens one room store rather than two writers", asy
 test("the server-auth-first handshake and endpoint bind fail closed", async (t) => {
   const { root, service, endpoint } = await fixture(t);
   await assert.rejects(NativeServiceClient.connect({ .../** @type {any} */ (endpoint), nonce: "wrong_nonce_00001" }), /server proof was invalid/);
-  const second = new NativeRoomService({ root, accountId: ACCOUNT, seatLabel: "admin-pc" });
+  const second = new NativeRoomService({ root, accountId: ACCOUNT, seatLabel: "seat-a" });
   await assert.rejects(second.start(), /endpoint .* already active or occupied/);
   await service.stop();
   await assert.rejects(NativeServiceClient.connect(/** @type {any} */ (endpoint)), /ECONNREFUSED|ENOENT|closed|dark/);
@@ -203,13 +203,13 @@ test("an endpoint squatter receives no client bytes before proving the service",
   fake.on("connection", (socket) => {
     socket.on("data", (bytes) => { received += bytes.length; });
     socket.write(encodeNativeFrame({ protocol: NATIVE_PROTOCOL, type: "server-hello", requestId: "f".repeat(32),
-      bootEpoch: "b".repeat(32), serverChallenge: "c".repeat(32), accountId: ACCOUNT, seatLabel: "admin-pc",
+      bootEpoch: "b".repeat(32), serverChallenge: "c".repeat(32), accountId: ACCOUNT, seatLabel: "seat-a",
       proof: "0".repeat(64) }));
   });
   await listen(fake, endpointPath);
   t.after(() => close(fake));
   await assert.rejects(NativeServiceClient.connect({ path: endpointPath, nonce: "n".repeat(32), bootEpoch: "b".repeat(32),
-    accountId: ACCOUNT, seatLabel: "admin-pc", timeoutMs: 1_000 }), /server proof was invalid/);
+    accountId: ACCOUNT, seatLabel: "seat-a", timeoutMs: 1_000 }), /server proof was invalid/);
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(received, 0, "no reusable credential, label, body or request crosses before server authentication");
 });
@@ -325,7 +325,7 @@ test("POSIX endpoint setup tightens a permissive pre-existing state directory", 
 test("a recorded dead-service transcript cannot authenticate a fresh client challenge", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "agora-native-replay-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const service = new NativeRoomService({ root, accountId: ACCOUNT, seatLabel: "admin-pc", nonce: "n".repeat(32) });
+  const service = new NativeRoomService({ root, accountId: ACCOUNT, seatLabel: "seat-a", nonce: "n".repeat(32) });
   const endpoint = await service.start();
   const raw = net.createConnection({ path: /** @type {string} */ (endpoint.path) });
   await once(raw, "connect");
@@ -481,7 +481,7 @@ test("subscription catch-up is contiguous beyond the default read page", async (
   const store = await service.openRoom(ROOM);
   for (let i = 1; i <= 1005; i++) await store.append({
     operationId: `operation_backlog_${String(i).padStart(4, "0")}`,
-    authorName: "Sol/codex",
+    authorName: "Cal/codex",
     text: String(i),
   }, { accountId: ACCOUNT });
   const client = await NativeServiceClient.connect(/** @type {any} */ (endpoint));
@@ -494,7 +494,7 @@ test("subscription catch-up is contiguous beyond the default read page", async (
     if (message.cursor === `${EPOCH}:1006`) resolveEnd();
   });
   await client.request("append", { roomId: ROOM, operation: {
-    operationId: "operation_backlog_1006", authorName: "Sol/codex", text: "1006",
+    operationId: "operation_backlog_1006", authorName: "Cal/codex", text: "1006",
   } });
   await end;
   const sequences = [...result.messages, ...events].map((message) => parseInt(message.cursor.split(":")[1], 10));
@@ -506,7 +506,7 @@ test("subscription refuses an oversized replay before delivering a partial prefi
   const store = await service.openRoom(ROOM);
   for (let i = 1; i <= 11; i++) await store.append({
     operationId: `operation_large_backlog_${String(i).padStart(2, "0")}`,
-    authorName: "Sol/codex",
+    authorName: "Cal/codex",
     text: `${i}:${"x".repeat(200_000)}`,
   }, { accountId: ACCOUNT });
   const client = await NativeServiceClient.connect(/** @type {any} */ (endpoint));

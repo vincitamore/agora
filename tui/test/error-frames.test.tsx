@@ -42,7 +42,7 @@ function assertClean(f: string) {
 
 describe("error strings reach the frame redacted", () => {
   test("a failing read and a failing peers read render as redacted diagnostics in ROOM and PEERS", async () => {
-    const client = new FailingClient({ name: "Alex", rooms: { scratch: seededRoom() } });
+    const client = new FailingClient({ name: "operator", rooms: { scratch: seededRoom() } });
     client.failRead = true;
     client.failPeers = true;
     const h = await mountApp({ client, initialAlias: "scratch" }, { width: 120, height: 30 });
@@ -61,13 +61,13 @@ describe("error strings reach the frame redacted", () => {
   });
 
   test("a failing post renders its diagnostic in the toast, redacted, and the draft stays", async () => {
-    const client = new FailingClient({ name: "Alex", rooms: { scratch: seededRoom() } });
+    const client = new FailingClient({ name: "operator", rooms: { scratch: seededRoom() } });
     client.failPost = true;
     const h = await mountApp({ client, initialAlias: "scratch" }, { width: 120, height: 30 });
     try {
-      await h.until((x) => x.includes("Fable (agent)  cursor 7"));
+      await h.until((x) => x.includes("Grace (agent)  cursor 7"));
       h.mockInput.pressKey("i");
-      await h.until((x) => x.includes("COMPOSE as Alex"));
+      await h.until((x) => x.includes("COMPOSE as operator"));
       await h.mockInput.typeText("a clean draft");
       h.mockInput.pressEnter({ meta: true });
       const f = await h.until((x) => x.includes("not sent:"));
@@ -90,7 +90,7 @@ describe("error strings reach the frame redacted", () => {
     );
     try {
       await h.until((x) => x.includes("YOUR NAME"));
-      await h.mockInput.typeText("Alex");
+      await h.mockInput.typeText("operator");
       h.mockInput.pressEnter();
       const f = await h.until((x) => x.includes("cannot write:"));
       expect(f).toContain("cannot write: [redacted]");

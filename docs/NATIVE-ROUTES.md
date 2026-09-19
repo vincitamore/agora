@@ -16,7 +16,7 @@ startMemberRoute({binding, allowedNodeKey}, options)
 
 startMemberChannel({descriptor}, options)
 // -> {ready, closed, stop}
-// ready: {binding}, after the P1 session reports admission
+// ready: {binding}, after the service session reports admission
 ```
 
 Both take the live local `owner` (`serviceId`, `serviceBootId`, `signal`), trusted
@@ -31,7 +31,7 @@ meet that route dependency contract and leaves cleanup pending.
 Outbound also requires `assertDescriptor(descriptor, signal)` and
 `resolveClientKey(binding, signal)`, returning an absolute local `keyPath`. The
 existing Tailcat parser checks the address; `printpub` checks the resolved key's
-public digest against the binding before connection. P1 must keep that private key
+public digest against the binding before connection. The service must keep that private key
 file immutable for the route's lifetime; checking it and later opening its path is
 not an atomic key pin against a hostile process sharing the OS account.
 
@@ -43,14 +43,14 @@ effects. Validation and the allowlisted transport alone are not that check.
 
 An outbound descriptor must be accepted by trusted local service code before any
 network launch. A descriptor's `proofRef` is a reference, not proof merely because
-the DTO accepts it. Native key resolution is explicit and separate from W11 offer
+the DTO accepts it. Native key resolution is explicit and separate from offer
 discovery. The binding's service boot identifies the host; an outbound caller's
 resource owner is its own local service and can have a different boot.
 
 The runtime guardian remains a nested owned resource, not another resident service.
 Stopping a route fences new local admission, cancels pending admission, destroys
 owned sockets, and joins late-returned sessions and children. A bounded stop timeout
-reports cleanup pending; it never settles actual `closed` as a success. P1 revokes
+reports cleanup pending; it never settles actual `closed` as a success. The service revokes
 the canonical grant before teardown and rejects buffered requests at commit.
 
 ## Immutable object stream seam
@@ -62,24 +62,24 @@ an explicit local service policy; an entry exceeding it refuses before acquisiti
 
 `sender.send({id, digest, lifetime}, destination)` accepts only an exact entry in that
 list. It does not accept a directory, filesystem path, changed digest or offer
-ordinal. The trusted P1 callback is:
+ordinal. The trusted service callback is:
 
 ```js
 openObject(binding, attachment, signal)
 // -> Promise<{info, readable, closed, release}>
 ```
 
-P1 checks live membership and room policy, returns an immutable pinned readable
+The service checks live membership and room policy, returns an immutable pinned readable
 stream and aborts the route signal on revocation. `release()` relinquishes that
 specific pin. `closed` is the owner's promise of actual stream-resource disposal;
 EOF, `destroyed` and `stream.finished()` are not interchangeable with disposal for
-all Node stream configurations. P2 destroys the stream and joins `closed` before
+all Node stream configurations. The sender destroys the stream and joins `closed` before
 releasing the pin. No consumer-visible writable hard link or reopen-by-path is involved.
 The callback must eventually return or reject when cancelled; a late successful
-acquisition is still destroyed and released by P2. Callback code runs inside the
+acquisition is still destroyed and released by the sender. Callback code runs inside the
 trusted service boundary; these JavaScript interfaces are not wire capabilities.
 
-P2 checks the returned identity/size against the allowlist, bounds emitted bytes,
+The sender checks the returned identity/size against the allowlist, bounds emitted bytes,
 hashes them and checks the final digest and size. Cancellation, source error,
 destination error and mismatched content all reject and release the pin. A failed
 release also prevents successful return. The successful result is `{id,digest,size}`.
@@ -109,13 +109,13 @@ discovery logs, NIC packets, router counters and a successful relay ping do not
 individually establish a completed direct exchange. This ping gate does not
 establish native admission, live subscription delivery or committed file bytes.
 
-The direct-path investigation used a
-[logging-only diagnostic fork](https://git.golden-vernier.ts.net/amoyer/tailcat/commit/1052fd684ce5bb1cc471e211c57e3aa535c348cc).
-The bundled runtime remains upstream `ce6fedcabc220bab3b94d470ab330219111eeae8`;
-the observed direct-path repair required network configuration, not that fork.
+A diagnostic fork of Tailcat that only added logging showed that the direct-path
+failure lay in network configuration, not in the runtime: the observed direct-path
+repair required network configuration, not a runtime change. The bundled runtime
+remains upstream `ce6fedcabc220bab3b94d470ab330219111eeae8`.
 
 Local fixtures exercise resource ownership and stream custody. They do not exhibit
 physical cross-seat transfer, DERP-only connectivity, simultaneous routes sharing a
-client key, authenticated P1 hello/admission, or filesystem immutability inside P1.
+client key, authenticated service hello/admission, or filesystem immutability inside the service.
 Those remain integration tests, not properties inferred from a callback name.
 The root CLI and historical record-v1 byte/digest paths are unchanged.

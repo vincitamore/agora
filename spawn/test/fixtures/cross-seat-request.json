@@ -6,23 +6,23 @@
   "role": "transport",
   "unit": "agora-native-adapters/cross-seat-admission",
   "room": "house",
-  "answersTo": "fable@opus-windows-primary",
+  "answersTo": "grace@seat-a",
   "cwd": "~/src/agora",
   "briefDigest": "sha256:c7a1e5602b48d93f176ea20b5c8341fd9e06b72a4c1358df0ba6e29147c3d015",
-  "targetSeat": "amore-dev-laptop",
+  "targetSeat": "seat-b",
   "parentRecord": {
-    "$note": "the origin's own signed record, verbatim; the target verifies the signature against the roster key for opus-windows-primary and derives depth = parent.depth + 1",
+    "$note": "the origin's own signed record, verbatim; the target verifies the signature against the roster key for seat-a and derives depth = parent.depth + 1",
     "spawnId": "spawn-01JZ8Q4K7N2X",
     "depth": 1,
-    "seat": "opus-windows-primary",
+    "seat": "seat-a",
     "signature": {
       "alg": "ed25519",
-      "seat": "opus-windows-primary",
+      "seat": "seat-a",
       "sig": "base64:UjZ4...Qg=="
     }
   },
   "$expected": {
-    "recordMintedBy": "amore-dev-laptop",
+    "recordMintedBy": "seat-b",
     "recordSignedWith": "the target seat key",
     "policyApplied": "the target's own allowSpawners, allowHarnesses, caps, backend",
     "refusalCase": {

@@ -133,7 +133,7 @@ test('cli ingest of four harness envelopes measures members and prints no raw ke
     { slug: 'sess-claude', sourceId: 'msg_synthetic_claude_01', harness: 'claude-code' },
     { slug: 'sess-omp', sourceId: 'msg_synthetic_omp_01', harness: 'omp' },
     { slug: 'sess-codex', sourceId: 'rollout:offset:12', harness: 'codex' },
-    { slug: 'sess-amore', sourceId: 'prompt_synthetic_01:grok-4.6', harness: 'amore-build' },
+    { slug: 'sess-amore-build', sourceId: 'prompt_synthetic_01:grok-4.6', harness: 'amore-build' },
   ];
   /** @type {Record<string, unknown>} */
   const bindings = {};
@@ -186,8 +186,8 @@ test('cli ingest of four harness envelopes measures members and prints no raw ke
   assert.equal(byHarness['sess-omp'].request.provisional[0].components.output.value, 5);
   assert.equal(byHarness['sess-codex'].snapshot.provisional[0].components.output.value, 6);
   assert.equal(byHarness['sess-codex'].request.provisional.length, 0);
-  assert.equal(byHarness['sess-amore'].aggregate.components.output.value, 8);
-  assert.equal(Object.hasOwn(byHarness['sess-amore'].request.components, 'output'), false);
+  assert.equal(byHarness['sess-amore-build'].aggregate.components.output.value, 8);
+  assert.equal(Object.hasOwn(byHarness['sess-amore-build'].request.components, 'output'), false);
 });
 
 test('cli ingest reports failed lines instead of dropping them silently', async () => {

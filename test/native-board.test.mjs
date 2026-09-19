@@ -142,10 +142,10 @@ test("break by an agent is refused; a human-kind break frees the subject", async
     /break is a human verb/,
   );
   assert.equal(store.board()[0].accountId, HOST);
-  const broken = /** @type {any} */ (await store.append({ kind: "board", operationId: OP(4), payload: { action: "break", subject: "work:break" }, authorKind: "human", authorName: "Alex", session: "grok-test-session" }, { accountId: PEER }));
+  const broken = /** @type {any} */ (await store.append({ kind: "board", operationId: OP(4), payload: { action: "break", subject: "work:break" }, authorKind: "human", authorName: "operator", session: "grok-test-session" }, { accountId: PEER }));
   assert.equal(broken.broken, true);
   assert.equal(broken.holder?.accountId, HOST);
-  assert.deepEqual(broken.actor, { name: "Alex", kind: "human", session: "grok-test-session" });
+  assert.deepEqual(broken.actor, { name: "operator", kind: "human", session: "grok-test-session" });
   assert.equal(store.board().length, 0);
   const taken = /** @type {any} */ (await store.append({ kind: "board", operationId: OP(5), payload: { action: "claim", subject: "work:break" } }, { accountId: PEER }));
   assert.equal(taken.held, true);
@@ -197,7 +197,7 @@ test("nativeTransport.board records the resolved session slug, not AGORA_SESSION
     },
   });
   const tr = nativeTransport({ transport: "native", roomId: ROOM }, {
-    actor: { name: "Codex-Astra/meta-wizard", kind: "agent" },
+    actor: { name: "Codex-Bruno/meta-wizard", kind: "agent" },
     stateRoot: root,
     session: "codex-fixture_codex_session",
     connect: /** @type {any} */ (connect),

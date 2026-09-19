@@ -49,7 +49,7 @@ test("session key: AGORA_SESSION, then the first set harness variable, then defa
     "CODEX_THREAD_ID",
     "HERMES_SESSION_ID",
   ]);
-  assert.deepEqual(resolveSession(cfg, { AGORA_SESSION: "fable-a" }), { slug: "fable-a", source: "AGORA_SESSION", explicit: true });
+  assert.deepEqual(resolveSession(cfg, { AGORA_SESSION: "grace-a" }), { slug: "grace-a", source: "AGORA_SESSION", explicit: true });
   assert.deepEqual(resolveSession(cfg, { CLAUDE_CODE_SESSION_ID: "2bfa6030-9abd-48d4-835f-53c4123fb0ed" }), {
     slug: "claude-code-2bfa6030-9abd-48d4-835f-53c4123fb0ed", source: "CLAUDE_CODE_SESSION_ID", explicit: false,
   });
@@ -112,11 +112,11 @@ test("a session key is one safe directory name: `.` and `..` are refused, and no
 });
 
 test("bearer: --as, then AGORA_ACTOR, then the config; paths validated at the boundary", () => {
-  assert.deepEqual(resolveBearer(cfg, { as: "Fable/watch", env: { AGORA_ACTOR: "Opus" } }), { name: "Fable/watch", source: "--as" });
+  assert.deepEqual(resolveBearer(cfg, { as: "Grace/watch", env: { AGORA_ACTOR: "Opus" } }), { name: "Grace/watch", source: "--as" });
   assert.deepEqual(resolveBearer(cfg, { env: { AGORA_ACTOR: "Opus/design" } }), { name: "Opus/design", source: "AGORA_ACTOR" });
   assert.deepEqual(resolveBearer(cfg, { env: {} }), { name: actor.name, source: "config" });
-  assert.throws(() => resolveBearer(cfg, { env: { AGORA_ACTOR: "Fable/" } }), /bearer path/);
-  assert.throws(() => resolveBearer(cfg, { env: { AGORA_ACTOR: "Fable watch" } }), /bearer path/);
+  assert.throws(() => resolveBearer(cfg, { env: { AGORA_ACTOR: "Grace/" } }), /bearer path/);
+  assert.throws(() => resolveBearer(cfg, { env: { AGORA_ACTOR: "Grace watch" } }), /bearer path/);
   assert.throws(() => resolveBearer(cfg, { as: "x".repeat(65), env: {} }), /bearer path/);
   assert.ok(BEARER_RE.test("Grok/build"));
   assert.ok(!BEARER_RE.test("/lead"));
@@ -196,7 +196,7 @@ test("every state write is a rename into place: nothing half-written, no temp fi
     const s = { slug: "s1", source: "AGORA_SESSION", explicit: true };
     const sdir = sessionDir(dir, s);
     await writeCursor(sdir, "r", "42");
-    await writeRecord(sdir, s, { bearer: "Fable/watch", pid: process.pid, pidSource: "TEST" });
+    await writeRecord(sdir, s, { bearer: "Grace/watch", pid: process.pid, pidSource: "TEST" });
     await writeArmed(sdir, "r", { room: "r", interval: 15, pid: process.pid, startedAt: new Date().toISOString() });
     await etagCache(sdir).set("r", 'W/"abc"');
     await appendPosted(sdir, "m1");
@@ -204,7 +204,7 @@ test("every state write is a rename into place: nothing half-written, no temp fi
     const names = (await readdir(sdir, { recursive: true })).map(String);
     assert.deepEqual(names.filter((n) => n.includes(".tmp-")), [], "no temp file survives a write");
     assert.equal(await readCursor(sdir, "r"), "42");
-    assert.equal((await readRecord(sdir))?.bearer, "Fable/watch", "the record parses whole");
+    assert.equal((await readRecord(sdir))?.bearer, "Grace/watch", "the record parses whole");
     assert.equal((await readArmed(sdir, "r"))?.room, "r");
     assert.equal(await etagCache(sdir).get("r"), 'W/"abc"');
     assert.ok((await readPosted(sdir)).has("m1"));
@@ -281,7 +281,7 @@ test("the session record: written once, bearer replaced on re-register, startedA
     assert.equal(await readRecord(sdir), undefined);
     const oldBuild = { version: "0.1.0", source: /** @type {const} */ ("git"), git: "a".repeat(40), at: "2020-01-01T00:00:00.000Z" };
     const currentBuild = { version: "0.1.0", source: /** @type {const} */ ("git"), git: "b".repeat(40), at: "2020-01-01T02:00:00.000Z" };
-    const first = await writeRecord(sdir, s, { bearer: "Fable/watch", label: "the watch", pid: 4242, pidSource: "CLAUDE_PID", build: oldBuild, now: new Date("2020-01-01T00:00:00Z") });
+    const first = await writeRecord(sdir, s, { bearer: "Grace/watch", label: "the watch", pid: 4242, pidSource: "CLAUDE_PID", build: oldBuild, now: new Date("2020-01-01T00:00:00Z") });
     assert.equal(first.startedAt, "2020-01-01T00:00:00.000Z");
     const second = await writeRecord(sdir, s, { bearer: "Opus/watch", now: new Date("2020-01-01T01:00:00Z") });
     assert.equal(second.bearer, "Opus/watch");
@@ -303,7 +303,7 @@ test("the session record: written once, bearer replaced on re-register, startedA
 });
 
 test("liveness: a matching boot and an answering pid is live; ESRCH or a reboot is gone; EPERM counts as alive; no pid is unknown", () => {
-  const rec = { slug: "s", source: "x", bearer: "Fable", pid: 100, bootEpoch: 1000, startedAt: "t", lastSeen: "t" };
+  const rec = { slug: "s", source: "x", bearer: "Grace", pid: 100, bootEpoch: 1000, startedAt: "t", lastSeen: "t" };
   const esrch = () => { const e = /** @type {NodeJS.ErrnoException} */ (new Error("no such process")); e.code = "ESRCH"; throw e; };
   const eperm = () => { const e = /** @type {NodeJS.ErrnoException} */ (new Error("not permitted")); e.code = "EPERM"; throw e; };
   assert.equal(liveness(rec, { kill: () => {}, boot: 1000 }), "live");
@@ -350,7 +350,7 @@ test("listRecords: every session with state, registered or not, with its livenes
   const { dir, cleanup } = await tmp();
   try {
     const a = { slug: "a", source: "x", explicit: true };
-    await writeRecord(sessionDir(dir, a), a, { bearer: "Fable/watch", pid: process.pid, pidSource: "TEST" });
+    await writeRecord(sessionDir(dir, a), a, { bearer: "Grace/watch", pid: process.pid, pidSource: "TEST" });
     await writeCursor(sessionDir(dir, { slug: "b", source: "x", explicit: true }), "r", "1"); // state but no record
     const rows = await listRecords(dir);
     assert.deepEqual(rows.map((r) => [r.slug, r.state]), [["a", "live"], ["b", "unregistered"]]);
@@ -373,17 +373,17 @@ test("departures: a gone session whose bearer is live again on the seat is a res
     const boot = bootEpoch();
     const ago = (/** @type {number} */ minutes) => new Date(Date.now() - minutes * 60_000);
     // the old resident: process gone, quiet past the grace, with state in room r
-    await writeRecord(sessionDir(dir, sess("old")), sess("old"), { bearer: "Opus/ncu-command", pid: 1, pidSource: "TEST", now: ago(10) });
+    await writeRecord(sessionDir(dir, sess("old")), sess("old"), { bearer: "Opus/room-a", pid: 1, pidSource: "TEST", now: ago(10) });
     await writeCursor(sessionDir(dir, sess("old")), "r", "1");
     // its successor: the same bearer under a new session, this process (live)
-    await writeRecord(sessionDir(dir, sess("new")), sess("new"), { bearer: "Opus/ncu-command", pid: process.pid, pidSource: "TEST" });
+    await writeRecord(sessionDir(dir, sess("new")), sess("new"), { bearer: "Opus/room-a", pid: process.pid, pidSource: "TEST" });
     await writeCursor(sessionDir(dir, sess("new")), "r", "1");
     let gone = await departures(dir, { selfSlug: "me", roomKey: "r", kill, boot });
     assert.deepEqual(gone.map((g) => g.slug), [], "a restarted bearer is not a departure");
     const marker = JSON.parse(await readFile(path.join(sessionDir(dir, sess("old")), "departed", "r.json"), "utf8"));
     assert.equal(marker.reason, "restarted");
     // once the successor is gone too, only the successor is announced; the old record stays silent
-    await writeRecord(sessionDir(dir, sess("new")), sess("new"), { bearer: "Opus/ncu-command", pid: 1, pidSource: "TEST", now: ago(10) });
+    await writeRecord(sessionDir(dir, sess("new")), sess("new"), { bearer: "Opus/room-a", pid: 1, pidSource: "TEST", now: ago(10) });
     gone = await departures(dir, { selfSlug: "me", roomKey: "r", kill, boot });
     assert.deepEqual(gone.map((g) => g.slug), ["new"]);
   } finally {
@@ -399,12 +399,12 @@ test("departures: gone past the grace and within the stale horizon, not yet anno
       await writeRecord(sessionDir(dir, s), s, { bearer, pid, pidSource: "TEST", now: new Date(Date.now() - minutesAgo * 60_000) });
     };
     const dead = () => { const e = /** @type {NodeJS.ErrnoException} */ (new Error("gone")); e.code = "ESRCH"; throw e; };
-    await mk("me", "Fable/watch", 1, 1);
+    await mk("me", "Grace/watch", 1, 1);
     await mk("quiet", "Opus/design", 30, 2); // gone, quiet for 30 minutes: announce
-    await mk("blip", "Fable/review", 1, 3); // gone but touched a minute ago: a restart, not a departure
+    await mk("blip", "Grace/review", 1, 3); // gone but touched a minute ago: a restart, not a departure
     await mk("ancient", "Grok/build", 80 * 60, 4); // gone for days: pruned, never announced
     await mk("alive", "Codex", 30, process.pid); // still running
-    await mk("elsewhere", "Fable/build", 30, 5); // gone, but never touched this room: not this room's news
+    await mk("elsewhere", "Grace/build", 30, 5); // gone, but never touched this room: not this room's news
     // a session is announced in a room it was actually in: a saved position for the key, or a watch
     // armed on it. Without this a fresh room opens with obituaries for bearers it never met.
     for (const slug of ["quiet", "blip", "ancient", "alive"]) await writeCursor(sessionDir(dir, { slug, source: "x", explicit: true }), "r", "1");
@@ -414,9 +414,9 @@ test("departures: gone past the grace and within the stale horizon, not yet anno
     const boot = bootEpoch();
     let gone = await departures(dir, { selfSlug: "me", roomKey: "r", kill, boot });
     assert.deepEqual(gone.map((g) => g.slug), ["quiet"]);
-    assert.match(departureLine(gone[0].record, ["Fable/watch", "Codex"]), /^Opus\/design is no longer running \(last seen .*Z\)\. Requests addressed to it will not be answered; re-address them\. Still here on this seat: Fable\/watch, Codex\.$/);
+    assert.match(departureLine(gone[0].record, ["Grace/watch", "Codex"]), /^Opus\/design is no longer running \(last seen .*Z\)\. Requests addressed to it will not be answered; re-address them\. Still here on this seat: Grace\/watch, Codex\.$/);
     assert.match(departureLine(gone[0].record, []), /No other session is provably live/);
-    assert.match(departureLine(gone[0].record, ["Fable/watch"], ["Grok-4.6/general"]), /Still here on this seat: Fable\/watch\. Also registered here, liveness not provable from this process: Grok-4\.6\/general\./, "an unprobeable bearer is named, never dropped");
+    assert.match(departureLine(gone[0].record, ["Grace/watch"], ["Grok-4.6/general"]), /Still here on this seat: Grace\/watch\. Also registered here, liveness not provable from this process: Grok-4\.6\/general\./, "an unprobeable bearer is named, never dropped");
     assert.match(departureLine(gone[0].record, [], [{ bearer: "Grok-4.6/general", lastSeen: "2026-09-03T22:09:25.559Z" }]), /liveness not provable from this process: Grok-4\.6\/general \(last seen 2026-09-03T22:09:25Z\)\./, "an unprobeable bearer carries when it last wrote");
 
     assert.equal(await claimDeparture(gone[0].dir, "r", "me"), true, "first announcer wins");
@@ -440,15 +440,15 @@ test("departures: gone past the grace and within the stale horizon, not yet anno
 
 test("one sweep is one post: a roster naming every bearer that went dark, and no count", async () => {
   const rec = (/** @type {string} */ bearer, /** @type {string} */ lastSeen) => /** @type {any} */ ({ bearer, lastSeen, slug: bearer, source: "x", bootEpoch: 1, startedAt: lastSeen });
-  const one = departuresLine([rec("Opus/design", "2026-09-04T11:20:00.000Z")], ["Fable/watch"]);
+  const one = departuresLine([rec("Opus/design", "2026-09-04T11:20:00.000Z")], ["Grace/watch"]);
   assert.match(one, /^Opus\/design is no longer running \(last seen 2026-09-04T11:20:00Z\)\./, "one departure reads exactly as it always did");
   const many = departuresLine(
-    [rec("Fable/build", "2026-09-03T13:02:00.000Z"), rec("Fable/review", "2026-09-04T03:51:00.000Z"), rec("Opus/design", "2026-09-04T11:20:00.000Z")],
-    ["Fable/orchestrator"],
+    [rec("Grace/build", "2026-09-03T13:02:00.000Z"), rec("Grace/review", "2026-09-04T03:51:00.000Z"), rec("Opus/design", "2026-09-04T11:20:00.000Z")],
+    ["Grace/orchestrator"],
     [{ bearer: "Grok-4.6/general", lastSeen: "2026-09-04T11:00:00.000Z" }],
   );
-  assert.match(many, /^Fable\/build, Fable\/review and Opus\/design are no longer running \(last seen 2026-09-03T13:02:00Z, 2026-09-04T03:51:00Z, 2026-09-04T11:20:00Z, in that order\)\./);
-  assert.match(many, /Requests addressed to them will not be answered; re-address them\. Still here on this seat: Fable\/orchestrator\./);
+  assert.match(many, /^Grace\/build, Grace\/review and Opus\/design are no longer running \(last seen 2026-09-03T13:02:00Z, 2026-09-04T03:51:00Z, 2026-09-04T11:20:00Z, in that order\)\./);
+  assert.match(many, /Requests addressed to them will not be answered; re-address them\. Still here on this seat: Grace\/orchestrator\./);
   assert.match(many, /liveness not provable from this process: Grok-4\.6\/general \(last seen 2026-09-04T11:00:00Z\)/);
   assert.doesNotMatch(many, /\b3\b/, "bearers are named; no count is emitted");
 });
@@ -490,9 +490,9 @@ test("AGORA_SESSION set to a harness variable's raw value names the same session
 test("the identity line names bearer, session and their sources, and warns on a shared default with siblings", async () => {
   const { dir, cleanup } = await tmp();
   try {
-    const bearer = { name: "Fable/watch", source: "AGORA_ACTOR" };
+    const bearer = { name: "Grace/watch", source: "AGORA_ACTOR" };
     let line = await identityLine(bearer, { slug: "default", source: "default", explicit: false }, dir);
-    assert.equal(line, "agora: Fable/watch (from AGORA_ACTOR) · session default (from default)");
+    assert.equal(line, "agora: Grace/watch (from AGORA_ACTOR) · session default (from default)");
     await writeCursor(sessionDir(dir, { slug: "other", source: "AGORA_SESSION", explicit: true }), "r", "1");
     line = await identityLine(bearer, { slug: "default", source: "default", explicit: false }, dir);
     assert.match(line, /WARNING session key is "default" and 1 other session has state here/);

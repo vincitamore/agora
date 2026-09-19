@@ -71,15 +71,15 @@ async function until(probe, what, ms = 8000) {
 async function fixture(t) {
   const root = await mkdtemp(path.join(tmpdir(), "agora-cli-native-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const service = new NativeRoomService({ root, accountId: ACCOUNT, seatLabel: "admin-pc" });
+  const service = new NativeRoomService({ root, accountId: ACCOUNT, seatLabel: "seat-a" });
   await service.start();
   await service.createRoom({ roomId: ROOM, epoch: EPOCH });
   t.after(() => service.stop());
   const cfgPath = path.join(root, "agora.json");
   await writeFile(cfgPath, JSON.stringify({ actor: { name: "seat", kind: "agent" }, rooms: { nat: { transport: "native", roomId: ROOM } } }));
-  const fable = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "fable", AGORA_ACTOR: "Fable/watch" };
-  const sol = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "sol", AGORA_ACTOR: "Sol/codex" };
-  return { root, service, fable, sol, cursorFile: path.join(root, "sessions", "fable", "nat.cursor"), armedFile: path.join(root, "sessions", "fable", "armed", "nat.json") };
+  const grace = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "grace", AGORA_ACTOR: "Grace/watch" };
+  const sol = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "sol", AGORA_ACTOR: "Cal/codex" };
+  return { root, service, grace, sol, cursorFile: path.join(root, "sessions", "grace", "nat.cursor"), armedFile: path.join(root, "sessions", "grace", "armed", "nat.json") };
 }
 
 test("cli: join pages when its own DEFAULT batch is too large, and a smaller batch still works", { timeout: 180000 }, async (t) => {
@@ -95,20 +95,20 @@ test("cli: join pages when its own DEFAULT batch is too large, and a smaller bat
   /** Execute the literal first-page instruction, then its stated continuation until every omitted id returns.
    * @param {{ label: string, prior: boolean, prefix?: number[], rows: number[], expectRecoveryShrink?: boolean }} input */
   async function omittedCase({ label, prior, prefix = [], rows, expectRecoveryShrink = false }) {
-    const { service, fable, cursorFile } = await fixture(t);
+    const { service, grace, cursorFile } = await fixture(t);
     const store = await service.openRoom(ROOM);
     let anchor;
     if (prior) {
       anchor = await store.append({ operationId: randomUUID().replaceAll("-", ""), authorName: "anchor", text: "prior" },
         { accountId: ACCOUNT });
-      const positioned = await agora(["cursor", "nat", "--set", anchor.cursor], fable);
+      const positioned = await agora(["cursor", "nat", "--set", anchor.cursor], grace);
       assert.equal(positioned.code, 0, `${label}: ${positioned.stderr}`);
     }
     const afterPrior = [
       ...await appendSizes(store, prefix, "small"),
       ...await appendSizes(store, rows, "large"),
     ];
-    const joined = await agora(["join", "nat", "--as", "Opus/e2c", "--json"], fable);
+    const joined = await agora(["join", "nat", "--as", "Opus/e2c", "--json"], grace);
     assert.equal(joined.code, 0, `${label}: join did not shrink its oversized default batch: ${joined.stderr}`);
     const hint = /read --since (\S+) --limit (\d+) is the first recovery page/.exec(joined.stderr);
     assert.ok(hint, `${label}: omission report has no executable first page: ${joined.stderr}`);
@@ -125,7 +125,7 @@ test("cli: join pages when its own DEFAULT batch is too large, and a smaller bat
     let since = hint[1];
     const previewCursor = shown.at(-1).cursor;
     for (let page = 0; page < 30 && since !== previewCursor; page += 1) {
-      const recovered = await agora(["read", "nat", "--since", since, "--limit", hint[2], "--json"], fable);
+      const recovered = await agora(["read", "nat", "--since", since, "--limit", hint[2], "--json"], grace);
       assert.equal(recovered.code, 0, `${label}: emitted recovery page refused: ${recovered.stderr}`);
       const pageRows = typed(recovered.stdout);
       assert.ok(pageRows.length, `${label}: recovery stopped before reaching every omitted row`);
@@ -149,10 +149,10 @@ test("cli: join pages when its own DEFAULT batch is too large, and a smaller bat
     rows: [...Array(20).fill(256 * 1024), ...Array(10).fill(256)], expectRecoveryShrink: true });
 
   {
-    const { service, fable } = await fixture(t);
+    const { service, grace } = await fixture(t);
     const store = await service.openRoom(ROOM);
     await appendSizes(store, Array(20).fill(64 * 1024), "default-read");
-    const read = await agora(["read", "nat", "--json"], fable);
+    const read = await agora(["read", "nat", "--json"], grace);
     assert.equal(read.code, 0, `default native read did not use the host-sized retry: ${read.stderr}`);
     const returned = typed(read.stdout);
     assert.ok(returned.length > 0 && returned.length < 20, "default native read did not shrink its oversized page");
@@ -162,10 +162,10 @@ test("cli: join pages when its own DEFAULT batch is too large, and a smaller bat
 
   /** @param {string} label @param {number[]} sizes */
   async function fittingCase(label, sizes) {
-    const { service, fable, cursorFile } = await fixture(t);
+    const { service, grace, cursorFile } = await fixture(t);
     const store = await service.openRoom(ROOM);
     const rows = await appendSizes(store, sizes, label);
-    const joined = await agora(["join", "nat", "--as", "Opus/e2c", "--json"], fable);
+    const joined = await agora(["join", "nat", "--as", "Opus/e2c", "--json"], grace);
     assert.equal(joined.code, 0, `${label}: ${joined.stderr}`);
     assert.equal(typed(joined.stdout).length, 20, `${label}: a fitting default preview was shortened`);
     assert.doesNotMatch(joined.stderr, /older omitted|first recovery page/, `${label}: fitting preview emitted recovery`);
@@ -180,7 +180,7 @@ test("cli: join pages when its own DEFAULT batch is too large, and a smaller bat
 });
 
 test("cli: join asks for the batch it prints, so a room too large for one frame still joins", { timeout: 60000 }, async (t) => {
-  const { service, fable } = await fixture(t);
+  const { service, grace } = await fixture(t);
   // THE WIRE, not the ends. The service honouring a limit and join slicing for display were both
   // already covered, and reverting the line that PASSES the limit left every one of those green —
   // measured, on this cell's first draft. So the assertion has to be the CLI verb succeeding on a
@@ -194,29 +194,29 @@ test("cli: join asks for the batch it prints, so a room too large for one frame 
     bytes += size;
   }
 
-  const joined = await agora(["join", "nat", "--as", "Opus/e2c"], fable);
+  const joined = await agora(["join", "nat", "--as", "Opus/e2c"], grace);
   assert.equal(joined.code, 0, `join failed on a busy room: ${joined.stderr}`);
   assert.match(joined.stderr, /cursor set to/, "join did not set a cursor");
 
   // and cursor --now, which reads only to learn the newest position and refused for the same reason
-  const now = await agora(["cursor", "nat", "--now"], fable);
+  const now = await agora(["cursor", "nat", "--now"], grace);
   assert.equal(now.code, 0, `cursor --now failed on a busy room: ${now.stderr}`);
 });
 
 test("cli: a watch on a native room rides the seat service and prints the poller's lines", { timeout: 60000 }, async (t) => {
-  const { fable, sol, cursorFile } = await fixture(t);
-  let r = await agora(["post", "nat", "hello from Sol", "--json"], sol);
+  const { grace, sol, cursorFile } = await fixture(t);
+  let r = await agora(["post", "nat", "hello from Cal", "--json"], sol);
   assert.equal(r.code, 0, r.stderr);
   assert.equal(JSON.parse(r.stdout).cursor, `${EPOCH}:1`);
 
-  r = await agora(["watch", "nat", "--once", "--json"], fable);
+  r = await agora(["watch", "nat", "--once", "--json"], grace);
   assert.equal(r.code, 42, r.stderr);
-  assert.match(r.stderr, /subscribed to nat through the seat service \(admin-pc\)/);
+  assert.match(r.stderr, /subscribed to nat through the seat service \(seat-a\)/);
   const lines = typed(r.stdout);
   assert.equal(lines[0].type, "identity");
   const message = lines.find((l) => l.type === "message");
-  assert.equal(message.text, "hello from Sol\n\n-- Sol/codex");
-  assert.equal(message.signedAs, "Sol/codex");
+  assert.equal(message.text, "hello from Cal\n\n-- Cal/codex");
+  assert.equal(message.signedAs, "Cal/codex");
   assert.equal(message.cursor, `${EPOCH}:1`);
   assert.equal(message.author.id, ACCOUNT, "the host stamped the account; the bearer is the signature");
   const result = lines[lines.length - 1];
@@ -228,22 +228,22 @@ test("cli: a watch on a native room rides the seat service and prints the poller
   assert.equal(result.never_offered, undefined, "a room inside the window offers everything, and the line carries no field for it");
   assert.equal(JSON.parse(await readFile(cursorFile, "utf8")).cursor, `${EPOCH}:1`, "the same cursor file the poller writes");
 
-  r = await agora(["watch", "nat", "--once", "--json"], fable);
+  r = await agora(["watch", "nat", "--once", "--json"], grace);
   assert.equal(r.code, 0, "nothing new is 0, as on every transport");
   assert.equal(typed(r.stdout).at(-1).fired, false);
 
   // this session's own post is skipped by the ledger, and still advances the cursor
-  r = await agora(["post", "nat", "my own line"], fable);
+  r = await agora(["post", "nat", "my own line"], grace);
   assert.equal(r.code, 0, r.stderr);
-  r = await agora(["watch", "nat", "--once", "--json"], fable);
+  r = await agora(["watch", "nat", "--once", "--json"], grace);
   assert.equal(r.code, 0);
   assert.equal(typed(r.stdout).at(-1).skipped, 1);
   assert.equal(JSON.parse(await readFile(cursorFile, "utf8")).cursor, `${EPOCH}:2`);
 
   // --wake mine: plain talk is filtered, what names this bearer wakes
   await agora(["post", "nat", "plain talk"], sol);
-  await agora(["post", "nat", "for you", "--to", "Fable/watch"], sol);
-  r = await agora(["watch", "nat", "--once", "--json", "--wake", "mine"], fable);
+  await agora(["post", "nat", "for you", "--to", "Grace/watch"], sol);
+  r = await agora(["watch", "nat", "--once", "--json", "--wake", "mine"], grace);
   assert.equal(r.code, 42, r.stderr);
   assert.deepEqual(typed(r.stdout).filter((l) => l.type === "message").map((l) => l.text.split("\n")[0]), ["for you"]);
   assert.equal(typed(r.stdout).at(-1).filtered, 1);
@@ -251,9 +251,9 @@ test("cli: a watch on a native room rides the seat service and prints the poller
 });
 
 test("cli: a resident native watch is a live subscriber with its build, wakes on an event, and a dead service is exit 1 service-dark with the cursor untouched", { timeout: 60000 }, async (t) => {
-  const { service, fable, sol, cursorFile, armedFile } = await fixture(t);
-  await agora(["cursor", "nat", "--now"], fable);
-  const first = resident(["watch", "nat", "--json"], fable);
+  const { service, grace, sol, cursorFile, armedFile } = await fixture(t);
+  await agora(["cursor", "nat", "--now"], grace);
+  const first = resident(["watch", "nat", "--json"], grace);
   t.after(() => { if (first.child.exitCode === null) first.child.kill(); });
   await until(async () => { try { await readFile(armedFile); return true; } catch { return false; } }, "the armed record");
   const armed = JSON.parse(await readFile(armedFile, "utf8"));
@@ -262,9 +262,9 @@ test("cli: a resident native watch is a live subscriber with its build, wakes on
   assert.equal(armed.pid, first.child.pid);
   assert.equal(typeof armed.build?.version, "string", "the build field is written as for every watch");
 
-  const doctor = await agora(["doctor", "--json", "--offline"], fable);
+  const doctor = await agora(["doctor", "--json", "--offline"], grace);
   const rows = typed(doctor.stdout);
-  const subscriber = rows.find((l) => l.type === "subscriber" && l.session === "fable");
+  const subscriber = rows.find((l) => l.type === "subscriber" && l.session === "grace");
   assert.ok(subscriber, "doctor lists the native subscriber as a live watch");
   assert.equal(subscriber.room, "nat");
   assert.equal(subscriber.pid, first.child.pid);
@@ -289,7 +289,7 @@ test("cli: a resident native watch is a live subscriber with its build, wakes on
   assert.equal(cursorAfter, `${EPOCH}:1`);
   await until(async () => { try { await readFile(armedFile); return false; } catch { return true; } }, "the armed record to be removed");
 
-  const second = resident(["watch", "nat", "--json"], fable);
+  const second = resident(["watch", "nat", "--json"], grace);
   t.after(() => { if (second.child.exitCode === null) second.child.kill(); });
   await until(async () => { try { await readFile(armedFile); return true; } catch { return false; } }, "the second armed record");
   await service.stop();
@@ -303,7 +303,7 @@ test("cli: a resident native watch is a live subscriber with its build, wakes on
   assert.match(dark.stderr, /service-dark|dark/);
   assert.equal(JSON.parse(await readFile(cursorFile, "utf8")).cursor, cursorAfter, "no cursor movement on a dark service");
 
-  const absent = await agora(["watch", "nat", "--once", "--json"], fable);
+  const absent = await agora(["watch", "nat", "--once", "--json"], grace);
   assert.equal(absent.code, 1);
   const absentResult = typed(absent.stdout).at(-1);
   assert.equal(absentResult.type, "watch-result");

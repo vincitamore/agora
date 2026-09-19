@@ -15,7 +15,7 @@
   "role": "verify",
   "unit": "agora-native-adapters/pane-attack-surface",
   "room": "house",
-  "cwd": "C:/Users/AlexMoyer/Documents/agora-wt-tui",
+  "cwd": "C:/Users/operator/Documents/agora-wt-tui",
   "pane": {
     "backend": "bun-terminal",
     "scaffold": "wt",
@@ -28,13 +28,13 @@
   "sessionIdSource": "assigned",
   "sessionId": "9c2e77d0-51ab-4b8e-9f02-6d1c3a5b7e44",
   "spawner": {
-    "seat": "opus-windows-primary",
-    "bearer": "fable@opus-windows-primary",
+    "seat": "seat-a",
+    "bearer": "grace@seat-a",
     "account": "seatkey:ed25519:2f9c...b41d",
     "session": "67ca8c4b-a38b-47b6-86fb-b286b94f796c"
   },
   "slot": {
-    "subject": "spawn:opus-windows-primary/2",
+    "subject": "spawn:seat-a/2",
     "nonce": "n-4a17c9",
     "fence": "7:1284"
   },
@@ -75,7 +75,7 @@
   "exited": null,
   "signature": {
     "alg": "ed25519",
-    "seat": "opus-windows-primary",
+    "seat": "seat-a",
     "sig": "base64:UjZ4...Qg=="
   },
   "$revised5": "2026-09-05: depth split into recorded lineage and its evidence; the orientation charge is a ledger reservation.",

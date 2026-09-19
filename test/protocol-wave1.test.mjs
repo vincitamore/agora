@@ -17,12 +17,12 @@ const host = { scheme: /** @type {const} */ ('native'), authority: 'enrolled-sea
 const otherHost = { ...host, authority: 'enrolled-seat-B' };
 const service = { serviceId: 'service000000001', serviceBootId: 'boot000000000001' };
 const registration = { accountId, registrationId: 'registered000001', generation: 1 };
-const bearer = { ...registration, label: 'Astra/contracts', attestor: service };
+const bearer = { ...registration, label: 'Bruno/contracts', attestor: service };
 const digest = `sha256:${'c'.repeat(64)}`;
 const ts = '2026-09-05T12:00:00.000Z';
 const id = createHash('sha256').update(`${roomId}\0${accountId}\0${operationId}`).digest('hex');
 const receipt = { roomId, accountId, operationId, id, cursor: `${epoch}:1` };
-const message = { id, room: roomId, author: { id: accountId, name: 'Astra', kind: /** @type {const} */ ('agent') }, text: 'hello', ts, cursor: `${epoch}:1`,
+const message = { id, room: roomId, author: { id: accountId, name: 'Bruno', kind: /** @type {const} */ ('agent') }, text: 'hello', ts, cursor: `${epoch}:1`,
   account: { accountId, principal: host, attestor: service }, bearer };
 const legacyAttachment = { id: 'attachment000001', digest, name: 'x.txt', kind: /** @type {const} */ ('file'), size: 3 };
 const binding = { host, member: host, accountId, serviceBootId: service.serviceBootId, roomId, roomEpoch: epoch, membershipRevision: 2,

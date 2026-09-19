@@ -105,8 +105,8 @@ export function formatTrailers(entries) {
 }
 
 /**
- * Does this address name me? Bearers match by segment prefix, so `Fable` reaches `Fable/watch` and
- * `Fable/watch` reaches only itself; `Fab` reaches nothing. `*` is everyone. A platform mention
+ * Does this address name me? Bearers match by segment prefix, so `Grace` reaches `Grace/watch` and
+ * `Grace/watch` reaches only itself; `Gra` reaches nothing. `*` is everyone. A platform mention
  * token matches when its id is the seat's: the platform's own mechanism resolves to the bot user,
  * so it addresses the whole seat and cannot pick out one bearer, which is why bearer addressing is
  * textual at all.

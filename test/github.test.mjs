@@ -6,16 +6,16 @@ import { createTransport, tokenSource } from "../src/transports/index.mjs";
 import { fakeFetch } from "./helpers.mjs";
 
 const comments = [
-  { id: 10, created_at: "2026-09-03T05:00:00Z", updated_at: "2026-09-03T07:00:00Z", body: "old, edited later", user: { login: "bone", type: "User" }, html_url: "u10" },
-  { id: 11, created_at: "2026-09-03T06:00:00Z", updated_at: "2026-09-03T06:00:00Z", body: "candidate ready", user: { login: "bone", type: "User" }, html_url: "u11" },
-  { id: 12, created_at: "2026-09-03T06:00:00Z", updated_at: "2026-09-03T06:00:00Z", body: "fired\n\n-- Claude (house)", user: { login: "alex", type: "User" }, html_url: "u12" },
+  { id: 10, created_at: "2026-09-03T05:00:00Z", updated_at: "2026-09-03T07:00:00Z", body: "old, edited later", user: { login: "peer", type: "User" }, html_url: "u10" },
+  { id: 11, created_at: "2026-09-03T06:00:00Z", updated_at: "2026-09-03T06:00:00Z", body: "candidate ready", user: { login: "peer", type: "User" }, html_url: "u11" },
+  { id: 12, created_at: "2026-09-03T06:00:00Z", updated_at: "2026-09-03T06:00:00Z", body: "fired\n\n-- Claude (house)", user: { login: "operator", type: "User" }, html_url: "u12" },
   { id: 13, created_at: "2026-09-03T06:30:00Z", updated_at: "2026-09-03T06:30:00Z", body: "bot says", user: { login: "app[bot]", type: "Bot" }, html_url: "u13" },
 ];
 
 /** @param {{ etag?: string, cache?: any }} [opts] */
 function make(opts = {}) {
   const { fetch, calls } = fakeFetch([
-    ["/user", () => ({ body: { id: 7, login: "vincitamore" } })],
+    ["/user", () => ({ body: { id: 7, login: "operator" } })],
     ["/issues/3/comments", (url, init) => {
       if (opts.etag) {
         const sent = /** @type {any} */ (init?.headers ?? {})["if-none-match"];
@@ -24,13 +24,13 @@ function make(opts = {}) {
       }
       if (init?.method === "POST") {
         const body = JSON.parse(String(init.body));
-        return { status: 201, body: { id: 99, created_at: "2026-09-03T08:00:00Z", body: body.body, user: { login: "vincitamore", type: "User" }, html_url: "u99" } };
+        return { status: 201, body: { id: 99, created_at: "2026-09-03T08:00:00Z", body: body.body, user: { login: "operator", type: "User" }, html_url: "u99" } };
       }
       const since = url.searchParams.get("since");
       return { body: since ? comments.filter((c) => c.updated_at >= since) : comments };
     }],
   ]);
-  const t = githubTransport({ transport: "github", repo: "bonejohnson8/slopcannon", issue: 3 }, { token: "ghp_x", fetch, cache: opts.cache });
+  const t = githubTransport({ transport: "github", repo: "example-org/example-repo", issue: 3 }, { token: "ghp_x", fetch, cache: opts.cache });
   return { t, calls, fetch };
 }
 
@@ -54,7 +54,7 @@ test("github room reads ascending with cursors, kinds and signatures", async () 
   assert.equal(msgs[2].signedAs, "Claude (house)");
   assert.equal(msgs[2].author.kind, "human");
   assert.equal(msgs[3].author.kind, "agent");
-  assert.equal(msgs[0].room, "bonejohnson8/slopcannon#3");
+  assert.equal(msgs[0].room, "example-org/example-repo#3");
   assert.equal(calls[0].init?.headers && /** @type {any} */ (calls[0].init.headers).authorization, "Bearer ghp_x");
 });
 
@@ -93,7 +93,7 @@ test("github room posts a comment and refuses threads", async () => {
   assert.equal(JSON.parse(String(calls.at(-1)?.init?.body)).body, "hello");
   await assert.rejects(() => t.post("x", { thread: "1" }), /no threads/);
   await assert.rejects(() => t.read({ thread: "1" }), /no threads/);
-  assert.deepEqual(await t.whoami(), { id: "7", name: "vincitamore" });
+  assert.deepEqual(await t.whoami(), { id: "7", name: "operator" });
 });
 
 test("github room surfaces API errors with status and message", async () => {
@@ -144,14 +144,14 @@ test("tokenSource and createTransport name the same GITHUB_TOKEN", async () => {
 
 test("github face half: history is a bounded unconditional window on created_at, a call error carries the answered and sent facts, and the half reads a raw comment", async () => {
   const { fetch, calls } = fakeFetch([
-    ["/user", () => ({ body: { id: 7, login: "vincitamore" } })],
+    ["/user", () => ({ body: { id: 7, login: "operator" } })],
     ["/issues/3/comments", (url, init) => {
       if (init?.method === "POST") return { status: 422, body: { message: "Validation Failed" } };
       if (url.searchParams.get("page") === "2") return { status: 502, body: { message: "Bad Gateway" } };
       return { body: comments };
     }],
   ]);
-  const t = githubTransport({ transport: "github", repo: "bonejohnson8/slopcannon", issue: 3 }, { token: "ghp_x", fetch });
+  const t = githubTransport({ transport: "github", repo: "example-org/example-repo", issue: 3 }, { token: "ghp_x", fetch });
   const win = await t.history({ since: "2026-09-03T05:30:00.000Z", until: "2026-09-03T06:00:00.000Z" });
   assert.deepEqual(win.messages.map((c) => c.id), [11, 12], "the edited old comment (updated inside, created before) is out; the later one is past until");
   assert.equal(win.complete, true);
@@ -170,9 +170,9 @@ test("github face half: history is a bounded unconditional window on created_at,
   assert.equal(githubFaceHalf.textMax, GITHUB_COMMENT_MAX);
   assert.equal(githubFaceHalf.encode("a & <b>"), "a & <b>", "verbatim on the wire");
   assert.equal(githubFaceHalf.rider({ body: `<!-- agora_face:${"a".repeat(64)} --> origin=${"a".repeat(64)}` }), undefined, "no rider: the body is never parsed for one, whatever shape it quotes");
-  assert.equal(githubFaceHalf.ownAccount({ user: { id: 7, login: "vincitamore" } }, { id: "7", name: "vincitamore" }), true);
-  assert.equal(githubFaceHalf.ownAccount({ user: { id: 9, login: "other" } }, { id: "7", name: "vincitamore" }), false);
-  assert.equal(githubFaceHalf.ownAccount({}, { id: "7", name: "vincitamore" }), false);
+  assert.equal(githubFaceHalf.ownAccount({ user: { id: 7, login: "operator" } }, { id: "7", name: "operator" }), true);
+  assert.equal(githubFaceHalf.ownAccount({ user: { id: 9, login: "other" } }, { id: "7", name: "operator" }), false);
+  assert.equal(githubFaceHalf.ownAccount({}, { id: "7", name: "operator" }), false);
   assert.equal(githubFaceHalf.idOf({ id: 4242 }), "4242");
   assert.deepEqual(githubFaceHalf.window(Date.parse("2026-09-05T11:59:55.000Z"), Date.parse("2026-09-05T12:00:30.000Z")), { since: "2026-09-05T11:59:55.000Z", until: "2026-09-05T12:00:30.000Z" });
   assert.equal(githubFaceHalf.pictureLine({ digest: "sha256:ab" }, "image x.png (image/png, 1 bytes)"), "image x.png (image/png, 1 bytes) sha256:ab");

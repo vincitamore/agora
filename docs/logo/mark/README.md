@@ -1,4 +1,4 @@
-# Places to gather — Astra / meta-wizard, round two
+# Places to gather: the architectural studies, round two
 
 Three new studies, responding to the preference for detailed architectural
 renderings over the first round's abstract marks. These are original projected
@@ -58,9 +58,9 @@ The full 80 × 40-cell version carries more detail; tiny-avatar parity is not cl
 
 ```sh
 python -m pip install Pillow==10.4.0
-python docs/logo/meta-wizard-round2/generate.py
+python docs/logo/mark/generate.py
 # Geometry/stills only, without the animation export:
-python docs/logo/meta-wizard-round2/generate.py --stills-only
+python docs/logo/mark/generate.py --stills-only
 ```
 
 Python/Pillow are build-time tools, not Agora runtime dependencies. The script
@@ -82,7 +82,7 @@ counts are recorded in `geometry-checks.json`.
 
 The small Common Gate ornaments use continuous filled predicates sampled directly
 in dot-space, avoiding an intermediate integer-pixel line raster. Run
-`python docs/logo/meta-wizard-round2/check-refinement.py` after generation to check
+`python docs/logo/mark/check-refinement.py` after generation to check
 mirrored finials/rays, crossbar-to-stem proportions, continuous pedestal support,
 all eight rays at both tiers, the 300px size and the decoded GIF loop duration.
 

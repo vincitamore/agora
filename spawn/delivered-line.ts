@@ -20,7 +20,7 @@ export function renderDeliveredLine(env: DeliveredEnvelope): string {
   return `[agora] ${deliveryId} from ${seat}/${bearer} · ${room} · ${cursorRange.from}-${cursorRange.to} · read with agora read ${room} --since ${since}`;
 }
 
-/** `sol@opus-windows-primary` → `sol`. */
+/** `ada@seat-a` → `ada`. */
 export function bearerFromProvenance(from: string): string {
   const at = from.indexOf("@");
   return at === -1 ? from : from.slice(0, at);

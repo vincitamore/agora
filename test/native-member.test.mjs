@@ -30,7 +30,7 @@ const KEY = `nodekey:${"d".repeat(64)}`;
 const OTHER_KEY = `nodekey:${"e".repeat(64)}`;
 /** @param {string} root @param {Record<string, unknown>} [routeOptions] */
 async function enrolledService(root, routeOptions) {
-  return authorityFixtureService({ root, accountId: ACCOUNT, seatLabel: 'admin-pc', routeOptions },
+  return authorityFixtureService({ root, accountId: ACCOUNT, seatLabel: 'seat-a', routeOptions },
     [{ roomId: ROOM, publicNodeKeys: [KEY, OTHER_KEY] }]);
 }
 /** Keep the entire wire cell on the real client, challenge AND effect.
@@ -155,7 +155,7 @@ test("a proof minted under the LOCAL nonce does not validate on a member route",
 test("the member transcript carries the route, and never the seat's local identity", () => {
   const b = binding();
   const t = memberTranscript(b, { bootEpoch: "f".repeat(32), requestId: "r".repeat(32),
-    serverChallenge: "s".repeat(32), accountId: ACCOUNT, seatLabel: "admin-pc" });
+    serverChallenge: "s".repeat(32), accountId: ACCOUNT, seatLabel: "seat-a" });
   // The remote reads seatLabel and the host accountId from service.json, which it does not have.
   assert.ok(!("seatLabel" in t), "seatLabel entered a transcript the remote cannot reproduce");
   // tsc also refuses `t.accountId` outright, which is a stronger statement than this assertion:
