@@ -647,7 +647,10 @@ What a session's `carry` says still stands is the third kernel, and it is not ag
 list of `Assert`, `Allocate` and `Retract` entries, where a retraction must name the coordination
 step that made it), with `spec/SETTLEMENT-LAWS.bend` (a fact stands only through an exhibit; an
 exhibit settles its fact; nothing is unsettled without coordination; a retraction whose step omits
-the member who asserted the fact is inert; the asserter's step unsettles) and
+the member who asserted the fact is inert; the asserter's step unsettles; and eight that pin the
+helpers and reads those rest on: a fact is its id, membership is being listed, only an assertion is
+an exhibit, coordination-free is retracting nothing, entries are applied in order, the newest
+assertion names its asserter, the empty ledger settles nothing, other entries change nothing) and
 `spec/SETTLEMENT-PROOF.bend` carried beside it. Every assertion names its member, and `carry` is
 member 0 on both sides of its own ledger. `carry`'s room fold asserts each of the session's verdict posts as a fact and
 retracts it under the session's own step when a later post `withdraws:` it or answers it by `re:`;
