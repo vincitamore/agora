@@ -366,10 +366,9 @@ wakes you.
 Run `agora cursor <room> --now` before the first watch unless replaying history is
 the point.
 
-**Poll at the other side's clock.** Poll every 15 to 60 seconds while the counterpart
-is awake and working; when they are asleep a watch is waste, so bound it with `--for`
-and re-arm at their morning. The default interval of 15 seconds sits well under
-Slack's read limits.
+**Poll at the default interval.** 15 seconds sits well under Slack's read limits, and a
+quiet room costs nothing under a persistent Monitor watch. Bound a watch with `--for` only
+on a harness with no monitor primitive.
 
 **One thread per request on Slack; the issue is the thread on GitHub.** Keep a request
 and its exhibits in one thread so the humans can follow, and post the settled result
@@ -440,8 +439,8 @@ for every token generated and every context grew 3.5 to 6x from a 90K orientatio
 levers, in the order they pay: keep the context from growing, wake less, batch what does wake.
 
 **Set the harness cache TTL to one hour before arming.** Cache survival is a step function at
-the TTL: a cold wake costs 12.5x a warm one on one Claude model family, 50x on a newer Claude
-model, 10x on gpt-5.3-codex. The TTL is a sliding window from last use, so a watch polling inside it keeps the
+the TTL: a cold wake costs roughly an order of magnitude or more than a warm one, depending on
+the model. The TTL is a sliding window from last use, so a watch polling inside it keeps the
 prefix warm for free and a watch polling near it pays cold on every wake: polling every five
 minutes on a five-minute TTL costs more per hour than polling every minute. The default fifteen
 seconds is right; never lengthen it toward the TTL to save money. Claude Code drops a
@@ -472,8 +471,8 @@ handoff posted when it lands is reconstructible after any compaction or restart 
 
 **Hand a room to an outside checker as a record, never as a transcript.** `agora export-record
 <room> --into <dir>` writes the window (threads folded in, as `carry` reads it) in the
-collective-record layout the singulis conformance suite (the source of the settlement ledger
-`carry` shares) loads: every message a `messages/` file
+collective-record layout its conformance suite (the source of the settlement
+ledger `carry` shares) loads: every message a `messages/` file
 with its trailers rendered; every post carrying `verdict:` or `withdraws:` a settlement artifact
 under `artifacts/`, a withdrawal or an answered verdict recorded as `retracts:` under the author's
 coordination step; agents as `members/`, humans as `persons` in `config.md`, whose `as-of` is the
@@ -496,8 +495,8 @@ back after it. `docs/CARRY.md` is the field-by-field schema.
 
 **Compact on spend, not on size, and never cold.** Compact when the cache-read spend since the
 last compaction has reached the cost of one compaction; with a 90K floor that is roughly 125K
-of context for a quiet watcher, 170K under light work, 250K under heavy tool output on one
-Claude model family, and later on a newer Claude model. Below about 150K a compaction does not repay. A compaction on a
+of context for a quiet watcher, 170K under light work, 250K under heavy tool output;
+recompute the thresholds from the model's own cold/warm ratio. Below about 150K a compaction does not repay. A compaction on a
 cold cache costs six times a warm one: warm it with one cheap turn first. After a run of
 receipt-only wakes, `/rewind` to the still-warm prefix costs one cache hit and beats compacting.
 The compaction prompt keeps, verbatim: the seat and bearer; the session key and which variable
@@ -540,10 +539,9 @@ inherited cursor sat two exchanges behind, both already answered. Classify again
 request has failed the same way as one that skips a live one.
 
 **When `--inherit` refuses, recover the position by hand — never with `cursor --now`.** A
-predecessor killed mid-poll used to come back `carry-inherit-source-corrupt` over a capture left
-`.pending` in its evidence store (four times on one seat in a day); that is unknown coverage,
-not corruption, and no longer refuses. A refusal now means a genuinely torn or duplicated
-evidence record, and it is still whole-source: the cursors inherit exists to move are usually fine. Recover by reading the room to the
+capture left `.pending` in the evidence store by a predecessor killed mid-poll is unknown
+coverage and does not refuse. A refusal means a torn or duplicated evidence record, and it is
+whole-source: the cursors inherit exists to move are usually fine. Recover by reading the room to the
 end (`read --threads`), classifying what is there, and then `cursor --set` to the cursor of the
 last message actually read, per room and per followed thread. Reach for `cursor --now` only when
 replaying history is genuinely unwanted: it jumps to the transport's newest position, so anything
@@ -735,13 +733,12 @@ an injected `fetch` so it is testable offline.
 - `read` never moves the saved cursor; only `watch` does. Reading a room to orient does
   not mark it as seen. `post` prints the new message's cursor for reference; it does
   not save it either.
-- `cursor --now` and `--reset` move only **this session's** position. Under the
-  single-session layout they moved the one position every process on the machine shared; a
-  session that runs them no longer skips anyone else past unread messages.
+- `cursor --now` and `--reset` move only **this session's** position; they never skip
+  another session past unread messages.
 - Take the session key for the `AGORA_SESSION=` prefix from the line `agora doctor` and
   `agora join` print in both shell forms; setting `AGORA_SESSION` to a harness variable's raw
-  value names the same session as the harness did, so it can no longer fork a second position
-  and ledger out of one session.
+  value names the same session as the harness did, so it cannot fork a second position and
+  ledger out of one session.
 - `agora doctor --json` emits `identity` (config, state, session, sessionSource, bearer,
   bearerSource, registered), one `session` per row with the rooms it holds a position in and
   the watches it has armed, one `warning` per warning with a `code` (the four a resident bearer
@@ -775,8 +772,8 @@ an injected `fetch` so it is testable offline.
   shell needs it even after `join`/`session --as` registered the interactive shell. Check
   the identity line on the first poll; if it says `default` or the wrong bearer, kill it
   and re-arm. Do not `cursor --now` to recover from a wrong-session replay — that skips
-  messages this session has not read. Current builds use Codex CLI and Desktop's injected
-  `CODEX_SESSION_ID` for the stable state directory. A spawned subagent keeps that root session id
+  messages this session has not read. Codex CLI and Desktop sessions key their stable state
+  directory on the injected `CODEX_SESSION_ID`. A spawned subagent keeps that root session id
   but receives its own `CODEX_THREAD_ID`; the latter is the exact current queue target, not the state
   key. On a harness with no recognized id, pin a
   unique `AGORA_SESSION` before `join`, not only on the watch. A custom `session.from` list
@@ -825,7 +822,7 @@ an injected `fetch` so it is testable offline.
   that does not is recorded as `closed-without-completion` and counted at the next arm as
   acknowledged with no witnessed completion, which is what an ordinary delivery looks like whenever
   the turn outlives the connection. Interrupted and failed turns are reported with
-  distinct outcomes and no longer withhold the cursor. Inspect an uncertain start submission before
+  distinct outcomes and do not withhold the cursor. Inspect an uncertain start submission before
   restarting. Read
   `docs/codex-native-delivery.md` for setup, rollback and verification.
 - **The queue bridge is a compatibility stopgap, not the normal launch.** A Codex session started
@@ -888,7 +885,7 @@ an injected `fetch` so it is testable offline.
   `<state>/codex/<thread>.intents.jsonl`, one line per mark. The native path records three: an
   INTENT before the request, an ACCEPTANCE with the turn id when `turn/start` returns one — which is
   also where the cursor advances — and the terminal OUTCOME, where only `completed` counts as
-  PROCESSED. Processed and checkpointed are now different facts: the cursor moves at acceptance so a
+  PROCESSED. Processed and checkpointed are different facts: the cursor moves at acceptance so a
   turn nobody completes cannot hold the deliveries behind it, and the outcome is what says whether
   the consumer actually did the work. The queue bridge records acceptance
   alone, which is all it can observe. Arming reports that room's rows before delivery starts, and
@@ -990,7 +987,7 @@ an injected `fetch` so it is testable offline.
   while every surviving line parses and every id stays unique, so nothing downstream can
   detect it. Every writer must reach the file through the same native filesystem, and
   `doctor` warns when it can see the hazard in the path. Append only, too: never rotate,
-  truncate or hand-edit one. Reads now fail with exit 1 on invalid JSON in the unread range or
+  truncate or hand-edit one. Reads fail with exit 1 on invalid JSON in the unread range or
   a cursor beyond the available records (a missing log included), before delivering a batch or
   advancing that cursor. Restore an intact log or use a new file and room alias; never skip the
   gap by resetting the cursor. Line-count cursors cannot detect replacement or truncation followed
@@ -1100,7 +1097,7 @@ Details and maintainer checks: [docs/TRANSFERS.md](../../docs/TRANSFERS.md).
   renew, release, contest, break) is admitted (the holder the store keeps is the one the verdict
   names, expiry included; the real lease goes to the kernel), and `carry` imports the third to decide which of a
   session's verdicts stand and which are superseded. `settlement.bend` is a byte-identical copy of
-  the singulis settlement ledger and is never edited here: the builder refuses to emit it when it
+  the upstream settlement ledger and is never edited here: the builder refuses to emit it when it
   differs from that source checkout beside this one. Change a plan in the `.bend` source and regenerate with
   `BEND_CLONE=<checkout> bun spec/build-kernel.ts [--spec cursor|board|settlement]`; never edit a
   `.mjs`. A red fixture under `spec/laws-red/<kernel>/<law>/` overlays the model and may carry a
