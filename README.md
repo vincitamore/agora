@@ -631,10 +631,10 @@ dependencies; `src/native-store.mjs` imports it and never re-implements the plan
 
 The board's admission is the second kernel: `spec/board.bend` judges a claim, renew, release,
 contest or break against the live holder (an expired lease is no holder), and `spec/BOARD-LAWS.bend`
-states ten claims proved by `spec/BOARD-PROOF.bend` (one live holder per subject; an expired lease
+states fifteen claims proved by `spec/BOARD-PROOF.bend` (one live holder per subject; an expired lease
 is free; a free subject is fenced at the claim's own cursor; only the holder releases; a stranger is
 refused; a stale fence is refused; renew keeps the holder and extends the lease; break is a human
-verb that names what it drops, on a live holder; a break on an expired or absent holder is nothing to break; a refusal changes nothing). `src/native-board.kernel.mjs` is its
+verb that names what it drops, on a live holder; a break on an expired or absent holder is nothing to break; a refusal changes nothing; and five that pin the helpers those rest on, so a change to a helper cannot quietly change what the others mean: a holder is an account and a lease, the fence is the holder's own, a live lease is the holder unchanged, an expired or absent lease is no holder, an applied verdict's holder stands). `src/native-board.kernel.mjs` is its
 compiled form and `native-store.mjs` `#appendBoard` asks it whether an act is admitted, with the
 error messages unchanged. The lease the store's policy computes is the lease the kernel judges
 with, and the holder the store keeps is the one the verdict names: its expiry is the kernel's
