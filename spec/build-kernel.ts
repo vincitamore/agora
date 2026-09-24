@@ -67,7 +67,7 @@ for (const name of names) {
   const out = join(ROOT, k.out);
 
   // the gate: the checker's stdout must be exactly the green string
-  const gate = spawnSync("bun", [MAIN, proof], { encoding: "utf8", env: { ...process.env, BEND_HUB: "http://127.0.0.1:1" } });
+  const gate = spawnSync("bun", [MAIN, proof], { encoding: "utf8", env: { ...process.env, BEND_HUB: "http://127.0.0.1:1", BEND_NO_TELEMETRY: "1" } });
   const verdict = ((gate.stdout ?? "") + (gate.stderr ?? "")).trim();
   if (verdict !== "All terms check.") {
     console.error(`${k.proof} is not green:\n${verdict}`);

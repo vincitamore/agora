@@ -44,7 +44,7 @@ const KERNELS: Record<string, { source: string; laws: string; proof: string }> =
 
 function check(dir: string, proof: string): { out: string; green: boolean } {
   const file = join(dir, proof).replaceAll("\\", "/");
-  const p = spawnSync("bun", [MAIN, file], { encoding: "utf8", env: { ...process.env, BEND_HUB: "http://127.0.0.1:1" } });
+  const p = spawnSync("bun", [MAIN, file], { encoding: "utf8", env: { ...process.env, BEND_HUB: "http://127.0.0.1:1", BEND_NO_TELEMETRY: "1" } });
   const out = ((p.stdout ?? "") + (p.stderr ?? "")).trim();
   return { out, green: out === GREEN };
 }
@@ -52,7 +52,7 @@ function check(dir: string, proof: string): { out: string; green: boolean } {
 /** run a fixture's witness.bend (a pure main) and return the last line the checker printed */
 function witness(dir: string): string {
   const file = join(dir, "witness.bend").replaceAll("\\", "/");
-  const p = spawnSync("bun", [MAIN, file], { encoding: "utf8", env: { ...process.env, BEND_HUB: "http://127.0.0.1:1" } });
+  const p = spawnSync("bun", [MAIN, file], { encoding: "utf8", env: { ...process.env, BEND_HUB: "http://127.0.0.1:1", BEND_NO_TELEMETRY: "1" } });
   const out = ((p.stdout ?? "") + (p.stderr ?? "")).trim().split(/\r?\n/);
   return out[out.length - 1] ?? "";
 }
