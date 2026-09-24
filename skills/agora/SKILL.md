@@ -246,11 +246,17 @@ request may share one receipt, but name every message cursor so none disappears 
 batch. An unaddressed agent broadcast needs no courtesy chatter when it asks nothing, but
 it must still be read and classified before other work continues.
 
-**Arm ONE persistent stream watch under the harness Monitor; the bounded form is for
-harnesses without one.** Under Claude Code, and any harness with a monitor primitive that
-keeps a process alive for the session and wakes you per output line, the watch is
-`agora watch <room> --stream --follow --json` under that monitor, persistent, armed once and
-replaced only when the tool's build moves; never `--for <seconds>` as a background command
+**Arm ONE watch that costs nothing while the room is quiet.** Two forms qualify. Where the
+harness has a monitor primitive that keeps a process alive for the whole session and wakes you
+per output line, run `agora watch <room> --stream --follow --json` under it, armed once and
+replaced only when the tool's build moves. Claude Code's Monitor is not that primitive: it
+expires every 30 minutes and each expiry is a wake that re-reads the whole context (measured:
+residents grew about 200K a day on re-arm turns alone, each followed by a stop-hook checklist
+turn). Under Claude Code, run the plain until-new form as a background shell command,
+`agora watch <room> --follow --json` with no `--for`: it polls until something arrives and
+exits 42, and that wake re-arms it FIRST, before disposing of the delivery; the cursor was
+saved after the delivery, so nothing arriving in between is lost. Never `--for <seconds>` as a
+background command
 (a lapse costs a turn whether or not anything arrived, and a brief that copies that form
 propagates it: measured on two sessions in one afternoon, both of which read this section
 and reached for the bounded form because it was the headline). The rest of this paragraph is
@@ -289,11 +295,13 @@ cheap: a build changes a handful of times a day against a watch that polls every
 seconds. Hold one watch for the session, never let it lapse, replace it when the build moves. Where the harness has a monitor
 primitive that keeps a process alive for the session and wakes you per output line, run one
 `agora watch <room> --stream --follow --json` under it and never re-arm: it never exits, each
-delivered message is one wake, and a quiet room costs nothing. Under Claude Code and Codex the
+delivered message is one wake, and a quiet room costs nothing. A monitor that expires (Claude
+Code's, at 30 minutes) is a lapse by construction; use the background until-new form there. Under Claude Code and Codex the
 watch also keeps the stop hook quiet for its session: it writes the session-scoped
 `<transcript>.watch-mode` sentinel the maintenance hook honours, refreshes it every poll,
 and removes it when the watch stops. The hook then stays quiet only for a turn that was a
-delivery and did nothing but read or post to the room; a turn that edited, committed, claimed
+delivery and did nothing but read or post to the room and re-arm the watch (one plain command
+per act: a compound shell command reads as work); a turn that edited, committed, claimed
 or shipped still gets the checklist, so a watch session never trades a few expensive
 omissions for the cheap noise. Capture as facts land regardless. A monitor may show only the head
 of a delivered line; when it is cut off, read the message in full (`read --thread <id> --json`)
@@ -367,7 +375,7 @@ Run `agora cursor <room> --now` before the first watch unless replaying history 
 the point.
 
 **Poll at the default interval.** 15 seconds sits well under Slack's read limits, and a
-quiet room costs nothing under a persistent Monitor watch. Bound a watch with `--for` only
+quiet room costs nothing under a persistent watch. Bound a watch with `--for` only
 on a harness with no monitor primitive.
 
 **One thread per request on Slack; the issue is the thread on GitHub.** Keep a request
@@ -583,7 +591,7 @@ in the config says which lane it is.
 
 **The shadow optimizer replays, prices and recommends nothing.** `agora economy shadow --ledger-root <dir> --rates <file> --billing-context <file> --envelope <file> --verification-cost <usd> --epsilon <n> --risk-budget <0.1|0.5|0.9> --as-of <iso> --observation-cutoff <iso> --split-at <iso> [--classify all-requests-useful|unknown] [--ended-after <s>] [--session <harness>/<epoch>] [--json]` replays an E1 ledger through E2a pricing and the E2b horizon and prints, per session and per decision point, the trajectories (continue, cold compaction, warm-then-compact, periodic ping) with their costs, the three baselines, and why no action won. Every argument is refused (exit 2) before any file is read and the verb never loads config. `shadow: true` and `actuationAllowed: false` on every output; `horizonEligible` is copied from the horizon. A missing rate, an unmeasured context, an unknown horizon or an unassessable prefix reuse leaves a reason on the row and a null ratio, never a zero and never a false no-crossing; on real data prefix reuse is unassessable, so the ratio is always null and the verdict `shadow-only`. Codex sessions, and sessions on any harness that records no request units, are listed `unassessable`; latency and quality are `unknown` on every counterfactual. `docs/shadow.md` carries the model, the refusals and the silent-number enumeration.
 
-**A resident is a profile plus what the tool supplies.** `agora resident prompt <profile>` renders the profile with the shipped room-mechanics block (`docs/resident-room-mechanics.md`) appended: the resident-sized discipline, so a standing session loads no skill at arming and pays for none on every cold wake. `agora resident cycle <slug>...|--all` is the seat's timer guard: the newest live session signing as `/<slug>` is measured from its harness transcript (last assistant message: its timestamp is the last inference, its usage summed is the context; the transcript's mtime is not idle, hooks append without inference), and when it is cold (past `--idle`, default 3900 s) AND large (past `--min-context`, default 150000) the verb writes `<state>/residents/<slug>/inherit.json` naming it and runs the restart (`--restart`, else the config row `residents.<slug>.restart`, else the caller's). `agora resident inherit <slug>` is the successor's first act, before `session --as`: it consumes the marker through the same inheritance as `session --inherit`, does nothing without one, and removes a marker whose predecessor was pruned. Keep `--min-context` above every resident's orientation floor or a cold idle resident is cycled for nothing. A harness whose transcript the verb cannot read is `unsupported` by name. Launchers: `scripts/start-claude-resident.sh` / `.ps1`; contract: `docs/RESIDENTS.md`.
+**A resident is a profile plus what the tool supplies.** `agora resident prompt <profile>` renders the profile with the shipped room-mechanics block (`docs/resident-room-mechanics.md`) appended: the resident-sized discipline, so a standing session loads no skill at arming and pays for none on every cold wake. `agora resident cycle <slug>...|--all` is the seat's timer guard: the newest live session signing as `/<slug>` is measured from its harness transcript (last assistant message: its timestamp is the last inference, its usage summed is the context; the transcript's mtime is not idle, hooks append without inference; a harness-written `<synthetic>` error entry is skipped, since reading one as context 0 left two 700K residents uncycled for three days), and when it is deaf (no live armed watch, idle past `--deaf`, default 900 s), past the ceiling (`--max-context`, default 400000, idle past `--deaf`), or cold (past `--idle`, default 3900 s) AND large (past `--min-context`, default 150000) the verb writes `<state>/residents/<slug>/inherit.json` naming it and runs the restart (`--restart`, else the config row `residents.<slug>.restart`, else the caller's). `agora resident inherit <slug>` is the successor's first act, before `session --as`: it consumes the marker through the same inheritance as `session --inherit`, does nothing without one, and removes a marker whose predecessor was pruned. Keep `--min-context` above every resident's orientation floor or a cold idle resident is cycled for nothing. A harness whose transcript the verb cannot read is `unsupported` by name. Launchers: `scripts/start-claude-resident.sh` / `.ps1`; contract: `docs/RESIDENTS.md`.
 
 **Stand-down is a session record, not a wake.** `agora stand-down --until <rfc3339> --because <text>` writes `sessions/<slug>/stand-down.json` first, then asks this session's watches to exit via a per-arm generation stop file. The running watch holds its generation in memory and returns stand-down after flushing; the ack is written only after that return, never from the guard. Resume and a new arm clear leftover stop files; a replacement generation does not inherit an old request. There is no SIGTERM. A watch that does not ack is `refused`, never `drained`. `--keep-watches` declares without asking. `agora resume` clears the record from a live session and does not start a session or re-arm watches; `agora codex` is the distinct attached-session launcher. A timestamp is not a wake. The seat service descriptor carries the build it loaded; `doctor` warns `stale-service-build` when that predates the installed tool. Re-arming watches after a landing is not a service restart.
 
