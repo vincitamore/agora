@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  DEFAULT_IDLE_SECONDS, DEFAULT_MIN_CONTEXT, configuredResidents, cycleVerdict, inheritMarkerPath, measureClaudeTranscript,
+  DEFAULT_DEAF_SECONDS, DEFAULT_IDLE_SECONDS, DEFAULT_MAX_CONTEXT, DEFAULT_MIN_CONTEXT, configuredResidents, cycleVerdict, inheritMarkerPath, measureClaudeTranscript,
   readInheritMarker, renderResidentPrompt, restartCommand, transcriptFor, writeInheritMarker,
 } from "../src/resident.mjs";
 import { writeRecord } from "../src/session.mjs";
@@ -77,6 +77,48 @@ test("measureClaudeTranscript takes the newest assistant usage, never the traili
   assert.deepEqual(m, { lastInference: "2026-01-01T02:00:00.000Z", context: 200_503, uncached: 3, cacheRead: 200_000, cacheWrite: 500 });
   await writeFile(f, "{}\n");
   assert.equal(await measureClaudeTranscript(f), null);
+});
+
+test("measureClaudeTranscript skips harness-written error entries: a trailing 529 is not context 0", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "agora-resident-s-"));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const f = path.join(root, "t.jsonl");
+  const zero = { input_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 0 };
+  const synthetic = (/** @type {string} */ ts) => JSON.stringify({ type: "assistant", timestamp: ts, message: { model: "<synthetic>", role: "assistant", usage: zero } });
+  const zeroReal = JSON.stringify({ type: "assistant", timestamp: "2026-01-03T00:00:00.000Z", message: { model: "claude-x", role: "assistant", usage: zero } });
+  await writeFile(f, transcript([["2026-01-01T02:00:00.000Z", 2, 720_000, 400]]) + synthetic("2026-01-02T01:05:00.000Z") + "\n" + synthetic("2026-01-02T01:18:00.000Z") + "\n" + zeroReal + "\n");
+  const m = await measureClaudeTranscript(f);
+  assert.equal(m?.lastInference, "2026-01-01T02:00:00.000Z");
+  assert.equal(m?.context, 720_402);
+  await writeFile(f, synthetic("2026-01-02T01:05:00.000Z") + "\n");
+  assert.equal(await measureClaudeTranscript(f), null);
+});
+
+test("cycleVerdict: deaf (no live watch) and past-the-ceiling cycle whatever the warmth, never mid-turn", async () => {
+  const now = new Date("2026-01-02T00:00:00.000Z");
+  const rec = { slug: "claude-code-r1", state: "live", record: { bearer: "Model/r1", startedAt: "2026-01-01T00:00:00.000Z", source: "CLAUDE_CODE_SESSION_ID" } };
+  const at = (/** @type {number} */ secondsAgo) => new Date(now.getTime() - secondsAgo * 1000).toISOString();
+  const measured = (/** @type {number} */ ctx, /** @type {number} */ ago) => async () => ({ status: /** @type {const} */ ("measured"), lastInference: at(ago), context: ctx, file: "t" });
+  const base = { slug: "r1", now, sessions: [rec] };
+  // deaf: small and warm, but no live watch past the grace
+  let v = await cycleVerdict({ ...base, measure: measured(95_000, DEFAULT_DEAF_SECONDS + 60), watching: 0 });
+  assert.equal(v.action, "cycle"); assert.match(String(v.reason), /^deaf/);
+  // a watch-less resident still inside the grace is working, not deaf
+  v = await cycleVerdict({ ...base, measure: measured(95_000, 60), watching: 0 });
+  assert.equal(v.action, "none"); assert.match(String(v.reason), /warm or working/);
+  // watching unmeasured (older callers) never yields a deaf verdict
+  v = await cycleVerdict({ ...base, measure: measured(95_000, DEFAULT_DEAF_SECONDS + 60) });
+  assert.equal(v.action, "none");
+  // ceiling: warm but huge, between turns
+  v = await cycleVerdict({ ...base, measure: measured(DEFAULT_MAX_CONTEXT + 1, DEFAULT_DEAF_SECONDS + 60), watching: 2 });
+  assert.equal(v.action, "cycle"); assert.match(String(v.reason), /^ceiling/);
+  // huge but mid-turn is left alone
+  v = await cycleVerdict({ ...base, measure: measured(DEFAULT_MAX_CONTEXT + 1, 30), watching: 2 });
+  assert.equal(v.action, "none");
+  // watching and moderate: the cold-and-large rule is unchanged
+  v = await cycleVerdict({ ...base, measure: measured(200_000, DEFAULT_IDLE_SECONDS + 60), watching: 2 });
+  assert.equal(v.action, "cycle"); assert.match(String(v.reason), /^cold/);
+  assert.equal(/** @type {any} */ (v).watching, 2);
 });
 
 test("transcriptFor finds the harness transcript by session uuid and refuses other harnesses by name", async (t) => {
@@ -161,7 +203,13 @@ test("CLI: prompt appends the shipped block; cycle measures the seat, writes the
   assert.equal(existsSync(inheritMarkerPath(s.state, "r1")), false);
   assert.equal(existsSync(stamp), false);
 
-  const small = await agora(["resident", "cycle", "r1", "--min-context", "300000", "--json"], env);
+  // this seat's session arms no watch, so past the deaf grace it is deaf whatever its size
+  const deaf = await agora(["resident", "cycle", "r1", "--min-context", "300000", "--dry-run", "--json"], env);
+  assert.equal(deaf.code, 0);
+  assert.match(JSON.parse(deaf.stdout.trim()).reason, /^deaf/);
+  assert.equal(JSON.parse(deaf.stdout.trim()).watching, 0);
+
+  const small = await agora(["resident", "cycle", "r1", "--min-context", "300000", "--deaf", "999999999", "--json"], env);
   assert.equal(small.code, 0);
   assert.match(JSON.parse(small.stdout.trim()).reason, /small/);
   assert.equal(existsSync(inheritMarkerPath(s.state, "r1")), false);
