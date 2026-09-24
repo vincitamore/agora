@@ -42,18 +42,23 @@ const KERNELS: Record<string, { source: string; laws: string; proof: string }> =
   settlement: { source: "settlement.bend", laws: "SETTLEMENT-LAWS.bend", proof: "SETTLEMENT-PROOF.bend" },
 };
 
+// Green is decided on STDOUT alone: the checker writes its errors, and its once-a-day notice that
+// a newer Bend exists, to stderr, and merging the two let that notice redden a proof that had
+// checked (measured 2026-09-19 on the Linux runner). `out` keeps both streams because a red
+// fixture is read there for the law it fired at; only the verdict is stdout's.
 function check(dir: string, proof: string): { out: string; green: boolean } {
   const file = join(dir, proof).replaceAll("\\", "/");
-  const p = spawnSync("bun", [MAIN, file], { encoding: "utf8", env: { ...process.env, BEND_HUB: "http://127.0.0.1:1" } });
-  const out = ((p.stdout ?? "") + (p.stderr ?? "")).trim();
-  return { out, green: out === GREEN };
+  const p = spawnSync("bun", [MAIN, file], { encoding: "utf8", env: { ...process.env, BEND_HUB: "http://127.0.0.1:1", BEND_NO_TELEMETRY: "1" } });
+  const stdout = (p.stdout ?? "").trim();
+  const out = (stdout + "\n" + (p.stderr ?? "").trim()).trim();
+  return { out, green: stdout === GREEN };
 }
 
 /** run a fixture's witness.bend (a pure main) and return the last line the checker printed */
 function witness(dir: string): string {
   const file = join(dir, "witness.bend").replaceAll("\\", "/");
-  const p = spawnSync("bun", [MAIN, file], { encoding: "utf8", env: { ...process.env, BEND_HUB: "http://127.0.0.1:1" } });
-  const out = ((p.stdout ?? "") + (p.stderr ?? "")).trim().split(/\r?\n/);
+  const p = spawnSync("bun", [MAIN, file], { encoding: "utf8", env: { ...process.env, BEND_HUB: "http://127.0.0.1:1", BEND_NO_TELEMETRY: "1" } });
+  const out = (p.stdout ?? "").trim().split(/\r?\n/);
   return out[out.length - 1] ?? "";
 }
 

@@ -1104,7 +1104,10 @@ Details and maintainer checks: [docs/TRANSFERS.md](../../docs/TRANSFERS.md).
   `witness.bend`, a pure `main` evaluating the law on concrete values; with one present the gate
   requires the proof red anywhere and the witness `True{}` beside the mutation, `False{}` beside the
   real model (the settlement fixtures ship witnesses: its proof terms spell the model's shape).
-  The checkout is pinned by `spec/bend.pin.json` and fetched by `node
+  The gates run the checker with `BEND_HUB` pointed at a dead address and `BEND_NO_TELEMETRY=1`,
+  and read the verdict from stdout alone: the checker's errors and its once-a-day update notice go
+  to stderr, and a verdict taken from both streams reddens a proof that checked. The checkout is
+  pinned by `spec/bend.pin.json` and fetched by `node
   scripts/bend-checkout.mjs` (upstream by sha; a mirror named by `BEND_MIRROR` is tried first
   when set, and the tree names none); the builder and the laws gate refuse any other commit, and
   CI runs both on every push. `spec/settlement.origin.json` pins the origin digest of the vendored
