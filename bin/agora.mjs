@@ -97,7 +97,7 @@ import { runUsage } from "../src/usage-cli.mjs";
 import { runUsageSessionsCli } from "../src/session-accounting.mjs";
 import { readShadowArgs, runEconomyShadowCli, ShadowInputError } from "../src/economy/shadow.mjs";
 import { clearStandDown, clearWatchStop, completeStandDownAck, declareStandDown, listStandDowns, standDownRequested } from "../src/stand-down.mjs";
-import { DEFAULT_IDLE_SECONDS, DEFAULT_MIN_CONTEXT, ROOM_MECHANICS_DOC, assertResidentSlug, configuredResidents, planCycle, readInheritMarker, removeInheritMarker, renderResidentPrompt, restartCommand, writeInheritMarker } from "../src/resident.mjs";
+import { DEFAULT_DEAF_SECONDS, DEFAULT_IDLE_SECONDS, DEFAULT_MAX_CONTEXT, DEFAULT_MIN_CONTEXT, ROOM_MECHANICS_DOC, assertResidentSlug, configuredResidents, planCycle, readInheritMarker, removeInheritMarker, renderResidentPrompt, restartCommand, writeInheritMarker } from "../src/resident.mjs";
 import { FACE_ATTACHMENT_MODES, FACE_BUILT, FACE_SELECTORS, appendFaceRecord, facePolicyPath, listFaceRecords, normalizeSelectors, readFacePolicy, selectFaces, writeFacePolicy } from "../src/faces.mjs";
 
 /**
@@ -351,10 +351,12 @@ const SCHEMA = {
         "--dry-run": "cycle: print the verdicts, write no marker, restart nothing",
         "--idle <seconds>": `cycle: the last inference must be older than this (default ${DEFAULT_IDLE_SECONDS}: a one-hour prompt-cache TTL plus a margin)`,
         "--min-context <tokens>": `cycle: the context must be at least this (default ${DEFAULT_MIN_CONTEXT}); keep it above every resident's orientation floor`,
+        "--max-context <tokens>": `cycle: past this, cycle even while warm, once idle past --deaf (default ${DEFAULT_MAX_CONTEXT}): every wake re-reads the whole context`,
+        "--deaf <seconds>": `cycle: a resident with no live watch and no inference for this long is deaf and is cycled whatever its size (default ${DEFAULT_DEAF_SECONDS}); also the between-turns grace for --max-context`,
         "--restart <command>": "cycle: run this after writing the marker ({slug} is the resident); else the config row's restart; else the restart is the caller's",
         "--force": "inherit: take the predecessor's position in a room this session already read",
       },
-      does: "standing sessions. prompt prints a profile with the shipped room-mechanics block appended (the resident-sized discipline, so no skill loads at arming). cycle finds the newest live session signing as /<slug>, measures its last inference and context from the harness transcript, and when it is cold (past --idle) AND large (past --min-context) writes <state>/residents/<slug>/inherit.json naming it and restarts the unit: a successor pays its floor, a cold wake pays the whole context. inherit consumes that marker (the same inheritance as session --inherit) and is a no-op without one. Never writes the shared config; docs/RESIDENTS.md",
+      does: "standing sessions. prompt prints a profile with the shipped room-mechanics block appended (the resident-sized discipline, so no skill loads at arming). cycle finds the newest live session signing as /<slug>, measures its last real inference and context from the harness transcript (harness-written error entries are skipped), and when it is deaf (no live watch, idle past --deaf), past the ceiling (--max-context, idle past --deaf), or cold (past --idle) AND large (past --min-context) writes <state>/residents/<slug>/inherit.json naming it and restarts the unit: a successor pays its floor, a cold wake pays the whole context. inherit consumes that marker (the same inheritance as session --inherit) and is a no-op without one. Never writes the shared config; docs/RESIDENTS.md",
     },
     doctor: { args: [], options: { "--offline": "skip the identity check", "--repair-tailcat": "restore the cached runtime from its hash-verified bundled capsule" }, does: "config, token presence per room, identity per room, this session and bearer and where each came from, the harness prompt-cache TTL where this seat can read one, and the reads a minute this seat spends with the arithmetic behind the number; three preflights for a resident bearer warn when a watch is armed against a five-minute TTL (cache-ttl), when a watch polls within half to one and a half times a TTL that was read (interval-near-ttl), and when no live watch in a room wakes on all (no-all-watch). Room and watch reports are derived. Tailcat integrity is verified locally; first use expands the bundled capsule into state, and --repair-tailcat explicitly restores a corrupt cache" },
     schema: { args: [], options: { "--json": "the whole surface as JSON, protocol included" }, does: "this description" },
@@ -479,6 +481,8 @@ const OPTIONS = /** @type {const} */ ({
   force: { type: "boolean", default: false },
   idle: { type: "string" },
   "min-context": { type: "string" },
+  "max-context": { type: "string" },
+  deaf: { type: "string" },
   restart: { type: "string" },
   face: { type: "string", multiple: true },
   "no-face": { type: "boolean", default: false },
@@ -1424,10 +1428,12 @@ async function main(argv) {
       };
       const idleSeconds = num("idle", DEFAULT_IDLE_SECONDS);
       const minContext = num("min-context", DEFAULT_MIN_CONTEXT);
+      const maxContext = num("max-context", DEFAULT_MAX_CONTEXT);
+      const deafSeconds = num("deaf", DEFAULT_DEAF_SECONDS);
       /** @type {number} */
       let rc = EXIT.ok;
       for (const slug of slugs) {
-        const row = /** @type {any} */ (await planCycle(stateRoot, slug, { idleSeconds, minContext }));
+        const row = /** @type {any} */ (await planCycle(stateRoot, slug, { idleSeconds, minContext, maxContext, deafSeconds }));
         if (row.action === "cycle") {
           if (values["dry-run"]) row.action = "would-cycle";
           else {
@@ -2693,7 +2699,11 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       } finally {
         subscription?.close();
         await removeArmed(sdir, key); // a thrown delivery must not leave the key registered
-        await clearWatchMode(watchMode).catch(() => undefined);
+        // An until-new watch that exits because it DELIVERED is about to be re-armed by the turn it
+        // woke; clearing the sentinel here raced that re-arm and let the stop hook nag the delivery
+        // turn. Leave it; the re-arm refreshes it and the hook's 12 h staleness bounds a forgotten one.
+        const deliveredForReArm = mode === "until-new" && result?.fired && !result?.reason;
+        if (!deliveredForReArm) await clearWatchMode(watchMode).catch(() => undefined);
       }
       }
       // 42 means a watch delivered, in every mode: the schema and the design's contract line both

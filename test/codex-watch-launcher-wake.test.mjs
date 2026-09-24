@@ -89,7 +89,7 @@ setInterval(() => {}, 1_000);
     assert.ok(receipt.watcherPid > 0, `${room}: the watch published its armed receipt`);
     /** @type {string[]} */
     const argv = JSON.parse(await readFile(argvFile, "utf8"));
-    await runFile(command, stopArgs(room), { env: environment, timeout: 10_000 });
+    await runFile(command, stopArgs(room), { env: environment, timeout: 30_000 });
     return argv;
   };
 

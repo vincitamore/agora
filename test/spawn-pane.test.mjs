@@ -131,11 +131,18 @@ setInterval(() => {}, 1000);
   assert.equal(paneAlive(panePid), true);
   if (typeof parentPid !== "number") throw new Error("parent pid missing");
   if (process.platform === "win32") {
-    spawn("taskkill", ["/PID", String(parentPid), "/F"], { stdio: "ignore", windowsHide: true });
+    // Await taskkill: under a loaded full-suite run it can take seconds to start, and an
+    // unawaited kill spent the whole liveness window before the parent was even gone.
+    await new Promise((resolve) => {
+      const k = spawn("taskkill", ["/PID", String(parentPid), "/F"], { stdio: "ignore", windowsHide: true });
+      k.once("exit", resolve);
+      k.once("error", resolve);
+    });
   } else {
     process.kill(parentPid, "SIGKILL");
   }
-  const deadline = Date.now() + 2000;
+  // The pane polls its parent every 250 ms; the window is that plus scheduling slack under load.
+  const deadline = Date.now() + 5000;
   while (Date.now() < deadline && paneAlive(panePid)) await new Promise((r) => setTimeout(r, 50));
   assert.equal(paneAlive(panePid), false);
 });

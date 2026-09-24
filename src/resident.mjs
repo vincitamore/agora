@@ -23,11 +23,13 @@ import { homedir } from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { AgoraError, EXIT, writeFileAtomic } from "./core.mjs";
-import { listRecords } from "./session.mjs";
+import { armedAlive, listArmed, listRecords } from "./session.mjs";
 
 export const RESIDENT_SLUG_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 export const DEFAULT_IDLE_SECONDS = 3900; // a one-hour prompt-cache TTL plus a margin
 export const DEFAULT_MIN_CONTEXT = 150_000;
+export const DEFAULT_MAX_CONTEXT = 400_000; // past this, cycle even warm, between turns
+export const DEFAULT_DEAF_SECONDS = 900; // no live watch and no inference for this long: deaf
 export const ROOM_MECHANICS_DOC = "docs/resident-room-mechanics.md";
 
 /** @param {string} slug */
@@ -98,8 +100,13 @@ export async function measureClaudeTranscript(file) {
     if (o?.type !== "assistant" || typeof o.timestamp !== "string") continue;
     const u = o.message?.usage;
     if (!u || typeof u !== "object") continue;
+    // A harness-written entry is not an inference: Claude Code logs an API error (529, spend limit)
+    // as model "<synthetic>" with all-zero usage. Taking it as the newest reading measured two
+    // 700K residents as context 0 for three days, so the guard called them small and never cycled.
+    if (o.message?.model === "<synthetic>") continue;
     const n = (/** @type {unknown} */ v) => (Number.isSafeInteger(v) && /** @type {number} */ (v) >= 0 ? /** @type {number} */ (v) : 0);
     const uncached = n(u.input_tokens), cacheRead = n(u.cache_read_input_tokens), cacheWrite = n(u.cache_creation_input_tokens);
+    if (uncached + cacheRead + cacheWrite + n(u.output_tokens) === 0) continue;
     last = { lastInference: o.timestamp, context: uncached + cacheRead + cacheWrite, uncached, cacheRead, cacheWrite };
   }
   return last;
@@ -115,8 +122,11 @@ export async function measureClaudeTranscript(file) {
  * @param {Date} [a.now]
  * @param {number} [a.idleSeconds]
  * @param {number} [a.minContext]
+ * @param {number} [a.maxContext] cycle past this even warm, once idle past `deafSeconds`
+ * @param {number} [a.deafSeconds] the grace a resident with no live watch gets before it is deaf
+ * @param {number} [a.watching] live watches the session holds; absent = not measured, no deaf verdict
  */
-export async function cycleVerdict({ slug, sessions, measure, now = new Date(), idleSeconds = DEFAULT_IDLE_SECONDS, minContext = DEFAULT_MIN_CONTEXT }) {
+export async function cycleVerdict({ slug, sessions, measure, now = new Date(), idleSeconds = DEFAULT_IDLE_SECONDS, minContext = DEFAULT_MIN_CONTEXT, maxContext = DEFAULT_MAX_CONTEXT, deafSeconds = DEFAULT_DEAF_SECONDS, watching }) {
   assertResidentSlug(slug);
   const live = sessions.filter((s) => s.state === "live" && s.record && typeof s.record.bearer === "string" && s.record.bearer.endsWith("/" + slug));
   /** @type {Record<string, unknown>} */
@@ -131,6 +141,13 @@ export async function cycleVerdict({ slug, sessions, measure, now = new Date(), 
   const idle = Math.floor((now.getTime() - new Date(m.lastInference).getTime()) / 1000);
   Object.assign(row, { lastInference: m.lastInference, idleSeconds: idle, context: m.context, transcript: m.file });
   if (!Number.isFinite(idle)) return { ...row, action: "none", reason: "the last inference carries no readable timestamp" };
+  if (typeof watching === "number") row.watching = watching;
+  // Deaf: no live watch and not working. A resident whose watches died (an API error on the turn
+  // that should have re-armed them) never wakes again, so size and warmth are beside the point.
+  if (watching === 0 && idle >= deafSeconds) return { ...row, action: "cycle", reason: `deaf: no live watch and idle ${idle}s >= ${deafSeconds}s` };
+  // Ceiling: every wake re-reads the whole context, so past this a successor at the orientation
+  // floor is cheaper even warm. Only between turns (idle past the deaf grace), never mid-work.
+  if (m.context >= maxContext && idle >= deafSeconds) return { ...row, action: "cycle", reason: `ceiling: context ${m.context} >= ${maxContext} and idle ${idle}s >= ${deafSeconds}s` };
   if (idle < idleSeconds) return { ...row, action: "none", reason: `warm or working: idle ${idle}s < ${idleSeconds}s` };
   if (m.context < minContext) return { ...row, action: "none", reason: `small: context ${m.context} < ${minContext}` };
   return { ...row, action: "cycle", reason: `cold ${idle}s and context ${m.context} >= ${minContext}` };
@@ -151,11 +168,17 @@ export function transcriptMeasure(deps = {}) {
 /**
  * Plan one resident's cycle against the seat's live records.
  * @param {string} stateRoot @param {string} slug
- * @param {{ now?: Date, idleSeconds?: number, minContext?: number, home?: string, kill?: (pid: number, sig: 0) => void, boot?: number }} [opts]
+ * @param {{ now?: Date, idleSeconds?: number, minContext?: number, maxContext?: number, deafSeconds?: number, home?: string, kill?: (pid: number, sig: 0) => void, boot?: number }} [opts]
  */
 export async function planCycle(stateRoot, slug, opts = {}) {
-  const sessions = await listRecords(stateRoot, { kill: opts.kill, boot: opts.boot });
-  return cycleVerdict({ slug, sessions, measure: transcriptMeasure({ home: opts.home }), now: opts.now, idleSeconds: opts.idleSeconds, minContext: opts.minContext });
+  const deps = { kill: opts.kill, boot: opts.boot };
+  const sessions = await listRecords(stateRoot, deps);
+  const armed = await listArmed(stateRoot);
+  // The live watches of the session the verdict will measure (the newest live one for this slug).
+  const live = sessions.filter((s) => s.state === "live" && s.record?.bearer?.endsWith("/" + slug));
+  live.sort((a, b) => String(b.record?.startedAt ?? "").localeCompare(String(a.record?.startedAt ?? "")));
+  const watching = live.length ? armed.filter((a) => a.slug === live[0].slug && armedAlive(a.armed, deps)).length : undefined;
+  return cycleVerdict({ slug, sessions, measure: transcriptMeasure({ home: opts.home }), now: opts.now, idleSeconds: opts.idleSeconds, minContext: opts.minContext, maxContext: opts.maxContext, deafSeconds: opts.deafSeconds, watching });
 }
 
 /**

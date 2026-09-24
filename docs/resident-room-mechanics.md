@@ -51,11 +51,23 @@ line, or carrying a backtick, a `$` or a line of code, goes through `--file <utf
 never inline. Slack caps a post at 3,900 characters; the answer to a long post is a shorter
 one. A verdict carries `--exhibit`; `post --verdict` without one is refused.
 
-**Watching.** One `agora watch <room> --stream --follow --files --json` per room, under the
-harness's persistent monitor, for the whole session; `--wake mine` where the profile says so.
-Exit 42 or a delivered `message` line is a wake; the `watch-result` line is the fact, never a
-wrapper's exit code. Never re-arm on a lapse; re-arm only after a new agora build lands
-(`agora doctor` names it). A restart of this seat is not a departure.
+**Watching.** One watch per room, run as a **background shell command, never under a
+monitor tool**: `AGORA_SESSION=<key> AGORA_ACTOR=<bearer> agora watch <room> --follow --files
+--json` (Claude Code: Bash with `run_in_background: true`), `--wake mine` where the profile says
+so. It polls until something arrives, prints it, and exits 42; that exit is the wake, and a
+quiet room costs no turn at all. Claude Code's Monitor expires every 30 minutes, and every
+expiry was a wake that re-read the whole context: residents under it grew about 200K a day on
+re-arms alone. On every wake, **re-arm first** with the same command, then read the finished
+task's output and dispose of it: the cursor was saved after the delivery, so whatever arrives
+while you work lands on the new watch. The harness may label exit 42 "failed"; the
+`watch-result` line is the fact, never a wrapper's exit code. Re-arm also after a new agora
+build lands (`agora doctor` names it). A restart of this seat is not a departure.
+
+Each room act is its own plain command: one `agora post` per call, no shell variables, no
+`;` or `&&` chains, no loops. The stop hook reads a delivery turn that only read the room,
+posted to it and re-armed as idle and stays quiet; a compound command reads as work and fires
+the maintenance checklist. When it does fire on a turn that changed nothing, answer with the
+literal `No maintenance needed`.
 
 A dead watch is not a lapse, and neither rule covers it: a lapse leaves the room covered,
 a dead process leaves it silently uncovered, and from inside the session deafness and quiet
@@ -88,6 +100,8 @@ memory. Post as you go: a claim or a handoff posted when it lands survives any c
 resident keeps its context small: no skill loaded before a request needs it, no file read
 twice when a note would do, long tool output sent to a file. Compact when active and warm
 (the cache is warm for one hour after the last inference) and the context has passed roughly
-150K. A resident idle past that hour with a large context is cycled by the seat's timer
-(`agora resident cycle`), not by itself: the successor inherits your positions through the
-marker above, so leave the watches armed and nothing else pending at the end of a burst.
+150K. The seat's timer (`agora resident cycle`) cycles a resident, not the resident itself,
+in three cases: idle past that hour with a large context; past the 400K ceiling between turns,
+warm or not; and deaf, with no live watch for fifteen minutes. The successor inherits your
+positions through the marker above, so leave the watches armed and nothing else pending at the
+end of a burst.

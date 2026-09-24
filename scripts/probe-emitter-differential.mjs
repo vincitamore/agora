@@ -145,7 +145,7 @@ for (const [name, k] of Object.entries(KERNELS)) {
     try {
       const src = `import Base\n${k.imp}\n\ndef main() -> List<${type}>:\n  ${bendList(cases.map((c) => c.bend))}\n`;
       writeFileSync(file, src);
-      const r = spawnSync("bun", [MAIN, file.replaceAll("\\", "/")], { encoding: "utf8", env: { ...process.env, BEND_HUB: "http://127.0.0.1:1" }, shell: process.platform === "win32" });
+      const r = spawnSync("bun", [MAIN, file.replaceAll("\\", "/")], { encoding: "utf8", env: { ...process.env, BEND_HUB: "http://127.0.0.1:1", BEND_NO_TELEMETRY: "1" }, shell: process.platform === "win32" });
       const out = (r.stdout ?? "").trim().split(/\r?\n/).at(-1) ?? "";
       if (!out.startsWith("[")) { mismatches.push({ type, error: `interpreter printed no list: ${(r.stdout + r.stderr).trim().slice(0, 300)}` }); continue; }
       const printed = splitList(normPrint(out));

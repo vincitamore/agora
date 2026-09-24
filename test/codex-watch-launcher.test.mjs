@@ -16,7 +16,7 @@ const powershellLauncher = path.join(repoRoot, "scripts", "start-codex-watch.ps1
 
 test("Codex launcher waits beyond the old ten-second clock for the subscribed armed receipt", {
   skip: process.platform === "darwin" ? "the launchd lifecycle has its own opt-in integration cell" : false,
-  timeout: 30_000,
+  timeout: 90_000, // the fixture alone crosses 10 s by design; arm, stop and the timeout path each start a cold pwsh
 }, async (t) => {
   const fixture = await tmp();
   const state = path.join(fixture.dir, "state");
@@ -104,7 +104,7 @@ setInterval(() => {}, 1_000);
       "-ConfigPath", config, "-StateRoot", state, "-Stop"]
     : ["--room", room, "--session-id", session, "--thread-id", session,
       "--config", config, "--state", state, "--stop"];
-  await runFile(command, stopArgs, { env: environment, timeout: 10_000 });
+  await runFile(command, stopArgs, { env: environment, timeout: 30_000 });
 
   // Assert the reported seconds bind elapsed time, not a count of probes. On
   // POSIX, a deliberately slow sed makes the retired probe-count loop exceed
@@ -169,7 +169,7 @@ test("Codex POSIX launcher gives macOS to launchd without weakening Linux detach
 
 test("watch launcher recovers the managed server after Codex filters the TUI environment", {
   skip: process.platform === "darwin" ? "covered by the opt-in launchd lifecycle on macOS" : false,
-  timeout: 30_000,
+  timeout: 90_000,
 }, async (t) => {
   const fixture = await tmp();
   const state = path.join(fixture.dir, "state");
@@ -237,7 +237,7 @@ process.on("SIGTERM", stop); process.on("SIGINT", stop); setInterval(() => {}, 1
       "-ThreadId", session, "-ConfigPath", config, "-StateRoot", state, "-Stop"]
     : ["--room", room, "--session-id", session, "--thread-id", session, "--config", config, "--state", state, "--stop"];
   t.after(async () => {
-    await runFile(command, stopArgs, { env: environment, timeout: 10_000 }).catch(() => {});
+    await runFile(command, stopArgs, { env: environment, timeout: 30_000 }).catch(() => {});
     await fixture.cleanup();
   });
 
@@ -295,7 +295,7 @@ test("managed Codex launchers refuse legacy queue fallback when the attachment i
     CODEX_THREAD_ID: session,
   };
 
-  await assert.rejects(runFile(command, args, { env: environment, timeout: 10_000 }), (/** @type {any} */ error) => {
+  await assert.rejects(runFile(command, args, { env: environment, timeout: 30_000 }), (/** @type {any} */ error) => {
     assert.equal(error.code, 1);
     assert.match(error.stderr, /session is managed[\s\S]*refusing legacy queue fallback/i);
     return true;
@@ -442,7 +442,7 @@ setInterval(() => {}, 1_000);
 
   t.after(async () => {
     for (const cleanupRoom of [room, bridgeRoom]) {
-      await runFile(launcher, ["--room", cleanupRoom, "--state", state, "--stop"], { env: environment, timeout: 10_000 }).catch(() => {});
+      await runFile(launcher, ["--room", cleanupRoom, "--state", state, "--stop"], { env: environment, timeout: 30_000 }).catch(() => {});
     }
     await fixture.cleanup();
   });
@@ -640,7 +640,7 @@ setTimeout(() => { rmSync(armed, { force: true }); process.exit(1); }, 1500);
     return JSON.parse(result.stdout.trim());
   };
   t.after(async () => {
-    await runFile(launcher, [...lifecycleArgs, "--stop"], { env: environment, timeout: 10_000 }).catch(() => {});
+    await runFile(launcher, [...lifecycleArgs, "--stop"], { env: environment, timeout: 30_000 }).catch(() => {});
     await fixture.cleanup();
   });
   const dark = JSON.stringify({ type: "watch-ended", reason: "service-dark", re_arm: "agora watch twice", pid: 0 });

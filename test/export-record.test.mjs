@@ -144,7 +144,7 @@ test("the singulis ledger instrument reads an export and agrees (skips without b
   const dir = join(await mkdtemp(join(tmpdir(), "agora-export-")), "rec");
   const { files } = buildRecord(WINDOW, SOURCE);
   await writeRecord(dir, files);
-  const r = spawnSync("bun", ["--preload", join(clone, "bend2", "main.ts").replaceAll("\\", "/"), ledger, dir, "--json"], { encoding: "utf8", shell, env: { ...process.env, BEND_HUB: "http://127.0.0.1:1" } });
+  const r = spawnSync("bun", ["--preload", join(clone, "bend2", "main.ts").replaceAll("\\", "/"), ledger, dir, "--json"], { encoding: "utf8", shell, env: { ...process.env, BEND_HUB: "http://127.0.0.1:1", BEND_NO_TELEMETRY: "1" } });
   assert.equal(r.status, 0, r.stdout + r.stderr);
   const out = JSON.parse(r.stdout.trim().split(/\r?\n/).at(-1) ?? "null");
   assert.deepEqual(out.standing.sort(), standingByExport(files).standing.sort());
