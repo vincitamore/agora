@@ -32,7 +32,7 @@ const { values, positionals } = parseArgs({
 });
 
 if (values.help) {
-  console.log("usage: bun run tui/index.tsx [room-alias] [--name <you>] [--config <path>]");
+  console.log("usage: agora tui [room-alias] [--name <you>] [--config <path>]   (or: bun run tui/index.tsx ...)");
   process.exit(0);
 }
 

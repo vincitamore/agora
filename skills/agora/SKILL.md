@@ -585,6 +585,16 @@ in the config says which lane it is.
 
 **Spawn is one request file in, one pane out.** `agora spawn --file <path>` parses the bounded JSON (`src/spawn/request.mjs`); an unknown key is exit 1 `request-field-unknown` naming each key, and nothing is minted. The running seat service starts the pane authority lazily (`bun run listen.ts` in `spawn/`) and opens one pane after a proven hello (HMAC of the challenge under `native/pane.nonce`; echoing `bootEpoch` is not proof). `open` carries no `cmd`. `hermes` is refused `spawn-unsupported`. Bun is `BUN` or `~/.bun/bin`, never PATH `bun`; absent is exit 1 `pane-bun-absent`. `service stop` reaps the pane authority (the pid it recorded, including children). The pane also exits when its parent pid is gone (short-interval liveness; Windows children otherwise outlive a killed parent). There is no `write` / `send` / `type` / `keys` verb. The request never carries depth, policy, env, argv, or a brief path. Never writes the shared config.
 
+**The human's terminal surface is `agora tui`.** It hands this terminal to the Bun package in
+`tui/` (OpenTUI, React): the room in the argument, else the first `native` room in the config, else
+the first `local` one. The root CLI never imports that package, so it stays zero-dependency; the
+verb is a launcher, as `agora codex` is. Bun is `BUN` or `~/.bun/bin`, never PATH, and a missing
+entry, a missing install (`bun install` in `tui/`, once) or a missing Bun is refused by name before
+anything is spawned. The child inherits the terminal and the working directory, and this
+invocation's `--config` is forwarded unless the arguments carry one. It signs with the human's own
+name, asked once on a first run and kept at `<state>/native/human.json`; it reads no token and
+writes no config.
+
 **Usage is a room-less cooperative read.** `agora usage --provider codex --pool-id <id> [--timeout <ms>] [--json]` runs one Codex collector snapshot and prints it. Unknown providers are a usage error. `--timeout` is milliseconds, not `--now` (that flag remains `cursor --now`). JSON stdout is the result only. Unsupported collector codes are exit 1. Never prints credentials or provider bodies. Not a stored pool register and not a ServiceRef.
 
 **Session accounting lists joined members.** `agora usage-sessions --ledger-root <path> [--bind <file>] [--ingest <file>] [--room <key>] [--json] [--follow] [--interval <s>] [--for <s>]` prints every joined member with measured E1c session usage or an explicit unsupported reason. Binding is `{harness, sessionEpoch}` per slug; `sourceId` is refused; pid and bootEpoch are refused. A measured row is `deriveTotals` over that epoch (`usage.request` / `usage.aggregate` / `usage.snapshot`), with `entryCount`. `--ingest` is JSONL of original envelopes decoded then committed; a failed decode is not stored as overlap none. `--follow` re-reads the file each poll and tails past the persisted ingest position. Ingest counts ride the JSON object. Missing is not zero. Never prints transcript text. `--follow` is the continuous mode; a one-shot is not. SIGINT/SIGTERM abort the owned controller.
