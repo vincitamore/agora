@@ -631,10 +631,10 @@ dependencies; `src/native-store.mjs` imports it and never re-implements the plan
 
 The board's admission is the second kernel: `spec/board.bend` judges a claim, renew, release,
 contest or break against the live holder (an expired lease is no holder), and `spec/BOARD-LAWS.bend`
-states ten claims proved by `spec/BOARD-PROOF.bend` (one live holder per subject; an expired lease
+states fifteen claims proved by `spec/BOARD-PROOF.bend` (one live holder per subject; an expired lease
 is free; a free subject is fenced at the claim's own cursor; only the holder releases; a stranger is
 refused; a stale fence is refused; renew keeps the holder and extends the lease; break is a human
-verb that names what it drops, on a live holder; a break on an expired or absent holder is nothing to break; a refusal changes nothing). `src/native-board.kernel.mjs` is its
+verb that names what it drops, on a live holder; a break on an expired or absent holder is nothing to break; a refusal changes nothing; and five that pin the helpers those rest on, so a change to a helper cannot quietly change what the others mean: a holder is an account and a lease, the fence is the holder's own, a live lease is the holder unchanged, an expired or absent lease is no holder, an applied verdict's holder stands). `src/native-board.kernel.mjs` is its
 compiled form and `native-store.mjs` `#appendBoard` asks it whether an act is admitted, with the
 error messages unchanged. The lease the store's policy computes is the lease the kernel judges
 with, and the holder the store keeps is the one the verdict names: its expiry is the kernel's
@@ -647,7 +647,10 @@ What a session's `carry` says still stands is the third kernel, and it is not ag
 list of `Assert`, `Allocate` and `Retract` entries, where a retraction must name the coordination
 step that made it), with `spec/SETTLEMENT-LAWS.bend` (a fact stands only through an exhibit; an
 exhibit settles its fact; nothing is unsettled without coordination; a retraction whose step omits
-the member who asserted the fact is inert; the asserter's step unsettles) and
+the member who asserted the fact is inert; the asserter's step unsettles; and eight that pin the
+helpers and reads those rest on: a fact is its id, membership is being listed, only an assertion is
+an exhibit, coordination-free is retracting nothing, entries are applied in order, the newest
+assertion names its asserter, the empty ledger settles nothing, other entries change nothing) and
 `spec/SETTLEMENT-PROOF.bend` carried beside it. Every assertion names its member, and `carry` is
 member 0 on both sides of its own ledger. `carry`'s room fold asserts each of the session's verdict posts as a fact and
 retracts it under the session's own step when a later post `withdraws:` it or answers it by `re:`;
