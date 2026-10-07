@@ -385,6 +385,104 @@ test("the CALL family is detected wherever its parenthesis stands, and its guard
   }
 });
 
+test("a name spelled like a load is only a load where the grammar calls it one", async (t) => {
+  // The call detectors matched the identifier and its parenthesis wherever they stood, so a
+  // method DECLARATION named like a load counted as a computed load and a module that loads
+  // nothing dynamically reported unknown. The identifier is a load only in call position:
+  // not as a member name, not as a method or function name being defined, and not inside a
+  // comment, a string, template text or a regexp. Every true call must still be caught, in
+  // particular the optional spelling of a bare call, which the old pattern missed outright.
+  const { root } = await repo(t);
+  await mkdir(path.join(root, "src"), { recursive: true });
+  await writeFile(path.join(root, "src", "loaded.mjs"), "\n");
+
+  /** @type {Array<[string, string]>} */
+  const ignored = [
+    ["class method declaration", "class A { require(x) { return x; } }\n"],
+    ["class static method", "class A { static require(x) { return x; } }\n"],
+    ["class async method", "class A { async require(x) { return x; } }\n"],
+    ["class generator method", "class A { *require(x) { yield x; } }\n"],
+    ["class async generator method", "class A { async *require(x) { yield x; } }\n"],
+    ["class getter", "class A { get require() { return 1; } }\n"],
+    ["class setter", "class A { set require(v) { this.v = v; } }\n"],
+    ["class private method and its call", "class A { #require(x) { return x; } m() { return this.#require(1); } }\n"],
+    ["object shorthand method", "const o = { require(x) { return x; } };\n"],
+    ["object async method", "const o = { async require(x) { return x; } };\n"],
+    ["object generator method", "const o = { *require(x) { yield x; } };\n"],
+    ["object getter", "const o = { get require() { return 1; } };\n"],
+    ["object setter", "const o = { set require(v) { this.v = v; } };\n"],
+    ["second object method", "const o = { a() {}, require(x) { return x; } };\n"],
+    ["export default object method", "export default { require(x) { return x; } };\n"],
+    ["function declaration", "function require(x) { return x; }\n"],
+    ["async function declaration", "async function require(x) { return x; }\n"],
+    ["generator function declaration", "function* require(x) { yield x; }\n"],
+    ["member call", "obj.require(x);\n"],
+    ["optional member call", "obj?.require(x);\n"],
+    ["member call, spaced dot", "obj . require(x);\n"],
+    ["member call with a literal", 'obj.require("./src/loaded.mjs");\n'],
+    ["in a line comment", "// require(x)\nconst y = 1;\n"],
+    ["in a block comment", "/* require(x) */\nconst y = 1;\n"],
+    ["in a string", 'const s = "require(x)";\n'],
+    ["in template text", "const s = `require(x)`;\n"],
+    ["in a regexp", "const re = /require(x)/;\n"],
+    ["object key with an arrow value", "const o = { require: (x) => x };\n"],
+    ["dynamic member call", "obj.import(x);\n"],
+    ["dynamic optional member call", "obj?.import(x);\n"],
+    ["dynamic member call with a literal", 'obj.import("./src/loaded.mjs");\n'],
+    ["dynamic object method", "const o = { import(x) { return x; } };\n"],
+    ["dynamic class method", "class A { import(x) { return x; } }\n"],
+    ["dynamic object getter", "const o = { get import() { return 1; } };\n"],
+    ["dynamic in a comment", "// import(x)\nconst y = 1;\n"],
+    ["dynamic in a string", 'const s = "import(x)";\n'],
+    ["dynamic in template text", "const s = `import(x)`;\n"],
+    ["a type-only spelling in a comment", "/** @type {import('./src/loaded.mjs')} */ const y = 1;\n"],
+    ["methods in conditional objects", "const o = c ? { require(x) { return x; } } : { import(y) { return y; } };\n"],
+    ["methods in returned and nested objects", "function f() { return { inner: { require(x) { return x; } } }; }\n"],
+  ];
+  for (const [label, source] of ignored) {
+    await writeFile(path.join(root, "entry.mjs"), source);
+    const c = importClosure({ entry: path.join(root, "entry.mjs"), root });
+    assert.equal(c.complete, true, `${label} was counted as a load: ${c.reason}`);
+    assert.ok(!c.files.has("src/loaded.mjs"), `${label} was followed as a load`);
+  }
+
+  /** @type {Array<[string, string, "computed" | "literal"]>} */
+  const loads = [
+    ["bare computed", "require(x);\n", "computed"],
+    ["bare literal", 'require("./src/loaded.mjs");\n', "literal"],
+    ["concatenation", 'require("./src/" + x);\n', "computed"],
+    ["interpolated template", "require(`./src/${x}.mjs`);\n", "computed"],
+    ["optional bare call, computed", "require?.(x);\n", "computed"],
+    ["optional bare call, literal", 'require?.("./src/loaded.mjs");\n', "literal"],
+    ["block comment in the gap", "require /* gap */ (x);\n", "computed"],
+    ["line comment in the gap", "require // gap\n(x);\n", "computed"],
+    ["inside a template interpolation", "const s = `${require(x)}`;\n", "computed"],
+    ["as a computed property key", "const o = { [require(x)](y) { return y; } };\n", "computed"],
+    ["as an object value", "const o = { k: require(x) };\n", "computed"],
+    ["as a class field initializer", "class A { f = require(x); }\n", "computed"],
+    ["in a class static block", "class A { static { require(x); } }\n", "computed"],
+    ["a call followed by a block", "require(x) {}\n", "computed"],
+    ["a declaration beside a true call", "class A { require(x) { return x; } m() { return require(y); } }\n", "computed"],
+    ["dynamic bare computed", "await import(x);\n", "computed"],
+    ["dynamic bare literal", 'await import("./src/loaded.mjs");\n', "literal"],
+    ["dynamic interpolated template", "await import(`./src/${x}.mjs`);\n", "computed"],
+    ["dynamic inside a template interpolation", "const s = `${await import(x)}`;\n", "computed"],
+    ["dynamic as a class field initializer", "class A { f = import(x); }\n", "computed"],
+    ["dynamic as an object value", "const o = { k: import(x) };\n", "computed"],
+  ];
+  for (const [label, source, kind] of loads) {
+    await writeFile(path.join(root, "entry.mjs"), source);
+    const c = importClosure({ entry: path.join(root, "entry.mjs"), root });
+    if (kind === "literal") {
+      assert.equal(c.complete, true, `${label}: ${c.reason}`);
+      assert.ok(c.files.has("src/loaded.mjs"), `${label} was not followed`);
+    } else {
+      assert.equal(c.complete, false, `${label} was not counted as a computed load`);
+      assert.match(String(c.reason), /computed specifier/, label);
+    }
+  }
+});
+
 test("a detected load whose specifier will not parse is reported, not dropped", async (t) => {
   // Totality is anchored on the KEYWORD. Widening the specifier body closes one spelling; a load
   // whose specifier this scanner still cannot parse would vanish exactly as the quote-bearing

@@ -405,12 +405,218 @@ const BARE_IMPORT = new RegExp(`\\bimport${RESOLVE_GAP}${SPEC}`, "g");
 // This comment says none of that in the grammar it matches, because this file is on the graph it
 // walks -- the sixth time today that constraint has cost a red.
 const CALL_GAP = `(?:${GAPT})?`;
-const DYNAMIC_CALL = new RegExp(`\\bimport${CALL_GAP}\\(`, "g");
-const DYNAMIC_SPEC = new RegExp(`\\bimport${CALL_GAP}\\(${GAP}${SPEC}${GAP}\\)`, "g");
-const REQUIRE_CALL = new RegExp(`(?<![.\\w])require${CALL_GAP}\\(`, "g");
-const REQUIRE_SPEC = new RegExp(`(?<![.\\w])require${CALL_GAP}\\(${GAP}${SPEC}${GAP}\\)`, "g");
+const DYNAMIC_CALL = new RegExp(`(?<![.\\w$#])import${CALL_GAP}\\(`, "g");
+const DYNAMIC_SPEC = new RegExp(`(?<![.\\w$#])import${CALL_GAP}\\(${GAP}${SPEC}${GAP}\\)`, "g");
+// A bare call may also be spelled with an optional chain between the name and its parenthesis.
+// That spelling carried no parenthesis directly after the name, so the pattern missed it whole:
+// a genuine load, uncounted and unfollowed. It is part of the call family, not a separate one.
+const REQUIRE_CALL = new RegExp(`(?<![.\\w$#])require${CALL_GAP}(?:\\?\\.${CALL_GAP})?\\(`, "g");
+const REQUIRE_SPEC = new RegExp(`(?<![.\\w$#])require${CALL_GAP}(?:\\?\\.${CALL_GAP})?\\(${GAP}${SPEC}${GAP}\\)`, "g");
 /** Any string in the module that is shaped like a path into the repository, wherever it sits. */
 const RELATIVE_LITERAL = /["'`](\.{1,2}\/[^"'`]*)["'`]/g;
+
+// ---------------------------------------------------------------------------------------------
+// Which of the call-shaped matches are calls at all?
+//
+// The patterns above find a name and a parenthesis. That spelling is not always a call: a method
+// or a function being DEFINED under that name is written with the same name and the same
+// parenthesis, a member call carries the name as a property of some other object, and the whole
+// shape can sit inside a comment, a string, template text or a regexp, where nothing executes.
+// Counting every match reported a module that loads nothing dynamically as holding a computed
+// load. No widening of the pattern can separate these, because the difference is grammatical
+// position, not spelling: the same text is a definition inside a class or object body and a call
+// at statement level. So position is decided by the smallest scan that can decide it — a token
+// pass that knows comments, strings, templates and regexps are not code, and knows whether the
+// brace it is standing in is a class body, an object literal or a block. The patterns still parse
+// the specifier, but only at a site this scan calls a call.
+//
+// What a token scan cannot decide stays counted, in the safe direction: a call through a local
+// binding that shadows the loader's name is spelled exactly like the loader's own call, and
+// telling them apart is scope analysis, not scanning.
+
+/** @typedef {{ value: string, start: number, kind: "word" | "punct" | "value" }} ScanToken */
+
+const REGEX_AFTER_WORD = new Set(["return", "typeof", "case", "delete", "void", "in", "instanceof", "throw", "await", "yield", "else", "do"]);
+/** @param {ScanToken | undefined} prev */
+function regexAllowed(prev) {
+  if (!prev) return true;
+  if (prev.kind === "value") return false;
+  if (prev.kind === "word") return REGEX_AFTER_WORD.has(prev.value);
+  return prev.value !== ")" && prev.value !== "]" && prev.value !== "++" && prev.value !== "--";
+}
+const isWordStart = (/** @type {string} */ c) => /[A-Za-z_$]/.test(c) || c.charCodeAt(0) >= 128;
+const isWordChar = (/** @type {string} */ c) => /[A-Za-z0-9_$]/.test(c) || c.charCodeAt(0) >= 128;
+const PUNCTUATORS = ["...", "===", "!==", "**=", "<<=", ">>=", "&&=", "||=", "??=", "=>", "==", "!=", "<=", ">=", "&&", "||", "??", "++", "--", "+=", "-=", "*=", "/=", "%=", "**", "<<", ">>", "&=", "|=", "^="];
+
+/** Code as tokens, with comments, string and template text and regexps reduced to inert values.
+ *  Template interpolations are code and are tokenised; the text around them is not.
+ * @param {string} source @returns {ScanToken[]} */
+function scanTokens(source) {
+  /** @type {ScanToken[]} */
+  const tokens = [];
+  /** @type {Array<{ template: boolean, interp: boolean, braces: number }>} */
+  const stack = [{ template: false, interp: false, braces: 0 }];
+  let i = 0;
+  while (i < source.length) {
+    const ctx = stack[stack.length - 1];
+    const c = source[i];
+    if (ctx.template) {
+      if (c === "\\") { i += 2; continue; }
+      if (c === "`") { i += 1; stack.pop(); tokens.push({ value: "literal", start: i, kind: "value" }); continue; }
+      if (c === "$" && source[i + 1] === "{") {
+        tokens.push({ value: "${", start: i, kind: "punct" });
+        i += 2; stack.push({ template: false, interp: true, braces: 0 }); continue;
+      }
+      i += 1; continue;
+    }
+    if (c === " " || c === "\t" || c === "\n" || c === "\r" || c === "\f" || c === "\v") { i += 1; continue; }
+    if (c === "/" && source[i + 1] === "/") { while (i < source.length && source[i] !== "\n") i += 1; continue; }
+    if (c === "/" && source[i + 1] === "*") { const end = source.indexOf("*/", i + 2); i = end === -1 ? source.length : end + 2; continue; }
+    if (c === "`") { stack.push({ template: true, interp: false, braces: 0 }); i += 1; continue; }
+    if (c === '"' || c === "'") {
+      const start = i; i += 1;
+      while (i < source.length && source[i] !== c && source[i] !== "\n") i += source[i] === "\\" ? 2 : 1;
+      i += 1; tokens.push({ value: "literal", start, kind: "value" }); continue;
+    }
+    if (c === "/" && regexAllowed(tokens[tokens.length - 1])) {
+      let j = i + 1, inClass = false, closed = false;
+      while (j < source.length && source[j] !== "\n") {
+        if (source[j] === "\\") { j += 2; continue; }
+        if (source[j] === "[") inClass = true;
+        else if (source[j] === "]") inClass = false;
+        else if (source[j] === "/" && !inClass) { closed = true; break; }
+        j += 1;
+      }
+      if (closed) {
+        const start = i; i = j + 1;
+        while (i < source.length && /[A-Za-z]/.test(source[i])) i += 1;
+        tokens.push({ value: "literal", start, kind: "value" }); continue;
+      }
+    }
+    if (c === "{" ) { if (ctx.interp) ctx.braces += 1; tokens.push({ value: "{", start: i, kind: "punct" }); i += 1; continue; }
+    if (c === "}") {
+      tokens.push({ value: "}", start: i, kind: "punct" }); i += 1;
+      if (ctx.interp && ctx.braces === 0) stack.pop(); else if (ctx.braces > 0) ctx.braces -= 1;
+      continue;
+    }
+    if (c === "#" && i + 1 < source.length && isWordStart(source[i + 1])) {
+      const start = i; i += 1;
+      while (i < source.length && isWordChar(source[i])) i += 1;
+      tokens.push({ value: source.slice(start, i), start, kind: "word" }); continue;
+    }
+    if (isWordStart(c)) {
+      const start = i;
+      while (i < source.length && isWordChar(source[i])) i += 1;
+      tokens.push({ value: source.slice(start, i), start, kind: "word" }); continue;
+    }
+    if (c >= "0" && c <= "9") {
+      const start = i;
+      while (i < source.length && /[A-Za-z0-9_.]/.test(source[i])) i += 1;
+      tokens.push({ value: "literal", start, kind: "value" }); continue;
+    }
+    if (c === "?" && source[i + 1] === "." && !(source[i + 2] >= "0" && source[i + 2] <= "9")) {
+      tokens.push({ value: "?.", start: i, kind: "punct" }); i += 2; continue;
+    }
+    const multi = PUNCTUATORS.find((p) => source.startsWith(p, i));
+    tokens.push({ value: multi ?? c, start: i, kind: "punct" });
+    i += (multi ?? c).length;
+  }
+  return tokens;
+}
+
+const EXPRESSION_WORDS = new Set(["return", "throw", "case", "typeof", "void", "delete", "in", "instanceof", "await", "yield"]);
+const EXPRESSION_PUNCT = new Set(["(", ",", "=", "[", "?", "!", "~", "&&", "||", "??", "+", "-", "*", "/", "%", "**", "==", "===", "!=", "!==", "<", ">", "<=", ">=", "&", "|", "^", "...", "+=", "-=", "*=", "/=", "%=", "**=", "&&=", "||=", "??=", "&=", "|=", "^=", "<<", ">>", "<<=", ">>="]);
+
+/** What the opening brace at `idx` opens. A brace in expression position opens an object; one
+ *  after a class head opens the class body; anything else is a block. The distinction is the
+ *  whole question, because a name and a parenthesis mean a definition in the first two and a
+ *  call in the third.
+ * @param {ScanToken[]} tokens @param {number} idx
+ * @param {Array<{ kind: string }>} frames @param {number} paren
+ * @returns {"class" | "object" | "block"} */
+function braceKind(tokens, idx, frames, paren) {
+  for (let j = idx - 1; j >= 0 && j >= idx - 64; j -= 1) {
+    const t = tokens[j];
+    if (t.value === ";" || t.value === "{" || t.value === "}" || t.value === "${") break;
+    if (t.kind === "word" && t.value === "class" && tokens[j - 1]?.value !== "." &&
+        tokens[j + 1]?.value !== ":" && tokens[j + 1]?.value !== "(") return "class";
+  }
+  const prev = tokens[idx - 1];
+  if (!prev) return "block";
+  if (prev.kind === "word" && EXPRESSION_WORDS.has(prev.value)) return "object";
+  if (prev.kind === "word" && prev.value === "default" && tokens[idx - 2]?.value === "export") return "object";
+  if (prev.value === ":") {
+    if (frames[frames.length - 1]?.kind === "object" || paren > 0) return "object";
+    // A colon is three things: an object member's (above), a conditional branch's, or a label or
+    // case's. Only the last opens a block, and the conditional is told from it by the question
+    // mark standing unclosed before it at this depth.
+    let depth = 0;
+    for (let j = idx - 2; j >= 0 && j >= idx - 128; j -= 1) {
+      const v = tokens[j].value;
+      if (v === ")" || v === "]" || v === "}") depth += 1;
+      else if (v === "(" || v === "[" || v === "{" || v === "${") { if (depth === 0) break; depth -= 1; }
+      else if (depth === 0 && v === ";") break;
+      else if (depth === 0 && v === "?") return "object";
+      else if (depth === 0 && v === "case") return "block";
+    }
+    return "block";
+  }
+  return EXPRESSION_PUNCT.has(prev.value) ? "object" : "block";
+}
+
+/**
+ * The starts of the bare calls in a module: the sites where the loader's name stands in call
+ * position. A site is refused as a member name (the token before it is the access, however it is
+ * spaced), as a private name, as the name of a function being declared, and as the name of a
+ * method being defined — at member level inside a class or object body, where a body follows
+ * the parenthesis. Everything else with the loader's name and a parenthesis is a call.
+ * @param {string} source
+ * @returns {{ requires: Set<number>, imports: Set<number> }}
+ */
+function loadCallStarts(source) {
+  const tokens = scanTokens(source);
+  /** @type {Set<number>} */ const requires = new Set();
+  /** @type {Set<number>} */ const imports = new Set();
+  /** @type {Array<{ kind: string, paren: number, bracket: number }>} */ const frames = [];
+  let paren = 0, bracket = 0;
+  for (let idx = 0; idx < tokens.length; idx += 1) {
+    const tok = tokens[idx];
+    if (tok.value === "{" || tok.value === "${") {
+      frames.push({ kind: tok.value === "${" ? "block" : braceKind(tokens, idx, frames, paren), paren, bracket });
+      continue;
+    }
+    if (tok.value === "}") { frames.pop(); continue; }
+    if (tok.value === "(") { paren += 1; continue; }
+    if (tok.value === ")") { paren -= 1; continue; }
+    if (tok.value === "[") { bracket += 1; continue; }
+    if (tok.value === "]") { bracket -= 1; continue; }
+    if (tok.kind !== "word" || tok.value.startsWith("#")) continue;
+    const isRequire = tok.value === "require", isImport = tok.value === "import";
+    if (!isRequire && !isImport) continue;
+    const optional = tokens[idx + 1]?.value === "?.";
+    const openIdx = optional ? idx + 2 : idx + 1;
+    if (tokens[openIdx]?.value !== "(") continue;
+    if (isImport && optional) continue;   // not a spelling the grammar accepts for a load
+    const prev = tokens[idx - 1];
+    if (prev?.value === "." || prev?.value === "?.") continue;                 // a member name
+    if (prev?.value === "function") continue;                                  // a function being declared
+    if (prev?.value === "*" && tokens[idx - 2]?.value === "function") continue;
+    const frame = frames[frames.length - 1];
+    if (frame && frame.kind !== "block" && paren === frame.paren && bracket === frame.bracket &&
+        (prev?.value === "{" || prev?.value === "," || prev?.value === ";" || prev?.value === "}" ||
+         prev?.value === "*" || prev?.value === "static" || prev?.value === "async" ||
+         prev?.value === "get" || prev?.value === "set")) {
+      let depth = 0, close = openIdx;
+      for (; close < tokens.length; close += 1) {
+        if (tokens[close].value === "(") depth += 1;
+        else if (tokens[close].value === ")") { depth -= 1; if (depth === 0) break; }
+      }
+      if (tokens[close + 1]?.value === "{") continue;                          // a method being defined
+    }
+    (isRequire ? requires : imports).add(tok.start);
+  }
+  return { requires, imports };
+}
 
 /** A template with an interpolation is not a literal: its actual specifier is computed at runtime
  * and the spelling in the source names no file. Counting it as a literal both skips the module it
@@ -466,8 +672,8 @@ export const COMPUTED_LOAD_EXEMPTIONS = Object.freeze({
 });
 
 /** The operand of a computed load, when it is a bare identifier the audit can follow. */
-const COMPUTED_OPERAND = /\bimport\s*\(\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\)/g;
-const REQUIRE_OPERAND = /(?<![.\w])require\s*\(\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\)/g;
+const COMPUTED_OPERAND = /(?<![.\w$#])import\s*\(\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\)/g;
+const REQUIRE_OPERAND = /(?<![.\w$#])require\s*(?:\?\.\s*)?\(\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\)/g;
 const squeeze = (/** @type {string} */ s) => s.replace(/\s+/g, " ").trim();
 const digestOf = (/** @type {string} */ s) => `sha256:${createHash("sha256").update(s).digest("hex")}`;
 
@@ -487,7 +693,9 @@ export function auditedChooserDigest(file, root = process.cwd()) {
  */
 function auditedChooser(source, operandPattern) {
   operandPattern.lastIndex = 0;
-  const names = [...source.matchAll(operandPattern)].map((m) => m[1]);
+  const starts = operandPattern === COMPUTED_OPERAND ? loadCallStarts(source).imports : loadCallStarts(source).requires;
+  const names = [...source.matchAll(operandPattern)]
+    .filter((m) => starts.has(/** @type {number} */ (m.index))).map((m) => m[1]);
   if (names.length !== 1) return undefined;
   const name = names[0];
   const lines = source.split(/\r?\n/).filter((line) => new RegExp(`\\b${name}\\b`).test(line));
@@ -503,9 +711,11 @@ function repoKey(root, file) {
  * Every repository file reachable from `entry` by a load the scanner can resolve, plus whether that
  * set can be trusted to be complete.
  *
- * Deliberately over-inclusive on what counts as a specifier (a path inside a comment or a string
- * would be followed): a superset keeps the answer on the safe side, and the only thing a false
- * member can do is report a re-arm that is not needed.
+ * Deliberately over-inclusive on what counts as a specifier for the static forms (a path inside a
+ * comment or a string would be followed): a superset keeps the answer on the safe side, and the
+ * only thing a false member can do is report a re-arm that is not needed. The call forms are
+ * stricter by necessity — their spelling is also a definition's spelling — and count only where
+ * the name stands in call position in code (see `loadCallStarts`).
  *
  * @param {{ entry: string, root: string, read?: (file: string) => string }} opts
  * @returns {{ files: Set<string>, complete: boolean, reason?: string, caveats?: string[] }}
@@ -584,10 +794,13 @@ export function importClosure(opts) {
     unparsed(new RegExp(`\\bfrom${DETECT_GAP}`, "g"));
     unparsed(new RegExp(`\\bimport${DETECT_GAP}`, "g"));
 
-    /** @param {RegExp} pattern */
-    const follow = (pattern) => {
+    // The call forms count only at a site in call position; the static forms keep their wider net.
+    const callStarts = loadCallStarts(source);
+    /** @param {RegExp} pattern @param {Set<number>} [starts] */
+    const follow = (pattern, starts) => {
       pattern.lastIndex = 0;
       for (const match of source.matchAll(pattern)) {
+        if (starts && !starts.has(/** @type {number} */ (match.index))) continue;
         const [, quote, spec] = match;
         if (interpolated(quote, spec)) continue;           // counted as computed below
         // An escape the RUNTIME decodes and this scanner does not is not a bare specifier: the
@@ -601,7 +814,9 @@ export function importClosure(opts) {
         queue.push(resolved);
       }
     };
-    for (const pattern of [FROM_SPEC, BARE_IMPORT, DYNAMIC_SPEC, REQUIRE_SPEC]) follow(pattern);
+    for (const pattern of [FROM_SPEC, BARE_IMPORT]) follow(pattern);
+    follow(DYNAMIC_SPEC, callStarts.imports);
+    follow(REQUIRE_SPEC, callStarts.requires);
 
     // A relative specifier that names nothing on disk is not a non-event: the file may exist at the
     // OTHER build, which is exactly the comparison being made. Skipping it silently is how the
@@ -611,12 +826,14 @@ export function importClosure(opts) {
     for (const spec of escaped)
       incomplete(`${key} loads ${JSON.stringify(spec)}, whose escape sequence this scanner does not decode; the runtime would, so the spelling is reported rather than read as a bare specifier`);
 
-    /** @param {string} label @param {RegExp} all @param {RegExp} spec @param {number} allowed */
-    const computed = (label, all, spec, allowed) => {
-      const total = (source.match(all) ?? []).length;
+    /** @param {string} label @param {RegExp} all @param {RegExp} spec @param {number} allowed @param {Set<number>} starts */
+    const computed = (label, all, spec, allowed, starts) => {
+      all.lastIndex = 0;
+      const total = [...source.matchAll(all)].filter((m) => starts.has(/** @type {number} */ (m.index))).length;
       let literal = 0;
       spec.lastIndex = 0;
-      for (const m of source.matchAll(spec)) if (!interpolated(m[1], m[2])) literal += 1;
+      for (const m of source.matchAll(spec))
+        if (starts.has(/** @type {number} */ (m.index)) && !interpolated(m[1], m[2])) literal += 1;
       const n = total - literal;
       if (n <= 0) return;
       if (n > allowed) {
@@ -638,8 +855,8 @@ export function importClosure(opts) {
       }
       caveats.push(`${key}: ${n} ${label} with a computed specifier, exempt because ${/** @type {any} */ (exempt).why}`);
     };
-    computed("dynamic import call(s)", DYNAMIC_CALL, DYNAMIC_SPEC, exempt?.imports ?? 0);
-    computed("require call(s)", REQUIRE_CALL, REQUIRE_SPEC, exempt?.requires ?? 0);
+    computed("dynamic import call(s)", DYNAMIC_CALL, DYNAMIC_SPEC, exempt?.imports ?? 0, callStarts.imports);
+    computed("require call(s)", REQUIRE_CALL, REQUIRE_SPEC, exempt?.requires ?? 0, callStarts.requires);
   }
   return { files, complete, ...(reason ? { reason } : {}), ...(caveats.length ? { caveats } : {}) };
 }
