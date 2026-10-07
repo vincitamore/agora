@@ -322,6 +322,13 @@ const SCHEMA = {
       options: { "--file <path>": "the bounded spawn-request JSON; unknown keys exit 1 request-field-unknown" },
       does: "one request file in, one pane out: parse the bounded request, ask the running seat service to open a pane after a proven hello. hermes is refused. open carries no cmd. Never writes the shared config. There is no write/send/type/keys verb",
     },
+    tui: {
+      args: ["[room] [-- <tui args>]"],
+      options: {
+        "--name <you>": "the name this terminal signs with, written once to the state root on a first run",
+      },
+      does: "hand this terminal to the human surface in tui/: a Bun package (OpenTUI, React) the root CLI never imports, launched as a child the way codex is. Bun is BUN or ~/.bun/bin, never PATH; a missing entry, install or Bun is refused by name before anything is spawned. The room argument, the flags and this invocation's --config are passed through; the child inherits this terminal and this working directory.",
+    },
     codex: {
       args: ["status | [resume <thread>] | [-- <codex args>]"],
       options: {
@@ -455,6 +462,8 @@ const OPTIONS = /** @type {const} */ ({
   "codex-token-file": { type: "string" },
   "codex-thread": { type: "string" },
   "codex-bin": { type: "string" },
+  name: { type: "string" }, // agora tui: the name that terminal signs with; forwarded to the tui package
+
   batch: { type: "boolean", default: false },
   coalesce: { type: "string" },
   "max-batch": { type: "string" },
@@ -1055,6 +1064,12 @@ async function main(argv) {
   const cfg = await loadConfig(values.config);
   const json = Boolean(values.json);
   const stateRoot = stateDir(cfg);
+  if (verb === "tui") {
+    const args = [roomAlias, ...rest].filter((value) => value !== undefined).map(String);
+    if (values.name !== undefined) args.push("--name", String(values.name));
+    const { launchTui } = await import("../src/tui-launch.mjs");
+    return await launchTui({ args, ...(values.config === undefined ? {} : { config: String(values.config) }) });
+  }
   if (verb === "codex") {
     const args = [roomAlias, ...rest].filter((value) => value !== undefined);
     if (args[0] === "status") {
