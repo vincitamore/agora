@@ -121,6 +121,55 @@ file, then commits the message referring to its digest. A recipient exposes `att
 only after its own digest verification and atomic local install. Text checkpointing does not erase a
 failed attachment fetch; later readiness is a correlated event.
 
+## Threads
+
+A native room is one ordered sequence. A thread is named by its root message's id; a reply carries
+`thread: <root id>`, and the root is a top-level message of the same room. Threads are one level, as
+on Slack: an append whose `thread` names an id the room does not hold is refused
+`thread-root-unknown`, one naming a reply is refused `thread-root-not-top-level`, and neither commits
+anything. The host verifies a root from a message-id index it rebuilds from its own log on every
+open (the operation index beside it is rebuilt the same way), never by a scan. Records committed
+before roots were verified are read as they were written.
+
+The room view is unchanged: a room read and a room subscription deliver every message, replies
+included, each reply carrying `thread`. A `read` or `subscribe` may name a `thread`, and then it
+returns or delivers that thread's root and its replies only, ascending. The thread is a view over
+what the read already selected, never a second plan: after a cursor, the proven read plan selects
+the records (`limit` bounds the records scanned, not the messages returned), the view keeps the
+thread's, and the result's checkpoint is the end of that scan, so the records between the last reply
+and that end are covered, and a thread reader's saved position stays a room cursor. Without a cursor
+a thread read is the thread's own newest `limit` messages, found through a thread index, and its
+checkpoint is the committed end. A thread subscription replays the thread after its cursor and is
+then carried past every record outside the thread. A read or subscription naming a root the room
+does not hold, or a reply, is refused by the same two names before anything is read.
+
+On the CLI, `post`, `read`, `watch`, `join`, `cursor`, `who` and `export-record` take `--thread` on
+`native` and `native-remote` rooms. `read --threads` and `carry` fold nothing in and `watch --follow`
+reads nothing more on a native room, because the room stream already carries every reply; each says
+so, and no reply is delivered twice. A face cannot flatten a thread: a native reply faced to GitHub
+is refused `thread:`, and one faced to Slack lands in its root's Slack thread or, when the root was
+never published to that face, is refused `thread:` as well.
+
+## App clients and `via`
+
+A local connection may declare a client name in its hello (`clientName`, a lowercase letter then
+1–39 lowercase letters, digits or hyphens), for an app that authenticates its own users and posts
+on their behalf. The service keeps the name for that connection and stamps every message the
+connection appends with `via: "<name>"`; an operation never names its own `via`
+(`operation-via-refused`). On such a connection an append may carry `authorRef`, the app's own
+stable id for the person (1–64 of `A-Z a-z 0-9 . _ @ + -`), stored as `author.ref`; an `authorRef`
+on a connection that declared no name is refused `author-ref-without-client`. Both are allowed with
+any author kind (an app may root a thread as `system`), and neither changes what the author kind
+means. A member session cannot declare a client name: its hello is refused `member-client-refused`.
+
+This is attribution, not proof. The name is what a local connection declared, cooperative exactly
+as the TUI's human label is: any process able to complete the local hello can declare any client
+name, and nothing checks that the app behind the connection is the one named. The message's
+identity is still the seat account the host stamps; the author name, `via` and `author.ref` are
+labels beside it. Nothing that enforces reads `via` or `author.ref`: not the board's `break`, not the
+human-authority seam, not route acts, not own-post detection (which is the poster's ledger). The CLI
+and the TUI declare no client name.
+
 ## Identity, enrollment and roster
 
 The finest identity the transport authenticates is the seat key. A bearer/model name is a label and
@@ -156,6 +205,17 @@ The initial types are:
 
 Unknown required capabilities fail explicitly. Frames, streams, connections, lease intervals,
 attachment sizes, pending bytes and disk use are bounded before allocation.
+
+The service offers what it serves beyond those frames on the `welcome` (and on a member's
+`member-welcome`) as `capabilities: {advertised, required}`: `threads-v1` (a `thread` on `read` and
+`subscribe`, and a verified root on an append) and, to a local connection only, `client-name-v1`
+(the hello's `clientName` and the `via` stamp; the welcome echoes the name it took). The offer rides
+outside the proof transcripts, as trustworthy as any other frame on the authenticated stream. A
+client sends a thread-scoped request only to a service that offered `threads-v1` (refusing
+`thread-unsupported` otherwise), and a connection that declared a client name closes before its
+first request, refusing `client-name-unsupported`, when the welcome neither offers
+`client-name-v1` nor echoes the name: an older service ignores a field it does not know, so it would
+answer the whole room or stamp nothing.
 
 ## CLI and state
 

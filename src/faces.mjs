@@ -594,6 +594,16 @@ export class FaceRunner {
       }
       const half = /** @type {FaceHalf} */ (faceHalf(face.transport));
       const thread = half.threads ? this.#faceThread(records, face, message) : undefined;
+      // A native reply whose root has no thread on this face (the root was never published to it,
+      // and the reply names no faced message) has nowhere to land but top level, which would flatten
+      // the thread. It is refused in the face's own words instead; mapping a native thread onto a
+      // face thread it never had is a separate piece of work.
+      if (message.thread && thread === undefined) {
+        const reason = `thread: this reply's root has no thread on the ${face.transport} face (the root was not published there), and a reply is never flattened to top level`;
+        await this.#append({ originId: message.id, cursor: message.cursor, transport: face.transport, status: "refused", code: "thread", reason, selector, attempt: 0, at });
+        faces.push({ transport: face.transport, status: "refused", reason });
+        continue;
+      }
       const text = faceText(message, face.attachments, half);
       const record = await this.#append({ originId: message.id, cursor: message.cursor, transport: face.transport, status: "pending", selector, attempt: 1, at, pendingAt: at,
         ...(thread ? { thread } : {}), payloadDigest: `sha256:${createHash("sha256").update(half.encode(text)).digest("hex")}` });

@@ -159,13 +159,13 @@ const SCHEMA = {
     whoami: { args: ["<room>"], options: {}, does: "the identity this side posts as, per the transport" },
     read: {
       args: ["<room>"],
-      options: { "--thread <id>": "a thread inside the room", "--since <cursor>": "only what came after", "--limit <n>": "cap (default transport)", "--pages <n>": "pages of history to walk back through when --since is given (Slack, default 10 of 200 messages). A walk that does not reach the cursor returns nothing and names the gap rather than a partial window from the middle of the backlog", "--threads": "fold the room's live threads in: replies after --since, interleaved by time (Slack never shows them in a room read)", "--files": "materialize Slack-hosted images into this session's media directory; metadata is always carried" },
+      options: { "--thread <id>": "a thread inside the room (native: its root message id; the root and its replies, and with --since the limit bounds the records scanned)", "--since <cursor>": "only what came after", "--limit <n>": "cap (default transport)", "--pages <n>": "pages of history to walk back through when --since is given (Slack, default 10 of 200 messages). A walk that does not reach the cursor returns nothing and names the gap rather than a partial window from the middle of the backlog", "--threads": "fold the room's live threads in: replies after --since, interleaved by time (Slack never shows them in a room read; a native room read already carries every reply, so it reads nothing more there)", "--files": "materialize Slack-hosted images into this session's media directory; metadata is always carried" },
       does: "print messages ascending; never touches the saved cursor. On a native frame refusal, retry this invocation once at the host's fitting limit and report the shrink",
     },
     post: {
       args: ["<room>", "[text]"],
       options: {
-        "--thread <id>": "reply in a thread",
+        "--thread <id>": "reply in a thread (native: the root message id; a reply to a reply, or to an id the room does not hold, is refused)",
         "--file <path>": "text from a file",
         "--stdin": "text from stdin (the caller must close the pipe, or this waits forever)",
         "--split": "chunk a too-long Slack post at line boundaries; each chunk is signed; trailers on the last with part: i/n",
@@ -226,8 +226,8 @@ const SCHEMA = {
     watch: {
       args: ["<room>"],
       options: {
-        "--thread <id>": "watch one thread",
-        "--follow": "also read the threads this session has posted in, at the slower thread interval",
+        "--thread <id>": "watch one thread (native: subscribe to its root and replies; the cursor stays a room position)",
+        "--follow": "also read the threads this session has posted in, at the slower thread interval (a native room's stream already carries every reply, so it reads nothing more there)",
         "--once": "one poll, then exit",
         "--stream": "keep delivering until --for elapses",
         "--pages <n>": "pages of history one poll walks back through (Slack, default 10 of 200 messages); a poll whose walk does not reach the cursor delivers nothing, advances nothing, and carries a gap on the result line",
@@ -1852,7 +1852,10 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
   // Validation belongs at the caller boundaries only. An id typed here (or into --re) is a usage
   // error the caller can fix; an id read back out of this session's own follow set is not, and the
   // watch drops that one instead of refusing to run.
-  for (const [flag, id] of /** @type {Array<[string, string | undefined]>} */ ([["--thread", thread], ["--re", values.re]])) {
+  // `--re` is a thread id only where a reply-to joins its thread (Slack); on a native room it names
+  // a message by id or cursor and is never a thread, so it is not held to the thread shape there.
+  const reIsThread = transport.threads && !transport.repliesInRoom;
+  for (const [flag, id] of /** @type {Array<[string, string | undefined]>} */ ([["--thread", thread], ["--re", reIsThread ? values.re : undefined]])) {
     if (!id || !transport.validateThread) continue;
     const why = transport.validateThread(id);
     if (why) throw new AgoraError(`${flag} ${id}: ${why}`, EXIT.usage);
@@ -2038,6 +2041,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         const line = `agora: folded ${window.threads.length} of ${seen} live thread${seen === 1 ? "" : "s"} into the room`;
         console.error(redact(unread.length ? `${line}; ${unread.length} not read: ${unread.map((u) => `${u.id} (${u.reason})`).join(", ")}` : line));
       } else if (wantThreads && !thread && !transport.threads) console.error(`agora: ${transport.kind} has no threads; the window is the room read alone`);
+      else if (wantThreads && !thread && transport.repliesInRoom) console.error(`agora: ${transport.kind} rooms carry every thread reply in the room read; the window is the room read alone`);
       // the same call `--wake addressed` makes, and for the same reason: an address may name the
       // seat rather than a bearer, and a transport that cannot say who it is leaves bearer
       // addressing working on its own
@@ -2110,7 +2114,14 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       // a read after a cursor that could not walk back to it returns NOTHING rather than a window
       // from the middle of the backlog, so the empty result must say which of the two it is
       const gap = /** @type {any} */ (msgs).gap;
-      if (values.threads && transport.threads) {
+      // a native thread read after a cursor scans records, not replies: where its scan ended past the
+      // last reply, the next read of the thread goes on from there
+      const scanned = /** @type {any} */ (msgs).scannedThrough;
+      if (values.threads && transport.repliesInRoom) {
+        // A native room is one ordered sequence: the room read already holds every reply after the
+        // cursor, whatever its root's age, so there is nothing to fold and nothing is read twice.
+        console.error(`agora: ${transport.kind} rooms carry every thread reply in the room read; --threads reads nothing more here`);
+      } else if (values.threads && transport.threads) {
         // On Slack a room read never contains replies, and a parent older than the cursor is
         // not in the window even when its thread moved after it: a claim made in a thread is
         // invisible to a plain read. Take a bounded horizon with no cursor, read the threads
@@ -2123,7 +2134,8 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       printMessages(msgs, json, roomAlias);
       // stdout stays pure: a read that printed nothing is otherwise indistinguishable from a read
       // of the wrong room, a --since past everything, or a room that is genuinely quiet
-      console.error(`agora: read ${msgs.length} message${msgs.length === 1 ? "" : "s"} from ${roomAlias} (${transport.kind}) since ${values.since ?? "the start"}${gap ? `; the walk did not reach that cursor (${gap.reason}, deepest reached ${gap.oldestFetched ?? "nothing"}), so nothing is printed rather than a partial window -- re-run with --pages above ${gap.pages}` : ""}`);
+      const scannedPast = scanned && values.since && scanned !== (msgs.length ? msgs[msgs.length - 1].cursor : values.since);
+      console.error(`agora: read ${msgs.length} message${msgs.length === 1 ? "" : "s"} from ${roomAlias} (${transport.kind})${thread ? ` thread ${thread}` : ""} since ${values.since ?? "the start"}${gap ? `; the walk did not reach that cursor (${gap.reason}, deepest reached ${gap.oldestFetched ?? "nothing"}), so nothing is printed rather than a partial window -- re-run with --pages above ${gap.pages}` : ""}${scannedPast ? `; the host scanned the room through ${scanned}, and the thread has nothing more before it (go on with --since ${scanned})` : ""}`);
       return EXIT.ok;
     }
     case "post": {
@@ -2224,7 +2236,10 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       const r = last;
       if (!r) throw new AgoraError(`nothing posted`, EXIT.error);
       if (boardIntent) await completeCarryPost(sdir, boardIntent, r);
-      if (thread) await follow(sdir, roomAlias, room, [thread]);
+      // A native room's stream carries every reply, so a watch there has no thread to follow and
+      // the post joins none; everything below is for a transport whose room read omits replies.
+      if (transport.repliesInRoom) { /* nothing to follow */ }
+      else if (thread) await follow(sdir, roomAlias, room, [thread]);
       else if (values.re && transport.threads) await follow(sdir, roomAlias, room, [String(values.re)]);
       // a top-level post roots the thread the humans and the other seat reply in. This session's
       // own post is never delivered to its own watch, so the watch cannot learn the thread from
@@ -2451,10 +2466,13 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
           // room subscribes through this seat's service, a remote one over its Tailcat member
           // channel. The remote opener lives in src/native-remote.mjs behind the same
           // NativeSubscription shape, so nothing in src/wake/subscriber.mjs moves for it.
+          // `--thread` narrows the subscription to that thread's root and replies; the cursor stays a
+          // room position, which the service carries past every record outside the thread.
           subscription = room.transport === "native"
-            ? await openNativeSubscription({ stateRoot, roomId: transport.room, since: seeded.cursor })
-            : await openRemoteSubscription({ room: /** @type {any} */ (transport).remote, since: seeded.cursor });
-          console.error(`agora: subscribed to ${roomAlias} through ${room.transport === "native" ? "the seat service" : "a member channel"} (${subscription.seat.seatLabel}); events wake this watch, nothing polls`);
+            ? await openNativeSubscription({ stateRoot, roomId: transport.room, since: seeded.cursor, ...(thread ? { thread } : {}) })
+            : await openRemoteSubscription({ room: /** @type {any} */ (transport).remote, since: seeded.cursor, ...(thread ? { thread } : {}) });
+          console.error(`agora: subscribed to ${roomAlias}${thread ? ` thread ${thread}` : ""} through ${room.transport === "native" ? "the seat service" : "a member channel"} (${subscription.seat.seatLabel}); events wake this watch, nothing polls`);
+          if (values.follow) console.error(`agora: a ${room.transport} room's stream already carries every thread reply, so --follow reads nothing more here and no reply is delivered twice`);
           if (subscription.neverOffered) {
             const h = subscription.neverOffered;
             console.error(`agora: no position was saved for ${key}, so this watch starts at the newest window: committed positions ${h.from} to ${h.to} (${h.count}) were never offered to this session by it; run \`agora cursor ${roomAlias} --set ${h.from.split(":")[0]}:0\` to be offered them from the start`);
@@ -2500,8 +2518,11 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         startedAt: new Date().toISOString(),
       });
 
+      // A followed thread is read beside the room only where the room read omits replies; on a
+      // native room the subscription already delivers every reply once, and a second read of a
+      // thread would hand the same reply over again under a separate cursor.
       /** @type {import('../src/watch.mjs').FollowedThreads | undefined} */
-      const threads = values.follow
+      const threads = values.follow && !transport.repliesInRoom
         ? {
             ids: () => follow(sdir, roomAlias, room, []),
             key: (id) => cursorKey(roomAlias, id),

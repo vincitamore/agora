@@ -1,0 +1,5 @@
+{
+  "case": "message-via-malformed",
+  "opens": false,
+  "refusal": "carries an invalid via"
+}

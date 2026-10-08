@@ -13,6 +13,8 @@ import { MEMBER_PHASES, buildRouteBinding, buildRouteDescriptor, memberHandshake
   memberTranscript, mintRouteSecret, removeRouteSecret, routeKey, validatePublicNodeKey,
   verifyMemberHandshakeProof, writeRouteSecret } from "./native-member.mjs";
 import { publicNodeKeyDigest } from "./protocol/route.mjs";
+import { receiveCapabilityOffer, validateCapabilityOffer } from "./protocol/capabilities.mjs";
+import { CLIENT_NAME_PATTERN } from "./protocol/common.mjs";
 import { localTransferIdentity } from "./tailcat.mjs";
 import { AuthorityError, readAuthorityRecord, createAuthorityChallenge, verifyAuthorityProof,
   validateAuthorityChallenge, validateAuthorityRequest } from "./authority.mjs";
@@ -27,6 +29,17 @@ import { ensurePaneAuthority, mintSpawnId, openPane, reapPane } from "./spawn-pa
 function codedRefusal(code, detail) {
   return Object.assign(new AgoraError(`${code}: ${detail}`), { code });
 }
+
+/**
+ * What this service serves beyond the original v1 frames, offered on the welcome of every admitted
+ * connection, outside the proof transcripts: a capability is as trustworthy as any frame on the
+ * stream after the proofs, and nothing that verifies a hello by echoing its fields may meet one. A
+ * client sends a request that needs a capability only to a service that offered it, because an
+ * older service ignores a field it does not know and would answer the whole room.
+ * `client-name-v1` is local-only: a member session cannot declare a client name.
+ */
+const LOCAL_OFFER = validateCapabilityOffer({ advertised: ["threads-v1", "client-name-v1"], required: [] });
+const MEMBER_OFFER = validateCapabilityOffer({ advertised: ["threads-v1"], required: [] });
 
 const MAX_PENDING_WRITE = 2 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -430,7 +443,9 @@ export class NativeRoomService {
     this.sockets = new Set();
     /** A member route's stream subscribes like any other client, so this is keyed on both
      * shapes; #broadcast writes through sendFrame, which is duck-typed for the same reason.
-     * @type {Map<net.Socket | import("node:stream").Duplex, Map<string, number>>} */
+     * Per stream, per room: the last sequence written to it, and the thread a thread-scoped
+     * subscription narrows to.
+     * @type {Map<net.Socket | import("node:stream").Duplex, Map<string, { sequence: number, thread?: string }>>} */
     this.subscriptions = new Map();
     /** @type {number | undefined} */
     this.panePid = undefined;
@@ -543,6 +558,9 @@ export class NativeRoomService {
     this.subscriptions.set(socket, new Map());
     const decoder = new NativeFrameDecoder();
     let greeted = false;
+    /** The client name this connection declared in its hello, stamped as `via` on its messages.
+     * @type {string | undefined} */
+    let clientName;
     let chain = Promise.resolve();
     const requestId = randomUUID().replaceAll("-", "");
     const serverChallenge = randomUUID().replaceAll("-", "");
@@ -570,12 +588,21 @@ export class NativeRoomService {
             const transcript = { ...serverTranscript, clientChallenge };
             if (!verifyNativeHandshakeProof(frame.proof, this.nonce, "client", transcript))
               throw new AgoraError("native service client did not prove the transcript");
+            // The name of the app client behind this connection, declared and therefore cooperative:
+            // any process that completes this hello may declare any name. It is attribution kept
+            // for the connection's life, never an identity, and nothing that enforces reads it.
+            if (frame.clientName !== undefined) {
+              if (typeof frame.clientName !== "string" || !CLIENT_NAME_PATTERN.test(frame.clientName))
+                throw codedRefusal("client-name-invalid", "a client name is a lowercase letter then 1-39 lowercase letters, digits or hyphens");
+              clientName = frame.clientName;
+            }
             greeted = true;
             sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "welcome", ...transcript,
-              proof: nativeHandshakeProof(this.nonce, "welcome", transcript) });
+              proof: nativeHandshakeProof(this.nonce, "welcome", transcript),
+              capabilities: LOCAL_OFFER, ...(clientName !== undefined ? { clientName } : {}) });
             return;
           }
-          await this.#dispatch(socket, frame);
+          await this.#dispatch(socket, frame, undefined, { clientName });
         }).catch((error) => {
           const requestId = raw && typeof raw === "object" && "requestId" in raw && typeof raw.requestId === "string" ? raw.requestId : undefined;
           fail(error, requestId);
@@ -589,8 +616,9 @@ export class NativeRoomService {
 
   /** @param {net.Socket} socket @param {Record<string, unknown>} frame */
   /** @param {net.Socket | import("node:stream").Duplex} socket @param {any} frame
-   * @param {{ binding: any } | undefined} [member] the admitted member route, when this stream is one */
-  async #dispatch(socket, frame, member) {
+   * @param {{ binding: any } | undefined} [member] the admitted member route, when this stream is one
+   * @param {{ clientName?: string }} [local] what a LOCAL connection declared in its hello */
+  async #dispatch(socket, frame, member, local = {}) {
     if (member) {
       // Board operations admitted through this protocol under the remote principal are allowed;
       // direct store or control access is not, so create-room and spawn are absent from the list.
@@ -689,8 +717,12 @@ export class NativeRoomService {
     if (frame.type === "read" || frame.type === "subscribe") {
       const since = frame.since === undefined ? undefined : requiredString(frame.since, "cursor");
       const limit = frame.limit === undefined ? undefined : Number(frame.limit);
+      // A thread narrows the room to one thread's root and its replies (threads-v1). The store
+      // refuses a root it does not hold, or one that is itself a reply, before anything is read.
+      const thread = frame.thread === undefined ? undefined : validateNativeId(requiredString(frame.thread, "thread id"), "thread id");
       if (frame.type === "read") {
-        const messages = store.read({ ...(since ? { since } : {}), ...(limit !== undefined ? { limit } : {}) });
+        const view = store.view({ ...(since ? { since } : {}), ...(limit !== undefined ? { limit } : {}), ...(thread !== undefined ? { thread } : {}) });
+        const messages = view.messages;
         // The page must be the END the STORE would select, or the limit this refusal names is a
         // limit for a different set of messages. `native-store.mjs` slices `-limit` when there is no
         // `since` (the newest N) and forward from the cursor when there is (the oldest N after it).
@@ -702,7 +734,11 @@ export class NativeRoomService {
         const envelope = (count) => {
           const page = count === messages.length ? messages
             : since ? messages.slice(0, count) : messages.slice(-count);
-          const sequence = page.length ? parseNativeCursor(page.at(-1).cursor).sequence
+          // A thread page is a view over a scan, so the whole page accounts for the scan's end: the
+          // records after its last reply are outside the thread and covered, and the reader's
+          // position stays a room position. A page cut to fit accounts only through what it carries.
+          const sequence = thread !== undefined && count === messages.length ? view.through
+            : page.length ? parseNativeCursor(page.at(-1).cursor).sequence
             : since ? parseNativeCursor(since).sequence : store.status().committed;
           return { protocol: NATIVE_PROTOCOL, type: "read-result", requestId: frame.requestId,
             roomId, messages: page, checkpoint: store.checkpoint(sequence) };
@@ -730,8 +766,13 @@ export class NativeRoomService {
               + `${nativeFramePayloadBytes(envelope(1))} bytes and one native protocol frame holds `
               + `${NATIVE_FRAME_MAX}; this protocol cannot deliver it (no cursor advanced)`);
           }
+          // A thread read after a cursor bounds the RECORDS it scans, not the messages it returns, so
+          // the limit that brings back exactly the messages that fit is the distance from the cursor
+          // to the last of them; their count would scan too few records and return fewer still.
+          const named = thread !== undefined && since
+            ? parseNativeCursor(messages[fits - 1].cursor).sequence - parseNativeCursor(since).sequence : fits;
           throw codedRefusal("read-batch-refused", `${messages.length} messages encode to ${bytes} bytes and `
-            + `one native protocol frame holds ${NATIVE_FRAME_MAX}; re-read with limit ${fits} or fewer `
+            + `one native protocol frame holds ${NATIVE_FRAME_MAX}; re-read with limit ${named} or fewer `
             + `(no cursor advanced)`);
         }
         sendFrame(socket, whole);
@@ -740,13 +781,15 @@ export class NativeRoomService {
 
       if (!since) throw new AgoraError("native subscription needs an explicit cursor");
       const start = parseNativeCursor(since);
-      // read() validates the epoch and that the cursor is not beyond the log.
+      // read() validates the epoch and that the cursor is not beyond the log; a thread's root is
+      // checked before anything is replayed or registered.
       store.read({ since, limit: 1 });
+      if (thread !== undefined) store.threadRoot(thread);
       const committed = store.status().committed;
       const backlogCount = committed - start.sequence;
       if (backlogCount > 10_000)
         throw new AgoraError(`native subscription backlog has ${backlogCount} records; read forward before subscribing (no cursor advanced)`);
-      const backlog = backlogCount ? store.read({ since, limit: backlogCount }) : [];
+      const backlog = backlogCount ? store.read({ since, limit: backlogCount, ...(thread !== undefined ? { thread } : {}) }) : [];
       // One event frame per message, so the batch bound above does not apply -- but a SINGLE
       // oversized message still cannot cross, and it would surface here as the encoder's byte
       // range with no cursor to identify it. Name it the same way the read path does.
@@ -765,7 +808,7 @@ export class NativeRoomService {
       if (socket.writableLength + replayBytes > MAX_PENDING_WRITE)
         throw new AgoraError(`native subscription backlog needs ${replayBytes} buffered bytes; read forward before subscribing (no cursor advanced)`);
       for (const encoded of replayFrames) socket.write(encoded);
-      this.subscriptions.get(socket)?.set(roomId, committed);
+      this.subscriptions.get(socket)?.set(roomId, { sequence: committed, ...(thread !== undefined ? { thread } : {}) });
       socket.write(resultFrame);
       return;
     }
@@ -773,9 +816,11 @@ export class NativeRoomService {
       const operation = frame.operation;
       if (!operation || typeof operation !== "object" || Array.isArray(operation)) throw new AgoraError("native append needs an operation object");
       // The store stamps author.id and derives the message id from this account id, so a member's
-      // posts carry its own minted principal rather than the host's.
+      // posts carry its own minted principal rather than the host's. A local connection that
+      // declared a client name has its messages stamped `via` that name; a member declares none.
       const receipt = /** @type {any} */ (await store.append(/** @type {any} */ (operation),
-        { accountId: member ? member.binding.accountId : this.accountId }));
+        { accountId: member ? member.binding.accountId : this.accountId,
+          ...(!member && local.clientName !== undefined ? { via: local.clientName } : {}) }));
       sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "append-ack", requestId: frame.requestId, roomId, ...receipt });
       if (receipt.kind !== "board") {
         const message = store.read({ since: `${store.manifest.epoch}:${parseNativeCursor(receipt.cursor).sequence - 1}`, limit: 1 })[0];
@@ -790,9 +835,14 @@ export class NativeRoomService {
   #broadcast(roomId, message) {
     const sequence = parseNativeCursor(message.cursor).sequence;
     for (const [socket, rooms] of this.subscriptions) {
-      const previous = rooms.get(roomId);
-      if (previous === undefined || sequence <= previous) continue;
-      if (sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "event", requestId: message.id, roomId, message })) rooms.set(roomId, sequence);
+      const held = rooms.get(roomId);
+      if (held === undefined || sequence <= held.sequence) continue;
+      // a thread subscription passes over a message outside its thread: covered, not delivered
+      if (held.thread !== undefined && message.id !== held.thread && message.thread !== held.thread) {
+        rooms.set(roomId, { ...held, sequence });
+        continue;
+      }
+      if (sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "event", requestId: message.id, roomId, message })) rooms.set(roomId, { ...held, sequence });
     }
   }
 
@@ -1106,9 +1156,15 @@ export class NativeRoomService {
             // different principal is refused here rather than reaching the store.
             if (frame.accountId !== undefined && frame.accountId !== route.binding.accountId)
               throw codedRefusal("member-actor-mismatch", "this route admits one principal and the frame named another");
+            // A client name is a LOCAL connection's declaration, stamped as `via` on its messages. A
+            // member's principal is its route's key; it names no app client, and one claimed here is
+            // refused by name rather than ignored.
+            if (frame.clientName !== undefined)
+              throw codedRefusal("member-client-refused", "a member session declares no client name; via is stamped only for a local connection");
             greeted = true;
             sendFrame(/** @type {any} */ (stream), { protocol: NATIVE_PROTOCOL, type: "member-welcome",
-              ...transcript, proof: memberHandshakeProof(route.secret, MEMBER_PHASES.welcome, transcript) });
+              ...transcript, proof: memberHandshakeProof(route.secret, MEMBER_PHASES.welcome, transcript),
+              capabilities: MEMBER_OFFER });
             resolveReady(undefined);
             return;
           }
@@ -1196,12 +1252,26 @@ export class NativeServiceClient {
     this.pending = new Map();
     /** @type {Map<string, Set<(message: any) => void>>} */
     this.listeners = new Map();
+    /** What the service offered on its welcome; empty for a service that predates offers, which
+     * serves no request that needs one. Set by `connect` (or by the member handshake).
+     * @type {Set<string>} */
+    this.capabilities = new Set();
+    /** The client name the service took for this connection, when one was declared.
+     * @type {string | undefined} */
+    this.clientName = undefined;
     socket.on("data", (bytes) => this.#receive(bytes));
     socket.on("error", (error) => this.#close(error));
     socket.on("close", () => this.#close(new AgoraError("native service connection closed")));
   }
 
-  /** @param {{ path: string, nonce: string, bootEpoch: string, accountId: string, seatLabel: string, timeoutMs?: number }} endpoint */
+  /**
+   * `clientName`, when given, is the app client behind this connection, declared in the hello and
+   * stamped by the service as `via` on every message this connection appends. It is attribution,
+   * not authentication: any process able to complete this hello may declare any name. A service
+   * that does not offer `client-name-v1` would ignore it and stamp nothing, so the connection is
+   * refused here, before any request is sent, rather than posting unattributed.
+   * @param {{ path: string, nonce: string, bootEpoch: string, accountId: string, seatLabel: string, timeoutMs?: number, clientName?: string }} endpoint
+   */
   static async connect(endpoint) {
     if (typeof endpoint.path !== "string" || !endpoint.path) throw new AgoraError("native service descriptor has no endpoint path");
     validateNativeId(endpoint.nonce, "service secret");
@@ -1209,6 +1279,9 @@ export class NativeServiceClient {
     validateNativeId(endpoint.accountId, "service account id");
     if (typeof endpoint.seatLabel !== "string" || !endpoint.seatLabel.trim() || endpoint.seatLabel.length > 120)
       throw new AgoraError("native service descriptor has no bounded seat label");
+    const clientName = endpoint.clientName;
+    if (clientName !== undefined && (typeof clientName !== "string" || !CLIENT_NAME_PATTERN.test(clientName)))
+      throw codedRefusal("client-name-invalid", "a client name is a lowercase letter then 1-39 lowercase letters, digits or hyphens");
     const timeoutMs = endpoint.timeoutMs ?? REQUEST_TIMEOUT_MS;
     const socket = net.createConnection({ path: endpoint.path });
     try {
@@ -1230,15 +1303,26 @@ export class NativeServiceClient {
       const clientChallenge = randomUUID().replaceAll("-", "");
       const transcript = { ...serverTranscript, clientChallenge };
       if (!sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "client-hello", ...transcript,
+        ...(clientName !== undefined ? { clientName } : {}),
         proof: nativeHandshakeProof(endpoint.nonce, "client", transcript) }))
         throw new AgoraError("native service closed before client authentication");
       const welcome = /** @type {Record<string, any>} */ (await readHandshakeFrame(socket, timeoutMs, "welcome proof"));
+      // A hello the service refused is its answer, said in its own words (a malformed client name
+      // is one); anything else in place of the welcome is a broken transcript.
+      if (welcome.type === "error" && typeof welcome.message === "string")
+        throw codedRefusal(/^([a-z][a-z0-9-]+):/.exec(welcome.message)?.[1] ?? "hello-refused", welcome.message.replace(/^[a-z][a-z0-9-]+:\s*/, "").slice(0, 500));
       if (welcome.type !== "welcome" || welcome.requestId !== requestId || welcome.bootEpoch !== endpoint.bootEpoch
         || welcome.serverChallenge !== serverChallenge || welcome.clientChallenge !== clientChallenge
         || welcome.accountId !== endpoint.accountId || welcome.seatLabel !== endpoint.seatLabel
         || !verifyNativeHandshakeProof(welcome.proof, endpoint.nonce, "welcome", transcript))
         throw new AgoraError("native service welcome did not prove the fresh transcript");
-      return new NativeServiceClient(socket, timeoutMs);
+      const offered = receiveCapabilityOffer(welcome.capabilities);
+      if (clientName !== undefined && (!offered.advertised.includes("client-name-v1") || welcome.clientName !== clientName))
+        throw codedRefusal("client-name-unsupported", `the seat service at ${endpoint.path} does not offer client-name-v1, so it would stamp no via; nothing was sent under the name ${clientName}`);
+      const client = new NativeServiceClient(socket, timeoutMs);
+      client.capabilities = new Set(offered.advertised);
+      if (clientName !== undefined) client.clientName = clientName;
+      return client;
     } catch (error) {
       socket.destroy();
       throw error;
@@ -1264,11 +1348,15 @@ export class NativeServiceClient {
     });
   }
 
-  /** @param {string} roomId @param {string} since @param {(message: any) => void} listener */
-  async subscribe(roomId, since, listener) {
+  /**
+   * `thread` narrows the subscription to one thread's root and replies (threads-v1); the caller
+   * checks the capability first, because a service without it would subscribe to the whole room.
+   * @param {string} roomId @param {string} since @param {(message: any) => void} listener @param {string} [thread]
+   */
+  async subscribe(roomId, since, listener, thread) {
     const listeners = this.listeners.get(roomId) ?? new Set();
     listeners.add(listener); this.listeners.set(roomId, listeners);
-    try { return await this.request("subscribe", { roomId, since }); }
+    try { return await this.request("subscribe", { roomId, since, ...(thread !== undefined ? { thread } : {}) }); }
     catch (e) { listeners.delete(listener); throw e; }
   }
 

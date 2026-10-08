@@ -1,5 +1,5 @@
 // @ts-check
-import { ProtocolValidationError, PROTOCOL_LIMITS, readArray, readEnum, readRecord } from './common.mjs';
+import { ProtocolValidationError, PROTOCOL_LIMITS, readArray, readEnum, readRecord, readString } from './common.mjs';
 import { validateAcceptedHostContext, validateNativeAccountRef } from './identity.mjs';
 
 /** @typedef {ReturnType<typeof validateAdvertisedCapabilities>} AdvertisedCapabilities */
@@ -7,12 +7,31 @@ import { validateAcceptedHostContext, validateNativeAccountRef } from './identit
 /** @typedef {ReturnType<typeof validateCapabilityOffer>} CapabilityOffer */
 /** @typedef {ReturnType<typeof validateNegotiatedCapabilities>} NegotiatedCapabilities */
 
-export const NATIVE_CAPABILITIES = Object.freeze(/** @type {const} */ (['contracts-v2', 'board-v1']));
+/** The closed vocabulary this build can negotiate. `threads-v1`: thread-scoped read and subscribe,
+ * and an append whose thread root the host verifies. `client-name-v1`: a local connection may
+ * declare a client name, which the host stamps as `via` on that connection's messages. */
+export const NATIVE_CAPABILITIES = Object.freeze(/** @type {const} */ (['contracts-v2', 'board-v1', 'threads-v1', 'client-name-v1']));
 /** @param {unknown} value */
 function capabilities(value) {
   const result = readArray(value, 'capabilities', PROTOCOL_LIMITS.capabilities, (v) => readEnum(v, 'capabilities', NATIVE_CAPABILITIES));
   if (new Set(result).size !== result.length) throw new ProtocolValidationError('field', 'capabilities');
   return result;
+}
+/** A host's offer as a client receives it, from a host that may be newer than this build. An
+ * advertised name this build does not know is dropped (it cannot be used, so it changes nothing);
+ * a REQUIRED name this build does not know is refused, because the host will not serve without it.
+ * An absent offer is a host that predates offers: it advertises nothing.
+ * @param {unknown} value @returns {{advertised: Array<typeof NATIVE_CAPABILITIES[number]>, required: Array<typeof NATIVE_CAPABILITIES[number]>}} */
+export function receiveCapabilityOffer(value) {
+  if (value === undefined) return { advertised: [], required: [] };
+  const v = readRecord(value, ['advertised', 'required']);
+  const token = (/** @type {unknown} */ item) => readString(item, 'capabilities', { min: 1, max: 64, pattern: /^[a-z][a-z0-9-]{0,63}$/ });
+  const known = /** @type {readonly string[]} */ (NATIVE_CAPABILITIES);
+  const advertised = readArray(v.advertised, 'advertised', PROTOCOL_LIMITS.capabilities, token)
+    .filter((c) => known.includes(c));
+  const required = capabilities(v.required);
+  if (required.some((c) => !advertised.includes(c))) throw new ProtocolValidationError('context', 'required');
+  return { advertised: /** @type {any} */ ([...new Set(advertised)]), required };
 }
 /** @param {unknown} value */
 export function validateAdvertisedCapabilities(value) {

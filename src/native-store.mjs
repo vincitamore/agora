@@ -9,7 +9,7 @@ import Kernel from "./native-cursor.kernel.mjs";
 import BoardKernel from "./native-board.kernel.mjs";
 import { nat as kernelNat } from "./kernel-nat.mjs";
 import { nativeCursor, nativeDigest, nativeMessageId, parseNativeCursor, validateNativeEpoch, validateNativeId } from "./native-protocol.mjs";
-import { ProtocolValidationError } from "./protocol/common.mjs";
+import { AUTHOR_REF_PATTERN, CLIENT_NAME_PATTERN, ProtocolValidationError } from "./protocol/common.mjs";
 import { validateBoardPayload } from "./protocol/operation.mjs";
 
 const LOG_VERSION = 1;
@@ -29,6 +29,12 @@ const sha256 = (bytes) => createHash("sha256").update(bytes).digest();
 
 /** @param {string} roomId @param {string} accountId @param {string} operationId */
 const messageId = nativeMessageId;
+
+/** A refusal whose name is a property, so the service carries it on the wire as `code` and a caller
+ * decides on the name, never on the prose. @param {string} code @param {string} detail */
+function refusal(code, detail) {
+  return Object.assign(new AgoraError(`${code}: ${detail}`), { code });
+}
 
 /** @param {string} root @param {string} roomId */
 function roomDirectory(root, roomId) {
@@ -272,9 +278,20 @@ function validateRecord(record, manifest, expectedSequence, expectedPreviousDige
     if (record.boardId !== messageId(manifest.roomId, record.accountId, record.operationId) ||
         record.cursor !== nativeCursor(manifest.epoch, expectedSequence))
       throw new AgoraError("native room board identity does not match its committed position");
-  } else if (!record.message || record.message.id !== messageId(manifest.roomId, record.accountId, record.operationId) ||
-      record.message.author?.id !== record.accountId || record.message.room !== manifest.roomId ||
-      record.message.cursor !== nativeCursor(manifest.epoch, expectedSequence)) throw new AgoraError("native room log message identity does not match its committed position");
+  } else {
+    if (!record.message || record.message.id !== messageId(manifest.roomId, record.accountId, record.operationId) ||
+        record.message.author?.id !== record.accountId || record.message.room !== manifest.roomId ||
+        record.message.cursor !== nativeCursor(manifest.epoch, expectedSequence)) throw new AgoraError("native room log message identity does not match its committed position");
+    // `via` and `author.ref` are optional; present, each has the shape the append admitted, and a
+    // ref never stands without the via that scoped it
+    const { via, author } = record.message;
+    if (via !== undefined && (typeof via !== "string" || !CLIENT_NAME_PATTERN.test(via)))
+      throw new AgoraError(`native room log message at sequence ${expectedSequence} carries an invalid via; do not advance or truncate it`);
+    if (author.ref !== undefined && (typeof author.ref !== "string" || !AUTHOR_REF_PATTERN.test(author.ref)))
+      throw new AgoraError(`native room log message at sequence ${expectedSequence} carries an invalid author ref; do not advance or truncate it`);
+    if (author.ref !== undefined && via === undefined)
+      throw new AgoraError(`native room log message at sequence ${expectedSequence} carries an author ref without a via; do not advance or truncate it`);
+  }
   const { recordDigest, ...unsigned } = record;
   if (!/^sha256:[a-f0-9]{64}$/.test(recordDigest ?? "") || nativeDigest(unsigned) !== recordDigest)
     throw new AgoraError(`native room log record digest mismatch at sequence ${expectedSequence}; do not advance or truncate it`);
@@ -344,7 +361,14 @@ export class NativeRoomStore {
     this.operations = new Map(records.map((r) => [`${r.accountId}\0${r.operationId}`, r]));
     /** @type {Map<string, { accountId: string, cursor: string, leaseId: string, fence: string, expiresAt: string, leaseMs: number }>} */
     this.holders = new Map();
-    for (const r of records) this.#applyBoard(r);
+    /** Every chat message's id to its record's index: how a thread root is verified without a scan.
+     * Derived from the log alone and rebuilt on every open, like the operation index above.
+     * @type {Map<string, number>} */
+    this.messageIndex = new Map();
+    /** A thread root's id to the indices of the records that reply in it, ascending; rebuilt on open.
+     * @type {Map<string, number[]>} */
+    this.threadIndex = new Map();
+    records.forEach((r, i) => { this.#applyBoard(r); this.#index(r, i); });
   }
 
   /** @param {{ root: string, roomId?: string, epoch?: string, hostAccountId: string, recordLimit?: number, now?: () => Date }} options */
@@ -439,9 +463,11 @@ export class NativeRoomStore {
   }
 
   /**
-   * The authenticated account id comes from the route-bound handler, never from the request body.
+   * The authenticated account id comes from the route-bound handler, never from the request body;
+   * `via`, when present, is the client name the local connection declared in its hello, handed in
+   * by the service beside the account (cooperative attribution, not authentication).
    * @param {any} input
-   * @param {{ accountId: string }} authenticated
+   * @param {{ accountId: string, via?: string }} authenticated
    */
   async append(input, authenticated) {
     const run = this.queue.then(() => this.#append(input, authenticated));
@@ -451,21 +477,34 @@ export class NativeRoomStore {
 
   /**
    * @param {any} input
-   * @param {{ accountId: string }} authenticated
+   * @param {{ accountId: string, via?: string }} authenticated
    */
   async #append(input, authenticated) {
     if (this.closed) throw new AgoraError("native room store is closed");
     if (/** @type {any} */ (input).kind === "board") return this.#appendBoard(/** @type {any} */ (input), authenticated);
     validateNativeId(input.operationId, "operation id");
     validateNativeId(authenticated.accountId, "account id");
+    // `via` is the client name the CONNECTION declared, handed in beside the account by the service;
+    // an operation never names its own. `authorRef` is that client's id for the person it posted for,
+    // so it exists only on a connection that declared a name. Both are attribution, never identity.
+    const via = authenticated.via;
+    if (via !== undefined && (typeof via !== "string" || !CLIENT_NAME_PATTERN.test(via)))
+      throw refusal("client-name-invalid", "a client name is a lowercase letter then 1-39 lowercase letters, digits or hyphens");
+    if (input.via !== undefined)
+      throw refusal("operation-via-refused", "via is stamped from the connection's declared client name, never taken from an operation");
+    if (input.authorRef !== undefined && via === undefined)
+      throw refusal("author-ref-without-client", "an authorRef is an app client's own id for the person, and this connection declared no client name");
+    if (input.authorRef !== undefined && (typeof input.authorRef !== "string" || !AUTHOR_REF_PATTERN.test(input.authorRef)))
+      throw refusal("author-ref-invalid", "an authorRef is 1-64 letters, digits or . _ @ + -");
     if (typeof input.authorName !== "string" || !input.authorName.trim() || input.authorName.length > 120) throw new AgoraError("native post needs a bounded author label");
-    if (input.authorKind && !["human", "agent", "unknown"].includes(input.authorKind)) throw new AgoraError("native post author kind is invalid");
+    if (input.authorKind && !["human", "agent", "unknown", "system"].includes(input.authorKind)) throw new AgoraError("native post author kind is invalid");
     if (typeof input.text !== "string" || Buffer.byteLength(input.text) > MESSAGE_TEXT_MAX) throw new AgoraError(`native post text exceeds ${MESSAGE_TEXT_MAX} bytes`);
     if (input.thread !== undefined) validateNativeId(input.thread, "thread id");
     if (input.attachments && (!Array.isArray(input.attachments) || input.attachments.length > ATTACHMENT_MAX)) throw new AgoraError(`native post carries more than ${ATTACHMENT_MAX} attachments`);
     const attachments = input.attachments?.map(validateAttachment);
     const payload = { accountId: authenticated.accountId, authorName: input.authorName.trim(), authorKind: input.authorKind ?? "agent", text: input.text,
-      ...(input.thread ? { thread: input.thread } : {}), ...(attachments?.length ? { attachments } : {}) };
+      ...(input.thread ? { thread: input.thread } : {}), ...(attachments?.length ? { attachments } : {}),
+      ...(via !== undefined ? { via } : {}), ...(input.authorRef !== undefined ? { authorRef: input.authorRef } : {}) };
     const payloadDigest = nativeDigest(payload);
     const key = `${authenticated.accountId}\0${input.operationId}`;
     const existing = this.operations.get(key);
@@ -473,13 +512,17 @@ export class NativeRoomStore {
       if (existing.payloadDigest !== payloadDigest) throw new AgoraError(`native operation ${input.operationId} was already committed with different bytes`);
       return { id: existing.message.id, cursor: existing.message.cursor, duplicate: true };
     }
+    // a reply names a root the room holds and that is itself top-level: one level, as on Slack
+    if (input.thread !== undefined) this.threadRoot(input.thread);
     if (this.records.length >= this.manifest.recordLimit)
       throw new AgoraError(`native room reached its ${this.manifest.recordLimit}-record resident limit; retain or archive explicitly before accepting more`);
     const sequence = this.records.length + 1;
     const id = messageId(this.manifest.roomId, authenticated.accountId, input.operationId);
     const message = { id, room: this.manifest.roomId,
       ...(input.thread ? { thread: input.thread } : {}),
-      author: { id: authenticated.accountId, name: payload.authorName, kind: payload.authorKind },
+      author: { id: authenticated.accountId, name: payload.authorName, kind: payload.authorKind,
+        ...(input.authorRef !== undefined ? { ref: input.authorRef } : {}) },
+      ...(via !== undefined ? { via } : {}),
       text: input.text, ts: this.now().toISOString(), cursor: nativeCursor(this.manifest.epoch, sequence),
       ...(attachments?.length ? { attachments } : {}) };
     const unsigned = { version: LOG_VERSION, roomId: this.manifest.roomId, epoch: this.manifest.epoch, sequence,
@@ -670,16 +713,44 @@ export class NativeRoomStore {
     this.end += frame.length;
     this.records.push(record);
     this.operations.set(key, record);
+    this.#index(record, this.records.length - 1);
   }
 
-  /** @param {{ since?: string, limit?: number }} [options] */
+  /** @param {{ since?: string, limit?: number, thread?: string }} [options] */
   read(options = {}) {
+    return this.view(options).messages;
+  }
+
+  /**
+   * A read and the committed sequence it accounts for (`through`).
+   *
+   * The room view is the one ordered sequence, replies included. A `thread` narrows it to that
+   * thread's root and its replies, ascending, and is a VIEW over what the read already selected,
+   * never a second plan: with `since`, the proven kernel selects the records after the cursor
+   * (`limit` bounds the records scanned, not the messages returned) and the view keeps the thread's;
+   * `through` is the end of that scan, so a thread reader's position advances over the records
+   * outside its thread and stays a room position. Without `since`, a thread view is its own newest
+   * `limit` messages, found through the thread index rather than a scan, and accounts for
+   * everything committed. A root the room does not hold, or one that is itself a reply, is refused
+   * by name before anything is read.
+   * @param {{ since?: string, limit?: number, thread?: string }} [options]
+   */
+  view(options = {}) {
     if (this.closed) throw new AgoraError("native room store is closed");
     const limit = options.limit ?? 1000;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10_000) throw new AgoraError("native room read limit must be 1-10000");
+    const thread = options.thread;
+    if (thread !== undefined) this.threadRoot(thread);
+    /** @param {any} m */
+    const inView = (m) => thread === undefined || m.id === thread || m.thread === thread;
     /** @param {any[]} records */
-    const messages = (records) => records.filter((r) => r.message).map((r) => structuredClone(r.message));
-    if (!options.since) return messages(this.records.slice(-limit));
+    const messages = (records) => records.filter((r) => r.message && inView(r.message)).map((r) => structuredClone(r.message));
+    if (!options.since) {
+      if (thread === undefined) return { messages: messages(this.records.slice(-limit)), through: this.records.length };
+      const at = /** @type {number} */ (this.messageIndex.get(thread));
+      const indices = [at, ...(this.threadIndex.get(thread) ?? [])].sort((a, b) => a - b).slice(-limit);
+      return { messages: indices.map((i) => structuredClone(this.records[i].message)), through: this.records.length };
+    }
     const cursor = parseNativeCursor(options.since);
     // The plan (which sequences a read delivers, or a refusal that advances nothing) is decided by
     // the kernel generated from spec/cursor.bend, whose laws the checker proves: a foreign epoch and
@@ -688,7 +759,34 @@ export class NativeRoomStore {
     const plan = Kernel.plan(cursor.epoch === this.manifest.epoch, kernelNat(this.records.length, "the committed sequence"), kernelNat(cursor.sequence, "the cursor sequence"), kernelNat(limit, "the read limit"));
     if (plan.$ === "RefusedEpoch") throw new AgoraError(`native room cursor belongs to epoch ${cursor.epoch}, not live epoch ${this.manifest.epoch}; recover explicitly without advancing`);
     if (plan.$ === "RefusedFuture") throw new AgoraError(`native room cursor ${cursor.sequence} exceeds committed sequence ${this.records.length}; recover explicitly without advancing`);
-    return messages(this.records.slice(Number(plan.from) - 1, Number(plan.to)));
+    return { messages: messages(this.records.slice(Number(plan.from) - 1, Number(plan.to))), through: Number(plan.to) };
+  }
+
+  /**
+   * The root of a thread, or a refusal by name: the room holds no message with that id
+   * (`thread-root-unknown`), or that message is itself a reply (`thread-root-not-top-level`; a
+   * thread is one level). Answered from the message index, never a scan.
+   * @param {string} id
+   */
+  threadRoot(id) {
+    const at = this.messageIndex.get(id);
+    if (at === undefined)
+      throw refusal("thread-root-unknown", `native room ${this.manifest.roomId} holds no message ${id}; a thread is named by its root message's id`);
+    const root = this.records[at].message;
+    if (root.thread !== undefined)
+      throw refusal("thread-root-not-top-level", `message ${id} is a reply in thread ${root.thread}; a thread is one level, so reply to its root ${root.thread}`);
+    return structuredClone(root);
+  }
+
+  /** @param {any} record @param {number} index */
+  #index(record, index) {
+    if (!record.message) return;
+    this.messageIndex.set(record.message.id, index);
+    const thread = record.message.thread;
+    if (thread === undefined) return;
+    const replies = this.threadIndex.get(thread);
+    if (replies) replies.push(index);
+    else this.threadIndex.set(thread, [index]);
   }
 
   /**

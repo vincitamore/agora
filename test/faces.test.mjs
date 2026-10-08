@@ -1208,3 +1208,28 @@ test("github / fixture 12: a pending github face whose process died is swept and
     assert.equal(r.posts().length, 0);
   } finally { await r.cleanup(); }
 });
+
+// ---------------------------------------------------------------------------------------------
+
+test("slack: a native reply lands in the Slack thread of its faced root, and one whose root has no thread on the face is refused with thread:, never flattened", async () => {
+  const publishedRoot = { originId: ORIGIN_D, cursor: `${EPOCH}:40`, transport: "slack", status: "published", id: "1756900500.000100", attempt: 1, at: "2026-09-05T12:00:00.000Z", via: "response" };
+  const r = await rig({ records: [publishedRoot], routes: [AUTH, ["chat.postMessage", () => ({ body: { ok: true, ts: "1756900501.000000" } })]] });
+  try {
+    // the root was published to this face: the reply goes under it
+    const under = await r.runner.face(msg({ id: ORIGIN_A, seq: 41, text: "in the thread\n\nto: operator\n\n-- Grace", thread: ORIGIN_D }));
+    assert.deepEqual(under.faces, [{ transport: "slack", status: "pending" }]);
+    await under.settled;
+    assert.equal(r.posts().length, 1);
+    assert.equal(r.bodyOf(r.posts()[0]).thread_ts, "1756900500.000100", "the reply lands in its root's Slack thread");
+    // a root this face never carried: refused before any call, in the face's own words
+    const orphan = await r.runner.face(msg({ id: ORIGIN_B, seq: 43, text: "also in a thread\n\nto: operator\n\n-- Grace", thread: ORIGIN_A.replace(/^c4/, "e5") }));
+    assert.equal(orphan.faces.length, 1);
+    assert.equal(orphan.faces[0].status, "refused");
+    assert.match(String(orphan.faces[0].reason), /^thread: this reply's root has no thread on the slack face/);
+    await orphan.settled;
+    assert.equal(r.posts().length, 1, "a thread refusal is decided before any call: nothing was flattened to top level");
+    const rec = (await r.records()).get(faceKey(ORIGIN_B, "slack"));
+    assert.equal(rec?.status, "refused");
+    assert.equal(rec?.code, "thread");
+  } finally { await r.cleanup(); }
+});

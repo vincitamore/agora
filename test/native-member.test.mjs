@@ -1037,3 +1037,58 @@ test("route open, list, a second open, and close reach the service through a rea
   assert.deepEqual(await listServiceRoutes(root), []);
   await assert.rejects(approvedWire(service, 'room-revoke'), /route-not-open/);
 });
+
+// ---------------------------------------------------------------- threads and via on a member route
+
+test("a member declaring a client name is refused by name, and a greeted member is offered threads-v1 alone", async (t) => {
+  const { service } = await memberFixture(t);
+  const { descriptor, accept } = await openFakedRoute(service);
+  const secret = await readRouteSecret(service.root, descriptor.binding, descriptor.proofRef);
+  {
+    const { hostSide, clientSide } = loopback();
+    accept(hostSide);
+    const hello = await collect(clientSide, (f) => (f.type === "member-server-hello" ? f : undefined));
+    const { protocol: _p, type: _t, proof: _pr, ...serverTranscript } = hello;
+    const transcript = { ...serverTranscript, clientChallenge: randomUUID().replaceAll("-", "") };
+    clientSide.write(encodeNativeFrame({ protocol: NATIVE_PROTOCOL, type: "member-client-hello", ...transcript,
+      clientName: "review-app", proof: memberHandshakeProof(secret, MEMBER_PHASES.client, transcript) }));
+    const refusal = await collect(clientSide, (f) => (f.type === "error" || f.type === "member-welcome" ? f : undefined));
+    assert.equal(refusal.type, "error");
+    assert.equal(refusal.code, "member-client-refused");
+  }
+  const { hostSide, clientSide } = loopback();
+  accept(hostSide);
+  const welcome = await greet(clientSide, secret);
+  assert.equal(welcome.type, "member-welcome", `handshake refused: ${welcome.message ?? ""}`);
+  assert.deepEqual(welcome.capabilities, { advertised: ["threads-v1"], required: [] }, "a member is never offered client-name-v1");
+});
+
+test("a member replies in a thread and reads it, and its authorRef and an operation via are refused by name", async (t) => {
+  const { service } = await memberFixture(t);
+  const { descriptor, accept } = await openFakedRoute(service);
+  const secret = await readRouteSecret(service.root, descriptor.binding, descriptor.proofRef);
+  const { hostSide, clientSide } = loopback();
+  accept(hostSide);
+  assert.equal((await greet(clientSide, secret)).type, "member-welcome");
+  /** @param {Record<string, unknown>} frame */
+  const ask = (frame) => {
+    const requestId = randomUUID().replaceAll("-", "");
+    clientSide.write(encodeNativeFrame({ protocol: NATIVE_PROTOCOL, requestId, roomId: ROOM, ...frame }));
+    return collect(clientSide, (f) => (f.requestId === requestId ? f : undefined));
+  };
+  /** @param {Record<string, unknown>} operation */
+  const append = (operation) => ask({ type: "append", operation: { operationId: randomUUID().replaceAll("-", ""), authorName: "remote-bearer", text: "t", ...operation } });
+  const root = await append({ text: "root" });
+  assert.equal(root.type, "append-ack", root.message);
+  const reply = await append({ text: "reply", thread: root.id });
+  assert.equal(reply.type, "append-ack", reply.message);
+  const thread = await ask({ type: "read", thread: root.id });
+  assert.equal(thread.type, "read-result", thread.message);
+  assert.deepEqual(thread.messages.map((/** @type {any} */ m) => m.text), ["root", "reply"]);
+  assert.equal((await append({ thread: reply.id })).code, "thread-root-not-top-level");
+  assert.equal((await append({ authorRef: "u-1" })).code, "author-ref-without-client");
+  assert.equal((await append({ via: "review-app" })).code, "operation-via-refused");
+  const stored = /** @type {any} */ ((await service.openRoom(ROOM)).read().at(-1));
+  assert.equal(stored.text, "reply", "no refused operation committed");
+  assert.equal("via" in stored, false, "a member's message carries no via");
+});

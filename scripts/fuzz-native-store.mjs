@@ -16,7 +16,11 @@
 //   - an expired lease is no holder for EVERY verb, break included, and is not listed as held;
 //   - a retried operation id from the same account with the same bytes is a duplicate and
 //     changes nothing; with different bytes it is refused;
-//   - the cursor of the record that admits an act is its fence.
+//   - the cursor of the record that admits an act is its fence;
+//   - a reply names a root the room holds that is itself top-level, checked after a retried
+//     operation id is recognized and before anything commits; a thread view is checked for its
+//     root before the read plan, keeps the root and its replies from what the plan selected, and
+//     accounts for the plan's end (with no cursor: the thread's newest, accounting for everything).
 
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -42,8 +46,16 @@ class Model {
     this.holders = new Map();
     /** @type {Map<string, { cursor: string, bytes: string }>} */
     this.ops = new Map();
-    /** @type {Array<{ cursor: string, text: string, seq: number }>} */
+    /** @type {Array<{ cursor: string, text: string, seq: number, id?: string, thread?: string }>} */
     this.messages = [];
+  }
+  /** null when `id` names a top-level message the room holds; otherwise the refusal the docs name
+   * @returns {{ outcome: string, cursor?: string } | null} */
+  root(/** @type {string} */ id) {
+    const m = this.messages.find((x) => x.id === id);
+    if (!m) return { outcome: "refused:thread-root-unknown" };
+    if (m.thread !== undefined) return { outcome: "refused:thread-root-not-top-level" };
+    return null;
   }
   cursor(/** @type {number} */ seq) { return `${EPOCH}:${seq}`; }
   live(/** @type {string} */ subject) { const h = this.holders.get(subject); return h && h.expiresAt > this.now() ? h : null; }
@@ -80,14 +92,25 @@ class Model {
     const c = admit();
     return { outcome: "applied", cursor: c };
   }
-  post(/** @type {string} */ account, /** @type {string} */ op, /** @type {string} */ text) {
+  post(/** @type {string} */ account, /** @type {string} */ op, /** @type {string} */ text, /** @type {string | undefined} */ thread = undefined) {
     const key = `${account}\0${op}`;
-    const bytes = JSON.stringify({ text });
+    const bytes = JSON.stringify(thread === undefined ? { text } : { text, thread });
     const prior = this.ops.get(key);
     if (prior) return prior.bytes === bytes ? { outcome: "duplicate", cursor: prior.cursor } : { outcome: "refused:different-bytes" };
+    if (thread !== undefined) { const refused = this.root(thread); if (refused) return refused; }
     this.seq += 1; const c = this.cursor(this.seq); this.ops.set(key, { cursor: c, bytes });
-    this.messages.push({ cursor: c, text, seq: this.seq });
+    this.messages.push({ cursor: c, text, seq: this.seq, ...(thread === undefined ? {} : { thread }) });
     return { outcome: "applied", cursor: c };
+  }
+  /** a thread view: its root checked first, then the plan, then the root and its replies kept */
+  view(/** @type {string} */ thread, /** @type {number | undefined} */ sinceSeq, /** @type {number} */ limit) {
+    const refused = this.root(thread);
+    if (refused) return refused;
+    const inThread = (/** @type {{ id?: string, thread?: string }} */ m) => m.id === thread || m.thread === thread;
+    if (sinceSeq === undefined) return { outcome: "delivered", cursors: this.messages.filter(inThread).slice(-limit).map((m) => m.cursor), through: this.seq };
+    if (sinceSeq > this.seq) return { outcome: "refused:future" };
+    const to = Math.min(sinceSeq + limit, this.seq);
+    return { outcome: "delivered", cursors: this.messages.filter((m) => m.seq > sinceSeq && m.seq <= to && inThread(m)).map((m) => m.cursor), through: to };
   }
   /** what a read after `since` with `limit` delivers, by message cursor */
   read(/** @type {number} */ sinceSeq, /** @type {number} */ limit, epoch = EPOCH) {
@@ -109,6 +132,8 @@ function classify(e) {
   if (/belongs to epoch/.test(m)) return "refused:epoch";
   if (/exceeds committed sequence/.test(m)) return "refused:future";
   if (/already committed with different bytes/.test(m)) return "refused:different-bytes";
+  if (/^thread-root-unknown:/.test(m)) return "refused:thread-root-unknown";
+  if (/^thread-root-not-top-level:/.test(m)) return "refused:thread-root-not-top-level";
   return `refused:other(${m.slice(0, 80)})`;
 }
 
@@ -144,20 +169,43 @@ export async function fuzzOnce(seed, steps, root) {
     for (let step = 0; step < steps; step++) {
       const r = rand();
       if (r < 0.12) { const dt = pick([1, 500, 999, 1000, 1001, 5000, 3_600_000, 3_600_001]); now += dt; log(trace.at(-1)), trace.push({ step, tick: dt }); continue; }
-      if (r < 0.30) {
+      if (r < 0.32) {
+        // a post, or a reply naming a root: mostly a message the room holds (a reply's id among
+        // them), sometimes an id it never held
         const account = pick(ACCOUNTS);
         const op = rand() < 0.15 && ops.length ? pick(ops) : `operation_${step.toString().padStart(6, "0")}_msg`;
         ops.push(op);
         const text = `m${step}`;
-        log(trace.at(-1)), trace.push({ step, post: { account, op } });
+        const known = model.messages.filter((m) => m.id);
+        const thread = r < 0.22 || !known.length ? undefined : rand() < 0.1 ? "f".repeat(64) : pick(known).id;
+        log(trace.at(-1)), trace.push({ step, post: { account, op, ...(thread ? { thread } : {}) } });
         let got;
-        try { const rr = await store.append({ operationId: op, authorName: account, authorKind: "agent", text }, { accountId: account }); got = { outcome: rr.duplicate ? "duplicate" : "applied", cursor: rr.cursor }; }
+        try { const rr = await store.append({ operationId: op, authorName: account, authorKind: "agent", text, ...(thread ? { thread } : {}) }, { accountId: account }); got = { outcome: rr.duplicate ? "duplicate" : "applied", cursor: rr.cursor, id: rr.id }; }
         catch (e) { got = { outcome: classify(e) }; }
-        const exp = model.post(account, op, text);
-        if (exp.outcome !== got.outcome || (exp.cursor && exp.cursor !== got.cursor)) { note(step, "post", exp, got); resync(`${account}\0${op}`, JSON.stringify({ text }), got); if (got.outcome === "applied" && exp.outcome !== "applied") model.messages.push({ cursor: got.cursor, text, seq: model.seq }); }
+        const exp = model.post(account, op, text, thread);
+        // the model learns a message id from the store's receipt, as it learns fences: the id is the
+        // receipt's documented derivation, not something the model re-derives
+        if (exp.outcome === "applied" && got.outcome === "applied") /** @type {any} */ (model.messages.at(-1)).id = got.id;
+        const bytes = JSON.stringify(thread === undefined ? { text } : { text, thread });
+        if (exp.outcome !== got.outcome || (exp.cursor && exp.cursor !== got.cursor)) { note(step, thread ? "reply" : "post", exp, got); resync(`${account}\0${op}`, bytes, got); if (got.outcome === "applied" && exp.outcome !== "applied") model.messages.push({ cursor: got.cursor, text, seq: model.seq, id: got.id, ...(thread ? { thread } : {}) }); }
         continue;
       }
-      if (r < 0.42) {
+      if (r < 0.38) {
+        // a thread view by a root the room holds, a reply's id, or an id it never held; with and
+        // without a cursor
+        const known = model.messages.filter((m) => m.id);
+        const thread = !known.length || rand() < 0.1 ? "e".repeat(64) : /** @type {string} */ (pick(known).id);
+        const sinceSeq = rand() < 0.3 ? undefined : Math.floor(rand() * (model.seq + 3));
+        const limit = pick([1, 2, 5, 1000]);
+        log(trace.at(-1)), trace.push({ step, view: { thread, sinceSeq, limit } });
+        let got;
+        try { const v = store.view({ thread, limit, ...(sinceSeq === undefined ? {} : { since: `${EPOCH}:${sinceSeq}` }) }); got = { outcome: "delivered", cursors: v.messages.map((m) => m.cursor), through: v.through }; }
+        catch (e) { got = { outcome: classify(e) }; }
+        const exp = model.view(thread, sinceSeq, limit);
+        if (JSON.stringify(exp) !== JSON.stringify(got)) note(step, "thread-view", exp, got);
+        continue;
+      }
+      if (r < 0.46) {
         const sinceSeq = Math.floor(rand() * (model.seq + 3));
         const limit = pick([1, 2, 5, 1000]);
         const epoch = rand() < 0.08 ? "f".repeat(32) : EPOCH;

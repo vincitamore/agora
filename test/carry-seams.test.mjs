@@ -50,6 +50,18 @@ test("carryWindow: the default limit is 200 (survivor 124: 200 -> 201)", async (
   assert.deepEqual(reads, [{ limit: 200 }]);
 });
 
+test("carryWindow: a threaded transport whose room read carries every reply (native) folds nothing, so no reply is read twice", async () => {
+  const room = [msg("p1", "parent"), msg("r1", "reply", { thread: "p1" })];
+  const { transport, reads } = fakeTransport(room, { p1: [msg("p1", "parent"), msg("r1", "reply", { thread: "p1" })] });
+  transport.repliesInRoom = true;
+  const w = await carryWindow(transport, { threads: true });
+  assert.deepEqual(reads, [{ limit: 200 }], "one room read and no thread read");
+  assert.deepEqual(w.threads, []);
+  assert.deepEqual(w.messages.map((m) => m.id), ["p1", "r1"]);
+  transport.repliesInRoom = false;
+  assert.deepEqual((await carryWindow(transport, { threads: true })).threads, ["p1"], "the same transport without the flag folds its thread");
+});
+
 test("carryWindow: a transport without threads folds nothing even when folding is asked for (survivor 128: || -> &&)", async () => {
   const room = [msg("p1", "parent"), msg("r1", "reply", { thread: "p1" })];
   const { transport, reads } = fakeTransport(room, { p1: [msg("r2", "another reply", { thread: "p1" })] }, { threads: false });

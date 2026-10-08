@@ -7,7 +7,13 @@
 // file, line and the change that survived. It writes to a scratch copy of each file and restores
 // the original after every mutant, and it refuses to run on a dirty target.
 //
-//   node scripts/mutate-consumers.mjs [--file src/carry.mjs] [--limit <n>] [--json] [--report <path>]
+//   node scripts/mutate-consumers.mjs [--file src/carry.mjs] [--lines <a-b,c>] [--from <n>] [--limit <n>] [--json] [--report <path>]
+//
+// `--from <n>` skips the first n mutants, so a sweep longer than one sitting runs as slices
+// (`--from 0 --limit 90`, `--from 90 --limit 90`, ...) whose union is the whole sweep; the
+// mutant numbers it prints are the whole sweep's. `--lines` keeps only the mutants on those lines
+// (a change's own lines, when the whole file costs hours on a slow seat); the slicing and the
+// numbering then apply to what it kept.
 //
 // Operators (each is a change a reviewer would call a bug if it shipped): flip a boolean
 // literal; swap a comparison (< <= > >= === !==); swap && and ||; add one to a numeric literal;
@@ -25,12 +31,13 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
  * The consumers, and the tests that import each (those are what a mutant must redden). Two
  * passes: the fast tests run on every mutant, and only a mutant that survives them is re-run
  * against the full set (the export-record test spawns the singulis ledger under bun, the model
- * gate runs forty fuzz seeds; a minute or more each), so a survivor is one NO importing test
+ * gate runs forty fuzz seeds, the seam pins append a thousand fsync'd records; seconds to a
+ * minute or more each), so a survivor is one NO importing test
  * reddened, at a fraction of the wall clock.
  */
 const TARGETS = {
   "src/carry.mjs": { fast: ["test/carry.test.mjs", "test/carry-seams.test.mjs"], full: ["test/carry.test.mjs", "test/carry-seams.test.mjs", "test/export-record.test.mjs"] },
-  "src/native-store.mjs": { fast: ["test/native-store.test.mjs", "test/native-board.test.mjs", "test/native-post-ledger.test.mjs"], full: ["test/native-store.test.mjs", "test/native-board.test.mjs", "test/native-post-ledger.test.mjs", "test/native-store-model.test.mjs", "test/native-store-bad-bytes.test.mjs"] },
+  "src/native-store.mjs": { fast: ["test/native-store.test.mjs", "test/native-board.test.mjs", "test/native-post-ledger.test.mjs", "test/native-store-threads.test.mjs", "test/native-store-inputs.test.mjs"], full: ["test/native-store.test.mjs", "test/native-board.test.mjs", "test/native-post-ledger.test.mjs", "test/native-store-threads.test.mjs", "test/native-store-seams.test.mjs", "test/native-store-inputs.test.mjs", "test/native-store-model.test.mjs", "test/native-store-bad-bytes.test.mjs"] },
 };
 
 const VERDICTS = ["Held_by_another", "Not_the_holder", "Fence_mismatch", "Not_human", "Nothing_to_break", "Applied"];
@@ -87,6 +94,10 @@ function run(tests, timeoutMs) {
 function main(argv) {
   const only = argv.includes("--file") ? argv[argv.indexOf("--file") + 1] : null;
   const limit = argv.includes("--limit") ? Number(argv[argv.indexOf("--limit") + 1]) : Infinity;
+  const lines = argv.includes("--lines") ? String(argv[argv.indexOf("--lines") + 1]).split(",").map((r) => r.split("-").map(Number)) : null;
+  if (lines && lines.some((r) => r.some((n) => !Number.isSafeInteger(n) || n < 1))) { console.error("--lines takes ranges like 12,33-38"); return 2; }
+  const from = argv.includes("--from") ? Number(argv[argv.indexOf("--from") + 1]) : 0;
+  if (!Number.isSafeInteger(from) || from < 0) { console.error("--from takes a non-negative whole number"); return 2; }
   const json = argv.includes("--json");
   const report = argv.includes("--report") ? argv[argv.indexOf("--report") + 1] : null;
   const timeoutMs = 180_000;
@@ -99,9 +110,10 @@ function main(argv) {
     if (dirty) { console.error(`${file} has uncommitted changes; the mutator restores files and refuses to guess what yours were`); return 2; }
     const base = run(full, timeoutMs);
     if (base.status !== "green") { console.error(`${file}: the tests are not green before any mutation (${base.status})`); return 2; }
-    const all = mutants(original).slice(0, limit);
-    console.error(`${file}: ${all.length} mutants; fast pass ${fast.join(", ")}; survivors re-run with ${full.filter((t) => !fast.includes(t)).join(", ")}`);
-    let i = 0;
+    const every = mutants(original).filter((m) => !lines || lines.some(([a, b = a]) => m.line >= a && m.line <= b));
+    const all = every.slice(from, from + limit);
+    console.error(`${file}: ${all.length} of ${every.length} mutants (from ${from}); fast pass ${fast.join(", ")}; survivors re-run with ${full.filter((t) => !fast.includes(t)).join(", ")}`);
+    let i = from;
     for (const m of all) {
       i++;
       writeFileSync(path, m.text, "utf8");
@@ -112,7 +124,7 @@ function main(argv) {
       } finally { writeFileSync(path, original, "utf8"); }
       const row = { file, line: m.line, column: m.column, from: m.from, to: m.to, status: r.status, source: original.split("\n")[m.line - 1].trim() };
       results.push(row);
-      if (!json) console.error(`  ${String(i).padStart(3)}/${all.length} ${r.status.padEnd(7)} ${file}:${m.line}:${m.column} ${JSON.stringify(m.from)} -> ${JSON.stringify(m.to)}`);
+      if (!json) console.error(`  ${String(i).padStart(3)}/${every.length} ${r.status.padEnd(7)} ${file}:${m.line}:${m.column} ${JSON.stringify(m.from)} -> ${JSON.stringify(m.to)}`);
     }
     if (readFileSync(path, "utf8") !== original) { console.error(`${file} was not restored`); return 2; }
   }

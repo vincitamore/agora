@@ -2,7 +2,8 @@
 import { randomUUID } from "node:crypto";
 import { AgoraError, redact } from "../core.mjs";
 import { parseNativeCursor } from "../native-protocol.mjs";
-import { ServiceDarkError, nativeMessage } from "../wake/subscriber.mjs";
+import { ServiceDarkError, requireThreads } from "../wake/subscriber.mjs";
+import { nativeReadResult, validateNativeThread } from "./native.mjs";
 
 /**
  * One line an operator can act on, or nothing. Redacted, because a teardown error can carry a path
@@ -44,7 +45,9 @@ export function nativeRemoteTransport(room, { actor, remote, session }) {
   const transport = {
     kind: "native-remote",
     room: roomId,
-    threads: false,
+    threads: true,
+    repliesInRoom: true,
+    validateThread: validateNativeThread,
     /**
      * Opens the channel and asks the host for the room's status.
      *
@@ -62,17 +65,19 @@ export function nativeRemoteTransport(room, { actor, remote, session }) {
       try { parseNativeCursor(cursor); return undefined; }
       catch (e) { return e instanceof Error ? e.message : String(e); }
     },
-    async read({ since, limit } = {}) {
+    /** A `thread` read as on a local native room, sent only to a host whose member welcome offered
+     * threads-v1. */
+    async read({ thread, since, limit } = {}) {
       const client = await remote.client();
+      if (thread !== undefined) requireThreads(client, `the host of ${roomId}`);
       let result;
       try {
-        result = await client.request("read", { roomId, ...(since ? { since } : {}), ...(limit ? { limit } : {}) });
+        result = await client.request("read", { roomId, ...(thread !== undefined ? { thread } : {}), ...(since ? { since } : {}), ...(limit ? { limit } : {}) });
       } catch (e) {
         if (client.socket.destroyed) throw new ServiceDarkError(`the member channel went dark during the read: ${e instanceof Error ? e.message : String(e)}`);
         throw e;
       }
-      const messages = Array.isArray(result?.messages) ? result.messages.map(nativeMessage) : [];
-      return /** @type {import('../core.mjs').ReadResult} */ (messages);
+      return nativeReadResult(result, thread);
     },
     /**
      * The host's single writer appends this; the member session never takes `writer.lock` and never
@@ -81,14 +86,14 @@ export function nativeRemoteTransport(room, { actor, remote, session }) {
      * `agent` from a member session — a remote may not claim to be a human.
      */
     async post(text, { thread, face } = {}) {
-      if (thread !== undefined) throw new AgoraError("native rooms have no threads");
       if (face !== undefined) throw new AgoraError("a face is the HOST's policy and is published by the host's own service; a remote seat cannot choose one for it");
       let client;
       try { client = await remote.client(); }
       catch (e) { throw dark(e); }
+      if (thread !== undefined) requireThreads(client, `the host of ${roomId}`);
       const operationId = randomUUID().replaceAll("-", "");
       const receipt = await client.request("append", { roomId,
-        operation: { operationId, authorName: actor.name, authorKind: actor.kind, text } });
+        operation: { operationId, authorName: actor.name, authorKind: actor.kind, text, ...(thread !== undefined ? { thread } : {}) } });
       return { id: String(receipt.id), cursor: String(receipt.cursor),
         ...(Array.isArray(receipt.faces) ? { faces: receipt.faces } : {}) };
     },

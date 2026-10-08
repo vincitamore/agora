@@ -24,10 +24,11 @@ import { MEMBER_PHASES, assertDescriptorDigest, memberHandshakeProof, memberTran
 import { NATIVE_PROTOCOL, NativeFrameDecoder, encodeNativeFrame, nativeCursor, parseNativeCursor,
   validateNativeEnvelope, validateNativeId } from "./native-protocol.mjs";
 import { NativeServiceClient } from "./native-service.mjs";
+import { receiveCapabilityOffer } from "./protocol/capabilities.mjs";
 import { publicNodeKeyDigest } from "./protocol/route.mjs";
 import { startMemberChannel } from "./tailcat-routes.mjs";
 import { localTransferIdentity } from "./tailcat.mjs";
-import { ServiceDarkError, nativeMessage } from "./wake/subscriber.mjs";
+import { ServiceDarkError, nativeMessage, requireThreads } from "./wake/subscriber.mjs";
 
 /** How long a handshake frame may take to arrive before the channel is called dark. */
 export const HANDSHAKE_TIMEOUT_MS = 30000;
@@ -237,7 +238,7 @@ export function assertRemoteDescriptor(descriptor, seat) {
  * This seat never sends an `accountId`: the route binds the principal, and a frame naming one is
  * refused by the host. Claiming it "for clarity" would be exactly the claim the binding replaces.
  * @param {{ stream: import("node:stream").Duplex, binding: any, secret: string, timeoutMs?: number,
- *  onDrained?: (stream: import("node:stream").Duplex) => any }} input
+ *  onDrained?: (stream: import("node:stream").Duplex, offered: { capabilities: Set<string> }) => any }} input
  */
 export async function completeMemberHandshake(input) {
   const timeoutMs = input.timeoutMs ?? HANDSHAKE_TIMEOUT_MS;
@@ -274,12 +275,18 @@ export async function completeMemberHandshake(input) {
         throw memberRefusal("member-welcome-refused", `the welcome's ${field} does not echo the transcript this seat proved`);
     if (!verifyMemberHandshakeProof(welcome.proof, input.secret, MEMBER_PHASES.welcome, transcript))
       throw memberRefusal("member-welcome-refused", "the welcome did not prove the fresh transcript");
+    // What the host serves beyond the v1 frames, offered on the welcome and outside the proofs; a
+    // host that predates offers sends none and is offered nothing. An unknown REQUIRED name refuses.
+    let offered;
+    try { offered = receiveCapabilityOffer(welcome.capabilities); }
+    catch (error) { throw memberRefusal("member-welcome-refused", `the welcome carried an offer this seat cannot honour (${error instanceof Error ? error.message : String(error)})`); }
+    const capabilities = new Set(offered.advertised);
     reader.assertDrained();
     // The handover, in the one order that leaves no gap: the client's listener goes on while this
     // reader's is still attached, and only then does this one come off.
-    const handed = input.onDrained ? input.onDrained(input.stream) : undefined;
+    const handed = input.onDrained ? input.onDrained(input.stream, { capabilities }) : undefined;
     reader.detach();
-    return { requestId, transcript, memberAccountId: input.binding.accountId, handed };
+    return { requestId, transcript, memberAccountId: input.binding.accountId, handed, capabilities };
   } catch (error) {
     reader.detach();
     throw error;
@@ -381,7 +388,11 @@ export class RemoteRoom {
             // which is the duck-typing the host half already relies on, so the remote inherits
             // the timeouts, the unknown-append-acceptance rule and the event fan-out unchanged.
             // Constructed inside the handshake's handover so the stream is never unlistened.
-            onDrained: (ready) => { client = new NativeServiceClient(/** @type {any} */ (ready), this.timeoutMs); return client; } })
+            onDrained: (ready, offered) => {
+              client = new NativeServiceClient(/** @type {any} */ (ready), this.timeoutMs);
+              client.capabilities = offered.capabilities;
+              return client;
+            } })
             .then(() => { resolveReady(undefined); },
               (error) => { rejectReady(error); stream.destroy(); });
           if (signal.aborted) stream.destroy();
@@ -498,13 +509,16 @@ export async function openRemoteRoom(input) {
  * persisted cursor never moves backwards. The idempotence point is the message id, above the
  * transport — a consumer that must not surface a duplicate dedups on `id`, and this subscription's
  * own floor is not that guarantee, it is only what keeps the common case quiet.
- * @param {{ room: RemoteRoom, since?: string, window?: number, maxReconnects?: number,
+ * A `thread` narrows the subscription as on a local room, and is asked only of a host whose welcome
+ * offered threads-v1; every re-dial re-checks the offer, since a replaced host may be older.
+ * @param {{ room: RemoteRoom, since?: string, thread?: string, window?: number, maxReconnects?: number,
  *  backoffMs?: number, idleMs?: number }} opts
  * @returns {Promise<import("./wake/subscriber.mjs").NativeSubscription>}
  */
 export async function openRemoteSubscription(opts) {
   const room = opts.room;
   const roomId = room.binding.roomId;
+  const thread = opts.thread;
   const maxReconnects = opts.maxReconnects ?? 5;
   const backoffMs = opts.backoffMs ?? 500;
   /** @type {import("./core.mjs").Message[]} */
@@ -655,8 +669,9 @@ export async function openRemoteSubscription(opts) {
 
   /** @param {NativeServiceClient} client @param {string} from */
   const attach = async (client, from) => {
+    if (thread !== undefined) requireThreads(client, `the host of ${roomId}`);
     client.socket.once("close", () => { if (!stopped) runReattach(); });
-    const result = await client.subscribe(roomId, from, (message) => push([message]));
+    const result = await client.subscribe(roomId, from, (message) => push([message]), thread);
     // Only after the subscribe RESOLVES: a client that failed to subscribe is not the one a probe
     // should speak on, and a successful subscribe is itself proof the channel carries.
     current = client;

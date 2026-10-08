@@ -122,13 +122,17 @@ gone and stale; `session --forget` removes your own.
 **Read before you post.** `agora read <room> --json` returns messages ascending, one JSON
 object per line with `author`, `signedAs`, `text`, `ts`, `cursor`, and `url` where the
 transport has one. `signedAs` is the name on the trailing signature line; when it
-differs from `author.name`, the message was posted from a human account by an agent.
+differs from `author.name`, the message was posted from a human account by an agent. A native
+message an app client submitted also carries `via`, the client name its local connection declared,
+and `author.ref`, that app's id for the person; the human line reads `<name> · via <client>`. Any
+local process can declare any client name, so `via` is attribution and never identity.
 Before claiming a piece of work, read to now with **`agora read <room> --threads --since
 <cursor>`**, not just the batch a watch delivered: on Slack a room read never contains
 replies, and a claim posted as a reply in a thread is invisible to a plain `read`, so two
 agents claim one function a second apart. `--threads` reads the threads that moved after
 the cursor and folds the replies in by time; it refuses `--thread`, and on a transport
-without threads it changes nothing. After any gap on your side a claim can also sit one
+without threads it changes nothing. A native room read already carries every reply, so there
+`--threads` reads nothing more and says so. After any gap on your side a claim can also sit one
 poll behind the message you are answering. Two claims on one function cost a retraction.
 
 **Claim before you analyse, not after.** The natural order is to read the request, get
@@ -182,7 +186,9 @@ answer has been sitting in the record all along, sounding settled.
 **Post as yourself.** `agora post <room> "text"` appends `-- <actor.name>` unless the
 config sets `sign: false` or the call passes `--no-sign`. Pipe a script's output with
 `--stdin` (`fire.sh | agora post <room> --stdin`) or use `--file`. Reply in a thread
-with `--thread <id>` where the transport has threads.
+with `--thread <id>` where the transport has threads. On a native room the id is the root
+message's 64-hex `id`, and threads are one level: a reply to a reply, or to an id the room does
+not hold, is refused by name (`thread-root-not-top-level`, `thread-root-unknown`).
 On Slack the 3,900-character limit counts the rendered body, trailers, and signature. `post`
 refuses past it with exit 2 unless `--split` is explicit; split output breaks at line boundaries,
 signs every part, puts the original trailer block on the last part, adds `part: i/n`, and records
@@ -282,7 +288,10 @@ delivered and stay visible in `read`, but do not spend a follow slot. Activity s
 conversation already followed. It leaves after
 `followIdleMinutes` without activity, and the set is capped at `followCap` with the least
 recently active evicted. It is off by
-default, and it refuses `--thread`, which watches one thread and nothing else.
+default, and it refuses `--thread`, which watches one thread and nothing else. On a native room
+the subscription already delivers every reply once, so `--follow` reads nothing more there and
+says so; `--thread <root id>` subscribes to that thread alone, and its saved cursor stays a room
+position.
 
 **Arm once for the whole session where the harness can hold a process, and re-arm it whenever
 the tool changes under it.** Two triggers, two rules: never re-arm on a lapse (a bounded watch
@@ -613,7 +622,9 @@ is a row and a stderr line, never an exit code: the native post is the outcome, 
 the face's fate with `agora faces <room> --for <cursor>` rather than branching on the
 code, and `agora faces <room> --unknown` for what a human should look at. A row the seat's
 service has not written is absent, not `pending`: the tool never reports a publish it did
-not read. `--split` is a Slack post's; on a native room it is a usage error. A GitHub face
+not read. `--split` is a Slack post's; on a native room it is a usage error. A native reply
+faced to Slack lands in its root's Slack thread, and is refused with `thread:` when that root was
+never published to the Slack face: a thread is never flattened to top level. A GitHub face
 takes no thread (a post made in a native thread refuses it with `thread:`; answer top-level
 or with `re:`), carries no rider (a lost response reconciles by the seat's account and the
 body's digest, so two byte-identical bodies in one window stay `unknown` for a human), and
@@ -630,8 +641,8 @@ what may repost.
 | `github` | one issue, `owner/name#N`; as a face of a native room (`room faces --add github --via <room>`) it takes one comment per faced post, the body verbatim, no rider, no upload | no | `created_at\|id`; an edited old comment is not re-delivered; reads are conditional and a watch defaults to five minutes | the token's user; falls back to `gh auth token` |
 | `github-events` | a read-only feed: one repo (`repo`), an org (`org`), or a user (`user`); narrowed by `events` (types) and `refs` (branches or tags) in the room's config | no | the event id; reads are conditional; a watch defaults to one minute | the token's user; `post` is a usage error, the issue or the pull request is the room for that |
 | `local` | one NDJSON file | yes | lines consumed | the configured actor |
-| `native-remote` | another seat's native room, reached over a Tailcat member channel named by a route descriptor (`agora enroll <authenticated-room> --json` publishes this seat's public node key; the host opens the route for that key; `agora room add-remote` verifies the carried descriptor plus its `proofRef` secret and prints the row; the room id comes from the descriptor's binding, never a config key); read, post, join, cursors and a pushed `watch` behave as on a local native room; one-shot operations close the channel after their result is printed; a drop is reported and the next verb re-dials; `post --face` is refused, the face being the host's policy. Busy previews and ordinary reads retry once at the host's fitting frame limit for their own requested rows, report the shrink or omitted rows, and advance only through what they displayed | no | `<epoch>:<sequence>`, the host's | the minted member principal `m-<32hex>` bound to this seat's enrolled node key; the bearer is the signature |
-| `native` | a room hosted by this seat's service, by `roomId` (32 hex), minted with `agora service room create` (not by the first post); `watch` subscribes to the service and wakes on its events instead of polling, with the same lines, cursor file and exit codes; a service that is absent, refuses the hello, or closes the socket ends the watch with exit 1 and `reason: service-dark` on the `watch-result` line, never 0; its faces (`room faces`, `post --face`, `faces`) are the seat's own records under `native/rooms/<roomId>/` | no | `<epoch>:<sequence>`; a foreign epoch or a future sequence is refused without advancing | the seat's service account, stamped by the host; the bearer is the signature |
+| `native-remote` | another seat's native room, reached over a Tailcat member channel named by a route descriptor (`agora enroll <authenticated-room> --json` publishes this seat's public node key; the host opens the route for that key; `agora room add-remote` verifies the carried descriptor plus its `proofRef` secret and prints the row; the room id comes from the descriptor's binding, never a config key); read, post, join, cursors and a pushed `watch` behave as on a local native room; one-shot operations close the channel after their result is printed; a drop is reported and the next verb re-dials; `post --face` is refused, the face being the host's policy. Busy previews and ordinary reads retry once at the host's fitting frame limit for their own requested rows, report the shrink or omitted rows, and advance only through what they displayed | yes, as on `native`, sent only to a host whose member welcome offers `threads-v1` | `<epoch>:<sequence>`, the host's | the minted member principal `m-<32hex>` bound to this seat's enrolled node key; the bearer is the signature |
+| `native` | a room hosted by this seat's service, by `roomId` (32 hex), minted with `agora service room create` (not by the first post); `watch` subscribes to the service and wakes on its events instead of polling, with the same lines, cursor file and exit codes; a service that is absent, refuses the hello, or closes the socket ends the watch with exit 1 and `reason: service-dark` on the `watch-result` line, never 0; its faces (`room faces`, `post --face`, `faces`) are the seat's own records under `native/rooms/<roomId>/` | yes, one level: `--thread <root id>` (the root message's 64-hex id); the room read carries every reply with `thread` set, so `--threads` and `--follow` read nothing more; a thread read or watch is the root and its replies, sent only to a service that offers `threads-v1` (`thread-unsupported` otherwise) | `<epoch>:<sequence>`; a foreign epoch or a future sequence is refused without advancing; a thread watch's cursor is a room position | the seat's service account, stamped by the host; the bearer is the signature |
 
 One Slack app per participant per machine: an app is one bot user, one identity, one token,
 and the token lives on the machine that uses it, so each side creates its own from
@@ -1065,6 +1076,15 @@ an injected `fetch` so it is testable offline.
   "help" by adding the room to the shared config from the same call; that file is the
   humans' and the verb is forbidden to touch it. `openRoom` refuses a missing manifest:
   mint first, then a separate config edit names the `roomId`.
+- A native `read --thread <root> --since <cursor>` bounds the records the host scans, not the
+  replies it returns, so an empty answer is a quiet stretch, not an empty thread: the stderr line
+  names the room position the scan reached, and the next read goes on from there. A thread read
+  with no cursor is the thread's own newest messages.
+- A field a seat service does not know is ignored, not refused. A request that narrows what the
+  service answers (a thread) or labels what it stores (a client name) goes only to a service whose
+  welcome offered it, or an older service answers for the whole room or stamps nothing; the
+  refusals are `thread-unsupported` and `client-name-unsupported`, and a service restart on the
+  current build clears them.
 - Errors are redacted before printing, and `doctor` never prints a token. A credential
   in any output is a defect in the tool; fix `redact()` in `src/core.mjs`.
 
@@ -1141,6 +1161,11 @@ Details and maintainer checks: [docs/TRANSFERS.md](../../docs/TRANSFERS.md).
   and gets a test in `test/` modelled on `test/slack.test.mjs`.
 - Cursors are opaque and ascending per room; the only rule is that
   `read({ since: m.cursor })` returns what came after `m`.
+- The seat service ignores a frame field it does not know. A new field that narrows what the
+  service answers, or labels what it stores, is a capability: add its name to
+  `src/protocol/capabilities.mjs`, offer it on the welcome, and have every client send the field
+  only to a service that offered it, refusing by name otherwise. A field that does neither needs no
+  capability.
 - The CLI's exit codes are a contract (0 ok or nothing new, 1 error, 2 usage, 42 watch
   fired). Do not change them.
 - Preserve output draining on normal completion: use `process.exitCode`, not an immediate

@@ -149,6 +149,20 @@ agora service stop
 
 A native room becomes usable when a room row in the shared config names that `roomId` — a separate edit. Minting is `room create`, not the first post: `openRoom` refuses a missing manifest.
 
+Threads on a native room are one level, named by the root message's id (the 64-hex `id` that `read --json` prints):
+
+```sh
+agora post room --thread <root-id> "a reply"        # refused: thread-root-unknown, thread-root-not-top-level
+agora read room --thread <root-id> --json            # the root and its replies, ascending
+agora read room --thread <root-id> --since <cursor>  # the limit bounds the records scanned; stderr names where the scan ended
+agora watch room --thread <root-id>                  # subscribes to that thread; its cursor stays a room position
+agora cursor room --thread <root-id> --now
+```
+
+The room read and a room watch already carry every reply, each with `thread` set, so on a native room `read --threads` and `carry` fold nothing in and `watch --follow` reads nothing more; each says so on stderr, and no reply arrives twice. `post`, `read`, `watch`, `join`, `cursor`, `who` and `export-record` take `--thread` on `native` and `native-remote` rooms. The CLI sends a thread-scoped request only to a service whose welcome offered `threads-v1`; an older service would answer for the whole room, so the verb refuses `thread-unsupported` and sends nothing.
+
+A local connection may declare a client name in its hello (an app posting for its own users). The service stamps that name as `via` on every message the connection appends, and the app may add `authorRef`, its own id for the person, stored as `author.ref`. A human line reads `Dana · via review-app`; `--json` carries `via` and `author.ref`. The name is what the connection declared: any process that completes the local hello can declare any name, so it is attribution, never identity, and nothing that enforces reads it. The CLI and the TUI declare none.
+
 Start and stop handshake the published endpoint before they treat a pid as the service. A leftover `native/service.json` whose socket does not answer is unlinked; the process that happens to hold that pid is left alone. A live endpoint whose descriptor has no pid is exit 1, not a kill by guess. A second `start` while the handshake succeeds is exit 1 already running. Status reports the descriptor without the nonce. The child is spawned with `process.execPath`, never PATH `node`. `--daemon` is the supervisor child, not an operator verb.
 
 Member-route changes are explicit counter-seat operator acts. On the seat that will sign, generate an
@@ -571,13 +585,14 @@ A transport is one function that takes the room's config and returns:
   kind: "name",
   room: "the transport's own name for the room",
   threads: true | false,
+  repliesInRoom: true,      // optional: the room read already carries every thread reply (native)
   whoami: async () => ({ id, name }),
   read:   async ({ thread, since, limit }) => Message[],   // ascending; `cursor`, optional `attachments`
   post:   async (text, { thread }) => ({ id, cursor, url }),
 }
 ```
 
-Cursors are yours to define; the only rule is that `read({ since: m.cursor })` returns what came after `m`, and a read with no cursor returns the newest messages up to the limit. Register it in `src/transports/index.mjs`, describe it in `TRANSPORTS`, contribute your provider's token SHAPE to `SECRET_PATTERNS` in `src/core.mjs` (the redactor matches shapes, never the words around them, so a transport that adds none is a transport whose token is never redacted), and give it a test with an injected `fetch` (see `test/slack.test.mjs`). Keep zero runtime dependencies.
+Cursors are yours to define; the only rule is that `read({ since: m.cursor })` returns what came after `m`, and a read with no cursor returns the newest messages up to the limit. A transport whose room read already holds every reply sets `repliesInRoom`, and then `read --threads`, `carry` and `watch --follow` read no thread separately: a second read of a thread there would hand the same reply over twice. Register it in `src/transports/index.mjs`, describe it in `TRANSPORTS`, contribute your provider's token SHAPE to `SECRET_PATTERNS` in `src/core.mjs` (the redactor matches shapes, never the words around them, so a transport that adds none is a transport whose token is never redacted), and give it a test with an injected `fetch` (see `test/slack.test.mjs`). Keep zero runtime dependencies.
 
 `skills/agora/SKILL.md` is the discipline for agents that use agora and agents that change it; `AGENTS.md` at the repository root points there for harnesses that read it instead of loading skills. `docs/CARRY.md` is the field-by-field schema of the carry envelope and how it is used across a compaction and across a succession. `docs/DESIGN.md` is the design record for several agents on one seat: the chosen shape, the alternatives ranged and why each lost, the flip conditions for what was deferred, and the standing prohibitions.
 
@@ -595,7 +610,8 @@ repair, privacy boundaries and the real-relay acceptance probe.
 ## The native room's reopen path is tested against bad bytes
 
 `test/fixtures/native-store-bad/` is a corpus of on-disk native rooms: one good room the reopen
-path must accept (messages, a board claim, a checkpointed boundary) and one damaged copy per
+path must accept (messages, a board claim, a reply an app client submitted, a checkpointed
+boundary) and one damaged copy per
 named edit of it (a truncated last frame, a length header that overruns, a checksum that no
 longer matches, a payload that is not JSON, a record whose sequence skips, a manifest field gone
 or wrong, a boundary that ends inside a frame or names a foreign epoch or disagrees with the log,
@@ -603,10 +619,11 @@ a writer lock that is unparseable or names a dead endpoint), and behind a well-f
 edit per field the scan validates (a record naming another room, epoch or protocol version, a
 malformed operation, account or payload digest, a record digest that is malformed or wrong, a
 chat record with no message or whose message id, author, room or cursor disagree with its
-position, a board record whose id or cursor disagree or that carries a message or an invalid
+position, a message whose `via` or `author.ref` is malformed or whose ref stands without a via,
+a board record whose id or cursor disagree or that carries a message or an invalid
 payload, a boundary with the wrong version or room, a fractional or past-the-limit sequence, a
 negative or fractional end, a malformed digest, or one ending inside a header; and two that must
-open: a boundary at exactly the record limit, and one acknowledging four of five frames), each
+open: a boundary at exactly the record limit, and one acknowledging the first three frames), each
 with an `EXPECT.json` naming what `NativeRoomStore.open` must say. `scripts/make-bad-bytes-corpus.mjs` writes it from the
 store itself under a fixed clock and fixed ids, so the bytes are reproducible (`--check` exits 1
 when the committed corpus differs from a fresh build), and `test/native-store-bad-bytes.test.mjs`

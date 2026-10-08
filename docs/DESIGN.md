@@ -152,6 +152,16 @@ cursor held before the preview (or native sequence zero when none existed); the 
 the last returned cursor until it reaches the omitted window. `cursor --now` independently asks
 only for the newest row.
 
+**App clients and `via`.** An app that authenticates its own users and posts for them through the
+seat service declares a client name in its local hello; the service stamps that name as `via` on
+every message the connection appends, and the app may add `author.ref`, its own id for the person.
+A human line reads `<name> · via <client>`. The name is what a local connection declared, cooperative
+like the TUI's human label: any process able to complete the local hello can claim any client name.
+So `via` and `author.ref` are attribution and never identity. Nothing that enforces reads them (the
+board's `break`, the human-authority seam and route acts do not), own-post detection stays the
+ledger, the account the host stamps stays the message's identity, and a member session cannot
+declare one. They add no count, tally or settled state; they label a message, the way a bearer does.
+
 ### Delivery
 
 **A message is this side's own if, and only if, this session posted it.** `post` appends the
@@ -773,6 +783,7 @@ than re-deriving the argument.
 | Per-message name and avatar overrides | The humans say the signature line is too easy to miss, and only in the form that keeps the seat in the rendered name. |
 | A `type` discriminator on message objects in `--json` | A consumer needs to tell a message from the final summary line without inspecting fields. |
 | A name lease | Own-post detection ever again depends on the signature. |
+| A native-to-Slack thread map (a native thread whose root was never faced, or arrived from Slack, landing in a Slack thread) | The face runner is wired to the seat service, or a person on a Slack face asks for native replies they cannot see because their root was not faced there. Until then such a reply is refused `thread:`, never flattened. |
 
 ## Standing prohibitions
 

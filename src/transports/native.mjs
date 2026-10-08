@@ -2,7 +2,31 @@
 import { randomUUID } from "node:crypto";
 import { AgoraError } from "../core.mjs";
 import { nativeMessageId, parseNativeCursor } from "../native-protocol.mjs";
-import { ServiceDarkError, connectSeatService, nativeMessage, readServiceDescriptor, validateNativeRoomId } from "../wake/subscriber.mjs";
+import { ServiceDarkError, connectSeatService, nativeMessage, readServiceDescriptor, requireThreads, validateNativeRoomId } from "../wake/subscriber.mjs";
+
+/**
+ * Why `id` is not a native thread id, or nothing. A thread is named by its root message's id,
+ * which is 64 lowercase hexadecimal characters; refused at the caller boundary (`--thread`).
+ * @param {string} id
+ */
+export function validateNativeThread(id) {
+  return /^[a-f0-9]{64}$/.test(id) ? undefined : "a native thread id is its root message's id: 64 lowercase hexadecimal characters (the id `read --json` prints)";
+}
+
+/**
+ * A native read result as every transport reports one. For a thread read the host's checkpoint is
+ * where its scan ended, which can lie past the last reply; it rides on the array as
+ * `scannedThrough` (a room cursor), the way a gap does, so a caller that needs it reads it and every
+ * other caller keeps a plain list.
+ * @param {any} result @param {string | undefined} thread
+ */
+export function nativeReadResult(result, thread) {
+  const messages = /** @type {import('../core.mjs').ReadResult} */ (Array.isArray(result?.messages) ? result.messages.map(nativeMessage) : []);
+  const checkpoint = result?.checkpoint;
+  if (thread !== undefined && checkpoint && typeof checkpoint.epoch === "string" && Number.isSafeInteger(checkpoint.sequence))
+    messages.scannedThrough = `${checkpoint.epoch}:${checkpoint.sequence}`;
+  return messages;
+}
 
 /**
  * A room hosted by this seat's native service, reached over the service's path endpoint. The
@@ -36,7 +60,9 @@ export function nativeTransport(room, { actor, stateRoot, session, connect }) {
   return {
     kind: "native",
     room: roomId,
-    threads: false,
+    threads: true,
+    repliesInRoom: true,
+    validateThread: validateNativeThread,
     async whoami() {
       const d = await readServiceDescriptor(stateRoot);
       return { id: d.accountId, name: actor.name };
@@ -45,17 +71,23 @@ export function nativeTransport(room, { actor, stateRoot, session, connect }) {
       try { parseNativeCursor(cursor); return undefined; }
       catch (e) { return e instanceof Error ? e.message : String(e); }
     },
-    async read({ since, limit } = {}) {
+    /**
+     * A `thread` narrows the read to that thread's root and replies, ascending. With `since`, the
+     * limit bounds the records the host scans rather than the messages it returns, and the result
+     * carries `scannedThrough`, the room position the scan accounts for, so a caller can go on from
+     * there when the thread was quiet in that stretch.
+     */
+    async read({ thread, since, limit } = {}) {
       const c = await client();
+      if (thread !== undefined) requireThreads(c, "this seat's service");
       let result;
       try {
-        result = await c.request("read", { roomId, ...(since ? { since } : {}), ...(limit ? { limit } : {}) });
+        result = await c.request("read", { roomId, ...(thread !== undefined ? { thread } : {}), ...(since ? { since } : {}), ...(limit ? { limit } : {}) });
       } catch (e) {
         if (c.socket.destroyed) throw new ServiceDarkError(`seat service went dark during the read: ${e instanceof Error ? e.message : String(e)}`);
         throw e;
       }
-      const messages = Array.isArray(result?.messages) ? result.messages.map(nativeMessage) : [];
-      return /** @type {import('../core.mjs').ReadResult} */ (messages);
+      return nativeReadResult(result, thread);
     },
     /**
      * `face` is the poster's post-time face choice (`--face` names transports, `--no-face` is
@@ -71,14 +103,15 @@ export function nativeTransport(room, { actor, stateRoot, session, connect }) {
      * after the receipt lost that race (measured: a session's own posts delivered back to it).
      */
     async post(text, { thread, face, beforeSend } = {}) {
-      if (thread !== undefined) throw new AgoraError("native rooms have no threads");
       /** @type {import('../native-service.mjs').NativeServiceClient} */
       let c;
       try { c = await client(); }
       catch (e) { throw new AgoraError(`room-dark: ${e instanceof Error ? e.message : String(e)}; nothing was posted and no cursor was issued`); }
+      // a reply goes only to a service that checks its root; an older one would store any id
+      if (thread !== undefined) requireThreads(c, "this seat's service");
       const operationId = randomUUID().replaceAll("-", "");
       if (beforeSend) await beforeSend(nativeMessageId(roomId, (await readServiceDescriptor(stateRoot)).accountId, operationId));
-      const receipt = await c.request("append", { roomId, operation: { operationId, authorName: actor.name, authorKind: actor.kind, text }, ...(face === undefined ? {} : { face }) });
+      const receipt = await c.request("append", { roomId, operation: { operationId, authorName: actor.name, authorKind: actor.kind, text, ...(thread !== undefined ? { thread } : {}) }, ...(face === undefined ? {} : { face }) });
       return { id: String(receipt.id), cursor: String(receipt.cursor), ...(Array.isArray(receipt.faces) ? { faces: receipt.faces } : {}) };
     },
     /**
