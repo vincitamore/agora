@@ -1,5 +1,5 @@
 // @ts-check
-import { PROTOCOL_LIMITS, ProtocolValidationError, parseCursor, readArray, readEnum, readInteger, readRecord, readString, readTimestamp, validateDigest, validateEpoch, validateNativeId, validateRoomId, validateText } from './common.mjs';
+import { PROTOCOL_LIMITS, ProtocolValidationError, parseCursor, readArray, readEnum, readInteger, readRecord, readString, readTimestamp, validateAuthorRef, validateClientName, validateDigest, validateEpoch, validateNativeId, validateRoomId, validateText } from './common.mjs';
 import { validateWireAttachment } from './attachment.mjs';
 import { validateAccountBinding, validateBearerAttestation, validateHumanChannelAttestation, validateOperatorAct, validateRegistrationRef, validateServiceRef } from './identity.mjs';
 import { validateOriginReference } from './origin.mjs';
@@ -17,8 +17,9 @@ export function validateAppendRequest(value) {
 }
 /** @param {unknown} value */
 function author(value) {
-  const v = readRecord(value, ['id', 'name', 'kind']);
-  return { id: validateNativeId(v.id), name: readString(v.name, 'name', { min: 1, max: 120, controls: true }), kind: readEnum(v.kind, 'kind', ['human', 'agent', 'unknown', 'system']) };
+  const v = readRecord(value, ['id', 'name', 'kind'], ['ref']);
+  return { id: validateNativeId(v.id), name: readString(v.name, 'name', { min: 1, max: 120, controls: true }), kind: readEnum(v.kind, 'kind', ['human', 'agent', 'unknown', 'system']),
+    ...(Object.hasOwn(v, 'ref') ? { ref: validateAuthorRef(v.ref) } : {}) };
 }
 /** @param {unknown} value @param {string} field @param {number} units @param {number} [min] */
 function legacyString(value, field, units, min = 0) {
@@ -30,18 +31,23 @@ function legacyString(value, field, units, min = 0) {
 function base(v, legacy = false) {
   const cursor = parseCursor(v.cursor);
   if (cursor.sequence === 0) throw new ProtocolValidationError('range', 'cursor');
-  const a = legacy ? readRecord(v.author, ['id', 'name', 'kind']) : undefined;
-  const parsedAuthor = a ? { id: validateNativeId(a.id), name: legacyString(a.name, 'name', 120, 1), kind: readEnum(a.kind, 'kind', ['human', 'agent', 'unknown']) } : author(v.author);
+  const a = legacy ? readRecord(v.author, ['id', 'name', 'kind'], ['ref']) : undefined;
+  const parsedAuthor = a ? { id: validateNativeId(a.id), name: legacyString(a.name, 'name', 120, 1), kind: readEnum(a.kind, 'kind', ['human', 'agent', 'unknown', 'system']),
+    ...(Object.hasOwn(a, 'ref') ? { ref: validateAuthorRef(a.ref) } : {}) } : author(v.author);
+  // `via` is the client name the appending local connection declared; `author.ref` is that client's
+  // own id for the person and exists only beside it. Neither is identity: the account is.
+  const via = Object.hasOwn(v, 'via') ? validateClientName(v.via) : undefined;
+  if (parsedAuthor.ref !== undefined && via === undefined) throw new ProtocolValidationError('context', 'via');
   return { id: readString(v.id, 'id', { min: 64, max: 64, pattern: /^[a-f0-9]{64}$/ }), room: validateRoomId(v.room),
     ...(Object.hasOwn(v, 'thread') ? { thread: validateNativeId(v.thread) } : {}),
-    author: parsedAuthor, text: validateText(v.text), ts: readTimestamp(v.ts), cursor: `${cursor.epoch}:${cursor.sequence}` };
+    author: parsedAuthor, ...(via !== undefined ? { via } : {}), text: validateText(v.text), ts: readTimestamp(v.ts), cursor: `${cursor.epoch}:${cursor.sequence}` };
 }
 /** New strict canonical shape only. Effective author kind and native-agent bearer requirement
  * belong to route admission via assertMessageContext, never sender-supplied payload.
  * This validator does not authenticate attestations or verify a v1 stored message hash.
  * @param {unknown} value */
 export function validateNativeMessage(value) {
-  const v = readRecord(value, ['id', 'room', 'author', 'text', 'ts', 'cursor', 'account'], ['thread', 'bearer', 'humanChannel', 'operator_act', 'origin', 'attachments']);
+  const v = readRecord(value, ['id', 'room', 'author', 'text', 'ts', 'cursor', 'account'], ['thread', 'via', 'bearer', 'humanChannel', 'operator_act', 'origin', 'attachments']);
   const message = base(v), account = validateAccountBinding(v.account);
   const bearer = Object.hasOwn(v, 'bearer') ? validateBearerAttestation(v.bearer) : undefined;
   const humanChannel = Object.hasOwn(v, 'humanChannel') ? validateHumanChannelAttestation(v.humanChannel) : undefined;
@@ -80,6 +86,6 @@ function legacyAttachment(value) {
 export function validateLegacyUnattestedMessage(value) {
   const v = readRecord(value, ['provenance', 'message']);
   const provenance = readEnum(v.provenance, 'provenance', ['legacy-unattested']);
-  const m = readRecord(v.message, ['id', 'room', 'author', 'text', 'ts', 'cursor'], ['thread', 'attachments']);
+  const m = readRecord(v.message, ['id', 'room', 'author', 'text', 'ts', 'cursor'], ['thread', 'via', 'attachments']);
   return { provenance, message: { ...base(m, true), ...(Object.hasOwn(m, 'attachments') ? { attachments: readArray(m.attachments, 'attachments', PROTOCOL_LIMITS.attachments, legacyAttachment) } : {}) } };
 }

@@ -117,16 +117,17 @@ export async function carryState(dir, stateRoot, alias) {
  * No retry is added on top of the transport's own. Slack already retries a 429 four times behind
  * a jittered wait, and a second loop out here would multiply that into a herd against the limit
  * that produced it.
- * @param {{ threads: boolean, read: (o: import('./core.mjs').ReadOptions) => Promise<Message[]>, validateThread?: (id: string) => string | undefined }} transport
+ * @param {{ threads: boolean, repliesInRoom?: boolean, read: (o: import('./core.mjs').ReadOptions) => Promise<Message[]>, validateThread?: (id: string) => string | undefined }} transport
  * @param {{ limit?: number, thread?: string, threads?: boolean, cap?: number }} [opts]
  * @returns {Promise<{ messages: Message[], threads: string[], threadsUnread: Array<{ id: string, reason: string }> }>}
  */
 export async function carryWindow(transport, opts = {}) {
   const limit = opts.limit ?? 200;
   const messages = await transport.read({ ...(opts.thread ? { thread: opts.thread } : {}), limit });
-  // a read already narrowed to one thread cannot fold itself in, and a transport with no threads
-  // has nothing to fold: in both cases the room read is the whole window
-  if (opts.threads === false || opts.thread || !transport.threads) return { messages, threads: [], threadsUnread: [] };
+  // a read already narrowed to one thread cannot fold itself in, a transport with no threads has
+  // nothing to fold, and one whose room read carries every reply (native) has nothing left to fold:
+  // in each case the room read is the whole window
+  if (opts.threads === false || opts.thread || !transport.threads || transport.repliesInRoom) return { messages, threads: [], threadsUnread: [] };
   // bounded exactly as `read --threads` bounds it, then ordered by what moved last: when the cap
   // or the rate limit cuts the fold short, the threads a handover most needs are the ones already in
   const roots = byLastActivity(boundedRoots(messages, messages, opts.cap === undefined ? {} : { cap: opts.cap }), messages);

@@ -39,11 +39,15 @@ key order or the choice of JSON escape notation. Binary bytes use attachments.
 | Digest | `sha256:` followed by 64 lowercase hex characters |
 | Attachment name / MIME | 255 / 200 UTF-8 bytes |
 | Source room/ID | Nonempty, at most 512 UTF-8 bytes, no controls |
+| Client name (`via`) | A lowercase letter, then 1–39 lowercase letters, digits or `-` |
+| Author ref | 1–64 of ASCII letters, digits, `.`, `_`, `@`, `+`, `-` |
 
 `common.mjs` exports `PROTOCOL_LIMITS`, `ProtocolValidationError`,
 `validateNativeId`, `validateRoomId`, `validateEpoch`, `validateDigest`,
 `validateCursor`, `parseCursor`, `formatCursor`, `validateText`,
-`validateSourceRef`, and `assertOperationContext`.
+`validateSourceRef`, `assertOperationContext`, and the client-name and author-ref
+grammars (`CLIENT_NAME_PATTERN`, `AUTHOR_REF_PATTERN`, `validateClientName`,
+`validateAuthorRef`).
 
 `SourceRef` is `{transport, room, id}`. External identifiers need not satisfy the
 native ID grammar: a Slack timestamp or offer ordinal is a source identifier,
@@ -167,7 +171,7 @@ imports stay within `src/protocol/`, never back through a service implementation
 | Module | Primary consumer exports |
 |---|---|
 | `identity.mjs` | `AcceptedHostContext`, `validateAcceptedHostContext`, `assertAcceptedHostContext`, `scopedNativeIdentityKey`, `assertScopedNativeCursorContext` |
-| `capabilities.mjs` | `validateCapabilityOffer`, `negotiateNativeCapabilities`, `assertNegotiatedCapabilitiesContext` |
+| `capabilities.mjs` | `validateCapabilityOffer`, `negotiateNativeCapabilities`, `assertNegotiatedCapabilitiesContext`, `receiveCapabilityOffer` |
 | `origin.mjs` | `OriginReference`, `validateOriginReference`, `assertOriginContext` |
 | `operation.mjs` | `NativeOperationRequest`, `NativeOperationEvent`, their validators, `nativeOperationPayloadDigest`, `assertNativeOperationEventContext` |
 | `message.mjs` | `NativeMessage`, `validateNativeMessage`, `assertMessageContext`, `validateLegacyUnattestedMessage` |
@@ -215,6 +219,35 @@ epoch. Imported origin is source metadata stamped by an authorized reader, not
 destination identity or permission to suppress an own post. An
 `AcceptedHostContext` is a syntax/context record; trust comes from the
 consumer-owned authenticated connection, not parsing that record.
+
+### Threads, app clients and the capability offer
+
+These are live `agora-native/1` fields, negotiated by an offer the service makes on its welcome:
+
+| Frame | Field | Meaning |
+|---|---|---|
+| `client-hello` (local only) | `clientName?` | the app client behind the connection; outside the proof transcript |
+| `welcome` | `capabilities`, `clientName?` | the offer `{advertised, required}`; the name the service took, echoed |
+| `member-welcome` | `capabilities` | `threads-v1` only; a `member-client-hello` naming a client is refused `member-client-refused` |
+| `read`, `subscribe` | `thread?` | the root message id; the root and its replies only, refused `thread-root-unknown` / `thread-root-not-top-level` |
+| `append` operation | `thread?`, `authorRef?` | a reply's verified root; the app's id for the person, refused `author-ref-without-client` without a client name |
+| stored message | `via?`, `author.ref?` | stamped by the host from the connection; an operation carrying `via` is refused `operation-via-refused` |
+
+`capabilities.mjs` adds `threads-v1` and `client-name-v1` to the closed vocabulary and exports
+`receiveCapabilityOffer`, the client's reading of an offer from a host that may be newer: an
+advertised name this build does not know is dropped, a required one refuses, and an absent offer is
+a host that predates offers and offers nothing. A client sends a thread-scoped request only to a
+host that offered `threads-v1` (`thread-unsupported` otherwise): an older host ignores an unknown
+field, so it would answer for the whole room. The offer rides outside the proof transcripts, as
+trustworthy as any frame on the authenticated stream and invisible to a client that verifies a hello
+by echoing its fields.
+
+`NativeMessage` and the legacy projection both accept an optional `via` and an optional
+`author.ref`, and refuse a ref without a via (`context` at `via`); the legacy author kinds include
+`system`, which the store now admits on a local append. `via` and `author.ref` are labels the
+appending connection declared, never identity: the account stays the author's id. The typed
+`NativeOperationRequest` payload and its digest are unchanged; `authorRef` rides the v1 append
+operation beside `authorName` and `authorKind`, which that payload does not carry either.
 
 ### Native scan results
 

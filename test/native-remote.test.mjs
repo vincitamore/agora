@@ -1427,3 +1427,58 @@ test("a replacement completed DURING dropClient's teardown is not dialled over o
   assert.equal(subscriptions, 2, `the probe re-subscribed a healthy channel: ${subscriptions} subscribes where 2 are owed`);
   assert.equal(sub.dark(), undefined, "a healthy channel was reported dark after a late resumption");
 });
+
+// ------------------------------------------------------------ threads over a member channel
+
+test("a remote seat replies in a thread, reads it, and subscribes to it; the host offered threads-v1 and no client name", async (t) => {
+  const { room, makeRoom } = await rig(t);
+  const actor = /** @type {any} */ ({ name: "Opus/t2", kind: "agent" });
+  const transport = nativeRemoteTransport(/** @type {any} */ ({ transport: "native-remote" }), { actor, remote: room });
+  t.after(() => transport.close?.());
+  assert.equal(transport.threads, true);
+  assert.equal(transport.repliesInRoom, true);
+  const root = await transport.post("root");
+  await transport.post("elsewhere");
+  await transport.post("reply", { thread: root.id });
+  const client = await room.client();
+  assert.deepEqual([...client.capabilities], ["threads-v1"], "a member is offered threads, never a client name");
+  const thread = await transport.read({ thread: root.id });
+  assert.deepEqual(thread.map((m) => m.text), ["root", "reply"]);
+  assert.deepEqual((await transport.read({})).map((m) => [m.text, m.thread ?? null]), [["root", null], ["elsewhere", null], ["reply", root.id]]);
+  await assert.rejects(transport.post("deeper", { thread: thread[1].id }), /thread-root-not-top-level/);
+  const sub = await openRemoteSubscription({ room: makeRoom(), since: nativeCursor(EPOCH, 0), thread: root.id, backoffMs: 10 });
+  t.after(() => sub.close());
+  const deadline = Date.now() + 4000;
+  /** @type {any[]} */ let got = [];
+  while (got.length < 2 && Date.now() < deadline) { await sub.wait(50); got = got.concat(await sub.read()); }
+  assert.deepEqual(got.map((m) => m.text), ["root", "reply"], "the subscription carries the thread only");
+});
+
+test("a member welcome's offer is read as offered: none from an older host, unknown names dropped, an unknown requirement refused", async () => {
+  /** @param {unknown} capabilities */
+  const handshake = async (capabilities) => {
+    const b = offlineBinding();
+    const secret = mintRouteSecret();
+    const toHost = new PassThrough();
+    const toClient = new PassThrough();
+    const stream = Duplex.from({ readable: toClient, writable: toHost });
+    const fresh = { bootEpoch: "f".repeat(32), requestId: "1".repeat(32), serverChallenge: "2".repeat(32) };
+    const serverTranscript = memberTranscript(b, fresh);
+    toClient.write(encodeNativeFrame({ protocol: NATIVE_PROTOCOL, type: "member-server-hello", ...serverTranscript,
+      proof: memberHandshakeProof(secret, MEMBER_PHASES.server, serverTranscript) }));
+    const decoder = new NativeFrameDecoder();
+    toHost.on("data", (bytes) => {
+      for (const frame of decoder.push(bytes)) {
+        const f = /** @type {any} */ (frame);
+        if (f.type !== "member-client-hello") continue;
+        const { protocol: _p, type: _t, proof: _pr, ...transcript } = f;
+        toClient.write(encodeNativeFrame({ protocol: NATIVE_PROTOCOL, type: "member-welcome", ...transcript,
+          proof: memberHandshakeProof(secret, MEMBER_PHASES.welcome, transcript), ...(capabilities === undefined ? {} : { capabilities }) }));
+      }
+    });
+    return completeMemberHandshake({ stream, binding: b, secret, timeoutMs: 2000 });
+  };
+  assert.deepEqual([...(await handshake(undefined)).capabilities], [], "an older host offers nothing, so nothing thread-scoped is sent to it");
+  assert.deepEqual([...(await handshake({ advertised: ["threads-v1", "later-v3"], required: [] })).capabilities], ["threads-v1"]);
+  await assert.rejects(handshake({ advertised: ["later-v3"], required: ["later-v3"] }), /member-welcome-refused/);
+});

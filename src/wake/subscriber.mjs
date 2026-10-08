@@ -145,12 +145,25 @@ export function nativeMessage(message) {
     room: String(message.room),
     ...(message.thread ? { thread: String(message.thread) } : {}),
     author: message.author ?? { id: "unknown", name: "unknown", kind: "unknown" },
+    // the app client the appending connection declared: attribution, never identity
+    ...(typeof message.via === "string" && message.via ? { via: message.via } : {}),
     text,
     signedAs: parseSignature(text),
     ts: String(message.ts),
     cursor: String(message.cursor),
     ...(Array.isArray(message.attachments) && message.attachments.length ? { attachments: message.attachments } : {}),
   };
+}
+
+/**
+ * Refuse a thread-scoped request to a service that does not offer `threads-v1`. An older service
+ * ignores a field it does not know, so it would answer a thread read or subscription for the whole
+ * room and accept a reply without checking its root: a silent room-wide answer, refused here.
+ * @param {{ capabilities?: Set<string> }} client @param {string} where
+ */
+export function requireThreads(client, where) {
+  if (client.capabilities?.has("threads-v1")) return;
+  throw Object.assign(new AgoraError(`thread-unsupported: ${where} does not offer threads-v1 (it predates native threads), so it would answer for the whole room; nothing was sent and no cursor moved`), { code: "thread-unsupported" });
 }
 
 /** @param {import('../core.mjs').Message} m */
@@ -188,12 +201,18 @@ export const SUBSCRIBE_WINDOW = 1000;
  * events it pushes afterwards form one ordered stream; the subscription keeps the stream in order
  * and hands out each sequence once. The service holds only the last sequence written to this
  * socket; the cursor is this session's and is advanced by the caller after delivery.
- * @param {{ stateRoot: string, roomId: string, since?: string, connect?: typeof NativeServiceClient.connect, timeoutMs?: number, window?: number }} opts
+ * A `thread` narrows the subscription to that thread's root and replies; its cursor is still a room
+ * position, and the service passes over the records outside the thread.
+ * @param {{ stateRoot: string, roomId: string, since?: string, thread?: string, connect?: typeof NativeServiceClient.connect, timeoutMs?: number, window?: number }} opts
  * @returns {Promise<NativeSubscription>}
  */
 export async function openNativeSubscription(opts) {
   const roomId = validateNativeRoomId(opts.roomId);
   const { client, descriptor } = await connectSeatService(opts.stateRoot, { connect: opts.connect, timeoutMs: opts.timeoutMs });
+  if (opts.thread !== undefined) {
+    try { requireThreads(client, `the seat service at ${descriptor.path}`); }
+    catch (e) { client.close(); throw e; }
+  }
   /** @type {import('../core.mjs').Message[]} */
   let queue = [];
   /** @type {string | undefined} */
@@ -260,7 +279,7 @@ export async function openNativeSubscription(opts) {
   };
   let result;
   try {
-    result = await client.subscribe(roomId, since, (message) => push([message]));
+    result = await client.subscribe(roomId, since, (message) => push([message]), opts.thread);
   } catch (e) { throw classify(e); }
   push(Array.isArray(result?.messages) ? result.messages : []);
   return {

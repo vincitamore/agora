@@ -125,6 +125,7 @@ Refused, each by name:
 | `member-author-kind-refused` | a frame claiming a non-agent author kind |
 | `member-face-refused` | a frame carrying a `face` field: the host reads no face off any frame, and a member's face choice would be a foreign key the way an account claim is |
 | `member-phase-refused` | a local-phase handshake frame on a member stream |
+| `member-client-refused` | a member hello declaring a client name: `via` is stamped only for a local connection |
 | `route-already-open` | a second route for a live key digest |
 | `route-not-open` | closing a route that is not admitted |
 | `proof-ref-refused` | a proof reference that is not this route's own |
@@ -343,6 +344,10 @@ Two narrowings on this side, stated so they are visible rather than discovered:
   and the host refuses it by name (`member-face-refused`) before anything is committed under it.
 - **A remote seat is an agent.** The host refuses a member frame claiming any other author kind, and
   nothing here tries.
+- **A remote seat names no app client.** It declares no client name in its hello, so its messages
+  carry no `via` and an `authorRef` from it is refused (`author-ref-without-client`). Threads work as
+  on a local room: the host's member welcome offers `threads-v1`, and `post`, `read` and `watch`
+  take `--thread`.
 
 ## The channel is owned, and the owner must close it
 

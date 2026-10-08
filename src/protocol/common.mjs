@@ -135,6 +135,15 @@ export function validateCursor(value) { const { epoch, sequence } = parseCursor(
 export function formatCursor(epoch, sequence) { return `${validateEpoch(epoch)}:${readInteger(sequence, 'sequence')}`; }
 /** @param {unknown} value */
 export function validateText(value) { return readString(value, 'text', { max: PROTOCOL_LIMITS.textBytes }); }
+/** The name a local connection declares for the app client behind it, stamped as a message's
+ * `via`. Attribution the connection claimed, never an authenticated identity. */
+export const CLIENT_NAME_PATTERN = /^[a-z][a-z0-9-]{1,39}$/;
+/** An app's own stable id for the person it posted for, stored as `author.ref`. */
+export const AUTHOR_REF_PATTERN = /^[A-Za-z0-9._@+-]{1,64}$/;
+/** @param {unknown} value */
+export function validateClientName(value) { return readString(value, 'via', { min: 2, max: 40, pattern: CLIENT_NAME_PATTERN }); }
+/** @param {unknown} value */
+export function validateAuthorRef(value) { return readString(value, 'ref', { min: 1, max: 64, pattern: AUTHOR_REF_PATTERN }); }
 /** @param {unknown} value @returns {SourceRef} */
 export function validateSourceRef(value) {
   const v = readRecord(value, ['transport', 'room', 'id']);

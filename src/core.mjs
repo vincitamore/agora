@@ -10,7 +10,11 @@ import path from "node:path";
 const execFileAsync = promisify(execFile);
 
 /** @typedef {'human' | 'agent' | 'unknown' | 'system'} ActorKind */
-/** @typedef {{ id: string, name: string, kind: ActorKind }} Author */
+/**
+ * `ref`, on a native message, is the app client's own id for the person it posted for; it stands
+ * only beside the message's `via` and, like it, is attribution and never identity.
+ * @typedef {{ id: string, name: string, kind: ActorKind, ref?: string }} Author
+ */
 /**
  * A file carried beside a message. `path` is a locally materialized, inert copy a local agent can
  * inspect without receiving the transport credential. A missing path never hides the attachment:
@@ -36,6 +40,8 @@ const execFileAsync = promisify(execFile);
  * @property {string} room
  * @property {string} [thread]
  * @property {Author} author
+ * @property {string} [via] on a native message, the client name the local connection that appended
+ *   it declared (an app posting for its users); cooperative, so attribution and never identity
  * @property {string} text
  * @property {string} [signedAs] the name on a trailing signature line, when present
  * @property {string} ts ISO-8601
@@ -59,7 +65,11 @@ const execFileAsync = promisify(execFile);
  * `oldestFetched` is the deepest position the walk did reach, `pages` how many it was allowed.
  * @typedef {{ reason: string, oldestFetched?: string, pages: number }} ReadGap
  */
-/** @typedef {{ gap?: ReadGap }} GapCarrier */
+/**
+ * `scannedThrough`, on a native thread read, is the room cursor the host's scan accounts for: past
+ * the last reply when the records after it are outside the thread.
+ * @typedef {{ gap?: ReadGap, scannedThrough?: string }} GapCarrier
+ */
 /**
  * What a read returns: the messages, ascending, and on the array itself the gap, when the walk
  * could not reach the cursor. A property on the array rather than an envelope so every existing
@@ -79,6 +89,9 @@ const execFileAsync = promisify(execFile);
  * @property {string} kind
  * @property {string} room the transport's own name for the room
  * @property {boolean} threads whether `thread` means anything here
+ * @property {boolean} [repliesInRoom] the room read already carries every thread reply (a native
+ *   room is one ordered sequence), so folding threads into a read, or following them in a watch,
+ *   reads nothing the room read did not
  * @property {() => Promise<{ id: string, name: string }>} whoami
  * @property {(opts?: ReadOptions) => Promise<ReadResult>} read
  * @property {(text: string, opts?: PostOptions) => Promise<PostResult>} post

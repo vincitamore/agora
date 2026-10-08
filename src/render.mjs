@@ -43,7 +43,10 @@ export function trailerLine(m) {
 
 /** The header the CLI prints above a message: who, as whom, where, at which cursor. @param {ReturnType<typeof decorate>} m */
 export function headerLine(m) {
-  const who = m.signedAs && m.signedAs !== m.author.name ? `${m.author.name} as ${m.signedAs}` : m.author.name;
+  const named = m.signedAs && m.signedAs !== m.author.name ? `${m.author.name} as ${m.signedAs}` : m.author.name;
+  // the app client a native message was submitted through: what its connection declared, shown as
+  // attribution beside the name and never in place of it
+  const who = m.via ? `${named} · via ${m.via}` : named;
   const where = m.thread ? `  thread ${m.thread}` : "";
   return `[${m.ts}] ${who} (${m.author.kind})${where}  cursor ${m.cursor}`;
 }

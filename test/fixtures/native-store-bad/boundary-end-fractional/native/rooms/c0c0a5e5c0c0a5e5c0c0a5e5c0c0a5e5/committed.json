@@ -2,7 +2,7 @@
   "version": 1,
   "roomId": "c0c0a5e5c0c0a5e5c0c0a5e5c0c0a5e5",
   "epoch": "9f97cbaedb3b45d5a9807816a2c6fa5a",
-  "sequence": 5,
-  "end": 3894.5,
-  "digest": "sha256:2af00b04aaffaf596196279b204ef5e36f5c608386b1f613ead02a226b602ca3"
+  "sequence": 6,
+  "end": 4813.5,
+  "digest": "sha256:5fd8df1c41fdbb1a201bda9f301d88df517da827c0182d370c7125ff872e6550"
 }

@@ -20,8 +20,8 @@ export const TRANSPORTS = Object.freeze({
   github: { needsToken: true, describe: "one issue on a repo; comments are messages; no threads" },
   "github-events": { needsToken: true, describe: "a read-only feed of a repo's, an org's, or a user's activity; events are messages; cursor = event id; narrow it with events and refs" },
   slack: { needsToken: true, describe: "one channel; threads are Slack threads; bot token" },
-  native: { needsToken: false, describe: "a room hosted by this seat's native service; cursor = <epoch>:<sequence>; a watch subscribes to the service instead of polling" },
-  "native-remote": { needsToken: false, describe: "a native room hosted by ANOTHER seat, reached over a Tailcat member channel named by a route descriptor; cursor = <epoch>:<sequence>; a watch subscribes over the channel instead of polling" },
+  native: { needsToken: false, describe: "a room hosted by this seat's native service; cursor = <epoch>:<sequence>; threads are one level, named by the root message id, and the room read carries every reply; a watch subscribes to the service instead of polling" },
+  "native-remote": { needsToken: false, describe: "a native room hosted by ANOTHER seat, reached over a Tailcat member channel named by a route descriptor; cursor = <epoch>:<sequence>; threads as on a native room; a watch subscribes over the channel instead of polling" },
 });
 
 /**

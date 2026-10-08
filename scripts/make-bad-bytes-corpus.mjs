@@ -5,7 +5,8 @@
 // checksum that no longer matches, a payload that is not JSON, a manifest field gone or wrong,
 // a boundary that ends inside a frame or names a foreign epoch or disagrees with the log, a
 // writer lock naming a dead endpoint or unparseable; and, behind a re-sealed frame, one edit per
-// field the scan validates: record, message, board and boundary fields). Every case carries an EXPECT.json naming
+// field the scan validates: record, message, board and boundary fields, a reply's via and
+// author ref among them). Every case carries an EXPECT.json naming
 // what `NativeRoomStore.open` must say, so the test opens the committed bytes offline and the
 // bytes stay traceable to the edit that made them.
 //
@@ -105,8 +106,9 @@ export const CASES = {
   "lock-unparseable": { expect: "writer lock", edit: ({ lock }) => writeFileSync(lock, "not json") },
   "lock-dead-endpoint": { expect: null, edit: () => {} },
   // wave 2: the fields the scan validates behind a well-formed frame. Frame 3 is the board claim,
-  // frame 4 the last chat message; each edit re-seals its frame so the checksum passes and the
-  // field check is what refuses.
+  // frame 4 the last top-level chat message, frame 5 a reply in frame 0's thread that an app client
+  // submitted (it carries via and author.ref); each edit re-seals its frame so the checksum passes
+  // and the field check is what refuses.
   "record-not-object": { expect: "record for another room or protocol version", edit: (p) => replaceLastPayload(p, JSON.stringify("not a record")) },
   "record-null": { expect: "record for another room or protocol version", edit: (p) => replaceLastPayload(p, "null") },
   "record-foreign-room": { expect: "record for another room or protocol version", edit: (p) => editRecord(p, 4, (r) => { r.roomId = "0".repeat(32); }) },
@@ -138,8 +140,11 @@ export const CASES = {
   "boundary-ends-after-header": { expect: "ends inside a record", edit: ({ frames, boundary }) => { const { last } = lastFrame(frames); editJson(boundary, (o) => { o.end = last + 4; }); } },
   "record-one-byte": { expect: "record for another room or protocol version", edit: (p) => replaceLastPayload(p, "1") },
   "boundary-ends-inside-header": { expect: "ends inside a header", edit: ({ frames, boundary }) => { const { last } = lastFrame(frames); editJson(boundary, (o) => { o.end = last + 2; }); } },
+  "message-via-malformed": { expect: "carries an invalid via", edit: (p) => editRecord(p, 5, (r) => { r.message.via = "Not A Client"; }) },
+  "message-author-ref-malformed": { expect: "carries an invalid author ref", edit: (p) => editRecord(p, 5, (r) => { r.message.author.ref = "has space"; }) },
+  "message-author-ref-without-via": { expect: "carries an author ref without a via", edit: (p) => editRecord(p, 5, (r) => { delete r.message.via; }) },
   "boundary-ends-at-frame": { expect: null, edit: ({ frames, boundary }) => {
-    // the boundary acknowledges four of the five frames: the fifth stays on disk unacknowledged, and open accepts it
+    // the boundary acknowledges the first three frames: the rest stay on disk unacknowledged, and open accepts it
     const { last, bytes } = lastFrame(frames); const len1 = bytes.readUInt32BE(0); const f1 = 4 + len1 + 32; const len2 = bytes.readUInt32BE(f1); const f2 = 4 + len2 + 32; const len3 = bytes.readUInt32BE(f1 + f2); const f3 = 4 + len3 + 32;
     const digest3 = JSON.parse(bytes.subarray(f1 + f2 + 4, f1 + f2 + 4 + len3).toString("utf8")).recordDigest;
     void last; editJson(boundary, (o) => { o.end = f1 + f2 + f3; o.sequence = 3; o.digest = digest3; });
@@ -151,9 +156,12 @@ async function goodRoom() {
   const root = await mkdtemp(join(tmpdir(), "agora-corpus-"));
   let tick = Date.UTC(2026, 8, 18, 12, 0, 0);
   const store = await NativeRoomStore.create({ root, roomId: ROOM, hostAccountId: HOST, epoch: "9f97cbaedb3b45d5a9807816a2c6fa5a", now: () => new Date((tick += 1000)) });
-  for (let i = 1; i <= 3; i++) await store.append({ operationId: `operation_${String(i).padStart(8, "0")}`, authorName: "Peer", text: `message ${i}` }, { accountId: HOST });
+  const first = await store.append({ operationId: "operation_00000001", authorName: "Peer", text: "message 1" }, { accountId: HOST });
+  for (let i = 2; i <= 3; i++) await store.append({ operationId: `operation_${String(i).padStart(8, "0")}`, authorName: "Peer", text: `message ${i}` }, { accountId: HOST });
   await store.append({ kind: "board", operationId: "operation_board_00000001", payload: { action: "claim", subject: "work:x" } }, { accountId: HOST });
   await store.append({ operationId: "operation_00000004", authorName: "Peer", text: "message 4", thread: undefined }, { accountId: HOST });
+  // a reply in message 1's thread, submitted through a local connection that declared a client name
+  await store.append({ operationId: "operation_00000005", authorName: "Peer", authorKind: "human", text: "message 5", thread: first.id, authorRef: "person-1" }, { accountId: HOST, via: "corpus-client" });
   await store.close();
   return { root, dir: join(root, "native", "rooms", ROOM) };
 }

@@ -49,7 +49,7 @@ for (const name of cases) {
   });
 }
 
-test("the good room reads back its four messages in order and its live board claim", async (t) => {
+test("the good room reads back its five messages in order, its reply's thread and via, and its live board claim", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "agora-bad-good-read-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   await cp(join(CORPUS, "good", "native"), join(root, "native"), { recursive: true });
@@ -58,7 +58,13 @@ test("the good room reads back its four messages in order and its live board cla
   const store = await NativeRoomStore.open({ root, roomId: ROOM, now: () => new Date(Date.UTC(2026, 8, 18, 12, 0, 30)) });
   t.after(() => store.close());
   const messages = store.read({ limit: 10 });
-  assert.deepEqual(messages.map((m) => m.text), ["message 1", "message 2", "message 3", "message 4"], "read delivers the chat records in order; the board record is not a message");
+  assert.deepEqual(messages.map((m) => m.text), ["message 1", "message 2", "message 3", "message 4", "message 5"], "read delivers the chat records in order; the board record is not a message");
   assert.deepEqual(store.board().map((h) => h.subject), ["work:x"], "the board claim is live on reopen");
-  assert.equal(store.status().committed, 5, "three messages, one board record, one message: five committed records");
+  assert.equal(store.status().committed, 6, "three messages, one board record, two messages: six committed records");
+  // the reply keeps its thread, via and author ref through the reopen, and the rebuilt indexes serve its thread
+  const reply = /** @type {any} */ (messages[4]);
+  assert.equal(reply.thread, messages[0].id);
+  assert.equal(reply.via, "corpus-client");
+  assert.equal(reply.author.ref, "person-1");
+  assert.deepEqual(store.read({ thread: messages[0].id }).map((m) => m.text), ["message 1", "message 5"], "the thread index is rebuilt from the log");
 });
