@@ -488,15 +488,11 @@ test("cli: a watch registers the cursor it holds while it runs, and a second wat
 
 test("cli: posting in a thread follows it, and --follow reads it; --follow with --thread is a usage error", async () => {
   const { dir, cleanup } = await tmp();
+  const slack = await slackChannel();
   try {
-    const cfgPath = path.join(dir, "agora.json");
-    await writeFile(cfgPath, JSON.stringify({
-      actor: { name: "Grace", kind: "agent" },
-      rooms: { down: { transport: "local", path: path.join(dir, "down.ndjson"), followCap: 8, threadInterval: 60 } },
-    }));
-    const root = path.join(dir, "state");
-    const A = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "a", CLAUDE_PID: "", AGORA_ACTOR: "Grace/watch" };
-    const B = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "b", CLAUDE_PID: "", AGORA_ACTOR: "Codex" };
+    const { cfgPath, root, token } = await slackRoom(dir, slack.api, { followCap: 8, threadInterval: 60 });
+    const A = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "a", CLAUDE_PID: "", AGORA_ACTOR: "Grace/watch", ...token };
+    const B = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "b", CLAUDE_PID: "", AGORA_ACTOR: "Codex", ...token };
 
     let r = await agora(["post", "down", "the request"], A);
     const parent = /posted (\S+)/.exec(r.stdout)?.[1];
@@ -516,6 +512,60 @@ test("cli: posting in a thread follows it, and --follow reads it; --follow with 
     r = await agora(["watch", "down", "--follow", "--thread", parent, "--once"], A);
     assert.equal(r.code, 2);
     assert.match(r.stderr, /cannot be combined with --thread/);
+  } finally {
+    await slack.close();
+    await cleanup();
+  }
+});
+
+test("cli: a reply posted mid-watch on a local room is delivered once, though the room read carries it and the session follows its thread", { timeout: 60_000 }, async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const cfgPath = path.join(dir, "agora.json");
+    await writeFile(cfgPath, JSON.stringify({
+      actor: { name: "Grace", kind: "agent" },
+      rooms: { down: { transport: "local", path: path.join(dir, "down.ndjson") } },
+    }));
+    const root = path.join(dir, "state");
+    const A = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "a", CLAUDE_PID: "", AGORA_ACTOR: "Grace/watch" };
+    const H = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "h", CLAUDE_PID: "", AGORA_ACTOR: "operator" };
+    const armed = path.join(root, "sessions", "a", "armed", "down.json");
+    /** @param {string} stdout */
+    const firstLines = (stdout) => messages(stdout).map((l) => String(JSON.parse(l).text).split(/\r?\n/)[0]);
+    /** Wait for the watch's registration, then past its first poll, which reads the room and every followed thread. */
+    const pastFirstPoll = async () => {
+      for (let i = 0; i < 200 && !existsSync(armed); i++) await delay(25);
+      assert.ok(existsSync(armed), "the watch registered");
+      await delay(400);
+    };
+
+    // this session's own top-level post roots the thread it follows
+    let r = await agora(["post", "down", "the request"], A);
+    const parent = /posted (\S+)/.exec(r.stdout)?.[1];
+    assert.ok(parent);
+
+    // the measured sequence: a stream watch reading the room every second and the thread every
+    // three, and a reply that lands between the two reads
+    const streaming = agora(["watch", "down", "--stream", "--follow", "--json", "--interval", "1", "--thread-interval", "3", "--for", "7"], A);
+    await pastFirstPoll();
+    await agora(["post", "down", "--thread", parent, "their reply"], H);
+    r = await streaming;
+    assert.equal(r.code, 42, r.stderr);
+    assert.deepEqual(firstLines(r.stdout), ["their reply"], "the room read delivered it, and the thread read must not deliver it again");
+    assert.match(r.stderr, /a local room's read already carries every thread reply, so --follow reads nothing more here/);
+
+    // the form a resident runs: until-new, re-armed after each delivery. The reply lands after the
+    // first poll, the room read delivers it and the watch exits; the re-armed watch reads the thread
+    assert.equal(existsSync(armed), false, "the stream watch left");
+    const untilNew = agora(["watch", "down", "--follow", "--json", "--interval", "1", "--thread-interval", "3600", "--for", "10"], A);
+    await pastFirstPoll();
+    await agora(["post", "down", "--thread", parent, "a later reply"], H);
+    r = await untilNew;
+    assert.equal(r.code, 42, r.stderr);
+    assert.deepEqual(firstLines(r.stdout), ["a later reply"]);
+    r = await agora(["watch", "down", "--once", "--follow", "--json"], A);
+    assert.equal(r.code, 0, `the re-armed watch has nothing new (delivered ${JSON.stringify(firstLines(r.stdout))})`);
+    assert.deepEqual(firstLines(r.stdout), []);
   } finally {
     await cleanup();
   }
@@ -775,15 +825,11 @@ test("cli: a room's note is printed with it, and doctor says when a local room s
 
 test("cli: a top-level post roots a followed thread, so a reply under this session's own message wakes it", async () => {
   const { dir, cleanup } = await tmp();
+  const slack = await slackChannel();
   try {
-    const cfgPath = path.join(dir, "agora.json");
-    await writeFile(cfgPath, JSON.stringify({
-      actor: { name: "Grace", kind: "agent" },
-      rooms: { down: { transport: "local", path: path.join(dir, "down.ndjson"), followCap: 8, threadInterval: 60 } },
-    }));
-    const root = path.join(dir, "state");
-    const A = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "a", CLAUDE_PID: "", AGORA_ACTOR: "Grace/orchestrator" };
-    const H = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "h", CLAUDE_PID: "", AGORA_ACTOR: "operator" };
+    const { cfgPath, root, token } = await slackRoom(dir, slack.api, { followCap: 8, threadInterval: 60 });
+    const A = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "a", CLAUDE_PID: "", AGORA_ACTOR: "Grace/orchestrator", ...token };
+    const H = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "h", CLAUDE_PID: "", AGORA_ACTOR: "operator", ...token };
 
     await agora(["cursor", "down", "--now"], A);
     let r = await agora(["post", "down", "joining the seat"], A);
@@ -802,21 +848,18 @@ test("cli: a top-level post roots a followed thread, so a reply under this sessi
     assert.equal(result.threads[mine], 1, "and it came in on the followed thread");
     assert.equal(result.delivered, 1);
   } finally {
+    await slack.close();
     await cleanup();
   }
 });
 
 test("cli: a delivered top-level message roots a followed thread, and an answer with --re joins the thread it answers", async () => {
   const { dir, cleanup } = await tmp();
+  const slack = await slackChannel();
   try {
-    const cfgPath = path.join(dir, "agora.json");
-    await writeFile(cfgPath, JSON.stringify({
-      actor: { name: "Grace", kind: "agent" },
-      rooms: { down: { transport: "local", path: path.join(dir, "down.ndjson"), followCap: 8, threadInterval: 60 } },
-    }));
-    const root = path.join(dir, "state");
-    const A = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "a", CLAUDE_PID: "", AGORA_ACTOR: "Grace/review" };
-    const B = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "b", CLAUDE_PID: "", AGORA_ACTOR: "peer" };
+    const { cfgPath, root, token } = await slackRoom(dir, slack.api, { followCap: 8, threadInterval: 60 });
+    const A = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "a", CLAUDE_PID: "", AGORA_ACTOR: "Grace/review", ...token };
+    const B = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "b", CLAUDE_PID: "", AGORA_ACTOR: "peer", ...token };
 
     await agora(["cursor", "down", "--now"], A);
     let r = await agora(["post", "down", "which lane was it", "--to", "Grace/review"], B);
@@ -843,21 +886,18 @@ test("cli: a delivered top-level message roots a followed thread, and an answer 
     set = JSON.parse(await readFile(path.join(root, "sessions", "a", "follow", "down.json"), "utf8"));
     assert.ok(second in set.threads, "an answer with --re joins the thread under the message it answers");
   } finally {
+    await slack.close();
     await cleanup();
   }
 });
 
 test("cli: delivered agent broadcasts spend no follow slot unless addressed to this reader", async () => {
   const { dir, cleanup } = await tmp();
+  const slack = await slackChannel();
   try {
-    const cfgPath = path.join(dir, "agora.json");
-    await writeFile(cfgPath, JSON.stringify({
-      actor: { name: "Grace", kind: "agent" },
-      rooms: { down: { transport: "local", path: path.join(dir, "down.ndjson"), followCap: 8 } },
-    }));
-    const root = path.join(dir, "state");
-    const A = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "a", CLAUDE_PID: "", AGORA_ACTOR: "Grace/review" };
-    const B = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "b", CLAUDE_PID: "", AGORA_ACTOR: "Cal/codex" };
+    const { cfgPath, root, token } = await slackRoom(dir, slack.api, { followCap: 8 });
+    const A = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "a", CLAUDE_PID: "", AGORA_ACTOR: "Grace/review", ...token };
+    const B = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "b", CLAUDE_PID: "", AGORA_ACTOR: "Cal/codex", ...token };
     const followFile = path.join(root, "sessions", "a", "follow", "down.json");
 
     await agora(["cursor", "down", "--now"], A);
@@ -879,6 +919,7 @@ test("cli: delivered agent broadcasts spend no follow slot unless addressed to t
     const secondSet = JSON.parse(await readFile(followFile, "utf8"));
     assert.deepEqual(Object.keys(secondSet.threads), [addressed], "an address naming the model admits the new conversation");
   } finally {
+    await slack.close();
     await cleanup();
   }
 });
@@ -926,6 +967,72 @@ async function room(dir, extra = {}) {
     rooms: { down: { transport: "local", path: path.join(dir, "down.ndjson"), ...extra } },
   }));
   return { cfgPath, root: path.join(dir, "state") };
+}
+
+/**
+ * A Slack channel on loopback that keeps what is posted to it and serves it the way Slack does: the
+ * history holds top-level messages only, and a reply is read from its thread. The follow set exists
+ * for that shape, a room read that omits replies, so the CLI's follow tests run here. A local room's
+ * read carries every reply, and following a thread there only hands a reply over twice.
+ */
+async function slackChannel() {
+  let n = 0;
+  const stamp = () => `1700000000.${String(++n).padStart(6, "0")}`;
+  /** @type {Array<{ ts: string, text: string, bot_id: string, username: string, thread_ts?: string }>} */
+  const posted = [];
+  const server = createServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://x");
+    let body = "";
+    req.setEncoding("utf8");
+    req.on("data", (/** @type {string} */ s) => { body += s; });
+    req.on("end", () => {
+      /** @param {any} b */
+      const send = (b) => res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(b));
+      const oldest = url.searchParams.get("oldest");
+      /** @param {{ ts: string }} m */
+      const after = (m) => !oldest || Number(m.ts) > Number(oldest);
+      switch (url.pathname) {
+        case "/auth.test": return send({ ok: true, user_id: "U9", user: "agora-bot", bot_id: "B9" });
+        case "/users.info": return send({ ok: true, user: { real_name: "fixture" } });
+        case "/chat.postMessage": {
+          const p = JSON.parse(body || "{}");
+          const parent = typeof p.thread_ts === "string" ? p.thread_ts : undefined;
+          if (parent && !posted.some((m) => m.ts === parent && !m.thread_ts)) return send({ ok: false, error: "thread_not_found" });
+          const m = { ts: stamp(), text: String(p.text ?? ""), bot_id: "B9", username: "agora-bot", ...(parent ? { thread_ts: parent } : {}) };
+          posted.push(m);
+          return send({ ok: true, ts: m.ts, channel: "C1" });
+        }
+        case "/conversations.history":
+          return send({ ok: true, has_more: false, messages: posted.filter((m) => !m.thread_ts && after(m)).reverse() });
+        case "/conversations.replies": {
+          const ts = url.searchParams.get("ts");
+          const parent = posted.find((m) => m.ts === ts && !m.thread_ts);
+          if (!parent) return send({ ok: false, error: "thread_not_found" });
+          return send({ ok: true, has_more: false, messages: [{ ...parent, thread_ts: parent.ts }, ...posted.filter((m) => m.thread_ts === ts && after(m))] });
+        }
+        default: return res.writeHead(404).end("{}");
+      }
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", () => r(undefined)));
+  const addr = /** @type {import('node:net').AddressInfo} */ (server.address());
+  return {
+    api: `http://127.0.0.1:${addr.port}`,
+    close: () => new Promise((r) => { server.closeAllConnections(); server.close(() => r(undefined)); }),
+  };
+}
+
+/**
+ * `room`, on a loopback Slack channel. The env each session runs with carries the token by name.
+ * @param {string} dir @param {string} api @param {Record<string, unknown>} [extra]
+ */
+async function slackRoom(dir, api, extra = {}) {
+  const cfgPath = path.join(dir, "agora.json");
+  await writeFile(cfgPath, JSON.stringify({
+    actor: { name: "Grace", kind: "agent" },
+    rooms: { down: { transport: "slack", channel: "C1", api, tokenEnv: "AGORA_TEST_TOKEN", ...extra } },
+  }));
+  return { cfgPath, root: path.join(dir, "state"), token: { AGORA_TEST_TOKEN: "xoxb-test" } };
 }
 
 test("cli: one sweep is one post, naming every bearer that went dark in this room", async () => {
@@ -1055,10 +1162,11 @@ test("cli: --batch hands a poll's messages over as one object; the default is on
 
 test("cli: an evicted follow is named on stdout under --json and on the result line, with the knob that governs it", async () => {
   const { dir, cleanup } = await tmp();
+  const slack = await slackChannel();
   try {
-    const { cfgPath, root } = await room(dir, { followCap: 1, threadInterval: 60 });
-    const A = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "a", AGORA_ACTOR: "Grace/watch" };
-    const B = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "b", AGORA_ACTOR: "peer" };
+    const { cfgPath, root, token } = await slackRoom(dir, slack.api, { followCap: 1, threadInterval: 60 });
+    const A = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "a", AGORA_ACTOR: "Grace/watch", ...token };
+    const B = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "b", AGORA_ACTOR: "peer", ...token };
 
     let r = await agora(["post", "down", "the first ask"], A);
     const first = /posted (\S+)/.exec(r.stdout)?.[1];
@@ -1079,6 +1187,7 @@ test("cli: an evicted follow is named on stdout under --json and on the result l
     assert.equal(result.evicted.length + result.following, 2, "what left the set and what remains are both on the result line");
     assert.equal(result.following, 1);
   } finally {
+    await slack.close();
     await cleanup();
   }
 });
@@ -1290,10 +1399,11 @@ test("cli: an unregistered session is told to register, and never refused", asyn
 
 test("cli: the cap does not take the thread under this session's own post while another is free", async () => {
   const { dir, cleanup } = await tmp();
+  const slack = await slackChannel();
   try {
-    const { cfgPath, root } = await room(dir, { followCap: 1, threadInterval: 60 });
-    const A = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "a", AGORA_ACTOR: "Grace/orchestrator" };
-    const B = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "b", AGORA_ACTOR: "peer" };
+    const { cfgPath, root, token } = await slackRoom(dir, slack.api, { followCap: 1, threadInterval: 60 });
+    const A = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "a", AGORA_ACTOR: "Grace/orchestrator", ...token };
+    const B = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "b", AGORA_ACTOR: "peer", ...token };
     const followFile = path.join(root, "sessions", "a", "follow", "down.json");
 
     await agora(["cursor", "down", "--now"], A);
@@ -1317,6 +1427,7 @@ test("cli: the cap does not take the thread under this session's own post while 
     assert.equal(r.code, 42);
     assert.equal(JSON.parse(messages(r.stdout).at(-1) ?? "{}").text.split("\n")[0], "answering the request");
   } finally {
+    await slack.close();
     await cleanup();
   }
 });

@@ -8,6 +8,10 @@
   "bin": {
     "agora": "bin/agora.mjs"
   },
+  "exports": {
+    "./client": "./src/client.mjs",
+    "./package.json": "./package.json"
+  },
   "engines": {
     "node": ">=22.13"
   },

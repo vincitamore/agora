@@ -32,6 +32,9 @@ export function localTransport(room, { actor, now = () => new Date() }) {
     kind: "local",
     room: file,
     threads: true,
+    // The file is one ordered sequence and the room read returns every line, replies included, so
+    // a followed thread read beside it would hand a reply over a second time under its own cursor.
+    repliesInRoom: true,
     async whoami() {
       return { id: actor.name, name: actor.name };
     },

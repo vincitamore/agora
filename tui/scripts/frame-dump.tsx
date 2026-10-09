@@ -100,7 +100,7 @@ export async function walkNativeFrames(): Promise<Frame[]> {
     const service = await startFakeService({ root, roomId: NATIVE_ROOM, epoch: NATIVE_EPOCH, coverageAhead: 1, seatLabel: "seat-a" });
     seedNative(service);
     const view = { stateRoot: root, rooms: [], native: [{ alias: "house", transport: "native" as const, room: NATIVE_ROOM, roomId: NATIVE_ROOM }], elsewhere: [] };
-    const client = new SeatRoomClient({ name: "operator", kind: "human" }, view, { native: { waitMs: 50 } });
+    const client = new SeatRoomClient({ name: "operator", kind: "human" }, view);
     const h = await mountApp({ client, initialAlias: "house" }, size);
     const take = (name: string) => out.push({ name: `${tag}-${name}`, width: size.width, height: size.height, text: h.frame(), secrets: [service.nonce] });
     try {
@@ -149,7 +149,7 @@ export async function walkNativeFrames(): Promise<Frame[]> {
     const refusing = await startFakeService({ root: root2, roomId: NATIVE_ROOM, epoch: NATIVE_EPOCH, refuse: ["subscribe"], seatLabel: "seat-a" });
     seedNative(refusing);
     const view2 = { stateRoot: root2, rooms: [], native: [{ alias: "house", transport: "native" as const, room: NATIVE_ROOM, roomId: NATIVE_ROOM }], elsewhere: [] };
-    const client2 = new SeatRoomClient({ name: "operator", kind: "human" }, view2, { native: { waitMs: 50 } });
+    const client2 = new SeatRoomClient({ name: "operator", kind: "human" }, view2);
     const h2 = await mountApp({ client: client2, initialAlias: "house" }, size);
     try {
       await h2.until((f) => f.includes("room refused ·"));

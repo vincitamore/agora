@@ -67,7 +67,7 @@ const untilTrue = async (pred: () => boolean, ms = 3000) => {
 describe("NativeRoomClient against the real seat service", () => {
   test("hello through the descriptor, the human's post lands kind human under the seat account with a receipt that answers the operation, and read to is the checkpoint", async () => {
     const { root, descriptor, post } = await realService();
-    const client = new NativeRoomClient(OPERATOR, NATIVE_VIEW(root), { waitMs: 50 });
+    const client = new NativeRoomClient(OPERATOR, NATIVE_VIEW(root));
     cleanups.push(() => client.close());
     expect(await client.rooms()).toEqual([{ alias: "house", transport: "native", room: ROOM, roomId: ROOM, note: undefined }]);
 
@@ -105,7 +105,7 @@ describe("NativeRoomClient against the real seat service", () => {
 
   test("subscribe delivers events after read to, and the service stopping is dark: on the subscription, on the next read, on the next post", async () => {
     const { root, service, post } = await realService();
-    const client = new NativeRoomClient(OPERATOR, NATIVE_VIEW(root), { waitMs: 50 });
+    const client = new NativeRoomClient(OPERATOR, NATIVE_VIEW(root));
     cleanups.push(() => client.close());
     await post("Cal/codex", "one");
     const first = await client.read("house");
@@ -139,7 +139,7 @@ describe("NativeRoomClient against the real seat service", () => {
 
   test("a refused cursor on a live socket is refused, not dark, and the socket stays usable", async () => {
     const { root, post } = await realService();
-    const client = new NativeRoomClient(OPERATOR, NATIVE_VIEW(root), { waitMs: 50 });
+    const client = new NativeRoomClient(OPERATOR, NATIVE_VIEW(root));
     cleanups.push(() => client.close());
     await post("Cal/codex", "one");
     const foreign = `${"8".repeat(32)}:0`;
@@ -158,7 +158,7 @@ describe("NativeRoomClient against the real seat service", () => {
 
   test("search and roster are seams: the service's own refusal, never a pretended answer; and the nonce is refused in a draft without being echoed", async () => {
     const { root, descriptor, post } = await realService();
-    const client = new NativeRoomClient(OPERATOR, NATIVE_VIEW(root), { waitMs: 50 });
+    const client = new NativeRoomClient(OPERATOR, NATIVE_VIEW(root));
     cleanups.push(() => client.close());
     await post("Cal/codex", "searchable");
     let e: unknown;
@@ -185,7 +185,7 @@ describe("NativeRoomClient against the fake for what the real one cannot do on c
     const { root, service } = await fake({ coverageAhead: 2 });
     service.seed({ name: "Cal/codex", kind: "agent" }, "one");
     service.seed({ name: "Cal/codex", kind: "agent" }, "two");
-    const client = new NativeRoomClient(OPERATOR, NATIVE_VIEW(root), { waitMs: 50 });
+    const client = new NativeRoomClient(OPERATOR, NATIVE_VIEW(root));
     cleanups.push(() => client.close());
     const r = await client.read("house");
     expect(r.messages.map((m) => m.cursor)).toEqual([`${EPOCH}:1`, `${EPOCH}:2`]);
@@ -198,7 +198,7 @@ describe("NativeRoomClient against the fake for what the real one cannot do on c
 
   test("acceptance unknown is retried under the same operation id, and an identical resend reuses it until one ack arrives", async () => {
     const { root, service } = await fake({ holdAppend: true });
-    const client = new NativeRoomClient(OPERATOR, NATIVE_VIEW(root), { waitMs: 50 });
+    const client = new NativeRoomClient(OPERATOR, NATIVE_VIEW(root));
     cleanups.push(() => client.close());
     const text = "did this land?\n\n-- operator";
     const pending = client.post("house", text);
@@ -237,7 +237,7 @@ describe("NativeRoomClient against the fake for what the real one cannot do on c
   test("a receipt that does not answer the operation is refused: the id must derive from the room, the seat account and this operation", async () => {
     const { root, service } = await fake();
     service.setForgeReceipt(true);
-    const client = new NativeRoomClient(OPERATOR, NATIVE_VIEW(root), { waitMs: 50 });
+    const client = new NativeRoomClient(OPERATOR, NATIVE_VIEW(root));
     cleanups.push(() => client.close());
     await client.read("house");
     let e: unknown;
@@ -278,7 +278,7 @@ describe("NativeRoomClient against the fake for what the real one cannot do on c
     expect(JSON.stringify(view)).not.toContain("tokenEnv");
     expect(JSON.stringify(view)).not.toContain("SeatBot");
 
-    const client = new SeatRoomClient(OPERATOR, view, { native: { waitMs: 50 } });
+    const client = new SeatRoomClient(OPERATOR, view);
     cleanups.push(() => client.close());
     expect(client.clientFor("house").kind).toBe("native");
     expect(client.clientFor("scratch").kind).toBe("local");

@@ -168,7 +168,7 @@ name, and nothing checks that the app behind the connection is the one named. Th
 identity is still the seat account the host stamps; the author name, `via` and `author.ref` are
 labels beside it. Nothing that enforces reads `via` or `author.ref`: not the board's `break`, not the
 human-authority seam, not route acts, not own-post detection (which is the poster's ledger). The CLI
-and the TUI declare no client name.
+and the TUI declare no client name. An app declares one through `agora/client` (docs/CLIENT.md).
 
 ## Identity, enrollment and roster
 

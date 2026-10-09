@@ -2,7 +2,9 @@
 // C0 for the kernels' consumers. The kernels are proved; what maps a room or a store onto them
 // (src/carry.mjs: the fold that asserts and retracts; src/native-store.mjs: the append and read
 // paths that call the kernels and apply their verdicts) is ordinary code, and a defect there
-// passes every proof. This script applies one small mutation at a time to those files, runs the
+// passes every proof. src/client.mjs (the app client: what an app's request, receipt and
+// subscription become) is the same kind of consumer, of the service rather than a kernel. This
+// script applies one small mutation at a time to those files, runs the
 // tests that import them, and reports every mutant NO test reddened: an untested seam, named by
 // file, line and the change that survived. It writes to a scratch copy of each file and restores
 // the original after every mutant, and it refuses to run on a dirty target.
@@ -38,6 +40,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const TARGETS = {
   "src/carry.mjs": { fast: ["test/carry.test.mjs", "test/carry-seams.test.mjs"], full: ["test/carry.test.mjs", "test/carry-seams.test.mjs", "test/export-record.test.mjs"] },
   "src/native-store.mjs": { fast: ["test/native-store.test.mjs", "test/native-board.test.mjs", "test/native-post-ledger.test.mjs", "test/native-store-threads.test.mjs", "test/native-store-inputs.test.mjs"], full: ["test/native-store.test.mjs", "test/native-board.test.mjs", "test/native-post-ledger.test.mjs", "test/native-store-threads.test.mjs", "test/native-store-seams.test.mjs", "test/native-store-inputs.test.mjs", "test/native-store-model.test.mjs", "test/native-store-bad-bytes.test.mjs"] },
+  "src/client.mjs": { fast: ["test/client.test.mjs", "test/client-seams.test.mjs"], full: ["test/client.test.mjs", "test/client-seams.test.mjs"] },
 };
 
 const VERDICTS = ["Held_by_another", "Not_the_holder", "Fence_mismatch", "Not_human", "Nothing_to_break", "Applied"];
