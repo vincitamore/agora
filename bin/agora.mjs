@@ -77,9 +77,10 @@ import { FOLLOW_CAP, FOLLOW_IDLE_MINUTES, aliasThreads, dropFollow, followableMe
 import { withThreads } from "../src/threads.mjs";
 import { carryState, carryWindow, foldRoom, renderCarry } from "../src/carry.mjs";
 import { buildRecord, writeRecord as writeExportRecord } from "../src/export-record.mjs";
-import { decorate, human } from "../src/render.mjs";
-import { formatTrailers, matchesAddress, parseTrailers, TRAILER_VALUE_MAX, trailerValueOk } from "../src/trailers.mjs";
+import { decorate, human, wireMessage } from "../src/render.mjs";
+import { formatTrailers, matchesAddress, parseTrailers, TRAILER_VALUE_MAX, trailerKeyOk, trailerValueOk, withTrailers } from "../src/trailers.mjs";
 import { SLACK_TEXT_MAX, chunkAtLines, encodeSlackText } from "../src/transports/slack.mjs";
+import { fittingReadLimit } from "../src/transports/native.mjs";
 import { codexBridgeRefusal, codexLiveness, codexSpawnWarning, codexThread, queueCodex, reconcileCodexIntents, recordCodexAccepted, recordCodexReceipt, recordCodexSubmitted, resolveCodexBinary } from "../src/codex.mjs";
 import { codexServerURL, deliverCodexServer } from "../src/codex-server.mjs";
 import { codexServerStatus, launchAttachedCodex } from "../src/codex-launch.mjs";
@@ -159,7 +160,7 @@ const SCHEMA = {
     whoami: { args: ["<room>"], options: {}, does: "the identity this side posts as, per the transport" },
     read: {
       args: ["<room>"],
-      options: { "--thread <id>": "a thread inside the room (native: its root message id; the root and its replies, and with --since the limit bounds the records scanned)", "--since <cursor>": "only what came after", "--limit <n>": "cap (default transport)", "--pages <n>": "pages of history to walk back through when --since is given (Slack, default 10 of 200 messages). A walk that does not reach the cursor returns nothing and names the gap rather than a partial window from the middle of the backlog", "--threads": "fold the room's live threads in: replies after --since, interleaved by time (Slack never shows them in a room read; a native room read already carries every reply, so it reads nothing more there)", "--files": "materialize Slack-hosted images into this session's media directory; metadata is always carried" },
+      options: { "--thread <id>": "a thread inside the room (native: its root message id; the root and its replies, and with --since the limit bounds the records scanned)", "--since <cursor>": "only what came after", "--limit <n>": "cap (default transport)", "--pages <n>": "pages of history to walk back through when --since is given (Slack, default 10 of 200 messages). A walk that does not reach the cursor returns nothing and names the gap rather than a partial window from the middle of the backlog", "--threads": "fold the room's live threads in: replies after --since, interleaved by time (Slack never shows them in a room read; a native or local room read already carries every reply, so it reads nothing more there)", "--files": "materialize Slack-hosted images into this session's media directory; metadata is always carried" },
       does: "print messages ascending; never touches the saved cursor. On a native frame refusal, retry this invocation once at the host's fitting limit and report the shrink",
     },
     post: {
@@ -227,7 +228,7 @@ const SCHEMA = {
       args: ["<room>"],
       options: {
         "--thread <id>": "watch one thread (native: subscribe to its root and replies; the cursor stays a room position)",
-        "--follow": "also read the threads this session has posted in, at the slower thread interval (a native room's stream already carries every reply, so it reads nothing more there)",
+        "--follow": "also read the threads this session has posted in, at the slower thread interval (a native room's stream and a local room's read already carry every reply, so it reads nothing more there)",
         "--once": "one poll, then exit",
         "--stream": "keep delivering until --for elapses",
         "--pages <n>": "pages of history one poll walks back through (Slack, default 10 of 200 messages); a poll whose walk does not reach the cursor delivers nothing, advances nothing, and carries a gap on the result line",
@@ -590,11 +591,9 @@ function recordLine(rec, state) {
 async function readWithinFrame(transport, options, onShrink) {
   try { return await transport.read(options); }
   catch (error) {
-    const named = /read-batch-refused:\s*(\d+) messages[\s\S]*re-read with limit (\d+)/.exec(String(/** @type {any} */ (error)?.message ?? ""));
+    const named = fittingReadLimit(error);
     if (!named) throw error;
-    const selected = Number(named[1]);
-    const fits = Number(named[2]);
-    if (!Number.isInteger(fits) || fits < 1) throw error;
+    const { selected, fits } = named;
     const asked = typeof options.limit === "number" ? options.limit : undefined;
     const took = asked === undefined ? fits : Math.min(fits, asked);
     const msgs = await transport.read({ ...options, limit: took });
@@ -616,7 +615,7 @@ async function readWithinFrame(transport, options, onShrink) {
 
 function printMessages(msgs, json, alias) {
   for (const m of msgs) {
-    const { raw: _raw, ...rest } = decorate(m);
+    const rest = wireMessage(m);
     console.log(json ? JSON.stringify({ type: "message", alias, ...rest }) : human(rest) + "\n");
   }
 }
@@ -748,7 +747,7 @@ function trailerEntries(values) {
     const at = raw.indexOf(":");
     const key = at < 0 ? "" : raw.slice(0, at).trim().toLowerCase();
     const value = at < 0 ? "" : raw.slice(at + 1).trim();
-    if (!/^[a-z][a-z0-9-]{0,23}$/.test(key) || !trailerValueOk(value))
+    if (!trailerKeyOk(key) || !trailerValueOk(value))
       throw new AgoraError(`--trailer takes "<key>: <value>" (a lower-case key of up to 24 characters, a value of up to ${TRAILER_VALUE_MAX} UTF-16 code units, so an emoji spends two)`, EXIT.usage);
     out.push({ key, value });
   }
@@ -2186,7 +2185,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       const payload = (piece) => (signIt ? sign(piece, cfg.actor) : piece);
       /** @param {string} piece */
       const slackLen = (piece) => (transport.kind === "slack" ? encodeSlackText(payload(piece)).length : payload(piece).length);
-      const assembled = trailerBlock ? `${unsigned}\n\n${trailerBlock}` : unsigned;
+      const assembled = withTrailers(unsigned, entries);
       const codexWarning = codexSpawnWarning(process.env);
       if (codexWarning) console.error(`agora: WARNING ${codexWarning}`);
       await identity();
@@ -2236,8 +2235,8 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       const r = last;
       if (!r) throw new AgoraError(`nothing posted`, EXIT.error);
       if (boardIntent) await completeCarryPost(sdir, boardIntent, r);
-      // A native room's stream carries every reply, so a watch there has no thread to follow and
-      // the post joins none; everything below is for a transport whose room read omits replies.
+      // A native room's stream and a local room's read carry every reply, so a watch there has no
+      // thread to follow and the post joins none; everything below is for a room read that omits replies.
       if (transport.repliesInRoom) { /* nothing to follow */ }
       else if (thread) await follow(sdir, roomAlias, room, [thread]);
       else if (values.re && transport.threads) await follow(sdir, roomAlias, room, [String(values.re)]);
@@ -2472,7 +2471,6 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
             ? await openNativeSubscription({ stateRoot, roomId: transport.room, since: seeded.cursor, ...(thread ? { thread } : {}) })
             : await openRemoteSubscription({ room: /** @type {any} */ (transport).remote, since: seeded.cursor, ...(thread ? { thread } : {}) });
           console.error(`agora: subscribed to ${roomAlias}${thread ? ` thread ${thread}` : ""} through ${room.transport === "native" ? "the seat service" : "a member channel"} (${subscription.seat.seatLabel}); events wake this watch, nothing polls`);
-          if (values.follow) console.error(`agora: a ${room.transport} room's stream already carries every thread reply, so --follow reads nothing more here and no reply is delivered twice`);
           if (subscription.neverOffered) {
             const h = subscription.neverOffered;
             console.error(`agora: no position was saved for ${key}, so this watch starts at the newest window: committed positions ${h.from} to ${h.to} (${h.count}) were never offered to this session by it; run \`agora cursor ${roomAlias} --set ${h.from.split(":")[0]}:0\` to be offered them from the start`);
@@ -2484,6 +2482,10 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         }
       }
       if (!result) {
+      // A room read (or a native stream) that carries every reply leaves no thread to follow, and a
+      // followed thread read beside it would hand each reply over a second time under its own cursor.
+      if (values.follow && transport.repliesInRoom)
+        console.error(`agora: a ${room.transport} room's ${subscription ? "stream" : "read"} already carries every thread reply, so --follow reads nothing more here and no reply is delivered twice`);
       // Under Claude Code a persistent watch would otherwise turn every delivery into a
       // maintenance-checklist turn; the stop hook honours a sentinel beside the transcript
       // while the watch runs. Touched on every poll (the hook treats it stale after 12 h),
@@ -2643,19 +2645,13 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
                 type: "batch",
                 alias: roomAlias,
                 room: transport.room,
-                messages: msgs.map((m) => {
-                  const { raw: _raw, ...restOfIt } = decorate(m);
-                  return restOfIt;
-                }),
+                messages: msgs.map(wireMessage),
                 delivered: batch.delivered,
                 skipped: batch.skipped,
                 filtered: batch.filtered,
               }));
             else if (json) {
-              for (const m of msgs) {
-                const { raw: _raw, ...rest } = decorate(m);
-                countedLog(JSON.stringify({ type: "message", alias: roomAlias, ...rest }));
-              }
+              for (const m of msgs) countedLog(JSON.stringify({ type: "message", alias: roomAlias, ...wireMessage(m) }));
             } else {
               for (const m of msgs) countedLog(human(decorate(m)) + "\n");
             }

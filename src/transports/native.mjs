@@ -14,6 +14,23 @@ export function validateNativeThread(id) {
 }
 
 /**
+ * What a `read-batch-refused` names when the host could fit part of the page in one frame: how
+ * many messages it selected and the largest limit that fits. Nothing for any other error, or for
+ * the refusal that names no limit (one message that cannot cross alone). The host says it only in
+ * its words, so this is the one place they are read.
+ * @param {unknown} error
+ * @returns {{ selected: number, fits: number } | undefined}
+ */
+export function fittingReadLimit(error) {
+  const named = /read-batch-refused:\s*(\d+) messages[\s\S]*re-read with limit (\d+)/.exec(String(/** @type {any} */ (error)?.message ?? ""));
+  if (!named) return undefined;
+  const selected = Number(named[1]);
+  const fits = Number(named[2]);
+  if (!Number.isInteger(fits) || fits < 1) return undefined;
+  return { selected, fits };
+}
+
+/**
  * A native read result as every transport reports one. For a thread read the host's checkpoint is
  * where its scan ended, which can lie past the last reply; it rides on the array as
  * `scannedThrough` (a room cursor), the way a gap does, so a caller that needs it reads it and every

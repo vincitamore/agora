@@ -42,6 +42,24 @@ export function trailerValueOk(value) {
     && !/[\r\n]/.test(value);
 }
 
+/**
+ * A key the emitter writes: lower case, the parser's grammar. Emitters share this.
+ * @param {unknown} key @returns {key is string}
+ */
+export function trailerKeyOk(key) {
+  return typeof key === "string" && /^[a-z][a-z0-9-]{0,23}$/.test(key);
+}
+
+/**
+ * A body with its trailer block: the body's trailing whitespace dropped, a blank line, the block.
+ * With no entries the body is returned as given. The CLI's `post` and `agora/client` assemble here.
+ * @param {string} body @param {Trailer[]} entries
+ */
+export function withTrailers(body, entries) {
+  if (!entries.length) return body;
+  return `${body.replace(/\s+$/, "")}\n\n${formatTrailers(entries)}`;
+}
+
 /** A platform mention resolves to the bot user, so it addresses the seat and cannot name a bearer. */
 const MENTION_RE = /^<@([A-Z0-9]+)(?:\|[^>]*)?>$/;
 

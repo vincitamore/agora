@@ -503,7 +503,7 @@ export class NativeRoomService {
 
   /** @param {{ roomId?: string, epoch?: string }} [options] */
   async createRoom(options = {}) {
-    if (!this.running) throw new AgoraError("native service is dark; start it explicitly before creating a room");
+    if (!this.running) throw codedRefusal("service-dark", "native service is dark; start it explicitly before creating a room");
     if (options.roomId && (this.rooms.has(options.roomId) || this.roomOpenings.has(options.roomId)))
       throw new AgoraError(`native room ${options.roomId} is already open on this service`);
     const activity = (async () => {
@@ -521,7 +521,7 @@ export class NativeRoomService {
 
   /** @param {string} roomId */
   async openRoom(roomId) {
-    if (!this.running) throw new AgoraError("native service is dark; start it explicitly before opening a room");
+    if (!this.running) throw codedRefusal("service-dark", "native service is dark; start it explicitly before opening a room");
     const existing = this.rooms.get(roomId);
     if (existing) return existing;
     let opening = this.roomOpenings.get(roomId);
@@ -967,7 +967,7 @@ export class NativeRoomService {
   /** @param {Parameters<NativeRoomService['openRoute']>[0]} request @param {any} binding @param {string} operationId */
   async #openApprovedRoute(request, binding, operationId) {
     const journal = /** @type {AuthorityJournal} */ (this.authorityJournal);
-    if (!this.running) throw new AgoraError("native service is dark; start it explicitly before opening a route");
+    if (!this.running) throw codedRefusal("service-dark", "native service is dark; start it explicitly before opening a route");
     const publicNodeKey = validatePublicNodeKey(request.publicNodeKey);
     const allowedKeyDigest = publicNodeKeyDigest(publicNodeKey);
     const roomId = requiredString(request.roomId, "room id");
@@ -1329,9 +1329,15 @@ export class NativeServiceClient {
     }
   }
 
-  /** @param {string} type @param {Record<string, unknown>} [fields] */
+  /**
+   * A refusal carries the service's `code`; a request that never left this side carries
+   * `sent: false`; one that was written and got no answer (the socket closed, or the timeout ran)
+   * carries neither, which for an append is acceptance unknown.
+   * @param {string} type @param {Record<string, unknown>} [fields]
+   */
   request(type, fields = {}) {
-    if (this.socket.destroyed) return Promise.reject(new AgoraError("native service is dark; request was not sent"));
+    const notSent = () => Object.assign(new AgoraError("native service is dark; request was not sent"), { sent: false });
+    if (this.socket.destroyed) return Promise.reject(notSent());
     const requestId = randomUUID().replaceAll("-", "");
     const frame = { ...fields, protocol: NATIVE_PROTOCOL, type, requestId };
     return new Promise((resolve, reject) => {
@@ -1343,7 +1349,7 @@ export class NativeServiceClient {
       this.pending.set(requestId, { type, resolve, reject, timer });
       if (!sendFrame(this.socket, frame)) {
         clearTimeout(timer); this.pending.delete(requestId);
-        reject(new AgoraError("native service is dark; request was not sent"));
+        reject(notSent());
       }
     });
   }

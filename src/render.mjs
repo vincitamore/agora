@@ -26,6 +26,17 @@ export function decorate(m) {
   };
 }
 
+/**
+ * A message as `read --json` prints it, without the line's `type` and `alias`: decorated, and
+ * without the transport's raw payload. The CLI's JSON lines and `agora/client` both build their
+ * message objects here, so the two cannot drift apart on a field.
+ * @param {import('./core.mjs').Message} m
+ */
+export function wireMessage(m) {
+  const { raw: _raw, ...rest } = decorate(m);
+  return rest;
+}
+
 /** The one derived line above a body: what the trailers say, in the emitter's order. @param {ReturnType<typeof decorate>} m */
 export function trailerLine(m) {
   if (!m.trailers?.length) return "";

@@ -783,6 +783,7 @@ than re-deriving the argument.
 | Per-message name and avatar overrides | The humans say the signature line is too easy to miss, and only in the form that keeps the seat in the rendered name. |
 | A `type` discriminator on message objects in `--json` | A consumer needs to tell a message from the final summary line without inspecting fields. |
 | A name lease | Own-post detection ever again depends on the signature. |
+| `agora/client` on a `native-remote` room, refused `room-transport-unsupported` | An app needs a room hosted on another seat, and the member route can carry what an app's post needs: a non-agent author and a client name stamped as `via`. Until then a member channel would post the app's people as agents with no `via`, so the client refuses by name. |
 | A native-to-Slack thread map (a native thread whose root was never faced, or arrived from Slack, landing in a Slack thread) | The face runner is wired to the seat service, or a person on a Slack face asks for native replies they cannot see because their root was not faced there. Until then such a reply is refused `thread:`, never flattened. |
 
 ## Standing prohibitions

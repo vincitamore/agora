@@ -1,35 +1,27 @@
 /**
- * NativeRoomClient: the human's client of the seat service, over the service's own socket, for
- * the rooms the config names `transport: native`. It is a client and nothing more: it holds no
- * token (the config's token fields are never read), never signs as an agent, never touches a
- * session record or a cursor file, and never writes the shared config.
+ * NativeRoomClient: the human's client of the seat service, for the rooms the config names
+ * `transport: native`. It is the first consumer of `agora/client` (src/client.mjs) and adds only
+ * what this surface needs on top: the human actor, the horizon each read renders, one resend of an
+ * append whose acceptance is unknown, and the RoomClient seam's fault types. It holds no token (the
+ * config's token fields are never read), never signs as an agent, never touches a session record or
+ * a cursor file, and never writes the shared config.
  *
- * Hello is the subscriber's: the descriptor at `<state>/native/service.json` names the endpoint
- * and the seat-private nonce, the service proves possession first over a fresh transcript, and
- * the client answers with its own proof (`connectSeatService`). The nonce stays inside this
- * object; the one thing it is used for besides the proof is refusing a draft that carries it.
+ * Through the client: the hello (the service proves itself first, from the descriptor), reads with
+ * their coverage ("read to" is the position the read accounts for, never a count), the pushed
+ * subscription with dark told apart from refused by the channel, and appends as `authorKind: human`
+ * under an operation id this surface retains while acceptance is unknown, with the receipt checked
+ * against the operation it answers.
  *
- * Read honours the service's read coverage: what the surface shows as "read to" is the
- * coverage's `toInclusive` when the result carries a coverage block, and the checkpoint's
- * position otherwise (PROTOCOL.md: the checkpoint equals `toInclusive`); it is a cursor, never a
- * count. Subscribe rides `openNativeSubscription`, so dark and refused are told apart the way the
- * subscriber tells them apart: `ServiceDarkError` is the channel, anything else is an answer.
- *
- * Append goes to the service as the human actor, `authorKind: "human"`, under an operation id
- * this client mints and retains while acceptance is unknown, so an identical resend reuses it and
- * the host deduplicates. The receipt is checked against the operation it answers
- * (`assertReceiptContext`: the id derivation and the epoch), so a service cannot hand back a
- * receipt for something else.
- *
- * Requests the service does not serve yet are named seams (`SEAT_SERVICE_SEAMS`): the client
- * sends the request and turns the service's refusal into `SeamUnservedError`; nothing pretends.
+ * Beside the client, for what it deliberately does not cover: the seat's session records (PEERS),
+ * the descriptor's nonce (the compose guard refuses a draft that carries it; the client never hands
+ * the secret out), and the requests the service does not serve yet (`SEAT_SERVICE_SEAMS`), sent on
+ * a connection of their own so the refusal is the service's and nothing pretends.
  */
 
 import { randomUUID } from "node:crypto";
-import { connectSeatService, nativeMessage, openNativeSubscription, ServiceDarkError } from "../../src/wake/subscriber.mjs";
-import { parseNativeCursor } from "../../src/native-protocol.mjs";
-import { validateNativeCheckpoint, validateNativeReadCoverage } from "../../src/protocol/read.mjs";
-import { assertReceiptContext, validateNativeCommitReceipt } from "../../src/protocol/receipt.mjs";
+import { ClientError, connect, type Client } from "../../src/client.mjs";
+import { connectSeatService, nativeMessage, readServiceDescriptor } from "../../src/wake/subscriber.mjs";
+import { validateNativeReadCoverage } from "../../src/protocol/read.mjs";
 import { listRecords } from "../../src/session.mjs";
 import type { NativeServiceClient } from "../../src/native-service.mjs";
 import { nonceRefusal } from "./compose-guard";
@@ -51,32 +43,14 @@ import {
   type Subscription,
 } from "./room-client";
 
-type Connect = typeof NativeServiceClient.connect;
-
 export interface NativeClientOptions {
-  /** Injected for tests; the subscriber's default is the real socket connect. */
-  connect?: Connect;
   now?: () => Date;
-  /** How long a subscription pump waits between drains when nothing arrives. */
-  waitMs?: number;
-  /** How long a live socket is kept before an idle client is closed; 0 keeps it. */
-  timeoutMs?: number;
 }
 
-interface Endpoint {
-  accountId: string;
-  seatLabel: string;
-  path: string;
-}
-
-/**
- * Dark or refused, decided by the channel. `ServiceDarkError` is the subscriber's own verdict;
- * a rejected request whose socket is gone is dark too; everything else arrived on a live socket.
- */
-export function classifyFault(e: unknown, socketGone: () => boolean): RoomFault {
-  const reason = e instanceof Error ? e.message : String(e);
-  if (e instanceof ServiceDarkError || socketGone()) return { kind: "dark", reason };
-  return { kind: "refused", reason };
+/** The client's outcome as this surface's fault: refused is an answer, everything else is dark. */
+function roomFault(e: unknown): RoomFaultError {
+  if (e instanceof ClientError) return new RoomFaultError(e.outcome === "refused" ? "refused" : "dark", e.message);
+  return new RoomFaultError("dark", e instanceof Error ? e.message : String(e));
 }
 
 const mintOperationId = () => randomUUID().replaceAll("-", "");
@@ -86,14 +60,11 @@ export class NativeRoomClient implements RoomClient {
   private human: HumanActor;
   private readonly stateRoot: string;
   private readonly rooms_: NativeRoom[];
-  private readonly connect?: Connect;
   private readonly now: () => Date;
-  private readonly waitMs: number;
-  private connecting: Promise<{ client: NativeServiceClient; endpoint: Endpoint }> | undefined;
-  /** The seat-private nonce, once a hello has run. Never returned, never rendered. */
+  private connecting: Promise<Client> | undefined;
+  private seamConnecting: Promise<NativeServiceClient> | undefined;
+  /** The seat-private nonce, once the descriptor has been read. Never returned, never rendered. */
   private nonce: string | undefined;
-  /** The live epoch per alias, learned from reads; the receipt check needs it. */
-  private readonly epochs = new Map<string, string>();
   /** Operation ids retained while acceptance is unknown, keyed by alias and the exact text. */
   private readonly retained = new Map<string, string>();
   private readonly subscriptions = new Set<{ close(): void }>();
@@ -102,9 +73,7 @@ export class NativeRoomClient implements RoomClient {
     this.human = { name: human.name, kind: "human" };
     this.stateRoot = view.stateRoot;
     this.rooms_ = view.native;
-    this.connect = opts.connect;
     this.now = opts.now ?? (() => new Date());
-    this.waitMs = opts.waitMs ?? 1000;
   }
 
   actor(): HumanActor {
@@ -125,24 +94,28 @@ export class NativeRoomClient implements RoomClient {
     return room.roomId;
   }
 
-  /** One request socket, made on first use and remade after it closes. The hello is inside. */
-  private conn(): Promise<{ client: NativeServiceClient; endpoint: Endpoint }> {
+  /** The client, made on first use and made again after a failed connect; it redials by itself. */
+  private client(): Promise<Client> {
     if (!this.connecting) {
-      this.connecting = connectSeatService(this.stateRoot, { connect: this.connect }).then(
-        ({ client, descriptor }) => {
-          this.nonce = descriptor.nonce;
-          client.socket.once("close", () => {
-            this.connecting = undefined;
-          });
-          return { client, endpoint: { accountId: descriptor.accountId, seatLabel: descriptor.seatLabel, path: descriptor.path } };
-        },
-        (e) => {
-          this.connecting = undefined;
-          throw e;
-        },
-      );
+      const attempt = connect({ state: this.stateRoot }).then(async (c) => {
+        await this.learnNonce();
+        return c;
+      });
+      attempt.catch(() => {
+        if (this.connecting === attempt) this.connecting = undefined;
+      });
+      this.connecting = attempt;
     }
     return this.connecting;
+  }
+
+  /** The descriptor's nonce, for the compose guard only. */
+  private async learnNonce(): Promise<void> {
+    try {
+      this.nonce = (await readServiceDescriptor(this.stateRoot)).nonce;
+    } catch {
+      /* a guard with nothing to compare against refuses nothing; the client refuses it on append */
+    }
   }
 
   draftRefusal(text: string): string | undefined {
@@ -151,43 +124,19 @@ export class NativeRoomClient implements RoomClient {
 
   async read(alias: string, opts: { since?: string; limit?: number } = {}): Promise<ReadResult> {
     const roomId = this.roomId(alias);
-    let c: NativeServiceClient;
-    let endpoint: Endpoint;
+    let c: Client;
     try {
-      ({ client: c, endpoint } = await this.conn());
+      c = await this.client();
     } catch (e) {
-      throw new RoomFaultError("dark", e instanceof Error ? e.message : String(e));
+      throw roomFault(e);
     }
-    let result: Record<string, unknown>;
+    let r: Awaited<ReturnType<Client["read"]>>;
     try {
-      result = (await c.request("read", { roomId, ...(opts.since ? { since: opts.since } : {}), ...(opts.limit ? { limit: opts.limit } : {}) })) as Record<string, unknown>;
+      r = await c.read({ roomId }, { ...(opts.since ? { since: opts.since } : {}), ...(opts.limit ? { limit: opts.limit } : {}) });
     } catch (e) {
-      const f = classifyFault(e, () => c.socket.destroyed);
-      throw new RoomFaultError(f.kind, f.reason);
+      throw roomFault(e);
     }
-    const messages = (Array.isArray(result.messages) ? result.messages : []).map((m) => nativeMessage(m) as unknown as Message);
-    let checkpoint: ReturnType<typeof validateNativeCheckpoint>;
-    try {
-      checkpoint = validateNativeCheckpoint(result.checkpoint);
-    } catch (e) {
-      throw new RoomFaultError("refused", `read result carried no valid checkpoint (${e instanceof Error ? e.message : String(e)})`);
-    }
-    if (checkpoint.roomId !== roomId) throw new RoomFaultError("refused", "read result answered for another room");
-    let readTo = `${checkpoint.epoch}:${checkpoint.sequence}`;
-    let committedThrough: string | undefined;
-    if (result.coverage !== undefined) {
-      let coverage: ReturnType<typeof validateNativeReadCoverage>;
-      try {
-        coverage = validateNativeReadCoverage(result.coverage);
-      } catch (e) {
-        throw new RoomFaultError("refused", `read result carried an invalid coverage block (${e instanceof Error ? e.message : String(e)})`);
-      }
-      if (coverage.room.roomId !== roomId || coverage.room.epoch !== checkpoint.epoch) throw new RoomFaultError("refused", "read coverage names another room or epoch");
-      if (parseNativeCursor(coverage.toInclusive).sequence !== checkpoint.sequence) throw new RoomFaultError("refused", "read coverage and checkpoint disagree on the position read to");
-      readTo = coverage.toInclusive;
-      committedThrough = coverage.committedThrough;
-    }
-    this.epochs.set(alias, checkpoint.epoch);
+    const messages = r.messages as unknown as Message[];
     return {
       messages,
       horizon: {
@@ -195,87 +144,73 @@ export class NativeRoomClient implements RoomClient {
         oldestTs: messages[0]?.ts,
         oldestCursor: messages[0]?.cursor,
         readAt: this.now().toISOString(),
-        source: `seat service ${endpoint.seatLabel}`,
-        readTo,
-        ...(committedThrough ? { committedThrough } : {}),
+        source: `seat service ${c.seat.label}`,
+        readTo: r.through,
+        ...(r.committedThrough ? { committedThrough: r.committedThrough } : {}),
       },
     };
   }
 
   async subscribe(alias: string, since: string, handlers: SubscribeHandlers): Promise<Subscription> {
     const roomId = this.roomId(alias);
-    let sub: Awaited<ReturnType<typeof openNativeSubscription>>;
+    let c: Client;
     try {
-      sub = await openNativeSubscription({ stateRoot: this.stateRoot, roomId, since, connect: this.connect });
+      c = await this.client();
     } catch (e) {
-      const f = classifyFault(e, () => false);
-      throw new RoomFaultError(f.kind, f.reason);
+      throw roomFault(e);
     }
     let open = true;
+    let sub: Awaited<ReturnType<Client["subscribe"]>> | undefined;
     const handle = {
       close: () => {
         if (!open) return;
         open = false;
         this.subscriptions.delete(handle);
-        sub.close();
+        sub?.close();
       },
     };
+    const ended = (kind: RoomFault["kind"]) => (e: ClientError) => {
+      if (!open) return;
+      open = false;
+      this.subscriptions.delete(handle);
+      handlers.onFault({ kind, reason: e.message });
+    };
     this.subscriptions.add(handle);
-    void (async () => {
-      while (open) {
-        await sub.wait(this.waitMs);
-        if (!open) return;
-        let got: Message[];
-        try {
-          got = (await sub.read()) as unknown as Message[];
-        } catch (e) {
-          if (!open) return;
-          const f = classifyFault(e, () => true);
-          handle.close();
-          handlers.onFault(f);
-          return;
-        }
-        if (got.length) handlers.onMessages(got);
-      }
-    })();
+    try {
+      sub = await c.subscribe({ roomId }, { since }, {
+        message: (m) => {
+          if (open) handlers.onMessages([m as unknown as Message]);
+        },
+        dark: ended("dark"),
+        refused: ended("refused"),
+      });
+    } catch (e) {
+      this.subscriptions.delete(handle);
+      throw roomFault(e);
+    }
+    if (!open) sub.close();
     return handle;
   }
 
   async post(alias: string, text: string, opts: { thread?: string } = {}): Promise<PostResult> {
     const roomId = this.roomId(alias);
-    const key = `${alias} ${text}`;
+    const key = `${alias}\u0000${text}`;
     const operationId = this.retained.get(key) ?? mintOperationId();
     this.retained.set(key, operationId);
-    const operation = { operationId, authorName: this.human.name, authorKind: "human" as const, text, ...(opts.thread ? { thread: opts.thread } : {}) };
     const attempt = async (): Promise<PostResult> => {
-      let c: NativeServiceClient;
-      let endpoint: Endpoint;
+      let c: Client;
       try {
-        ({ client: c, endpoint } = await this.conn());
+        c = await this.client();
       } catch (e) {
         throw new PostFaultError("dark", `room-dark: ${e instanceof Error ? e.message : String(e)}; nothing was posted and no cursor was issued`, operationId);
       }
-      if (c.socket.destroyed || !c.socket.writable) throw new PostFaultError("dark", "room-dark: the seat service socket is closed; nothing was posted and no cursor was issued", operationId);
-      let ack: Record<string, unknown>;
       try {
-        ack = (await c.request("append", { roomId, operation })) as Record<string, unknown>;
+        const r = await c.append({ roomId }, { text, author: { kind: "human", name: this.human.name }, operationId, ...(opts.thread ? { thread: opts.thread } : {}) });
+        return { id: r.id, cursor: r.cursor, duplicate: r.duplicate, operationId: r.operationId };
       } catch (e) {
-        const reason = e instanceof Error ? e.message : String(e);
-        // the request was written: a socket that died afterwards, or a silence, leaves acceptance
-        // unknown, and the same operation id is what makes the retry safe
-        if (c.socket.destroyed || !c.socket.writable) throw new PostFaultError("unknown-acceptance", reason, operationId);
-        if (e instanceof ServiceDarkError) throw new PostFaultError("unknown-acceptance", reason, operationId);
-        throw new PostFaultError("refused", reason, operationId);
+        if (e instanceof ClientError) throw new PostFaultError(e.outcome, e.message, operationId);
+        throw e;
       }
-      const receipt = { roomId, accountId: endpoint.accountId, operationId, id: ack.id, cursor: ack.cursor };
-      try {
-        const epoch = this.epochs.get(alias);
-        if (epoch) assertReceiptContext(receipt, { roomId, accountId: endpoint.accountId, operationId, epoch });
-        else validateNativeCommitReceipt(receipt);
-      } catch (e) {
-        throw new PostFaultError("refused", `the receipt does not answer this operation (${e instanceof Error ? e.message : String(e)})`, operationId);
-      }
-      return { id: String(ack.id), cursor: String(ack.cursor), duplicate: ack.duplicate === true, operationId };
     };
     try {
       const r = await attempt();
@@ -314,20 +249,38 @@ export class NativeRoomClient implements RoomClient {
     }));
   }
 
+  /** The seam connection: a request socket of its own, for requests the client does not carry. */
+  private seamClient(): Promise<NativeServiceClient> {
+    if (!this.seamConnecting) {
+      const attempt = connectSeatService(this.stateRoot).then(({ client, descriptor }) => {
+        this.nonce = descriptor.nonce;
+        client.socket.once("close", () => {
+          if (this.seamConnecting === attempt) this.seamConnecting = undefined;
+        });
+        return client;
+      });
+      attempt.catch(() => {
+        if (this.seamConnecting === attempt) this.seamConnecting = undefined;
+      });
+      this.seamConnecting = attempt;
+    }
+    return this.seamConnecting;
+  }
+
   /** A request the service does not serve yet, sent anyway so the refusal is the service's. */
   private async seam<T>(request: "search" | "roster", fields: Record<string, unknown>): Promise<T> {
     let c: NativeServiceClient;
     try {
-      ({ client: c } = await this.conn());
+      c = await this.seamClient();
     } catch (e) {
       throw new RoomFaultError("dark", e instanceof Error ? e.message : String(e));
     }
     try {
       return (await c.request(request, fields)) as T;
     } catch (e) {
-      const f = classifyFault(e, () => c.socket.destroyed);
-      if (f.kind === "dark") throw new RoomFaultError("dark", f.reason);
-      throw new SeamUnservedError(request, f.reason);
+      const reason = e instanceof Error ? e.message : String(e);
+      if (c.socket.destroyed) throw new RoomFaultError("dark", reason);
+      throw new SeamUnservedError(request, reason);
     }
   }
 
@@ -342,10 +295,10 @@ export class NativeRoomClient implements RoomClient {
     const rows = (Array.isArray(result.rows) ? result.rows : []).map((m) => nativeMessage(m) as unknown as Message);
     const coverage = validateNativeReadCoverage(result.coverage);
     if (coverage.room.roomId !== roomId) throw new RoomFaultError("refused", "search coverage names another room");
-    const { endpoint } = await this.conn();
+    const c = await this.client();
     return {
       rows,
-      horizon: { alias, oldestTs: rows[0]?.ts, oldestCursor: coverage.fromExclusive, readAt: this.now().toISOString(), source: `seat service ${endpoint.seatLabel} index`, readTo: coverage.toInclusive, committedThrough: coverage.committedThrough },
+      horizon: { alias, oldestTs: rows[0]?.ts, oldestCursor: coverage.fromExclusive, readAt: this.now().toISOString(), source: `seat service ${c.seat.label} index`, readTo: coverage.toInclusive, committedThrough: coverage.committedThrough },
     };
   }
 
@@ -360,6 +313,9 @@ export class NativeRoomClient implements RoomClient {
     for (const s of [...this.subscriptions]) s.close();
     const pending = this.connecting;
     this.connecting = undefined;
-    if (pending) void pending.then(({ client }) => client.close(), () => undefined);
+    if (pending) void pending.then((c) => c.close(), () => undefined);
+    const seam = this.seamConnecting;
+    this.seamConnecting = undefined;
+    if (seam) void seam.then((c) => c.close(), () => undefined);
   }
 }

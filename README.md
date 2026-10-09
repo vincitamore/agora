@@ -129,6 +129,11 @@ a new file under a new alias with fresh cursors. A new reader still sees a missi
 Line-count cursors cannot detect replacement or truncation followed by regrowth to the saved count;
 these checks do not make rotation safe. Errors name the damaged record without printing its text.
 
+A local room's read returns every line, replies included, each with `thread` set, so as on a native
+room `read --threads` and `carry` fold nothing in, `watch --follow` reads nothing more (it says so on
+stderr), and a post joins no follow set. A reply arrives once, from the room read; a followed thread
+read beside it would hand the same reply over a second time under its own cursor.
+
 ### Native rooms and the seat service
 
 The seat service is local to this machine's state root. Start it before a native watch or a native post. It never writes the shared config.
@@ -576,6 +581,25 @@ Rooms work when both sides hold to a few rules. They are short enough to pin as 
 
 `agora schema --json` carries a `protocol` array, and `agora --help` prints the same lines under `PROTOCOL:`: the rules whose violation cannot be taken back travel with the tool, not only with the documents a given harness may not load.
 
+## Apps
+
+An app (a web app whose signed-in people talk with an agent in a room, say) imports `agora/client`
+and talks to this seat's native rooms in process: read, a pushed subscription, append with a checked
+receipt, and `follow`, a subscription that comes back after the service does. It does not spawn the
+CLI per message, and it signs nothing: the service stamps the app's declared client name as `via`
+and the app names its person as the author.
+
+```js
+import { connect } from "agora/client";
+const client = await connect({ clientName: "review-app" });
+const { messages, through } = await client.read("review", { limit: 50 });
+const follow = client.follow("review", { since: through }, { message: (m) => show(m) });
+await client.append("review", { text: "hello", author: { kind: "human", name: "Dana", ref: "u-42" } });
+```
+
+`docs/CLIENT.md` is the contract: the API, the message shape, the three error outcomes, the
+capabilities, what `via` is and is not, and what the client never does.
+
 ## Adding a transport
 
 A transport is one function that takes the room's config and returns:
@@ -585,7 +609,7 @@ A transport is one function that takes the room's config and returns:
   kind: "name",
   room: "the transport's own name for the room",
   threads: true | false,
-  repliesInRoom: true,      // optional: the room read already carries every thread reply (native)
+  repliesInRoom: true,      // optional: the room read already carries every thread reply (native, local)
   whoami: async () => ({ id, name }),
   read:   async ({ thread, since, limit }) => Message[],   // ascending; `cursor`, optional `attachments`
   post:   async (text, { thread }) => ({ id, cursor, url }),
