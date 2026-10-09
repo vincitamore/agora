@@ -1078,6 +1078,11 @@ an injected `fetch` so it is testable offline.
   "help" by adding the room to the shared config from the same call; that file is the
   humans' and the verb is forbidden to touch it. `openRoom` refuses a missing manifest:
   mint first, then a separate config edit names the `roomId`.
+- A fresh seat cannot start its service from an empty config. The config must name at least one
+  room (`rooms must name at least one room`), and the `state` directory must already exist
+  (`ENOENT ... realpath`). Mint the first native room with a `local` desk room as the config's
+  one room, after `mkdir -m 700 -p <state>`. Then `service start`, `service room create`, and
+  the separate config edit naming the new `roomId`.
 - A native `read --thread <root> --since <cursor>` bounds the records the host scans, not the
   replies it returns, so an empty answer is a quiet stretch, not an empty thread: the stderr line
   names the room position the scan reached, and the next read goes on from there. A thread read
