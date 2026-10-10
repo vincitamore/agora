@@ -12,8 +12,13 @@
  * `{ receipt: { id, cursor, duplicate, operationId } }` with a post's outcomes (202, 409, 503).
  *
  * React. `{ target, name, on }`: `name` is one short word (letters, digits, `_` or `-`, at most
- * 32), kept in the kit's store by person. The answer is `{ names: [personId] }`, the people who
- * chose that name for that message, never a number.
+ * 32), kept in the kit's store by person. The answer is `{ names: [personId], reactions }`: the people
+ * who chose that name for that message, and the message's reactions as now folded, never a number.
+ *
+ * Reactions folded. Every message the kit serves (the thread and room routes, the thread list's
+ * `root` and `last`, search hits, and the stream's `message` and `annotation` events) carries
+ * `reactions: [{ name, people: [personId] }]` when it has any: each name once, in the order it was
+ * first chosen, with the people who chose it in the order they did. No reactions, no field.
  *
  * Purge. `{ targets?, thread?, reason, operationId? }`; `authorize(person, "purge", { targets, thread })`.
  * The room's purge, signed with the person's name and ref; the kit's index forgets the purged text
@@ -29,6 +34,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { faultOf, asFault } from "./room.mjs";
 import { MESSAGE_ID, NAME_MAX, TEXT_MAX_BYTES, postFault } from "./post.mjs";
 import { forgetPurge } from "./search.mjs";
+import { once } from "./uploads.mjs";
 
 const ACTS = new Set(["edit", "withdraw", "pin", "unpin"]);
 const DRAFT_ID = /^[A-Za-z0-9_-]{8,128}$/;
@@ -132,7 +138,8 @@ export async function handleReact(req, person, kit) {
   if (thread === undefined) return kit.fail(404, "NOT_FOUND", "There is no such message.");
   if (!kit.hooks.authorize(person, "react", { target, thread })) return kit.fail(403, "FORBIDDEN", "You cannot do that here.");
   kit.store.setReaction(target, name, person.id, on);
-  return kit.json(200, { ok: true, data: { names: kit.store.reactions(target)[name] ?? [] } });
+  const reactions = reactionsOf(kit.store, [target]).get(target) ?? [];
+  return kit.json(200, { ok: true, data: { names: reactions.find((r) => r.name === name)?.people ?? [], reactions } });
 }
 
 /**
@@ -165,4 +172,47 @@ export async function handlePurge(req, person, kit) {
     if (f.outcome === "unknown-acceptance") return kit.json(202, { ok: false, error: { code: "ACCEPTANCE_UNKNOWN", operationId: op.draft, message: "The room did not confirm the purge. Send it again under the same operation id: it will not be applied twice." } });
     return kit.fail(409, "ROOM_REFUSED", `The room refused the purge (${f.code}).`, { refusal: f.code });
   }
+}
+
+/** @typedef {{ name: string, people: string[] }} Reaction */
+
+/**
+ * The reactions on these messages, by message id: each name once, in the order first chosen, with
+ * the people who chose it. A message with none is absent from the map.
+ * @param {import("./store.mjs").KitStore} store @param {readonly string[]} ids
+ * @returns {Map<string, Reaction[]>}
+ */
+export function reactionsOf(store, ids) {
+  /** @type {Map<string, Reaction[]>} */
+  const out = new Map();
+  const unique = [...new Set(ids)];
+  for (let at = 0; at < unique.length; at += 500) {
+    const chunk = unique.slice(at, at + 500);
+    const rows = /** @type {Array<{ target: string, name: string, person: string }>} */ (once(store.db,
+      `select target, name, person from reactions where target in (${chunk.map(() => "?").join(",")}) order by at, rowid`, (st) => st.all(...chunk)));
+    for (const r of rows) {
+      const list = out.get(r.target) ?? [];
+      out.set(r.target, list);
+      const entry = list.find((x) => x.name === r.name);
+      if (entry) entry.people.push(r.person);
+      else list.push({ name: r.name, people: [r.person] });
+    }
+  }
+  return out;
+}
+
+/**
+ * Messages with their reactions folded in (`reactions`, only when there are any).
+ * @template {Record<string, any>} M
+ * @param {import("./store.mjs").KitStore} store @param {M[]} messages
+ * @returns {Array<M & { reactions?: Reaction[] }>}
+ */
+export function withReactions(store, messages) {
+  const ids = messages.map((m) => m?.id).filter((id) => typeof id === "string");
+  if (!ids.length) return messages;
+  const map = reactionsOf(store, ids);
+  return messages.map((m) => {
+    const r = m && map.get(m.id);
+    return r ? { ...m, reactions: r } : m;
+  });
 }

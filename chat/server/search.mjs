@@ -21,6 +21,7 @@
 
 import { KIT_TRAILER_KEYS, parseContext, parseMentions } from "./store.mjs";
 import { dropThumbsUnreferenced, once } from "./uploads.mjs";
+import { withReactions } from "./annotate.mjs";
 
 /** How many hits a search answers when it is not told, and at most. */
 const SEARCH_LIMIT = 50;
@@ -103,7 +104,7 @@ export async function handleSearch(req, person, kit) {
     if (!may) continue;
     const got = kit.store.message(r.id);
     if (!got) continue;
-    const message = kit.toBrowser(kit.room.fold([/** @type {any} */ (got.message)], /** @type {any} */ (got.annotations))[0]);
+    const [message] = withReactions(kit.store, [kit.toBrowser(kit.room.fold([/** @type {any} */ (got.message)], /** @type {any} */ (got.annotations))[0])]);
     hits.push({ message, snippet: r.snippet });
     if (hits.length >= limit) break;
   }

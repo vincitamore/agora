@@ -25,7 +25,7 @@
  */
 
 import * as pushServer from "../push/server.mjs";
-import { handleAnnotate, handlePurge, handleReact } from "./annotate.mjs";
+import { handleAnnotate, handlePurge, handleReact, withReactions } from "./annotate.mjs";
 import { createPosting, fail, json, MESSAGE_ID, personRef } from "./post.mjs";
 import { asFault, openRoom } from "./room.mjs";
 import { handleScan } from "./scan.mjs";
@@ -289,7 +289,8 @@ export async function createChat(options) {
 
   /**
    * Where the follow starts: the index checked against the room's epoch (rebuilt when they
-   * differ), then everything the room committed since the index last ran, read page by page.
+   * differ), then everything the room committed since the index last ran, read page by page; the
+   * follow then starts after that, or where the index stood before it so purges are replayed.
    * @param {import("./room.mjs").AgoraClient} c @param {string} alias
    */
   async function startFrom(c, alias) {
@@ -310,6 +311,11 @@ export async function createChat(options) {
       reset = state.epoch !== null;
     }
     let since = store.indexState().through ?? `${epoch}:0`;
+    // A purge appended while the kit was away is not in a read; the follow replays it. So on a
+    // service that sends purges, the follow resumes where the index stood before this catch-up and
+    // the index applies what it replays (messages and annotations it already holds are skipped).
+    // A new or rebuilt index needs no replay: a read already shows a purged message without its text.
+    const resume = !reset && state.epoch === epoch && state.through && c.capabilities.has("purge-v1") ? state.through : null;
     for (;;) {
       const page = await c.read(alias, { since, limit: 500 });
       for (const m of page.messages) index.message(m, isNews(m.cursor));
@@ -320,7 +326,7 @@ export async function createChat(options) {
       if (done) break;
     }
     caughtUp = true;
-    return { since, reset };
+    return { since: resume ?? since, reset };
   }
 
   const index = {
@@ -432,7 +438,7 @@ export async function createChat(options) {
   /** The newest message of a thread, folded, for the line under its title. @param {string} id */
   function lastMessage(id) {
     const got = store.message(id);
-    return got ? toBrowser(room.fold([/** @type {any} */ (got.message)], /** @type {any} */ (got.annotations))[0]) : null;
+    return got ? withReactions(store, [toBrowser(room.fold([/** @type {any} */ (got.message)], /** @type {any} */ (got.annotations))[0])])[0] : null;
   }
 
   /** @param {URL} url @param {Person} person */
@@ -479,7 +485,7 @@ export async function createChat(options) {
         unread = !pos || !at || pos.epoch !== at.epoch || at.seq > pos.seq;
       }
       return {
-        root: toBrowser(room.fold([/** @type {any} */ (r.root)], /** @type {any} */ (r.rootAnnotations))[0]),
+        root: withReactions(store, [toBrowser(room.fold([/** @type {any} */ (r.root)], /** @type {any} */ (r.rootAnnotations))[0])])[0],
         lastAt: last.ts,
         lastBy: { name: last.author.name, kind: last.author.kind, ...(last.author.ref ? { ref: last.author.ref } : {}) },
         lastCursor: last.cursor,
@@ -499,7 +505,7 @@ export async function createChat(options) {
     try {
       const got = await room.read({ limit: THREAD_LIMIT, ...(root ? { thread: root } : {}), ...(since ? { since } : {}) });
       const shown = new Set(got.messages.map((m) => m.id));
-      const messages = room.fold(got.messages, got.annotations ?? []).map(toBrowser);
+      const messages = withReactions(store, room.fold(got.messages, got.annotations ?? []).map(toBrowser));
       // an annotation on a message this page does not carry (an edit after `since`) is given on its own
       const annotations = (got.annotations ?? []).filter((a) => !shown.has(a.target)).map(toBrowser);
       return json(200, { ok: true, data: { messages, annotations, through: got.through } });

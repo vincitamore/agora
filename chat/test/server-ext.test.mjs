@@ -45,7 +45,8 @@ async function setup(t, knobs = {}) {
   let scanThrows = false;
   /** @type {{ denyThread: string | null }} */
   const live = { denyThread: null };
-  const chat = await createChat({
+  /** @type {import("../server/index.mjs").ChatOptions} */
+  const options = {
     agoraDir: AGORA_DIR, agoraState: seat.state, agoraConfig: seat.config, room: seat.alias, clientName: "example-app",
     storeDir: kitDir,
     hooks: {
@@ -63,7 +64,8 @@ async function setup(t, knobs = {}) {
     },
     push: null, log: (line) => logs.push(line),
     tuning: { keepAliveMs: 1000, presenceMs: 500, restartMs: 500, peopleMs: 0 },
-  });
+  };
+  let chat = await createChat(options);
   const server = BunRuntime.serve({
     port: 0, hostname: "127.0.0.1", maxRequestBodySize: 64 * 1024 * 1024,
     async fetch(/** @type {Request} */ req) {
@@ -109,6 +111,11 @@ async function setup(t, knobs = {}) {
   };
   return {
     seat, agent, call, upload, indexed, logs, base, kitDir,
+    get chat() { return chat; },
+    /** the kit stops (the host keeps serving: the kit answers 503 STOPPED meanwhile) */
+    async down() { await chat.close(); },
+    /** the kit starts again on the same store */
+    async up() { chat = await createChat(options); },
     /** @param {boolean} v */
     set scanThrows(v) { scanThrows = v; },
     /** the host stops letting anyone but Ada read this thread @param {string} thread */
@@ -327,10 +334,35 @@ test("react keeps names, never counts", SLOW, async (t) => {
   const root = await k.call("p-ada", "/chat/post", { text: "a reaction target" });
   const id = root.body.data.receipt.id;
   await k.indexed(id);
-  assert.deepEqual((await k.call("p-ada", "/chat/react", { target: id, name: "agree", on: true })).body.data, { names: ["p-ada"] });
-  assert.deepEqual((await k.call("p-grace", "/chat/react", { target: id, name: "agree", on: true })).body.data, { names: ["p-ada", "p-grace"] });
-  assert.deepEqual((await k.call("p-ada", "/chat/react", { target: id, name: "agree", on: false })).body.data, { names: ["p-grace"] });
+  assert.deepEqual((await k.call("p-ada", "/chat/react", { target: id, name: "agree", on: true })).body.data.names, ["p-ada"]);
+  assert.deepEqual((await k.call("p-grace", "/chat/react", { target: id, name: "agree", on: true })).body.data.names, ["p-ada", "p-grace"]);
+  assert.deepEqual((await k.call("p-ada", "/chat/react", { target: id, name: "agree", on: false })).body.data.names, ["p-grace"]);
   assert.equal((await k.call("p-ada", "/chat/react", { target: id, name: "two words", on: true })).status, 400);
+
+  // folded into every message the kit serves: names, each with who, in the order first chosen
+  assert.equal((await k.call("p-lin", "/chat/react", { target: id, name: "later", on: true })).status, 403);
+  const add = await k.call("p-ada", "/chat/react", { target: id, name: "seen", on: true });
+  const want = [{ name: "agree", people: ["p-grace"] }, { name: "seen", people: ["p-ada"] }];
+  assert.deepEqual(add.body.data, { names: ["p-ada"], reactions: want });
+  const inThread = async (/** @type {string} */ where) => (await k.call("p-grace", `/chat/thread/${where}`)).body.data.messages.find((/** @type {any} */ m) => m.id === id);
+  assert.deepEqual((await inThread(id)).reactions, want, "the thread route");
+  assert.deepEqual((await inThread("main")).reactions, want, "the room route");
+  const row = (await k.call("p-grace", "/chat/threads")).body.data.threads.find((/** @type {any} */ x) => x.root.id === id);
+  assert.deepEqual(row.root.reactions, want, "the thread list's root");
+  assert.deepEqual(row.last.reactions, want, "and its last");
+  assert.deepEqual((await k.call("p-grace", "/chat/search?q=reaction")).body.data.hits[0].message.reactions, want, "a search hit");
+  const s = await k.stream("p-grace", `thread=${id}`);
+  const shown = /** @type {any} */ (await s.until(() => s.of("message").find((e) => e.data.id === id), "the message on the stream")).data;
+  assert.deepEqual(shown.reactions, want, "the stream's message event");
+  await k.call("p-ada", "/chat/annotate", { act: "pin", target: id });
+  const pinned = /** @type {any} */ (await s.until(() => s.of("annotation").find((e) => e.data.act === "pin"), "the pin on the stream")).data;
+  assert.deepEqual(pinned.message.reactions, want, "the stream's annotation event carries its target's reactions");
+  // removed: the field goes
+  assert.deepEqual((await k.call("p-ada", "/chat/react", { target: id, name: "seen", on: false })).body.data.reactions, [{ name: "agree", people: ["p-grace"] }]);
+  assert.deepEqual((await k.call("p-grace", "/chat/react", { target: id, name: "agree", on: false })).body.data, { names: [], reactions: [] });
+  assert.equal((await inThread(id)).reactions, undefined, "no reactions, no field");
+  assert.equal((await k.call("p-ada", "/chat/react", { target: id, name: "__proto__", on: true })).status, 200, "a name is data, never a key");
+  assert.deepEqual((await inThread(id)).reactions, [{ name: "__proto__", people: ["p-ada"] }]);
   assert.equal((await k.call("p-ada", "/chat/react", { target: "e".repeat(64), name: "agree", on: true })).status, 404);
   assert.equal((await k.call("p-lin", "/chat/react", { target: id, name: "agree", on: true })).status, 403);
 });
@@ -443,4 +475,44 @@ test("a purge made by another app reaches the kit's index and its thread streams
   assert.equal(ev.thread, rootId);
   assert.equal((await k.call("p-ada", "/chat/search?q=zebracode")).body.data.hits.length, 0, "the index forgot it when the record arrived");
   assert.equal((await k.call("p-ada", "/chat/search?q=clear")).body.data.hits.length, 0);
+});
+
+test("a purge made while the kit was down reaches its index when it starts again", SLOW, async (t) => {
+  const k = await setup(t);
+  const up = await k.upload("p-ada", png(), { "x-file-name": "gauge.png", "content-type": "image/png" });
+  const att = up.body.data.attachment;
+  const post = await k.call("p-ada", "/chat/post", { text: "the gauge reading quixotic", attachments: [att] });
+  const id = post.body.data.receipt.id;
+  const keep = await k.call("p-ada", "/chat/post", { text: "an older quixotic note that stays" });
+  await k.indexed(keep.body.data.receipt.id);
+  const fileUrl = `/chat/file/${att.id}?digest=${encodeURIComponent(att.digest)}`;
+  assert.equal((await k.call("p-grace", fileUrl)).status, 200);
+  assert.equal((await k.call("p-ada", "/chat/search?q=quixotic")).body.data.hits.length, 2);
+
+  await k.down();
+  const r = await k.agent.purge(k.seat.alias, { targets: [id], reason: "removed while the kit was away", author: { kind: "agent", name: "Resident/watch" } });
+  assert.deepEqual(r.purged, [id]);
+  await k.agent.append(k.seat.alias, { text: "written while the kit was away", author: { kind: "agent", name: "Resident/watch" } });
+  await k.up();
+  /** @type {string[]} */
+  const heard = [];
+  k.chat.on("message", (m) => { heard.push(String(m.text)); });
+
+  const end = Date.now() + 20_000;
+  let hits = [];
+  for (;;) {
+    hits = (await k.call("p-ada", "/chat/search?q=quixotic")).body.data?.hits ?? [];
+    if (hits.length === 1 || Date.now() > end) break;
+    await new Promise((res) => setTimeout(res, 50));
+  }
+  assert.deepEqual(hits.map((/** @type {any} */ h) => h.message.id), [keep.body.data.receipt.id], "search no longer finds the purged words");
+  assert.equal((await k.call("p-grace", fileUrl)).status, 404, "and its file is gone");
+  const row = (await k.call("p-ada", "/chat/threads")).body.data.threads.find((/** @type {any} */ x) => x.root.id === id);
+  assert.equal(row.root.text, "", "the thread list shows no purged words");
+  // the replay re-delivers nothing as news: only a message written after the start is heard
+  await k.agent.append(k.seat.alias, { text: "written after the start", author: { kind: "agent", name: "Resident/watch" } });
+  const until = Date.now() + 20_000;
+  while (!heard.includes("written after the start") && Date.now() < until) await new Promise((res) => setTimeout(res, 50));
+  assert.deepEqual(heard.filter((x) => !x.startsWith("written after the start")), [], "nothing from before the start is emitted again");
+  assert.ok(heard.some((x) => x.startsWith("written after the start")));
 });

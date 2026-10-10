@@ -27,6 +27,7 @@
 
 import { parseCursor } from "./store.mjs";
 import { asFault } from "./room.mjs";
+import { withReactions } from "./annotate.mjs";
 
 /** A comment line on the stream, so a proxy does not decide it has gone quiet. */
 export const KEEP_ALIVE_MS = 25_000;
@@ -109,7 +110,7 @@ export function createStreams(o) {
   function foldedTarget(target) {
     const got = o.store.message(target);
     if (!got) return null;
-    return toBrowser(o.room.fold([got.message], got.annotations)[0]);
+    return withReactions(o.store, [toBrowser(o.room.fold([got.message], got.annotations)[0])])[0];
   }
 
   /** @param {Member} m @param {Held} h */
@@ -119,7 +120,7 @@ export function createStreams(o) {
     m.seen.add(h.cursor);
     if (h.kind === "message") {
       m.ids.add(h.m.id);
-      m.send("message", toBrowser(h.m), h.cursor);
+      m.send("message", withReactions(o.store, [toBrowser(h.m)])[0], h.cursor);
     } else if (h.kind === "annotation") {
       m.send("annotation", { ...toBrowser(h.a), message: foldedTarget(h.a.target) }, h.cursor);
     } else {
