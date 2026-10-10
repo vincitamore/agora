@@ -67,7 +67,9 @@ test('stop waits for a late child and concurrent callers join its observed exit'
   const runtime=startOfferWorker(root,{listen:async spec=>(listener=await createTransferListener(spec)),
     spawn:async()=>{entered.resolve();await release.promise;return child;}});
   await entered.promise;const stopped=runtime.stop();assert.strictEqual(stopped,runtime.stop());
-  let closed=false;void stopped.then(()=>{closed=true;});await delay(30);
+  let closed=false;void stopped.then(()=>{closed=true;});
+  // the stop closes the listener asynchronously: poll it to a deadline, not after a fixed wait
+  await waitFor(()=>!listener.server.listening,'the stop did not close the listener',5000);
   assert.equal(listener.server.listening,false);assert.equal(closed,false);
   release.resolve();await waitFor(()=>child.disconnects===1);assert.equal(closed,false);
   child.finish();await stopped;await assert.rejects(runtime.ready,/stopped/);

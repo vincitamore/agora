@@ -645,15 +645,24 @@ setTimeout(() => { rmSync(armed, { force: true }); process.exit(1); }, 1500);
   });
   const dark = JSON.stringify({ type: "watch-ended", reason: "service-dark", re_arm: "agora watch twice", pid: 0 });
   const one = await run(armArgs, { RUNTIME_LINE: dark });
-  await new Promise((r) => setTimeout(r, 2500));
-  const afterOne = await run([...lifecycleArgs, "--log-prefix", logPrefix, "--status"]);
+  // the fake runtime exits on its own about 1.5 s after arming; read --status until it says so,
+  // to a deadline, rather than once after a fixed wait a loaded machine can outlast
+  /** @returns {Promise<any>} */
+  const settled = async () => {
+    const end = Date.now() + 20_000;
+    for (;;) {
+      const status = await run([...lifecycleArgs, "--log-prefix", logPrefix, "--status"]);
+      if (status.alive === false || Date.now() > end) return status;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  };
+  const afterOne = await settled();
   assert.equal(afterOne.alive, false);
   assert.equal(afterOne.ended?.reason, "service-dark", "arm one ended dark and --status says so");
   const normal = JSON.stringify({ type: "watch-result", exit: 0 });
   const two = await run(armArgs, { RUNTIME_LINE: normal });
   assert.notEqual(two.watcherPid, one.watcherPid);
-  await new Promise((r) => setTimeout(r, 2500));
-  const afterTwo = await run([...lifecycleArgs, "--log-prefix", logPrefix, "--status"]);
+  const afterTwo = await settled();
   assert.equal(afterTwo.alive, false);
   assert.equal(afterTwo.ended, null, `arm two ended normally; a stale line from arm one must not be reported: ${JSON.stringify(afterTwo.ended)}`);
   const log = await readFile(`${logPrefix}.stdout.log`, "utf8");

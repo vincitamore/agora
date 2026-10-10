@@ -76,8 +76,18 @@ test("the request connection is made once, and made again when it is gone", { ti
   await app.read({ roomId: ROOM });
   assert.equal(s.hellos, 1, "one hello for every request");
   s.drop();
-  await new Promise((r) => setTimeout(r, 50));
-  assert.deepEqual((await app.read({ roomId: ROOM })).messages, []);
+  // the client learns of the drop when its socket stops being writable, which is asynchronous: a
+  // read sent before that meets the dead connection, so read to a deadline rather than after a
+  // fixed wait. A read on the dead connection makes no hello, so the count below still says once.
+  const end = Date.now() + 10_000;
+  /** @type {any} */
+  let after;
+  for (;;) {
+    after = await app.read({ roomId: ROOM }).catch((/** @type {any} */ e) => e);
+    if (Array.isArray(after?.messages) || Date.now() > end) break;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  assert.deepEqual(after.messages, [], `the read after the drop: ${after?.code ?? ""}`);
   assert.equal(s.hellos, 2, "a dropped connection is dialled again, once");
 });
 

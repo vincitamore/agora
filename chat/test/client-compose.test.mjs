@@ -160,14 +160,21 @@ test("a retry is scheduled while a post waits, and none once it has gone", async
   const box = createOutbox({ send: room.send, storage: null, schedule: (fn) => { timers.push(fn); return timers.length; }, cancel: () => {} });
   room.online = false;
   await box.add({ text: "timed", thread: null });
-  await new Promise((r) => setTimeout(r, 5));
+  // the send and the retry it arms are asynchronous: poll each to a deadline, never a fixed wait
+  await until(() => timers.length >= 1);
   assert.ok(timers.length >= 1, "a retry was armed");
   room.online = true;
   timers[timers.length - 1]();
-  await new Promise((r) => setTimeout(r, 20));
+  await until(() => room.holds("timed") === 1 && box.items().length === 0);
   assert.equal(room.holds("timed"), 1);
   assert.equal(box.items().length, 0);
 });
+
+/** Poll `ok` until it holds or five seconds pass. @param {() => boolean} ok */
+async function until(ok) {
+  const end = Date.now() + 5_000;
+  while (!ok() && Date.now() < end) await new Promise((r) => setTimeout(r, 5));
+}
 
 // ---- the scan before send ----
 

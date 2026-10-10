@@ -344,7 +344,8 @@ test('CLI SIGINT cancels and reaps only the owned helper', { timeout: 20000 }, a
     assert.ok(elapsed < 8000, `looked like timeout not cancel: ${elapsed}ms`);
     assert.equal(status, 1, `stderr=${stderr}\nstdout=${stdout}`);
     assert.match(stdout, /codex-cancelled/);
-    await delay(200);
+    // the helper's exit after the cancel is asynchronous: poll it to a deadline, not after a fixed wait
+    for (const end = Date.now() + 5_000; pidAlive(helperPid) && Date.now() < end;) await delay(50);
     assert.equal(pidAlive(helperPid), false, `owned helper ${helperPid} still alive`);
   } finally {
     try { child.kill('SIGKILL'); } catch { /* gone */ }

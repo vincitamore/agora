@@ -221,6 +221,21 @@ async function openStream(url, headers) {
 /** @param {number} ms */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Probe until `ok` holds or the deadline passes, and return the last value probed, so the assertion
+ * after it names what was seen. What the kit indexes from the room arrives through its follow, so a
+ * fixed wait for it reads as a failure on a loaded machine.
+ * @template T @param {() => Promise<T>} probe @param {(value: T) => boolean} ok @param {number} [ms]
+ */
+async function eventually(probe, ok, ms = 15_000) {
+  const end = Date.now() + ms;
+  for (;;) {
+    const value = await probe();
+    if (ok(value) || Date.now() > end) return value;
+    await sleep(25);
+  }
+}
+
 /** @param {{ events: SseEvent[] }} s */
 function noDuplicates(s) {
   const cursors = s.events.filter((e) => e.event === "message" || e.event === "annotation").map((e) => e.id);
@@ -446,9 +461,10 @@ for (const host of HOSTS) {
     const c = await k.agentSays("third thread, nobody's");
     const rootA = a.body.data.receipt.id;
     await k.agentSays("a reply that moves the first thread up", { thread: rootA, trailers: [["card", "plan P-2"]] });
-    await sleep(500);
 
-    const all = await k.call("p-ada", "/chat/threads");
+    // the agent's posts reach the kit through its follow: wait until the reply has moved the first thread up
+    const all = await eventually(() => k.call("p-ada", "/chat/threads"),
+      (r) => r.status === 200 && r.body.data.threads[0]?.root.id === rootA && r.body.data.threads.length === 3);
     assert.equal(all.status, 200, JSON.stringify(all.body));
     const list = all.body.data.threads;
     assert.deepEqual(list.map((/** @type {any} */ x) => x.root.id), [rootA, c.id, b.id]);
@@ -484,15 +500,14 @@ for (const host of HOSTS) {
     await k.call("p-ada", "/chat/position", { json: { thread: rootA, cursor: a.body.data.receipt.cursor } });
     assert.equal((await k.call("p-ada", "/chat/threads")).body.data.threads[0].unread, false);
     await k.agentSays("another reply", { thread: rootA });
-    await sleep(500);
-    assert.equal((await k.call("p-ada", "/chat/threads")).body.data.threads[0].unread, true);
+    assert.equal((await eventually(() => k.call("p-ada", "/chat/threads"), (r) => r.body.data.threads[0].unread === true)).body.data.threads[0].unread, true);
     assert.equal((await k.call("p-ada", "/chat/position", { json: { thread: rootA, cursor: "nope" } })).status, 400);
 
     // the waiting stands until Grace posts in that thread
     const answer = await k.call("p-grace", "/chat/post", { json: { text: "here I am", thread: b.id } });
     assert.equal(answer.status, 200);
-    await sleep(500);
-    const after = (await k.call("p-grace", "/chat/threads")).body.data.threads;
+    const after = (await eventually(() => k.call("p-grace", "/chat/threads"),
+      (r) => r.body.data.threads.find((/** @type {any} */ x) => x.root.id === b.id)?.waiting.length === 0)).body.data.threads;
     const second = after.find((/** @type {any} */ x) => x.root.id === b.id);
     assert.deepEqual(second.waiting, []);
     assert.equal(second.unread, false, "the last word is Grace's own");
@@ -506,7 +521,7 @@ for (const host of HOSTS) {
     k.chat.on("message", (value, meta) => heard.push({ value, meta }));
     await k.call("p-ada", "/chat/post", { json: { text: "heard live, for @Lin" } });
     await k.agentSays("also heard", { trailers: [["waiting", "ref-grace"]] });
-    await new Promise((r) => setTimeout(r, 500));
+    await eventually(async () => heard.length, (n) => n >= 2);
     assert.deepEqual(heard.map((h) => h.value.text), ["heard live, for @Lin", "also heard\n\nwaiting: ref-grace"]);
     assert.deepEqual(heard[0].meta.mentions, ["p-lin"]);
     assert.deepEqual(heard[1].meta.waiting, ["p-grace"]);
