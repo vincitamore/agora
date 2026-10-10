@@ -258,3 +258,23 @@ test("withdraw removes no bytes: the text stays in the log until a purge takes i
   assert.deepEqual(receipt.purged, [m.id]);
   assert.equal((await readFile(path.join(dir, "room.frames.1"), "utf8")).includes("withdrawn but kept"), false);
 });
+
+// kills: view's thread narrowing of a purge (`thread !== undefined` flipped in `purges`, src/native-store.mjs
+// view): a purge that took messages inside and outside a thread reads, in that thread's view, as the
+// thread's messages only, and a purge that took none of them is absent from it
+test("a thread view narrows a purge to the thread's messages and drops one that took none of them", async (t) => {
+  const { store } = await room(t);
+  const root = await post(store, "the root");
+  const reply = await post(store, "a reply", { thread: root.id });
+  const outside = await post(store, "outside the thread");
+  const elsewhere = await post(store, "also outside");
+  const since = `${EPOCH}:${store.records.length}`;
+  const away = await purge(store, { targets: [elsewhere.id], reason: "not this thread" });
+  const mixed = await purge(store, { targets: [outside.id, reply.id], reason: "one of each" });
+  assert.deepEqual(mixed.purged, [reply.id, outside.id]);
+  const whole = store.view();
+  assert.deepEqual(whole.purges.map((p) => [p.id, p.purged]), [[away.id, [elsewhere.id]], [mixed.id, [reply.id, outside.id]]], "the room view keeps every purge whole");
+  for (const view of [store.view({ thread: root.id }), store.view({ thread: root.id, since })]) {
+    assert.deepEqual(view.purges.map((p) => [p.id, p.purged]), [[mixed.id, [reply.id]]], "the thread view names only the thread's message");
+  }
+});

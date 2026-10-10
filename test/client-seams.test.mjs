@@ -242,3 +242,24 @@ test("a named state root reads no config; without one, the config names the stat
   const none = await failure(connect());
   assert.deepEqual([none.outcome, none.code], ["dark", "service-dark"], "no config: the default state root, which holds no service");
 });
+
+// kills: subscribe's purge de-duplication (`read.sequence <= position` -> `<`, the purge branch of
+// `deliver`, src/client.mjs): a replay that resends the purge at the cursor's own position has it
+// covered, never handed to the purge handler, exactly as a message at the cursor is
+test("a purge at the cursor's own position is covered, not delivered; the one after it is delivered once", { timeout: 30_000 }, async (t) => {
+  /** @type {(frame: Record<string, any>) => Array<Record<string, any>> | undefined} */
+  let next = () => undefined;
+  const s = await stub(t, { offer: { advertised: ["threads-v1", "client-name-v1", "purge-v1"], required: [] }, answer: (f) => next(f) });
+  const app = await connect({ state: s.root });
+  t.after(() => app.close());
+  const purgeAt = (/** @type {number} */ sequence) => ({ type: "event", roomId: ROOM, purge: { id: String(sequence).padStart(64, "p"), cursor: `${EPOCH}:${sequence}`,
+    ts: "2026-01-01T00:00:00.000Z", purged: [stubMessage(1).id], reason: "asked", by: { name: "Ada" } } });
+  next = (f) => (f.type === "subscribe" ? [purgeAt(2), purgeAt(3), { type: "subscribe-result", roomId: ROOM, messages: [], checkpoint: checkpoint(4) }] : undefined);
+  /** @type {string[]} */
+  const purges = [];
+  const sub = await app.subscribe({ roomId: ROOM }, { since: `${EPOCH}:2` }, { message: () => undefined, purge: (p) => purges.push(p.cursor) });
+  sub.close();
+  assert.equal(s.frames.find((f) => f.type === "subscribe")?.purges, true, "a purge handler asks the service for purges");
+  assert.deepEqual(purges, [`${EPOCH}:3`]);
+  assert.equal(sub.cursor, `${EPOCH}:4`);
+});

@@ -1,0 +1,5 @@
+{
+  "case": "purge-target-unknown",
+  "opens": false,
+  "refusal": "names a message the log did not hold"
+}

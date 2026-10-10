@@ -1,0 +1,5 @@
+{
+  "case": "purge-reason-not-string",
+  "opens": false,
+  "refusal": "is not a purge"
+}

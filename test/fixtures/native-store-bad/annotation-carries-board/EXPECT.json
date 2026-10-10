@@ -1,0 +1,5 @@
+{
+  "case": "annotation-carries-board",
+  "opens": false,
+  "refusal": "carries a message, a board act or a purge"
+}

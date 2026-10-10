@@ -1,0 +1,5 @@
+{
+  "case": "purge-via-boolean",
+  "opens": false,
+  "refusal": "is not a purge"
+}

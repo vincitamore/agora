@@ -1,0 +1,5 @@
+{
+  "case": "purge-target-malformed",
+  "opens": false,
+  "refusal": "is not a purge"
+}

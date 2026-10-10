@@ -1,0 +1,5 @@
+{
+  "case": "purge-list-short",
+  "opens": false,
+  "refusal": "lists messages its targets and thread do not name"
+}

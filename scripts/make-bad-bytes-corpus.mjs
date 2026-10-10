@@ -79,10 +79,20 @@ function editRecord({ frames, boundary }, index, f) {
   editJson(boundary, (o) => { o.end = o.end + (next.length - bytes.length); });
 }
 
+/** The record inside frame `index` (0-based), as JSON. @param {Paths} p @param {number} index */
+function readRecord({ frames }, index) {
+  const bytes = readFileSync(frames);
+  let pos = 0;
+  for (let i = 0; i < index; i++) pos += 4 + bytes.readUInt32BE(pos) + 32;
+  return JSON.parse(bytes.subarray(pos + 4, pos + 4 + bytes.readUInt32BE(pos)).toString("utf8"));
+}
+
 /**
- * each case: a named edit of the good room and what open must say (null: opens)
+ * each case: a named edit of a good room and what open must say (null: opens); `base` names the
+ * room it edits, the version 1 room when absent
  * @typedef {{ dir: string, frames: string, manifest: string, boundary: string, lock: string }} Paths
- * @type {Record<string, { expect: string | null, edit: (p: Paths) => void }>}
+ * @typedef {{ base?: "purge", expect: string | null, edit: (p: Paths) => void }} Case
+ * @type {Record<string, Case>}
  */
 export const CASES = {
   "truncated-last-frame": { expect: "truncated below its acknowledged", edit: ({ frames }) => { const { size } = lastFrame(frames); writeFileSync(frames, readFileSync(frames).subarray(0, size - 5)); } },
@@ -149,6 +159,47 @@ export const CASES = {
     const digest3 = JSON.parse(bytes.subarray(f1 + f2 + 4, f1 + f2 + 4 + len3).toString("utf8")).recordDigest;
     void last; editJson(boundary, (o) => { o.end = f1 + f2 + f3; o.sequence = 3; o.digest = digest3; });
   } },
+  // wave 3: a version 2 room that a purge rewrote (base "purge"; purgeRoom writes it). Frame 0 is a
+  // thread root whose text and edit the purge took, 1 a message it left (pinned), 2 the root's
+  // reply, 3 a message it took by target, 4 the pin, 5 the edit, 6 the purge (targets [3], thread 0,
+  // submitted through a client connection, so it carries via and by.ref). Each case is one field of
+  // the stored purge record, or one marker or annotation the purge's scan checks.
+  "good-purge": { base: "purge", expect: null, edit: () => {} },
+  "purge-carries-board": { base: "purge", expect: "carries a message, a board act or an annotation", edit: (p) => editRecord(p, 6, (r) => { r.board = { action: "claim", subject: "work:x" }; }) },
+  "purge-null": { base: "purge", expect: "does not match its committed position", edit: (p) => editRecord(p, 6, (r) => { r.purge = null; }) },
+  "purge-id-mismatch": { base: "purge", expect: "does not match its committed position", edit: (p) => editRecord(p, 6, (r) => { r.purge.id = "f".repeat(64); }) },
+  "purge-cursor-mismatch": { base: "purge", expect: "does not match its committed position", edit: (p) => editRecord(p, 6, (r) => { r.purge.cursor = r.purge.cursor.replace(/:\d+$/, ":99"); }) },
+  "purge-ts-not-string": { base: "purge", expect: "does not match its committed position", edit: (p) => editRecord(p, 6, (r) => { r.purge.ts = 5; }) },
+  // a number whose decimal form is a valid id: only the type check refuses it
+  "purge-target-number": { base: "purge", expect: "is not a purge", edit: (p) => editRecord(p, 6, (r) => { r.purge.targets = [1234567890123456]; }) },
+  // an id of exactly 16 characters has a valid shape, so what refuses it is that the log never held it
+  "purge-target-sixteen": { base: "purge", expect: "names a message the log did not hold", edit: (p) => editRecord(p, 6, (r) => { r.purge.targets = ["a".repeat(16)]; }) },
+  "purge-target-too-long": { base: "purge", expect: "is not a purge", edit: (p) => editRecord(p, 6, (r) => { r.purge.targets = ["a".repeat(129)]; }) },
+  "purge-target-malformed": { base: "purge", expect: "is not a purge", edit: (p) => editRecord(p, 6, (r) => { r.purge.targets = ["short"]; }) },
+  "purge-targets-not-list": { base: "purge", expect: "is not a purge", edit: (p) => editRecord(p, 6, (r) => { r.purge.targets = "x"; }) },
+  "purge-target-unknown": { base: "purge", expect: "names a message the log did not hold", edit: (p) => editRecord(p, 6, (r) => { r.purge.targets = ["b".repeat(64)]; }) },
+  "purge-thread-malformed": { base: "purge", expect: "is not a purge", edit: (p) => editRecord(p, 6, (r) => { r.purge.thread = "short"; }) },
+  "purge-thread-unknown": { base: "purge", expect: "names a message the log did not hold", edit: (p) => editRecord(p, 6, (r) => { r.purge.thread = "b".repeat(64); }) },
+  "purge-thread-is-reply": { base: "purge", expect: "names a message the log did not hold", edit: (p) => editRecord(p, 6, (r) => { r.purge.thread = r.purge.purged[1]; }) },
+  "purge-names-nothing": { base: "purge", expect: "is not a purge", edit: (p) => editRecord(p, 6, (r) => { r.purge.targets = []; delete r.purge.thread; }) },
+  "purge-reason-not-string": { base: "purge", expect: "is not a purge", edit: (p) => editRecord(p, 6, (r) => { r.purge.reason = 5; }) },
+  "purge-reason-empty": { base: "purge", expect: "is not a purge", edit: (p) => editRecord(p, 6, (r) => { r.purge.reason = ""; }) },
+  "purge-by-missing": { base: "purge", expect: "is not a purge", edit: (p) => editRecord(p, 6, (r) => { delete r.purge.by; }) },
+  "purge-by-name-not-string": { base: "purge", expect: "is not a purge", edit: (p) => editRecord(p, 6, (r) => { r.purge.by.name = 5; }) },
+  // a number whose decimal form matches the ref pattern: only the type check refuses it
+  "purge-by-ref-number": { base: "purge", expect: "is not a purge", edit: (p) => editRecord(p, 6, (r) => { r.purge.by.ref = 12345; }) },
+  "purge-by-ref-malformed": { base: "purge", expect: "is not a purge", edit: (p) => editRecord(p, 6, (r) => { r.purge.by.ref = "has space"; }) },
+  "purge-by-ref-without-via": { base: "purge", expect: "is not a purge", edit: (p) => editRecord(p, 6, (r) => { delete r.purge.via; }) },
+  // `true` reads as "true", which matches the client-name pattern: only the type check refuses it
+  "purge-via-boolean": { base: "purge", expect: "is not a purge", edit: (p) => editRecord(p, 6, (r) => { r.purge.via = true; }) },
+  "purge-via-malformed": { base: "purge", expect: "is not a purge", edit: (p) => editRecord(p, 6, (r) => { r.purge.via = "Not A Client"; }) },
+  "purge-list-not-list": { base: "purge", expect: "is not a purge", edit: (p) => editRecord(p, 6, (r) => { r.purge.purged = "x"; }) },
+  "purge-list-short": { base: "purge", expect: "lists messages its targets and thread do not name", edit: (p) => editRecord(p, 6, (r) => { r.purge.purged.pop(); }) },
+  // a marker is outside the record digest, so the scan's end check is what holds it
+  "marker-names-other-purge": { base: "purge", expect: "has no text and no purge names it", edit: (p) => { const purge = readRecord(p, 6).purge; editRecord(p, 1, (r) => { delete r.message.text; r.message.purged = { at: purge.ts, purge: purge.id }; }); } },
+  "marker-wrong-time": { base: "purge", expect: "has no text and no purge names it", edit: (p) => editRecord(p, 0, (r) => { r.message.purged.at = "2000-01-01T00:00:00.000Z"; }) },
+  "annotation-carries-board": { base: "purge", expect: "carries a message, a board act or a purge", edit: (p) => editRecord(p, 4, (r) => { r.board = { action: "claim", subject: "work:x" }; }) },
+  "pin-carries-marker": { base: "purge", expect: "carries a text on a pin", edit: (p) => { const purge = readRecord(p, 6).purge; editRecord(p, 4, (r) => { r.annotation.purged = { at: purge.ts, purge: purge.id }; }); } },
 };
 
 /** write the good room under a fixed clock and return its directory */
@@ -166,19 +217,44 @@ async function goodRoom() {
   return { root, dir: join(root, "native", "rooms", ROOM) };
 }
 
+/** write the version 2 room a purge rewrote, under a fixed clock; its frames are listed above CASES' wave 3 */
+async function purgeRoom() {
+  const root = await mkdtemp(join(tmpdir(), "agora-corpus-purge-"));
+  let tick = Date.UTC(2026, 8, 18, 12, 0, 0);
+  const store = await NativeRoomStore.create({ root, roomId: ROOM, hostAccountId: HOST, epoch: "9f97cbaedb3b45d5a9807816a2c6fa5a", logVersion: 2, now: () => new Date((tick += 1000)) });
+  const local = { accountId: HOST };
+  const post = (/** @type {string} */ n, /** @type {Record<string, unknown>} */ extra = {}) =>
+    /** @type {Promise<any>} */ (store.append({ operationId: `purge_room_op_000${n}`, authorName: "Peer", authorKind: "human", text: `message ${n}`, ...extra }, local));
+  const note = (/** @type {string} */ n, /** @type {Record<string, unknown>} */ annotation) =>
+    store.append(/** @type {any} */ ({ kind: "annotation", operationId: `purge_room_note_00${n}`, authorName: "Peer", authorKind: "human", annotation }), local);
+  const root1 = await post("1");
+  const kept = await post("2");
+  await post("3", { thread: root1.id });
+  const taken = await post("4");
+  await note("1", { act: "pin", target: kept.id });
+  await note("2", { act: "edit", target: root1.id, text: "message 1, edited" });
+  await store.append(/** @type {any} */ ({ kind: "purge", operationId: "purge_room_purge_1", authorName: "Peer", authorKind: "human", authorRef: "person-1",
+    purge: { targets: [taken.id], thread: root1.id, reason: "the corpus purge" } }), { accountId: HOST, via: "corpus-client" });
+  await store.close();
+  return { root, dir: join(root, "native", "rooms", ROOM) };
+}
+
 /** @param {string} into */
 async function build(into) {
-  const good = await goodRoom();
+  const bases = { v1: await goodRoom(), purge: await purgeRoom() };
   rmSync(into, { recursive: true, force: true });
   mkdirSync(into, { recursive: true });
-  for (const [name, c] of [["good", { expect: null, edit: () => {} }], ...Object.entries(CASES)]) {
+  for (const [name, c] of /** @type {Array<[string, Case]>} */ ([["good", { expect: null, edit: () => {} }], ...Object.entries(CASES)])) {
     const dir = join(into, name, "native", "rooms", ROOM);
-    cpSync(good.dir, dir, { recursive: true });
+    cpSync(bases[c.base ?? "v1"].dir, dir, { recursive: true });
     writeFileSync(join(dir, "writer.lock"), DEAD_LOCK);
-    c.edit({ dir, frames: join(dir, "room.frames"), manifest: join(dir, "room.json"), boundary: join(dir, "committed.json"), lock: join(dir, "writer.lock") });
+    // a purged room's log is the generation its boundary names (room.frames.<n>)
+    const generation = JSON.parse(readFileSync(join(dir, "committed.json"), "utf8")).generation ?? 0;
+    const frames = join(dir, generation ? `room.frames.${generation}` : "room.frames");
+    c.edit({ dir, frames, manifest: join(dir, "room.json"), boundary: join(dir, "committed.json"), lock: join(dir, "writer.lock") });
     writeFileSync(join(into, name, "EXPECT.json"), JSON.stringify({ case: name, opens: c.expect === null, refusal: c.expect }, null, 2) + "\n");
   }
-  await rm(good.root, { recursive: true, force: true });
+  for (const b of Object.values(bases)) await rm(b.root, { recursive: true, force: true });
 }
 
 /** a byte-for-byte listing of a tree, for --check */

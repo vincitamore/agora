@@ -1,0 +1,5 @@
+{
+  "case": "purge-by-ref-malformed",
+  "opens": false,
+  "refusal": "is not a purge"
+}

@@ -1,0 +1,5 @@
+{
+  "case": "purge-target-too-long",
+  "opens": false,
+  "refusal": "is not a purge"
+}

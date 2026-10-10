@@ -1,0 +1,5 @@
+{
+  "case": "purge-carries-board",
+  "opens": false,
+  "refusal": "carries a message, a board act or an annotation"
+}

@@ -1,0 +1,5 @@
+{
+  "case": "purge-list-not-list",
+  "opens": false,
+  "refusal": "is not a purge"
+}
