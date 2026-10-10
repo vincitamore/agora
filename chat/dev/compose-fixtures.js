@@ -154,7 +154,7 @@ export function installComposeFixtures(base) {
         hits.push({ message: m, snippet: (at > 0 ? "…" : "") + line.slice(at, at + 160) + (line.length > at + 160 ? "…" : "") });
       }
       hits.sort((a, b) => (a.message.ts < b.message.ts ? 1 : -1));
-      return ok({ hits, coverage: { through: `e1:${seq}` } });
+      return ok({ hits, coverage: { through: `e1:${seq}`, at: all.reduce((m, x) => (x.ts > m ? x.ts : m), "") || null } });
     }
     return inner(input, init);
   };

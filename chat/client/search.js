@@ -4,7 +4,7 @@
  * columns (when, who, the words), and how far the record was searched.
  *
  * `GET <base>/search?q=&scope=messages|files&context=` answers `{ hits: [{ message, snippet }],
- * coverage: { through } }`. A snippet is shown as text: the words the person typed are marked by
+ * coverage: { through, at } }`. A snippet is shown as text: the words the person typed are marked by
  * the client, never by markup in the answer. Opening a hit hands its thread's root (and the
  * message id) to the host's `onOpen`, which usually calls the mounted chat's `open`.
  *
@@ -12,7 +12,7 @@
  */
 
 import { h } from "./markdown.js";
-import { bodyOf, clock, shortWhen } from "./thread.js";
+import { bodyOf, clock, dayLabel, shortWhen } from "./thread.js";
 
 /**
  * @typedef {{
@@ -26,6 +26,17 @@ import { bodyOf, clock, shortWhen } from "./thread.js";
  *   fetch?: typeof fetch,
  * }} SearchOptions
  */
+
+/**
+ * How far the record was searched, as a person reads it: "searched through today 14:16", from the
+ * coverage's `at` (the newest record the index holds), never its cursor.
+ * @param {{ through?: unknown, at?: unknown } | null | undefined} coverage @param {Date} now
+ */
+export function coverageWords(coverage, now) {
+  const at = typeof coverage?.at === "string" ? new Date(coverage.at) : null;
+  if (!at || Number.isNaN(at.getTime())) return "searched";
+  return `searched through ${dayLabel(at, now)} ${clock(at)}`;
+}
 
 /**
  * The words of a query, for marking: each term once, longest first.
@@ -153,8 +164,7 @@ export function mountSearch(el, options = {}) {
     const list = Array.isArray(body.data?.hits) ? body.data.hits : [];
     const terms = queryTerms(words);
     for (const hit of list) hits.appendChild(hitRow(hit, terms));
-    const through = body.data?.coverage?.through;
-    const reach = through ? `the record searched through ${through}` : "the record searched";
+    const reach = coverageWords(body.data?.coverage, now());
     say(list.length ? reach : `nothing found · ${reach}`);
   };
 

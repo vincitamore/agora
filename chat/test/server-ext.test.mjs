@@ -439,6 +439,10 @@ test("search: words and file names, context, coverage, and what a reader may see
   assert.deepEqual(ids(both), [a.body.data.receipt.id, b.body.data.receipt.id].sort(), "every word, each as a prefix");
   assert.match(both.body.data.hits[0].snippet, /valve schedule/);
   assert.equal(typeof both.body.data.coverage.through, "string");
+  // coverage reads as a time: the newest record the index holds through that cursor
+  const shownC = (await k.call("p-ada", "/chat/thread/main")).body.data.messages.find((/** @type {any} */ m) => m.id === c.body.data.receipt.id);
+  assert.deepEqual(both.body.data.coverage, { through: shownC.cursor, at: shownC.ts });
+  assert.deepEqual((await k.call("p-ada", "/chat/search?q=%22%29%28*")).body.data.coverage.at, shownC.ts, "an empty query says it too");
   assert.equal(both.body.data.hits[0].message.author.id, undefined, "the browser's shape");
   assert.deepEqual(ids(await k.call("p-ada", "/chat/search?q=valve&context=item%3Dalpha")), [a.body.data.receipt.id]);
   assert.deepEqual(ids(await k.call("p-ada", "/chat/search?q=wiring&scope=files")), [c.body.data.receipt.id]);

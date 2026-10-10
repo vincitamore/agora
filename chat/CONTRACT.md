@@ -80,7 +80,7 @@ The host's cross-site checks and session sit in front of every route.
 | `POST /chat/react` | `{ target, name: "<short word>", on: bool }` | `{ names: [personId], reactions }`: the people who chose that name, and the message's reactions as now folded (kit store, names only) |
 | `POST /chat/purge` | `{ targets?, thread?, reason, operationId? }` | `{ purged, facesOutOfReach, blobsRemoved, receipt }` (authorize `purge`); 202/409/503 as post |
 | `POST /chat/position` | `{ thread: <root>\|"main", cursor }` | `{}`; a position never moves back within an epoch |
-| `GET /chat/search` | `q`, `scope=messages\|files`, `context`, `limit` (1-200, default 50) | `{ hits: [{ message, snippet }], coverage: { through } }`; every word as a prefix; `messages` searches the words, `files` the names |
+| `GET /chat/search` | `q`, `scope=messages\|files`, `context`, `limit` (1-200, default 50) | `{ hits: [{ message, snippet }], coverage: { through, at } }`; `at` is the time of the newest record the index holds through `through` (`null` while it holds none), which the search sheet prints as "searched through <day> <time>"; every word as a prefix; `messages` searches the words, `files` the names |
 | `GET /chat/push/key` | | `{ publicKey }`, the VAPID public key |
 | `POST /chat/push/subscribe` | a push subscription | stored |
 | `DELETE /chat/push/subscribe` | `{ endpoint }` | `{ removed }` |

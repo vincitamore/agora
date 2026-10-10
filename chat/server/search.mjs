@@ -7,7 +7,9 @@
  * word of `q` must match, each as a prefix. A hit is `{ message, snippet }`: the message folded as
  * the browser gets it, and a plain-text excerpt around the match (no markup; the client escapes and
  * highlights). `context` keeps hits whose thread carries every pair, as the thread list does.
- * `coverage.through` is the last record the index holds, so a reader knows what the answer covers.
+ * `coverage.through` is the last record the index holds, so a reader knows what the answer covers,
+ * and `coverage.at` the time of the newest message or annotation it holds there, so a person can read
+ * it ("searched through 14:16").
  * A hit in a thread the person may not read (`authorize(person, "read", { thread })`) is left out.
  *
  * The index forgets at once:
@@ -68,10 +70,10 @@ export async function handleSearch(req, person, kit) {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > SEARCH_MAX) return kit.fail(400, "BAD_REQUEST", `limit is 1 to ${SEARCH_MAX}.`);
   if (!kit.hooks.authorize(person, "read", { search: true })) return kit.fail(403, "FORBIDDEN", "You cannot do that here.");
 
-  const through = kit.store.indexState().through;
+  const coverage = kit.store.coverage();
   const column = scope === "files" ? "files" : "text";
   const match = ftsQuery(q, column);
-  if (!match) return kit.json(200, { ok: true, data: { hits: [], coverage: { through } } });
+  if (!match) return kit.json(200, { ok: true, data: { hits: [], coverage } });
   /** @type {string[]} */
   const where = ["message_fts match ?", LIVE_MESSAGE];
   /** @type {Array<string | number>} */
@@ -108,7 +110,7 @@ export async function handleSearch(req, person, kit) {
     hits.push({ message, snippet: r.snippet });
     if (hits.length >= limit) break;
   }
-  return kit.json(200, { ok: true, data: { hits, coverage: { through } } });
+  return kit.json(200, { ok: true, data: { hits, coverage } });
 }
 
 /**

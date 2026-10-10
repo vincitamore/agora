@@ -290,6 +290,25 @@ function makeStore(db, storeDir) {
         setMeta("index_through", null);
       })();
     },
+    /**
+     * How far the index reaches, for a person: `through`, the last record it covers, and `at`, the
+     * time of the newest message or annotation it holds at or before that record (`null` while it
+     * holds none). The index holds one epoch, so a sequence compares within it.
+     * @returns {{ through: string | null, at: string | null }}
+     */
+    coverage() {
+      const through = getMeta("index_through");
+      const at = parseCursor(through);
+      if (!through || !at) return { through, at: null };
+      // prepared and finalized here, never a cached db.query: see once() in uploads.mjs
+      const st = db.prepare(`select max(at) as at from (
+        select ts as at from messages where seq <= ?1
+        union all select json_extract(json, '$.ts') as at from annotations where seq <= ?1)`);
+      try {
+        const row = /** @type {{ at: string | null } | null} */ (st.get(at.seq));
+        return { through, at: typeof row?.at === "string" ? row.at : null };
+      } finally { st.finalize(); }
+    },
     /** @param {string} cursor */
     setThrough(cursor) {
       const at = parseCursor(cursor);

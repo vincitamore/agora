@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 
 const { createOutbox, mentionAt, matchPeople, insertMention, scanText, newOperationId, draftKey, isMine, reactionsOf, purgedOf, DEFAULT_REACTIONS } = await import("../client/composer.js");
 const { fitWithin, reencodePlan, encodedName, uploadFile, UploadError } = await import("../client/upload.js");
-const { markRuns, queryTerms, rootOf } = await import("../client/search.js");
+const { markRuns, queryTerms, rootOf, coverageWords } = await import("../client/search.js");
 
 // ---- stand-ins: a Storage, and a room that de-duplicates by operation id ----
 
@@ -288,4 +288,12 @@ test("search: query terms are marked in the snippet as text runs, never as marku
   assert.deepEqual(markRuns("nothing", []), [{ text: "nothing", mark: false }]);
   assert.equal(rootOf({ id: "m2", thread: "m1" }), "m1");
   assert.equal(rootOf({ id: "m1" }), "m1");
+});
+
+test("search coverage reads as a time, never a cursor", () => {
+  const now = new Date(2026, 9, 10, 15, 0);
+  assert.equal(coverageWords({ through: "e1:5000", at: new Date(2026, 9, 10, 14, 16).toISOString() }, now), "searched through today 14:16");
+  assert.equal(coverageWords({ through: "e1:5000", at: new Date(2026, 9, 8, 9, 5).toISOString() }, now), "searched through thu 08 oct 09:05");
+  assert.equal(coverageWords({ through: "e1:5000", at: null }, now), "searched");
+  assert.equal(coverageWords(undefined, now), "searched");
 });
