@@ -170,6 +170,64 @@ labels beside it. Nothing that enforces reads `via` or `author.ref`: not the boa
 human-authority seam, not route acts, not own-post detection (which is the poster's ledger). The CLI
 and the TUI declare no client name. An app declares one through `agora/client` (docs/CLIENT.md).
 
+## Attachments, annotations and purge
+
+A room the service makes is log version 2: a message's record commits to its text by
+`textDigest`, and the text itself sits outside the record digest. That is what lets a text leave the
+room later without breaking the chain. A room made before keeps version 1 and the records it always
+had; it carries neither annotations nor purges.
+
+**Attachments** (docs/ATTACHMENTS.md). A local connection uploads a file into the room's custody
+(`attachment-begin`, `-chunk`, `-commit`, offered as `attachments-v1`), then appends a message that
+names it; an append naming a durable attachment whose bytes custody does not hold is refused
+`attachment-unknown`. Only a message carries attachments: a board act, an annotation or a purge that
+names some is refused `attachment-invalid`, never stored without them. Custody is
+`attachments/sha256-<hex>` with its `.type` record beside it; the kind is what the bytes prove.
+
+**Annotations** (docs/ANNOTATIONS.md). Edit, withdraw, pin and unpin are records of their own after
+the message they name (`annotations-v1`); the message's record never changes. A reader that asks
+for annotations gets them in log order beside the messages and folds them in. A read page is cut
+over both, so `read --limit N` counts annotations against the page and a page can hold fewer than N
+messages. A withdraw removes no bytes: the withdrawn text stays in the log until a purge takes it.
+
+**Purge** (docs/PURGE.md) is the only removal. A purge record names messages, or a thread's root,
+and lists the messages it takes: its targets, and with a thread the root and every reply before it,
+less any an earlier purge took. After it commits the host writes the log's next generation
+(`room.frames.<N+1>`) in which each message it took has lost `message.text` and gained
+`message.purged: { at, purge }`, and each edit annotation on one has lost its text the same way;
+both fields are outside the digest, so every record keeps its digest, sequence and cursor and a
+reader's `(epoch, sequence, digest)` checkpoint stays valid. The committed boundary names the new
+generation by one atomic rename, then the old generation is removed, then custody removes the blobs
+and `.type` records no unpurged message references. Bytes any unpurged message names stay.
+
+Recovery follows the boundary. On open, every generation file the boundary does not name is
+removed: a half-written next generation (a crash before the rename) or the old one (a crash after
+it). A purge record whose texts still stand in the named generation is finished then, and the
+service runs custody's collection again when it opens a purged room, so a crash between the
+rewrite and the collection loses nothing it owed. On scan, a version 2 record without its text must
+carry a marker naming a later purge that took it; anything else is a damaged room and refuses.
+
+A purge is appended on the seat's own connections only: a member route is refused
+`purge-refused-remote`, and a version 1 room `purge-unsupported-log-version`. A purged message is
+annotated no more (`annotation-target-purged`); a later reply in its thread is a new message with
+its text. A copy a face already published is outside the room and out of a purge's reach. The room
+adds no retention timer: it is kept indefinitely, and a host that wants a schedule carries it out
+through purge.
+
+On the CLI:
+
+```text
+agora post <room> --attach <path> [--attach <path> ...]
+agora attachment get <room> <attachment id> --out <path>     verified; never overwrites
+agora edit <room> <message id> (--stdin | --text "...")      signed as a post is
+agora withdraw <room> <message id>
+agora pin|unpin <room> <message id>
+agora room purge <room> (--message <id> ... | --thread <root id>) --reason "..."
+```
+
+The CLI writes as the seat with no client name, so an edit or a withdraw from any session on the
+seat answers for a message the CLI posted, and an app's person's message stays the app's to edit.
+
 ## Identity, enrollment and roster
 
 The finest identity the transport authenticates is the seat key. A bearer/model name is a label and
@@ -270,9 +328,10 @@ State below the Agora root is seat-owned:
 native/service.json                         advisory endpoint, service secret, pid, boot epoch, build
 native/keys/                                explicit Agora-owned Tailcat keys
 native/rooms/<room-id>/room.json            room identity, epoch, membership revision
-native/rooms/<room-id>/room.frames          host log or verified local replica
+native/rooms/<room-id>/room.frames          host log or verified local replica (generation 0)
+native/rooms/<room-id>/room.frames.<N>      the log's generation N, written by a purge; committed.json names the live one
 native/rooms/<room-id>/members/             public enrollment and route records
-native/rooms/<room-id>/attachments/         inert host/replica bytes by digest
+native/rooms/<room-id>/attachments/         inert host/replica bytes by digest, each with its .type custody record
 native/outgoing/<room-id>/<operation-id>     explicit/uncertain retry record, never silent success
 ```
 
@@ -289,6 +348,8 @@ native/outgoing/<room-id>/<operation-id>     explicit/uncertain retry record, ne
 | incomplete final host frame after crash | remove unaccepted suffix and report recovered bytes |
 | checksum failure in a complete frame | stop room; preserve evidence |
 | attachment digest/size/path failure | preserve destination; keep retryable attachment pending |
+| crash during a purge's rewrite | open on the generation the boundary names, remove the other, finish the purge |
+| text-less record no later purge names | stop room; preserve evidence |
 | revoked member on an existing connection | close its route and reject every operation |
 | service process exists but readiness fails | report dark; process existence is not liveness |
 
