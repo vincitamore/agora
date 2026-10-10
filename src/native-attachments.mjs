@@ -469,6 +469,34 @@ async function syncDirectory(directory) {
 }
 
 /**
+ * Let go of what a purge released (docs/PURGE.md): for each digest no unpurged message references
+ * (the store's `custodyCensus().released`), remove its blob and its `.type` custody record. Run
+ * under the room's custody lock, so no upload's install interleaves with it. Idempotent: a digest
+ * already gone is passed over, so the service runs it after every purge and again when it opens a
+ * purged room, which finishes a collection a crash interrupted. A blob is removed before its record,
+ * so a crash between the two leaves a record with no blob, which nothing reads and the next run removes.
+ * @param {string} roomDirectory @param {Iterable<string>} released
+ * @returns {Promise<{ blobsRemoved: number }>}
+ */
+export async function collectReleasedCustody(roomDirectory, released) {
+  const digests = [...released].filter((d) => typeof d === "string" && DIGEST_RE.test(d));
+  if (!digests.length) return { blobsRemoved: 0 };
+  return withRoomLock(roomDirectory, async () => {
+    let blobsRemoved = 0;
+    for (const digest of digests) {
+      const blob = custodyPath(roomDirectory, digest);
+      if ((await installedSize(blob)) !== undefined) {
+        await rm(blob, { force: true });
+        blobsRemoved += 1;
+      }
+      await rm(custodyRecordPath(roomDirectory, digest), { force: true });
+    }
+    if (blobsRemoved) await syncDirectory(custodyDirectory(roomDirectory)).catch(() => {});
+    return { blobsRemoved };
+  });
+}
+
+/**
  * Before a message append: every `durable` attachment it names must be installed in this room's
  * custody, its size the bytes' and its kind and type the custody record's, or the append is refused and nothing is appended. A
  * message that carries a durable attachment carries at most `perMessage` attachments in all.

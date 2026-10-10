@@ -9,7 +9,7 @@ import { NativeFrameDecoder, NATIVE_FRAME_MAX, NATIVE_PROTOCOL, encodeNativeFram
   nativeHandshakeProof, parseNativeCursor,
   validateNativeEnvelope, validateNativeId, verifyNativeHandshakeProof } from "./native-protocol.mjs";
 import { NativeRoomStore } from "./native-store.mjs";
-import { assertDurableAttachments, handleAttachmentFrame, isAttachmentFrame } from "./native-attachments.mjs";
+import { assertDurableAttachments, collectReleasedCustody, handleAttachmentFrame, isAttachmentFrame } from "./native-attachments.mjs";
 import { MEMBER_PHASES, buildRouteBinding, buildRouteDescriptor, memberHandshakeProof, memberMayRequest,
   memberTranscript, mintRouteSecret, removeRouteSecret, routeKey, validatePublicNodeKey,
   verifyMemberHandshakeProof, writeRouteSecret } from "./native-member.mjs";
@@ -535,6 +535,12 @@ export class NativeRoomService {
           await store.close();
           throw new AgoraError("native service stopped while opening the room; the room was not retained");
         }
+        // a purged room's custody lets go of what its purges released; a collection a crash
+        // interrupted is finished here (docs/PURGE.md)
+        if (store.purged.size) {
+          try { await collectReleasedCustody(store.directory, store.custodyCensus().released); }
+          catch (error) { await store.close(); throw error; }
+        }
         this.rooms.set(roomId, store);
         return store;
       })());
@@ -846,6 +852,15 @@ export class NativeRoomService {
     if (frame.type === "append") {
       const operation = frame.operation;
       if (!operation || typeof operation !== "object" || Array.isArray(operation)) throw new AgoraError("native append needs an operation object");
+      const kind = /** @type {any} */ (operation).kind;
+      // Only a message carries attachments: a board act, an annotation or a purge that names some is
+      // refused here, before custody is consulted, rather than stored without them (the store refuses
+      // the same; this keeps a custody check from being the precondition of a field that cannot land)
+      if (kind !== undefined && kind !== "message" && /** @type {any} */ (operation).attachments !== undefined)
+        throw codedRefusal("attachment-invalid", `a ${String(kind)} carries no attachments; only a message does`);
+      // A purge removes text from this seat's own record; a remote member's route never reaches it
+      if (member && kind === "purge")
+        throw codedRefusal("purge-refused-remote", "a purge is appended on this seat's own connections; a member route may not purge");
       // a durable attachment names bytes this room's custody must already hold
       if (/** @type {any} */ (operation).attachments !== undefined)
         await assertDurableAttachments({ root: this.root, socket, send: (answer) => sendFrame(socket, answer),
@@ -856,6 +871,15 @@ export class NativeRoomService {
       const receipt = /** @type {any} */ (await store.append(/** @type {any} */ (operation),
         { accountId: member ? member.binding.accountId : this.accountId,
           ...(!member && local.clientName !== undefined ? { via: local.clientName } : {}) }));
+      if (receipt.kind === "purge") {
+        // custody lets go of what this purge released; what any unpurged message names is kept.
+        // The copies a face already published are out of a purge's reach; the face record log that
+        // lists them is the faces' to read, so the list is empty until that reading lands.
+        const { blobsRemoved } = await collectReleasedCustody(store.directory, store.custodyCensus().released);
+        sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "append-ack", requestId: frame.requestId, roomId, ...receipt,
+          blobsRemoved, facesOutOfReach: [] });
+        return;
+      }
       sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "append-ack", requestId: frame.requestId, roomId, ...receipt });
       if (receipt.kind === "annotation" && !receipt.duplicate) {
         const annotation = store.view({ since: `${store.manifest.epoch}:${parseNativeCursor(receipt.cursor).sequence - 1}`, limit: 1 }).annotations[0];

@@ -44,7 +44,12 @@ export * from "./client-attachments.mjs";
 
 /** A room: an alias from the config, or a native room id. @typedef {string | { roomId: string }} RoomRef */
 /** @typedef {{ alias: string, roomId: string, transport: 'native' }} RoomInfo */
-/** A message, shaped exactly as `read --json` prints one. @typedef {ReturnType<typeof wireMessage>} ClientMessage */
+/** When a purge took a record's text, and which purge record did (docs/PURGE.md). @typedef {{ at: string, purge: string }} PurgedMarker */
+/**
+ * A message, shaped exactly as `read --json` prints one. A message a purge took carries `purged`
+ * and an empty text (docs/PURGE.md).
+ * @typedef {ReturnType<typeof wireMessage> & { purged?: PurgedMarker }} ClientMessage
+ */
 /**
  * `through` is the position the read accounts for: a room cursor, past the last message when the
  * records after it are not messages (or, on a thread read, not in the thread). `committedThrough`
@@ -55,10 +60,26 @@ export * from "./client-attachments.mjs";
  * @typedef {{ messages: ClientMessage[], annotations?: ClientAnnotation[], through: string, committedThrough?: string, gap?: ClientReadGap }} ClientReadResult
  */
 /** @typedef {{ reason: 'frame-limit', requested: number, returned: number }} ClientReadGap */
-/** An annotation, shaped exactly as `read --json` prints one (docs/ANNOTATIONS.md). @typedef {ReturnType<typeof wireAnnotation>} ClientAnnotation */
+/**
+ * An annotation, shaped exactly as `read --json` prints one (docs/ANNOTATIONS.md). An edit whose
+ * message a purge took carries `purged` and no text.
+ * @typedef {ReturnType<typeof wireAnnotation> & { purged?: PurgedMarker }} ClientAnnotation
+ */
 /** @typedef {'edit' | 'withdraw' | 'pin' | 'unpin'} AnnotationAct */
 /** @typedef {{ act: AnnotationAct, target: string, text?: string, author: ClientAuthor, operationId?: string }} AnnotateRequest */
 /** @typedef {{ id: string, cursor: string, duplicate: boolean, operationId: string }} AnnotateReceipt */
+/**
+ * A purge (docs/PURGE.md): the messages named by `targets`, and with `thread` that root and every
+ * reply, lose their text. `reason` is recorded on the purge record; `author` is who asked (`by`).
+ * @typedef {{ targets?: string[], thread?: string, reason: string, author: ClientAuthor, operationId?: string }} PurgeRequest
+ */
+/**
+ * `purged` lists the messages this purge took, in log order (an earlier purge's are not listed again);
+ * `blobsRemoved` counts the attachment blobs custody let go of; `facesOutOfReach` the copies a face
+ * already published, which a purge cannot reach.
+ * @typedef {{ id: string, cursor: string, duplicate: boolean, operationId: string, purged: string[], blobsRemoved: number,
+ *   facesOutOfReach: Array<{ transport: string, channel: string, ts: string }> }} PurgeReceipt
+ */
 /**
  * `message` sees each message once, in order. `annotation`, when given, sees each annotation once,
  * in the same order (it needs annotations-v1); without it, annotation records are passed over and
@@ -348,7 +369,8 @@ class AgoraClient {
   static #message(raw, roomId, epoch, code) {
     if (!raw || typeof raw.id !== "string" || raw.room !== roomId)
       throw refused(code, `the service delivered a message that is not one of room ${roomId}'s`);
-    const m = wireMessage(nativeMessage(raw));
+    /** @type {ClientMessage} */
+    const m = { ...wireMessage(nativeMessage(raw)), ...(AgoraClient.#purgedMarker(raw.purged) ? { purged: { at: raw.purged.at, purge: raw.purged.purge } } : {}) };
     let at;
     try { at = parseNativeCursor(m.cursor); }
     catch { throw refused(code, `the service delivered a message without a native cursor`); }
@@ -356,13 +378,21 @@ class AgoraClient {
     return { m, sequence: at.sequence };
   }
 
+  /** A purge marker as the service sends one: `{ at, purge }`. @param {any} value */
+  static #purgedMarker(value) {
+    return Boolean(value) && typeof value === "object" && typeof value.at === "string" && typeof value.purge === "string";
+  }
+
   /** @param {any} raw @param {string} epoch @param {string} code */
   static #annotation(raw, epoch, code) {
     if (!raw || typeof raw !== "object" || typeof raw.id !== "string" || !ANNOTATION_ACTS.has(raw.act) || typeof raw.target !== "string" ||
         !raw.author || typeof raw.author.id !== "string" || typeof raw.author.name !== "string" || typeof raw.author.kind !== "string" ||
-        (raw.text !== undefined && typeof raw.text !== "string") || (raw.act === "edit") !== (typeof raw.text === "string"))
+        (raw.text !== undefined && typeof raw.text !== "string") ||
+        // an edit carries its text, unless a purge took it and says so
+        (raw.act === "edit" ? typeof raw.text !== "string" && !AgoraClient.#purgedMarker(raw.purged) : typeof raw.text === "string"))
       throw refused(code, "the service delivered an annotation that is not one");
-    const a = wireAnnotation(raw);
+    /** @type {ClientAnnotation} */
+    const a = { ...wireAnnotation(raw), ...(AgoraClient.#purgedMarker(raw.purged) ? { purged: { at: raw.purged.at, purge: raw.purged.purge } } : {}) };
     let at;
     try { at = parseNativeCursor(a.cursor); }
     catch { throw refused(code, "the service delivered an annotation without a native cursor"); }
@@ -721,6 +751,82 @@ class AgoraClient {
       throw refused("receipt-mismatch", `the receipt does not answer this operation (${said(e)})`, { cause: e });
     }
     return { id: String(ack.id), cursor: String(ack.cursor), duplicate: ack.duplicate === true, operationId };
+  }
+
+  /**
+   * Purge (docs/PURGE.md): the named messages, and with `thread` that root and every reply, lose
+   * their text, and custody lets go of the attachment bytes no remaining message references. Every
+   * record keeps its place, so a reader's cursor stays valid. A version 1 room refuses
+   * `purge-unsupported-log-version`. Outcomes and resending are exactly an append's: on
+   * `unknown-acceptance` resend under the returned `operationId`, which finishes a purge whose
+   * rewrite was interrupted and answers with the original receipt.
+   * @param {RoomRef} room @param {PurgeRequest} request @returns {Promise<PurgeReceipt>}
+   */
+  async purge(room, request) {
+    const operationId = request?.operationId ?? randomUUID().replaceAll("-", "");
+    try {
+      return await this.#purge(room, request, operationId);
+    } catch (e) {
+      const error = e instanceof ClientError ? e : refused("purge-invalid", said(e), { cause: e });
+      error.operationId ??= operationId;
+      throw error;
+    }
+  }
+
+  /** @param {RoomRef} room @param {PurgeRequest} request @param {string} operationId @returns {Promise<PurgeReceipt>} */
+  async #purge(room, request, operationId) {
+    const roomId = this.#roomId(room);
+    if (typeof request !== "object" || request === null) throw refused("purge-invalid", "purge takes { targets?, thread?, reason, author, operationId? }");
+    if (typeof operationId !== "string" || !OPERATION_ID_RE.test(operationId)) throw refused("operation-id-invalid", "an operation id is 16-128 letters, digits, _ or -");
+    const targets = request.targets ?? [];
+    if (!Array.isArray(targets) || targets.length > 1000 || !targets.every((t) => typeof t === "string" && OPERATION_ID_RE.test(t)))
+      throw refused("purge-invalid", "targets is a list of up to 1000 message ids");
+    if (new Set(targets).size !== targets.length) throw refused("purge-invalid", "a purge names each target once");
+    if (request.thread !== undefined) AgoraClient.#thread(request.thread);
+    if (!targets.length && request.thread === undefined) throw refused("purge-invalid", "a purge names at least one message or a thread");
+    if (typeof request.reason !== "string" || !request.reason.trim() || request.reason.length > 1000)
+      throw refused("purge-invalid", "a purge carries a reason of 1-1000 characters");
+    const author = request.author;
+    if (typeof author?.name !== "string" || !AUTHOR_KINDS.has(author.kind) || !author.name.trim() || author.name.length > 120)
+      throw refused("author-invalid", "author is { kind: human | agent | system, name: 1-120 characters, ref? }");
+    if (author.ref !== undefined) {
+      if (this.clientName === undefined)
+        throw refused("author-ref-without-client", "an author ref is an app client's own id for the person, and this client declared no client name");
+      if (typeof author.ref !== "string" || !AUTHOR_REF_PATTERN.test(author.ref)) throw refused("author-ref-invalid", "an author ref is 1-64 letters, digits or . _ @ + -");
+    }
+    if (this.#secret !== undefined && request.reason.includes(this.#secret))
+      throw refused("service-secret-in-text", "the reason carries the seat service secret; nothing was purged");
+    let conn;
+    try { conn = await this.#live(); }
+    catch (e) {
+      const error = /** @type {ClientError} */ (e);
+      if (error.outcome === "dark") throw dark(error.code, `room-dark: ${error.message}; nothing was purged and no cursor was issued`, { cause: error, operationId });
+      throw error;
+    }
+    const { client: c, accountId } = conn;
+    if (request.thread !== undefined) AgoraClient.#threads(c, "this seat's service");
+    const operation = { kind: "purge", operationId, authorName: author.name, authorKind: author.kind,
+      purge: { targets, ...(request.thread !== undefined ? { thread: request.thread } : {}), reason: request.reason },
+      ...(author.ref !== undefined ? { authorRef: author.ref } : {}) };
+    if (nativeFramePayloadBytes({ roomId, operation, protocol: NATIVE_PROTOCOL, type: "append", requestId: "0".repeat(32) }) > NATIVE_FRAME_MAX)
+      throw refused("purge-invalid", "the purge would not fit one native frame");
+    /** @type {any} */
+    let ack;
+    try { ack = await c.request("append", { roomId, operation }); }
+    catch (e) { throw classify(e, { append: true, operationId, where: "this seat's service" }); }
+    const receipt = { roomId, accountId, operationId, id: ack?.id, cursor: ack?.cursor };
+    try {
+      const epoch = this.#epochs.get(roomId);
+      if (epoch) assertReceiptContext(receipt, { roomId, accountId, operationId, epoch });
+      else validateNativeCommitReceipt(receipt);
+    } catch (e) {
+      throw refused("receipt-mismatch", `the receipt does not answer this operation (${said(e)})`, { cause: e });
+    }
+    if (ack.kind !== "purge" || !Array.isArray(ack.purged) || !ack.purged.every((/** @type {unknown} */ id) => typeof id === "string"))
+      throw refused("receipt-mismatch", "the service did not answer with a purge receipt (an older service keeps no purge)");
+    return { id: String(ack.id), cursor: String(ack.cursor), duplicate: ack.duplicate === true, operationId,
+      purged: [...ack.purged], blobsRemoved: Number.isSafeInteger(ack.blobsRemoved) ? ack.blobsRemoved : 0,
+      facesOutOfReach: Array.isArray(ack.facesOutOfReach) ? ack.facesOutOfReach : [] };
   }
 
   /**
