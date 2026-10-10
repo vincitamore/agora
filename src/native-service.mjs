@@ -39,7 +39,7 @@ function codedRefusal(code, detail) {
  * older service ignores a field it does not know and would answer the whole room.
  * `client-name-v1` is local-only: a member session cannot declare a client name.
  */
-const LOCAL_OFFER = validateCapabilityOffer({ advertised: ["threads-v1", "client-name-v1", "attachments-v1", "annotations-v1"], required: [] });
+const LOCAL_OFFER = validateCapabilityOffer({ advertised: ["threads-v1", "client-name-v1", "attachments-v1", "annotations-v1", "purge-v1"], required: [] });
 const MEMBER_OFFER = validateCapabilityOffer({ advertised: ["threads-v1"], required: [] });
 
 const MAX_PENDING_WRITE = 2 * 1024 * 1024;
@@ -454,7 +454,7 @@ export class NativeRoomService {
      * shapes; #broadcast writes through sendFrame, which is duck-typed for the same reason.
      * Per stream, per room: the last sequence written to it, and the thread a thread-scoped
      * subscription narrows to.
-     * @type {Map<net.Socket | import("node:stream").Duplex, Map<string, { sequence: number, thread?: string, annotations?: boolean }>>} */
+     * @type {Map<net.Socket | import("node:stream").Duplex, Map<string, { sequence: number, thread?: string, annotations?: boolean, purges?: boolean }>>} */
     this.subscriptions = new Map();
     /** @type {number | undefined} */
     this.panePid = undefined;
@@ -748,6 +748,11 @@ export class NativeRoomService {
       if (frame.annotations !== undefined && typeof frame.annotations !== "boolean")
         throw codedRefusal("annotations-invalid", "annotations is true or false");
       const withAnnotations = frame.annotations === true;
+      // purge-v1 (docs/PURGE.md): a subscriber asks for purge events by name; one that does not is
+      // carried past purge records, as past board records
+      if (frame.purges !== undefined && typeof frame.purges !== "boolean")
+        throw codedRefusal("purges-invalid", "purges is true or false");
+      const withPurges = frame.purges === true;
       if (frame.type === "read") {
         const view = store.view({ ...(since ? { since } : {}), ...(limit !== undefined ? { limit } : {}), ...(thread !== undefined ? { thread } : {}) });
         // annotations-v1: a reader that asks for annotations gets them in log order beside the
@@ -827,10 +832,11 @@ export class NativeRoomService {
       if (backlogCount > 10_000)
         throw new AgoraError(`native subscription backlog has ${backlogCount} records; read forward before subscribing (no cursor advanced)`);
       const replay = backlogCount ? store.view({ since, limit: backlogCount, ...(thread !== undefined ? { thread } : {}) }) : undefined;
-      /** @type {{ message?: any, annotation?: any, cursor: string }[]} the replay in log order; annotations only when asked for */
+      /** @type {{ message?: any, annotation?: any, purge?: any, cursor: string }[]} the replay in log order; annotations and purges only when asked for */
       const backlog = !replay ? []
         : [...replay.messages.map((message) => ({ message, cursor: message.cursor })),
-          ...(withAnnotations ? replay.annotations.map((annotation) => ({ annotation, cursor: annotation.cursor })) : [])]
+          ...(withAnnotations ? replay.annotations.map((annotation) => ({ annotation, cursor: annotation.cursor })) : []),
+          ...(withPurges ? replay.purges.map((purge) => ({ purge, cursor: purge.cursor })) : [])]
           .sort((x, y) => parseNativeCursor(x.cursor).sequence - parseNativeCursor(y.cursor).sequence);
       // One event frame per message, so the batch bound above does not apply -- but a SINGLE
       // oversized message still cannot cross, and it would surface here as the encoder's byte
@@ -838,6 +844,8 @@ export class NativeRoomService {
       const replayFrames = backlog.map((entry) => {
         const event = entry.annotation
           ? { protocol: NATIVE_PROTOCOL, type: "event", requestId: entry.annotation.id, roomId, annotation: entry.annotation }
+          : entry.purge
+          ? { protocol: NATIVE_PROTOCOL, type: "event", requestId: entry.purge.id, roomId, purge: entry.purge }
           : { protocol: NATIVE_PROTOCOL, type: "event", requestId: entry.message.id, roomId, message: entry.message };
         const size = nativeFramePayloadBytes(event);
         if (size > NATIVE_FRAME_MAX)
@@ -853,7 +861,7 @@ export class NativeRoomService {
         throw new AgoraError(`native subscription backlog needs ${replayBytes} buffered bytes; read forward before subscribing (no cursor advanced)`);
       for (const encoded of replayFrames) socket.write(encoded);
       this.subscriptions.get(socket)?.set(roomId, { sequence: committed, ...(thread !== undefined ? { thread } : {}),
-        ...(withAnnotations ? { annotations: true } : {}) });
+        ...(withAnnotations ? { annotations: true } : {}), ...(withPurges ? { purges: true } : {}) });
       socket.write(resultFrame);
       return;
     }
@@ -899,6 +907,10 @@ export class NativeRoomService {
           { requested: () => this.testHooks?.collectionRequested?.(roomId) });
         sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "append-ack", requestId: frame.requestId, roomId, ...receipt,
           blobsRemoved, facesOutOfReach: [] });
+        if (!receipt.duplicate) {
+          const purge = store.view({ since: `${store.manifest.epoch}:${parseNativeCursor(receipt.cursor).sequence - 1}`, limit: 1 }).purges[0];
+          if (purge) this.#broadcastPurge(roomId, purge, store);
+        }
         return;
       }
       sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "append-ack", requestId: frame.requestId, roomId, ...receipt });
@@ -926,6 +938,32 @@ export class NativeRoomService {
         continue;
       }
       if (sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "event", requestId: message.id, roomId, message })) rooms.set(roomId, { ...held, sequence });
+    }
+  }
+
+  /**
+   * A purge goes to the subscriptions that asked for purges (purge-v1) and, on a thread
+   * subscription, only when it took one of that thread's messages, narrowed to those. Every other
+   * subscription is carried past it, as past a board record.
+   * @param {string} roomId @param {any} purge @param {NativeRoomStore} store
+   */
+  #broadcastPurge(roomId, purge, store) {
+    const sequence = parseNativeCursor(purge.cursor).sequence;
+    for (const [socket, rooms] of this.subscriptions) {
+      const held = rooms.get(roomId);
+      if (held === undefined || !held.purges || sequence <= held.sequence) continue;
+      let event = purge;
+      if (held.thread !== undefined) {
+        // a thread subscription hears of the purge only for its own thread's messages
+        const purged = purge.purged.filter((/** @type {string} */ id) => {
+          const at = store.messageIndex.get(id);
+          const m = at === undefined ? undefined : store.records[at].message;
+          return m !== undefined && (m.id === held.thread || m.thread === held.thread);
+        });
+        if (!purged.length) continue;
+        event = { ...purge, purged };
+      }
+      if (sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "event", requestId: purge.id, roomId, purge: event })) rooms.set(roomId, { ...held, sequence });
     }
   }
 
@@ -1362,6 +1400,9 @@ export class NativeServiceClient {
     /** The annotation listeners of subscriptions that asked for annotations (annotations-v1).
      * @type {Map<string, Set<(annotation: any) => void>>} */
     this.annotationListeners = new Map();
+    /** The purge listeners of subscriptions that asked for purges (purge-v1).
+     * @type {Map<string, Set<(purge: any) => void>>} */
+    this.purgeListeners = new Map();
     /** What the service offered on its welcome; empty for a service that predates offers, which
      * serves no request that needs one. Set by `connect` (or by the member handshake).
      * @type {Set<string>} */
@@ -1470,19 +1511,23 @@ export class NativeServiceClient {
    * `onAnnotation`, when given, asks the service for annotation events too (annotations-v1); the
    * caller checks the capability first, as for a thread.
    * @param {string} roomId @param {string} since @param {(message: any) => void} listener @param {string} [thread]
-   * @param {(annotation: any) => void} [onAnnotation]
+   * `onPurge`, when given, asks for purge events (purge-v1), the capability checked by the caller.
+   * @param {(annotation: any) => void} [onAnnotation] @param {(purge: any) => void} [onPurge]
    */
-  async subscribe(roomId, since, listener, thread, onAnnotation) {
+  async subscribe(roomId, since, listener, thread, onAnnotation, onPurge) {
     const listeners = this.listeners.get(roomId) ?? new Set();
     listeners.add(listener); this.listeners.set(roomId, listeners);
     const annotationListeners = this.annotationListeners.get(roomId) ?? new Set();
     if (onAnnotation) { annotationListeners.add(onAnnotation); this.annotationListeners.set(roomId, annotationListeners); }
+    const purgeListeners = this.purgeListeners.get(roomId) ?? new Set();
+    if (onPurge) { purgeListeners.add(onPurge); this.purgeListeners.set(roomId, purgeListeners); }
     try {
       return await this.request("subscribe", { roomId, since, ...(thread !== undefined ? { thread } : {}),
-        ...(onAnnotation ? { annotations: true } : {}) });
+        ...(onAnnotation ? { annotations: true } : {}), ...(onPurge ? { purges: true } : {}) });
     } catch (e) {
       listeners.delete(listener);
       if (onAnnotation) annotationListeners.delete(onAnnotation);
+      if (onPurge) purgeListeners.delete(onPurge);
       throw e;
     }
   }
@@ -1499,6 +1544,11 @@ export class NativeServiceClient {
         // an annotation event reaches only a subscription that asked for annotations
         if (frame.annotation !== undefined && frame.message === undefined) {
           for (const listener of this.annotationListeners.get(frame.roomId) ?? []) listener(frame.annotation);
+          continue;
+        }
+        // a purge event reaches only a subscription that asked for purges
+        if (frame.purge !== undefined && frame.message === undefined) {
+          for (const listener of this.purgeListeners.get(frame.roomId) ?? []) listener(frame.purge);
           continue;
         }
         for (const listener of this.listeners.get(frame.roomId) ?? []) listener(frame.message);

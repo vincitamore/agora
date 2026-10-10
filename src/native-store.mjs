@@ -1352,10 +1352,17 @@ export class NativeRoomStore {
     const annotationInView = (a) => thread === undefined || inView(this.records[/** @type {number} */ (this.messageIndex.get(a.target))].message);
     /** @param {any[]} records */
     const annotations = (records) => records.filter((r) => r.kind === "annotation" && annotationInView(r.annotation)).map((r) => withoutTextDigest(r.annotation));
+    /** A purge as a reader receives it; in a thread view, narrowed to the thread's messages and
+     * present only when it took one of them. @param {any[]} records */
+    const purges = (records) => records.filter((r) => r.kind === "purge").map((r) => {
+      const p = structuredClone(r.purge);
+      if (thread !== undefined) p.purged = p.purged.filter((/** @type {string} */ id) => inView(this.records[/** @type {number} */ (this.messageIndex.get(id))].message));
+      return p;
+    }).filter((p) => p.purged.length);
     if (!options.since) {
       if (thread === undefined) {
         const window = this.records.slice(-limit);
-        return { messages: messages(window), annotations: annotations(window), through: this.records.length };
+        return { messages: messages(window), annotations: annotations(window), purges: purges(window), through: this.records.length };
       }
       const at = /** @type {number} */ (this.messageIndex.get(thread));
       const indices = [at, ...(this.threadIndex.get(thread) ?? [])].sort((a, b) => a - b).slice(-limit);
@@ -1363,7 +1370,7 @@ export class NativeRoomStore {
       const from = indices[0] ?? 0;
       const named = indices.flatMap((i) => this.annotationIndex.get(this.records[i].message.id) ?? []).filter((i) => i >= from).sort((a, b) => a - b);
       return { messages: indices.map((i) => withoutTextDigest(this.records[i].message)),
-        annotations: named.map((i) => withoutTextDigest(this.records[i].annotation)), through: this.records.length };
+        annotations: named.map((i) => withoutTextDigest(this.records[i].annotation)), purges: purges(this.records.slice(from)), through: this.records.length };
     }
     const cursor = parseNativeCursor(options.since);
     // The plan (which sequences a read delivers, or a refusal that advances nothing) is decided by
@@ -1374,7 +1381,7 @@ export class NativeRoomStore {
     if (plan.$ === "RefusedEpoch") throw new AgoraError(`native room cursor belongs to epoch ${cursor.epoch}, not live epoch ${this.manifest.epoch}; recover explicitly without advancing`);
     if (plan.$ === "RefusedFuture") throw new AgoraError(`native room cursor ${cursor.sequence} exceeds committed sequence ${this.records.length}; recover explicitly without advancing`);
     const selected = this.records.slice(Number(plan.from) - 1, Number(plan.to));
-    return { messages: messages(selected), annotations: annotations(selected), through: Number(plan.to) };
+    return { messages: messages(selected), annotations: annotations(selected), purges: purges(selected), through: Number(plan.to) };
   }
 
   /**

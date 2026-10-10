@@ -86,7 +86,15 @@ export * from "./client-attachments.mjs";
  * the cursor still advances across them. `dark` and `refused` see the end of an established
  * subscription, at most one of them, once; a subscription that cannot be established rejects
  * `subscribe` instead and calls neither.
- * @typedef {{ message: (m: ClientMessage) => void, annotation?: (a: ClientAnnotation) => void, dark?: (error: ClientError) => void, refused?: (error: ClientError) => void }} SubscribeHandlers
+ * `purge`, when given, sees each purge once, in the same order (it needs purge-v1): the messages a
+ * purge took, so a reader strikes text it already shows (`foldPurges`); without it, purge records
+ * are passed over and the cursor still advances across them.
+ * @typedef {{ message: (m: ClientMessage) => void, annotation?: (a: ClientAnnotation) => void, purge?: (p: ClientPurge) => void, dark?: (error: ClientError) => void, refused?: (error: ClientError) => void }} SubscribeHandlers
+ */
+/**
+ * A purge as a subscriber receives it (docs/PURGE.md): `purged` lists the messages it took, in log
+ * order (on a thread subscription, only that thread's).
+ * @typedef {{ id: string, cursor: string, ts: string, purged: string[], thread?: string, reason: string, by: { name: string, ref?: string }, via?: string }} ClientPurge
  */
 /** `cursor` is the last position delivered or covered. @typedef {{ readonly cursor: string, close(): void }} ClientSubscription */
 /** `ref` is the app's own id for the person, stamped as `author.ref`; only on a client that declared a name. @typedef {{ kind: 'human' | 'agent' | 'system', name: string, ref?: string }} ClientAuthor */
@@ -97,13 +105,38 @@ export * from "./client-attachments.mjs";
  */
 /** @typedef {{ id: string, cursor: string, duplicate: boolean, operationId: string }} AppendReceipt */
 /** @typedef {'live' | 'dark' | 'refused'} FollowState */
-/** @typedef {{ message: (m: ClientMessage) => void, annotation?: (a: ClientAnnotation) => void, state?: (state: FollowState, error?: ClientError) => void }} FollowHandlers */
+/** @typedef {{ message: (m: ClientMessage) => void, annotation?: (a: ClientAnnotation) => void, purge?: (p: ClientPurge) => void, state?: (state: FollowState, error?: ClientError) => void }} FollowHandlers */
 /** @typedef {{ readonly cursor: string | undefined, close(): void }} Follow */
 /** @typedef {{ state?: string, config?: string, clientName?: string }} ConnectOptions */
 /** @typedef {AgoraClient} Client */
 
 /** The capability a service offers when it carries annotations (docs/ANNOTATIONS.md). */
 export const ANNOTATIONS_CAPABILITY = "annotations-v1";
+/** The capability a service offers when it keeps purges and sends them to subscribers (docs/PURGE.md). */
+export const PURGE_CAPABILITY = "purge-v1";
+
+/**
+ * Mark the messages purges took (docs/PURGE.md): each named message comes back with an empty text,
+ * `purged: { at, purge }`, and nothing read off its old text (trailers, `to`, signature, offer). A
+ * reader that already shows a message strikes it with this when a purge event arrives. Pure: it
+ * returns new messages in the same order, ignores ids not among them, and keeps a marker a message
+ * already carries.
+ * @template {ClientMessage} M
+ * @param {readonly M[]} messages @param {readonly ClientPurge[]} purges
+ * @returns {Array<M & { purged?: PurgedMarker }>}
+ */
+export function foldPurges(messages, purges) {
+  /** @type {Map<string, PurgedMarker>} */
+  const taken = new Map();
+  const ordered = [...purges].sort((x, y) => parseNativeCursor(x.cursor).sequence - parseNativeCursor(y.cursor).sequence);
+  for (const p of ordered) for (const id of p.purged) if (!taken.has(id)) taken.set(id, { at: p.ts, purge: p.id });
+  return messages.map((m) => {
+    const marker = m.purged ?? taken.get(m.id);
+    if (!marker) return /** @type {any} */ ({ ...m });
+    const { to: _to, trailers: _trailers, offer: _offer, signedAs: _signedAs, ...rest } = /** @type {any} */ (m);
+    return /** @type {any} */ ({ ...rest, text: "", purged: { ...marker } });
+  });
+}
 const ANNOTATION_ACTS = new Set(["edit", "withdraw", "pin", "unpin"]);
 
 /**
@@ -400,6 +433,23 @@ class AgoraClient {
     return { a, sequence: at.sequence };
   }
 
+  /** @param {any} raw @param {string} epoch @param {string} code */
+  static #purgeEvent(raw, epoch, code) {
+    const ok = raw && typeof raw === "object" && typeof raw.id === "string" && typeof raw.ts === "string" && typeof raw.reason === "string" &&
+      Array.isArray(raw.purged) && raw.purged.every((/** @type {unknown} */ id) => typeof id === "string") &&
+      raw.by && typeof raw.by.name === "string" && (raw.thread === undefined || typeof raw.thread === "string");
+    if (!ok) throw refused(code, "the service delivered a purge that is not one");
+    let at;
+    try { at = parseNativeCursor(String(raw.cursor)); }
+    catch { throw refused(code, "the service delivered a purge without a native cursor"); }
+    if (at.epoch !== epoch) throw refused(code, `the service delivered a purge of epoch ${at.epoch}, not ${epoch}`);
+    /** @type {ClientPurge} */
+    const p = { id: raw.id, cursor: String(raw.cursor), ts: raw.ts, purged: [...raw.purged], ...(raw.thread !== undefined ? { thread: raw.thread } : {}),
+      reason: raw.reason, by: { name: raw.by.name, ...(typeof raw.by.ref === "string" ? { ref: raw.by.ref } : {}) },
+      ...(typeof raw.via === "string" ? { via: raw.via } : {}) };
+    return { p, sequence: at.sequence };
+  }
+
   /** @param {NativeServiceClient} c @param {string} where @param {string} what */
   static #annotations(c, where, what) {
     if (c.capabilities.has(ANNOTATIONS_CAPABILITY)) return;
@@ -499,13 +549,17 @@ class AgoraClient {
     AgoraClient.#thread(thread);
     if (typeof handlers?.message !== "function") throw refused("handlers-invalid", "subscribe needs handlers with a message function");
     if (handlers.annotation !== undefined && typeof handlers.annotation !== "function") throw refused("handlers-invalid", "an annotation handler is a function");
+    if (handlers.purge !== undefined && typeof handlers.purge !== "function") throw refused("handlers-invalid", "a purge handler is a function");
     const wantsAnnotations = typeof handlers.annotation === "function";
+    const wantsPurges = typeof handlers.purge === "function";
     const { client: c, path: endpoint } = await this.#dial(undefined);
     const where = `the seat service at ${endpoint}`;
     let from = since;
     try {
       if (thread !== undefined) AgoraClient.#threads(c, where);
       if (wantsAnnotations) AgoraClient.#annotations(c, where, "never deliver an annotation");
+      if (wantsPurges && !c.capabilities.has(PURGE_CAPABILITY))
+        throw refused("purge-unsupported", `${where} does not offer ${PURGE_CAPABILITY}, so it would never deliver a purge; nothing was sent`);
       if (from === undefined) {
         const status = /** @type {any} */ (await c.request("status", { roomId }))?.status;
         try { from = nativeCursor(status?.epoch, status?.committed); }
@@ -536,8 +590,18 @@ class AgoraClient {
       c.close();
       if (ending && was === "open") handlers[ending.kind]?.(ending.error);
     };
-    /** @param {{ message?: any, annotation?: any }} event */
+    /** @param {{ message?: any, annotation?: any, purge?: any }} event */
     const deliver = (event) => {
+      if (event.purge !== undefined) {
+        let read;
+        try { read = AgoraClient.#purgeEvent(event.purge, epoch, "event-invalid"); }
+        catch (e) { return finish({ kind: "refused", error: /** @type {ClientError} */ (e) }); }
+        if (read.sequence <= position) return;
+        try { handlers.purge?.(read.p); }
+        catch (e) { return finish({ kind: "refused", error: refused("handler-threw", `the purge handler threw at ${read.p.cursor}: ${said(e)}; the subscription ended before it`, { cause: e }) }); }
+        position = read.sequence;
+        return;
+      }
       if (event.annotation !== undefined) {
         let read;
         try { read = AgoraClient.#annotation(event.annotation, epoch, "event-invalid"); }
@@ -556,7 +620,7 @@ class AgoraClient {
       catch (e) { return finish({ kind: "refused", error: refused("handler-threw", `the message handler threw at ${read.m.cursor}: ${said(e)}; the subscription ended before it`, { cause: e }) }); }
       position = read.sequence;
     };
-    /** @param {{ message?: any, annotation?: any }} event */
+    /** @param {{ message?: any, annotation?: any, purge?: any }} event */
     const accept = (event) => {
       if (state === "opening") pending.push(event);
       else if (state === "open") deliver(event);
@@ -565,10 +629,12 @@ class AgoraClient {
     const listener = (raw) => accept({ message: raw });
     /** @param {any} raw */
     const annotationListener = (raw) => accept({ annotation: raw });
+    /** @param {any} raw */
+    const purgeListener = (raw) => accept({ purge: raw });
     this.#open.add(handle);
     c.socket.once("close", () => finish({ kind: "dark", error: dark("service-dark", `${where} closed the connection`) }));
     try {
-      const result = /** @type {any} */ (await c.subscribe(roomId, from, listener, thread, wantsAnnotations ? annotationListener : undefined));
+      const result = /** @type {any} */ (await c.subscribe(roomId, from, listener, thread, wantsAnnotations ? annotationListener : undefined, wantsPurges ? purgeListener : undefined));
       let checkpoint;
       try { checkpoint = validateNativeCheckpoint(result?.checkpoint); }
       catch (e) { throw refused("subscribe-result-invalid", `the subscription carried no valid checkpoint (${said(e)})`, { cause: e }); }
@@ -805,6 +871,8 @@ class AgoraClient {
     }
     const { client: c, accountId } = conn;
     if (request.thread !== undefined) AgoraClient.#threads(c, "this seat's service");
+    if (!c.capabilities.has(PURGE_CAPABILITY))
+      throw refused("purge-unsupported", `this seat's service does not offer ${PURGE_CAPABILITY}, so it keeps no purge; nothing was purged`);
     const operation = { kind: "purge", operationId, authorName: author.name, authorKind: author.kind,
       purge: { targets, ...(request.thread !== undefined ? { thread: request.thread } : {}), reason: request.reason },
       ...(author.ref !== undefined ? { authorRef: author.ref } : {}) };
@@ -880,7 +948,9 @@ class AgoraClient {
     AgoraClient.#thread(thread);
     if (typeof handlers?.message !== "function") throw refused("handlers-invalid", "follow needs handlers with a message function");
     if (handlers.annotation !== undefined && typeof handlers.annotation !== "function") throw refused("handlers-invalid", "an annotation handler is a function");
+    if (handlers.purge !== undefined && typeof handlers.purge !== "function") throw refused("handlers-invalid", "a purge handler is a function");
     const onAnnotation = handlers.annotation;
+    const onPurge = handlers.purge;
     const ladder = tuning.backoffMs ?? FOLLOW_BACKOFF_MS;
     if (!Array.isArray(ladder) || !ladder.length || !ladder.every((ms) => Number.isFinite(ms) && ms >= 0))
       throw refused("backoff-invalid", "backoffMs is a non-empty list of non-negative milliseconds");
@@ -929,6 +999,12 @@ class AgoraClient {
             if (stopped) return;
             onAnnotation(a);
             cursor = a.cursor;
+          } } : {}),
+          // a purge moves the cursor too, so it is handed over once across a dark period
+          ...(onPurge ? { purge: (/** @type {ClientPurge} */ p) => {
+            if (stopped) return;
+            onPurge(p);
+            cursor = p.cursor;
           } } : {}),
           dark: ended,
           refused: ended,
