@@ -291,9 +291,52 @@ async function readAllStdin() {
 }
 
 /**
+ * An image's width and height read from its header bytes, for PNG, JPEG, GIF and WebP (the kinds
+ * custody calls an image); undefined when the bytes are not one of them or the header does not say.
+ * Nothing past the header is decoded.
+ * @param {Uint8Array} input @returns {{ width: number, height: number } | undefined}
+ */
+export function imageDimensions(input) {
+  const b = Buffer.from(input.buffer, input.byteOffset, input.byteLength);
+  /** @param {number} width @param {number} height */
+  const sized = (width, height) => Number.isSafeInteger(width) && Number.isSafeInteger(height) && width > 0 && height > 0 ? { width, height } : undefined;
+  // PNG: the signature, then the IHDR chunk's width and height, big-endian
+  if (b.length >= 24 && b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) && b.toString("latin1", 12, 16) === "IHDR")
+    return sized(b.readUInt32BE(16), b.readUInt32BE(20));
+  // GIF: the logical screen's width and height, little-endian
+  if (b.length >= 10 && (b.toString("latin1", 0, 6) === "GIF87a" || b.toString("latin1", 0, 6) === "GIF89a"))
+    return sized(b.readUInt16LE(6), b.readUInt16LE(8));
+  // WebP: RIFF....WEBP, then a lossy, lossless or extended first chunk
+  if (b.length >= 30 && b.toString("latin1", 0, 4) === "RIFF" && b.toString("latin1", 8, 12) === "WEBP") {
+    const chunk = b.toString("latin1", 12, 16);
+    if (chunk === "VP8 " && b[23] === 0x9d && b[24] === 0x01 && b[25] === 0x2a) return sized(b.readUInt16LE(26) & 0x3fff, b.readUInt16LE(28) & 0x3fff);
+    if (chunk === "VP8L" && b[20] === 0x2f) return sized(1 + (b[21] | ((b[22] & 0x3f) << 8)), 1 + ((b[22] >> 6) | (b[23] << 2) | ((b[24] & 0x0f) << 10)));
+    if (chunk === "VP8X") return sized(1 + b.readUIntLE(24, 3), 1 + b.readUIntLE(27, 3));
+    return undefined;
+  }
+  // JPEG: walk the segments to the first start-of-frame, whose height and width are big-endian
+  if (b.length >= 4 && b[0] === 0xff && b[1] === 0xd8) {
+    let i = 2;
+    while (i + 3 < b.length) {
+      if (b[i] !== 0xff) return undefined;
+      const marker = b[i + 1];
+      if (marker === 0xff) { i += 1; continue; }
+      // markers that carry no length
+      if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd9)) { i += 2; continue; }
+      const length = b.readUInt16BE(i + 2);
+      if (length < 2) return undefined;
+      const sof = marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc;
+      if (sof) return i + 9 <= b.length ? sized(b.readUInt16BE(i + 7), b.readUInt16BE(i + 5)) : undefined;
+      i += 2 + length;
+    }
+  }
+  return undefined;
+}
+
+/**
  * `post --attach`: upload each path into the room's custody and resolve with the references the
  * post carries, in the order given. The kind is what the bytes prove; a file's declared type comes
- * from its extension where one is known.
+ * from its extension where one is known, and an image carries the width and height its header says.
  * @param {{ roomAlias: string, room: Record<string, any>, cfg: import("./core.mjs").Config, stateRoot: string, paths: string[] }} context
  * @returns {Promise<import("./protocol/attachment.mjs").WireAttachment[]>}
  */
@@ -314,7 +357,9 @@ export async function prepareAttachments(context) {
     const refs = [];
     for (const { file, bytes } of files) {
       const declared = DECLARED_TYPES[path.extname(file).toLowerCase()];
-      refs.push(await app.upload(context.roomAlias, { bytes, name: path.basename(file).slice(0, 255), ...(declared ? { mimetype: declared } : {}) }));
+      const dimensions = imageDimensions(bytes);
+      refs.push(await app.upload(context.roomAlias, { bytes, name: path.basename(file).slice(0, 255), ...(declared ? { mimetype: declared } : {}),
+        ...(dimensions ?? {}) }));
     }
     return refs;
   } catch (e) { throw asCliError(e); }

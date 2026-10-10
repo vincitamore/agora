@@ -200,6 +200,18 @@ reader's `(epoch, sequence, digest)` checkpoint stays valid. The committed bound
 generation by one atomic rename, then the old generation is removed, then custody removes the blobs
 and `.type` records no unpurged message references. Bytes any unpurged message names stay.
 
+The collection reads the room's references under the custody lock that every install takes, and
+the service checks and commits an append that names durable bytes under the same lock, so bytes are
+never collected between the check that found them and the commit that references them. An upload
+holds its digest (installed, or found already in custody) until an append names it or an hour
+passes, and the collection passes over a held digest; a later collection (the next purge, or the
+next open of the room) takes whatever is still unreferenced.
+
+A subscription that asks for purges (`purges: true`, offered as `purge-v1`) receives each purge as
+an event `{ id, cursor, ts, purged, thread?, reason, by, via? }`, in its replay and live, in log
+order among the messages; a thread subscription hears only of its own thread's messages, narrowed
+to those. A subscription that does not ask is carried past purge records as past board records.
+
 Recovery follows the boundary. On open, every generation file the boundary does not name is
 removed: a half-written next generation (a crash before the rename) or the old one (a crash after
 it). A purge record whose texts still stand in the named generation is finished then, and the

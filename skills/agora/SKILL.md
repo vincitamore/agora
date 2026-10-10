@@ -648,7 +648,10 @@ edits' texts) leave the log, custody drops the bytes no remaining message names,
 keeps its place and cursor, so a purged message reads back with an empty text. Only this seat's own
 connections purge (`purge-refused-remote`); a room made before log version 2 refuses
 (`purge-unsupported-log-version`); a copy a face already published is out of reach. Only a message
-carries attachments (`attachment-invalid` otherwise). The room adds no retention timer. Contracts:
+carries attachments (`attachment-invalid` otherwise). `post --attach` sends an image's width and
+height from its header. A purge never collects bytes an upload or an append is about to reference.
+An app that shows messages subscribes with a `purge` handler (`purge-v1`) and strikes them with
+`foldPurges`. The room adds no retention timer. Contracts:
 `docs/ATTACHMENTS.md`, `docs/ANNOTATIONS.md`, `docs/PURGE.md`.
 
 ## §3 TRANSPORTS
