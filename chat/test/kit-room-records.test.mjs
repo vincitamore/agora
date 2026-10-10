@@ -4,12 +4,12 @@
 // what the kit's stream and routes show of each, and a mention in the thread pushed to a loopback
 // push service under the host's thread URL template.
 //
-// What the kit does not yet do with a purge made outside it is printed as a `gap:` line rather than
-// asserted, so the test states what composes and names what does not.
+// A purge made outside the kit reaches it: a purge event on the stream, the index's text forgotten
+// at once, and the file route answering 404 for the purged reply's PNG.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { startSeat } from "./seat-service.mjs";
@@ -162,8 +162,12 @@ test("a kit thread, a PNG reply from the CLI, its edit and purge, and a pushed m
   const thread = await call("p-ada", `/chat/thread/${rootId}`);
   assert.equal(thread.status, 200);
   assert.equal(thread.body.data.messages.find((/** @type {any} */ m) => m.id === reply.id)?.attachments?.[0]?.digest, att.digest, "the thread route shows the same attachment");
-  const fileRoute = await call("p-ada", `/chat/file/${att.id}?digest=${att.digest}`);
-  if (fileRoute.status !== 200) console.log(`gap: GET /chat/file answers ${fileRoute.status} (${fileRoute.body?.error?.code ?? ""}): the kit's file route is K1b's`);
+  const fileRes = await fetch(`${base}/chat/file/${att.id}?digest=${encodeURIComponent(att.digest)}`, { headers: { "x-person": "p-ada" } });
+  assert.equal(fileRes.status, 200, "the kit's file route streams the reply's PNG from custody");
+  assert.equal(fileRes.headers.get("content-type"), "image/png");
+  assert.equal(fileRes.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(fileRes.headers.get("cache-control"), "private");
+  assert.deepEqual(new Uint8Array(await fileRes.arrayBuffer()), new Uint8Array(await readFile(file)), "the bytes are the file's");
 
   // the agent edits the reply from the CLI: the kit's stream carries the annotation with the folded message
   const edited = lines((await seat.agora(["edit", seat.alias, reply.id, "--text", "the photo of the panel, cropped", "--json"])).stdout)[0];
@@ -183,8 +187,11 @@ test("a kit thread, a PNG reply from the CLI, its edit and purge, and a pushed m
   await seat.agora(["post", seat.alias, "after the purge", "--thread", rootId]);
   await stream.until(() => stream.of("message").some((e) => e.data.text?.startsWith("after the purge")), "a message after the purge");
   assert.equal(stream.of("state").filter((e) => e.data.state !== "live").length, 0, "the stream never went dark or refused over the purge");
-  const purgeEvents = stream.of("purge");
-  if (!purgeEvents.length) console.log("gap: the kit's stream carries no purge event: K1's follow asks for no purges (purge-v1); K1b wires A3's purge handler");
+  const purgeEvent = /** @type {any} */ (await stream.until(() => stream.of("purge").find((e) => e.data.purged?.includes(reply.id)), "the purge on the kit's stream")).data;
+  assert.deepEqual(purgeEvent.purged, [reply.id], "the thread's stream hears the purge of its reply");
+  assert.equal(purgeEvent.reason, "asked to remove the photo");
+  assert.ok(purgeEvent.by?.name, "the purge names who asked");
+  assert.equal((await call("p-ada", `/chat/file/${att.id}?digest=${encodeURIComponent(att.digest)}`)).status, 404, "the purged reply's file is gone");
 
   // a read through the kit after the purge: the room's read path shows the reply without its text
   const afterRead = await call("p-ada", `/chat/thread/${rootId}`);
@@ -200,7 +207,7 @@ test("a kit thread, a PNG reply from the CLI, its edit and purge, and a pushed m
   const kitDb = new Database(path.join(dir, "kit", "kit.sqlite"), { readonly: true });
   try {
     const fts = /** @type {any} */ (kitDb.query("select text from message_fts where id = ?").get(reply.id));
-    if (fts && /photo of the panel/.test(String(fts.text))) console.log("gap: the kit's search index still holds the purged reply's text (a purge made outside the kit reaches the index only on a rebuild; K1b's purge handler calls forgetText)");
+    assert.equal(fts, null, "the kit's search index forgot the purged reply's text when the purge arrived");
   } finally { kitDb.close(); }
 
   // a mention in the thread is pushed to Grace under the host's thread URL

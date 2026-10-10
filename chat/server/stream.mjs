@@ -14,6 +14,8 @@
  * - `message`: a message, folded (an edit's text, `edited`, `withdrawn`, `pinned`), `id:` its cursor;
  * - `annotation`: `{ ...annotation, message }`, the annotation and its target as now folded (or
  *   null when the kit has not seen the target), `id:` its cursor;
+ * - `purge`: `{ id, cursor, ts, purged, thread?, reason, by }`, the messages a purge took (on a
+ *   thread's stream, only that thread's), `id:` its cursor; the browser strikes their text;
  * - `state`: `{ state: 'live' | 'dark' | 'refused', reason?, through? }`; the first after the history
  *   carries `through` and `id:` it, so a reconnecting EventSource resumes from there;
  * - `presence`: the host's presence for the resident, `{ name, state, lastSeen?, running? }`,
@@ -25,6 +27,7 @@
 
 import { parseCursor } from "./store.mjs";
 import { asFault } from "./room.mjs";
+import { withReactions } from "./annotate.mjs";
 
 /** A comment line on the stream, so a proxy does not decide it has gone quiet. */
 export const KEEP_ALIVE_MS = 25_000;
@@ -42,7 +45,9 @@ const RETRY_MS = 5000;
 /**
  * @typedef {import("./room.mjs").RoomMessage} RoomMessage
  * @typedef {import("./room.mjs").RoomAnnotation} RoomAnnotation
- * @typedef {{ kind: 'message', seq: number, cursor: string, m: RoomMessage } | { kind: 'annotation', seq: number, cursor: string, a: RoomAnnotation }} Held
+ * @typedef {import("./room.mjs").RoomPurge} RoomPurge
+ * @typedef {{ kind: 'message', seq: number, cursor: string, m: RoomMessage } | { kind: 'annotation', seq: number, cursor: string, a: RoomAnnotation }
+ *   | { kind: 'purge', seq: number, cursor: string, p: RoomPurge }} Held
  * @typedef {{
  *   thread: string | null,
  *   since: string | undefined,
@@ -105,7 +110,7 @@ export function createStreams(o) {
   function foldedTarget(target) {
     const got = o.store.message(target);
     if (!got) return null;
-    return toBrowser(o.room.fold([got.message], got.annotations)[0]);
+    return withReactions(o.store, [toBrowser(o.room.fold([got.message], got.annotations)[0])])[0];
   }
 
   /** @param {Member} m @param {Held} h */
@@ -115,9 +120,12 @@ export function createStreams(o) {
     m.seen.add(h.cursor);
     if (h.kind === "message") {
       m.ids.add(h.m.id);
-      m.send("message", toBrowser(h.m), h.cursor);
-    } else {
+      m.send("message", withReactions(o.store, [toBrowser(h.m)])[0], h.cursor);
+    } else if (h.kind === "annotation") {
       m.send("annotation", { ...toBrowser(h.a), message: foldedTarget(h.a.target) }, h.cursor);
+    } else {
+      const { via: _via, ...p } = h.p;
+      m.send("purge", p, h.cursor);
     }
   }
 
@@ -143,6 +151,15 @@ export function createStreams(o) {
       for (const m of members) {
         if (m.thread !== null && thread !== m.thread && !m.ids.has(raw.target)) continue;
         offer(m, { kind: "annotation", seq: at.seq, cursor: raw.cursor, a: raw });
+      }
+    },
+    purge(raw) {
+      // a root's stream hears only its thread's ids, and nothing for a purge that took none of them
+      const at = parseCursor(raw.cursor);
+      if (!at) return;
+      for (const m of members) {
+        const purged = m.thread === null ? raw.purged : raw.purged.filter((id) => id === m.thread || m.ids.has(id) || o.store.threadOf(id) === m.thread);
+        if (purged.length) offer(m, { kind: "purge", seq: at.seq, cursor: raw.cursor, p: { ...raw, purged } });
       }
     },
     state(s, code) {
