@@ -20,6 +20,11 @@ annotation events, only to a service that offered it.
 
 - `room.json` carries `logVersion: 1 | 2`. `agora service room create` makes version 2 rooms; a
   room created before this field existed is version 1 and is read exactly as before.
+  `NativeRoomStore.create` without `logVersion` makes version 1, so every existing caller writes
+  the bytes it wrote before. `status` reports `logVersion`.
+- A version 1 room carries no annotations: an annotation append there is refused
+  `annotation-unsupported-log-version`, so a version 1 log stays readable by a build that predates
+  annotations, and an edit's text is always held where a purge can remove it.
 - The committed boundary carries `generation` (absent means 0). Generation 0 is the file
   `room.frames`; generation N is `room.frames.<N>`. A purge is the only writer of a generation
   above 0.
@@ -39,14 +44,22 @@ Appended through the same `append` frame as a message:
 { act: "edit" | "withdraw" | "pin" | "unpin", target: "<message id>", text /* edit only, <= 256 KiB */ }
 ```
 
+An edit's text is held as a message's: `annotation.textDigest` inside the record digest,
+`annotation.text` outside it. A reader never sees `textDigest`.
+
+An annotation carries no attachments. An edit replaces the message's text and nothing else: the
+attachments the message was committed with stay its attachments, and the custody that holds their
+bytes is untouched by the edit (`docs/ATTACHMENTS.md`).
+
 Refusals:
 
 | code | when |
 |---|---|
 | `annotation-target-unknown` | the room holds no message with that id |
-| `annotation-not-author` | an `edit` or `withdraw` from another author: the target's account, and its `author.ref` when it has one, must match the append's |
-| `annotation-target-withdrawn` | the target is already withdrawn |
-| `annotation-invalid` | an unknown act, a missing or oversized text on `edit`, a text on any other act |
+| `annotation-not-author` | an `edit` or `withdraw` from another author. The check is two-sided: the target's account must be the append's, the append's `authorRef` must equal the target's `author.ref` (both absent counts as equal), and when a ref is present the append's `via` must be the target's. A person an app names cannot edit a message the seat's agents posted, though every local client shares the seat's account |
+| `annotation-target-withdrawn` | the target is already withdrawn; applies to every act |
+| `annotation-invalid` | an unknown act, an unknown key, a missing or oversized text on `edit`, a text on any other act |
+| `annotation-unsupported-log-version` | the room is version 1 |
 
 `pin` and `unpin` may come from any author the host admits; who may pin is the host
 application's decision, made before it appends.
@@ -58,6 +71,7 @@ client.annotate(room, { act, target, text, author: { kind, name, ref }, operatio
   // -> { id, cursor, duplicate }
 client.read(room, opts)
   // -> { messages, annotations, through, committedThrough, gap }
+  //    annotations is present only when the service offers annotations-v1, and then always a list
 client.subscribe(room, opts, { message, annotation /* optional */, dark, refused })
 client.follow(room, opts, { message, annotation, state })
 
@@ -75,6 +89,11 @@ folded state.
 A subscriber with no `annotation` handler is carried past annotation records: its cursor advances
 over them and it sees nothing it did not see before. `follow` delivers each annotation once across
 a dark period, as it does messages.
+
+On the wire, a `read` or `subscribe` frame asks with `annotations: true`; a `read-result` then
+carries `annotations` beside `messages`, cut over both in log order, and a subscription interleaves
+`{ type: "event", annotation }` frames with its message events. A frame that does not ask is
+answered exactly as before.
 
 ## CLI
 

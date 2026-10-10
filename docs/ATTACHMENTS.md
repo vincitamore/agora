@@ -32,7 +32,7 @@ attachment-chunk  { requestId, uploadId, offset, data: <base64> }
 attachment-commit { requestId, uploadId }
   -> attachment-ack { requestId, attachment: WireAttachment }      (lifetime "durable")
 attachment-read   { requestId, roomId, id, digest, offset, length } (length <= chunkMax)
-  -> attachment-data { requestId, offset, data: <base64>, size, eof }
+  -> attachment-data { requestId, offset, data: <base64>, size, eof, kind, mimetype }
 ```
 
 Refusal codes, each on an `error` frame with the request's id:
@@ -57,7 +57,8 @@ request.
 Constants in `src/native-attachments.mjs`:
 
 - one attachment: 25 MiB;
-- attachments per message: 10 (the store's own ceiling of 32 stays as the outer bound);
+- attachments per message: 10 when the list names at least one `durable` attachment (refused
+  `attachment-quota` past it); a list of metadata-only references keeps the store's own ceiling of 32;
 - room quota: 2 GiB, set per room in `room.json` as `attachmentQuota`;
 - an upload not committed within 10 minutes is dropped;
 - at most 4 uploads in flight per connection.
@@ -65,17 +66,27 @@ Constants in `src/native-attachments.mjs`:
 ## Kind and type
 
 The kind is detected from the bytes, never from the name or the declared type: PNG, JPEG, GIF and
-WebP magic bytes are `image`; everything else is `file`. The detected MIME type is recorded beside
-the declared one. A PNG named `report.vsdx` is an image; a text file named `photo.png` is a file.
+WebP magic bytes are `image`; everything else is `file`. A PNG named `report.vsdx` is an image; a
+text file named `photo.png` is a file.
+
+The type custody records is an image's detected type, and a file's declared type unless that
+claims an image the bytes do not prove (then, and when none was declared, `application/octet-stream`).
+It is recorded once, at the first install of those bytes; a later upload of the same bytes cannot
+retype them. Every `attachment-data` frame carries the recorded `kind` and `mimetype`, so a reader
+learns them from the first, and `client.attachment` returns them. An append whose reference names
+another kind or type than custody recorded is refused `attachment-unknown`.
 
 ## Storage
 
 ```text
-native/rooms/<roomId>/attachments/sha256-<hex>
+native/rooms/<roomId>/attachments/sha256-<hex>        the bytes
+native/rooms/<roomId>/attachments/sha256-<hex>.type   the custody record: { kind, mimetype }
 ```
 
-No extension, mode 0600, installed by temp file, fsync and rename (the same retrying rename the
-store uses on Windows). Identical bytes are one file. A crash between the temp write and the
+The blob has no extension, mode 0600, installed by temp file, fsync and rename (the same retrying
+rename the store uses on Windows). Its record is written the same way before the blob's rename
+and removed if that rename fails, so an installed blob always has one. Identical bytes are one
+file and one record. A crash between the temp write and the
 rename leaves no installed blob. An append that names a `durable` attachment whose blob is not
 installed is refused `attachment-unknown`; nothing is appended.
 
