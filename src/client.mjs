@@ -19,7 +19,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import path from "node:path";
-import { AgoraError, configPath, expandHome, loadConfig, stateDir } from "./core.mjs";
+import { AgoraError, configPath, expandHome, loadConfig, parseSignature, stateDir } from "./core.mjs";
 import { NativeServiceClient } from "./native-service.mjs";
 import { NATIVE_FRAME_MAX, NATIVE_PROTOCOL, nativeCursor, nativeFramePayloadBytes, parseNativeCursor } from "./native-protocol.mjs";
 import { AUTHOR_REF_PATTERN, CLIENT_NAME_PATTERN } from "./protocol/common.mjs";
@@ -27,7 +27,7 @@ import { validateWireAttachment } from "./protocol/attachment.mjs";
 import { ATTACHMENTS_CAPABILITY, readAttachment, uploadAttachment } from "./client-attachments.mjs";
 import { validateNativeCheckpoint, validateNativeReadCoverage } from "./protocol/read.mjs";
 import { assertReceiptContext, validateNativeCommitReceipt } from "./protocol/receipt.mjs";
-import { wireMessage } from "./render.mjs";
+import { decorate, wireAnnotation, wireMessage } from "./render.mjs";
 import { trailerKeyOk, trailerValueOk, withTrailers } from "./trailers.mjs";
 import { fittingReadLimit, validateNativeThread } from "./transports/native.mjs";
 import { nativeMessage, readServiceDescriptor } from "./wake/subscriber.mjs";
@@ -50,14 +50,22 @@ export * from "./client-attachments.mjs";
  * records after it are not messages (or, on a thread read, not in the thread). `committedThrough`
  * is what the host had committed, when it says. `gap` is present only when a newest-window read
  * returned fewer messages than were asked for because the rest would not fit one frame.
- * @typedef {{ messages: ClientMessage[], through: string, committedThrough?: string, gap?: ClientReadGap }} ClientReadResult
+ * `annotations` are the annotation records in the same span, in log order, present when the
+ * service offers annotations-v1 (and then always a list); a service without it has none to give.
+ * @typedef {{ messages: ClientMessage[], annotations?: ClientAnnotation[], through: string, committedThrough?: string, gap?: ClientReadGap }} ClientReadResult
  */
 /** @typedef {{ reason: 'frame-limit', requested: number, returned: number }} ClientReadGap */
+/** An annotation, shaped exactly as `read --json` prints one (docs/ANNOTATIONS.md). @typedef {ReturnType<typeof wireAnnotation>} ClientAnnotation */
+/** @typedef {'edit' | 'withdraw' | 'pin' | 'unpin'} AnnotationAct */
+/** @typedef {{ act: AnnotationAct, target: string, text?: string, author: ClientAuthor, operationId?: string }} AnnotateRequest */
+/** @typedef {{ id: string, cursor: string, duplicate: boolean, operationId: string }} AnnotateReceipt */
 /**
- * `message` sees each message once, in order. `dark` and `refused` see the end of an established
+ * `message` sees each message once, in order. `annotation`, when given, sees each annotation once,
+ * in the same order (it needs annotations-v1); without it, annotation records are passed over and
+ * the cursor still advances across them. `dark` and `refused` see the end of an established
  * subscription, at most one of them, once; a subscription that cannot be established rejects
  * `subscribe` instead and calls neither.
- * @typedef {{ message: (m: ClientMessage) => void, dark?: (error: ClientError) => void, refused?: (error: ClientError) => void }} SubscribeHandlers
+ * @typedef {{ message: (m: ClientMessage) => void, annotation?: (a: ClientAnnotation) => void, dark?: (error: ClientError) => void, refused?: (error: ClientError) => void }} SubscribeHandlers
  */
 /** `cursor` is the last position delivered or covered. @typedef {{ readonly cursor: string, close(): void }} ClientSubscription */
 /** `ref` is the app's own id for the person, stamped as `author.ref`; only on a client that declared a name. @typedef {{ kind: 'human' | 'agent' | 'system', name: string, ref?: string }} ClientAuthor */
@@ -68,10 +76,54 @@ export * from "./client-attachments.mjs";
  */
 /** @typedef {{ id: string, cursor: string, duplicate: boolean, operationId: string }} AppendReceipt */
 /** @typedef {'live' | 'dark' | 'refused'} FollowState */
-/** @typedef {{ message: (m: ClientMessage) => void, state?: (state: FollowState, error?: ClientError) => void }} FollowHandlers */
+/** @typedef {{ message: (m: ClientMessage) => void, annotation?: (a: ClientAnnotation) => void, state?: (state: FollowState, error?: ClientError) => void }} FollowHandlers */
 /** @typedef {{ readonly cursor: string | undefined, close(): void }} Follow */
 /** @typedef {{ state?: string, config?: string, clientName?: string }} ConnectOptions */
 /** @typedef {AgoraClient} Client */
+
+/** The capability a service offers when it carries annotations (docs/ANNOTATIONS.md). */
+export const ANNOTATIONS_CAPABILITY = "annotations-v1";
+const ANNOTATION_ACTS = new Set(["edit", "withdraw", "pin", "unpin"]);
+
+/**
+ * Fold annotations onto messages (docs/ANNOTATIONS.md): a later edit replaces an earlier one, a
+ * withdrawal wins over any edit, earlier or later, and the last of pin and unpin decides `pinned`.
+ * An edited message's text is the latest edit's, with its trailers and signature read off the new
+ * text. A pure function of its arguments: it returns new messages, keeps their order, ignores an
+ * annotation whose target is not among them, and keeps no folded state anywhere.
+ * @template {ClientMessage} M
+ * @param {readonly M[]} messages @param {readonly ClientAnnotation[]} annotations
+ * @returns {Array<M & { edited?: { at: string, text: string }, withdrawn?: { at: string }, pinned?: boolean }>}
+ */
+export function foldAnnotations(messages, annotations) {
+  /** @type {Map<string, { edited?: { at: string, text: string }, withdrawn?: { at: string }, pinned?: boolean }>} */
+  const folded = new Map();
+  const ids = new Set(messages.map((m) => m.id));
+  const ordered = [...annotations].filter((a) => ids.has(a.target))
+    .sort((x, y) => parseNativeCursor(x.cursor).sequence - parseNativeCursor(y.cursor).sequence);
+  for (const a of ordered) {
+    const state = folded.get(a.target) ?? {};
+    folded.set(a.target, state);
+    if (a.act === "withdraw") { state.withdrawn ??= { at: a.ts }; continue; }
+    if (a.act === "pin" || a.act === "unpin") { state.pinned = a.act === "pin"; continue; }
+    // an edit after the withdrawal changes nothing: withdrawn wins
+    if (a.act === "edit" && !state.withdrawn && typeof a.text === "string") state.edited = { at: a.ts, text: a.text };
+  }
+  return messages.map((m) => {
+    const state = folded.get(m.id);
+    if (!state) return /** @type {any} */ ({ ...m });
+    let base = /** @type {any} */ ({ ...m });
+    if (state.edited) {
+      // what was read off the old text goes with it, and is read again off the new one
+      const { to: _to, trailers: _trailers, offer: _offer, signedAs: _signedAs, ...rest } = base;
+      const text = state.edited.text;
+      const signedAs = parseSignature(text);
+      base = decorate(/** @type {any} */ ({ ...rest, text, ...(signedAs !== undefined ? { signedAs } : {}) }));
+    }
+    return { ...base, ...(state.edited ? { edited: state.edited } : {}), ...(state.withdrawn ? { withdrawn: state.withdrawn } : {}),
+      ...(state.pinned !== undefined ? { pinned: state.pinned } : {}) };
+  });
+}
 
 /** What `follow` waits after a dark socket, attempt by attempt; the last step repeats. */
 export const FOLLOW_BACKOFF_MS = Object.freeze([500, 1000, 2000, 5000, 15000]);
@@ -304,6 +356,26 @@ class AgoraClient {
     return { m, sequence: at.sequence };
   }
 
+  /** @param {any} raw @param {string} epoch @param {string} code */
+  static #annotation(raw, epoch, code) {
+    if (!raw || typeof raw !== "object" || typeof raw.id !== "string" || !ANNOTATION_ACTS.has(raw.act) || typeof raw.target !== "string" ||
+        !raw.author || typeof raw.author.id !== "string" || typeof raw.author.name !== "string" || typeof raw.author.kind !== "string" ||
+        (raw.text !== undefined && typeof raw.text !== "string") || (raw.act === "edit") !== (typeof raw.text === "string"))
+      throw refused(code, "the service delivered an annotation that is not one");
+    const a = wireAnnotation(raw);
+    let at;
+    try { at = parseNativeCursor(a.cursor); }
+    catch { throw refused(code, "the service delivered an annotation without a native cursor"); }
+    if (at.epoch !== epoch) throw refused(code, `the service delivered an annotation of epoch ${at.epoch}, not ${epoch}`);
+    return { a, sequence: at.sequence };
+  }
+
+  /** @param {NativeServiceClient} c @param {string} where @param {string} what */
+  static #annotations(c, where, what) {
+    if (c.capabilities.has(ANNOTATIONS_CAPABILITY)) return;
+    throw refused("annotations-unsupported", `${where} does not offer ${ANNOTATIONS_CAPABILITY}, so it would ${what}; nothing was sent`);
+  }
+
   /**
    * Read the room, ascending. Without `since`, the newest `limit` messages (the service's default
    * window when no limit is given); after `since`, at most `limit` records past it. A `thread` keeps
@@ -321,8 +393,11 @@ class AgoraClient {
     const { client: c } = await this.#live();
     if (thread !== undefined) AgoraClient.#threads(c, "this seat's service");
     const where = "this seat's service";
+    // a service that offers annotations is asked for them; one that does not has none to give
+    const withAnnotations = c.capabilities.has(ANNOTATIONS_CAPABILITY);
     /** @param {number | undefined} n */
-    const ask = (n) => c.request("read", { roomId, ...(thread !== undefined ? { thread } : {}), ...(since ? { since } : {}), ...(n !== undefined ? { limit: n } : {}) });
+    const ask = (n) => c.request("read", { roomId, ...(thread !== undefined ? { thread } : {}), ...(since ? { since } : {}), ...(n !== undefined ? { limit: n } : {}),
+      ...(withAnnotations ? { annotations: true } : {}) });
     /** @type {any} */
     let answer;
     /** the count asked for when the host named a smaller page that fits one frame */
@@ -360,10 +435,23 @@ class AgoraClient {
       previous = sequence;
       messages.push(m);
     }
+    /** @type {ClientAnnotation[]} */
+    const annotations = [];
+    if (withAnnotations) {
+      const seen = new Set(messages.map((m) => parseNativeCursor(m.cursor).sequence));
+      let before = after?.sequence ?? 0;
+      for (const raw of Array.isArray(answer.annotations) ? answer.annotations : []) {
+        const { a, sequence } = AgoraClient.#annotation(raw, checkpoint.epoch, "read-result-invalid");
+        if (sequence <= before || sequence > checkpoint.sequence || seen.has(sequence))
+          throw refused("read-result-invalid", "read result annotations are out of order, at or before the cursor, past the position read to, or at a message's position");
+        before = sequence;
+        annotations.push(a);
+      }
+    }
     this.#epochs.set(roomId, checkpoint.epoch);
     // a page cut to fit after a cursor skips nothing (it ends earlier); a newest window loses its oldest
     const gap = requested && !since ? { gap: { reason: /** @type {const} */ ("frame-limit"), requested, returned: messages.length } } : {};
-    return { messages, through, ...(committedThrough ? { committedThrough } : {}), ...gap };
+    return { messages, ...(withAnnotations ? { annotations } : {}), through, ...(committedThrough ? { committedThrough } : {}), ...gap };
   }
 
   /**
@@ -380,11 +468,14 @@ class AgoraClient {
     AgoraClient.#cursor(since, "since");
     AgoraClient.#thread(thread);
     if (typeof handlers?.message !== "function") throw refused("handlers-invalid", "subscribe needs handlers with a message function");
+    if (handlers.annotation !== undefined && typeof handlers.annotation !== "function") throw refused("handlers-invalid", "an annotation handler is a function");
+    const wantsAnnotations = typeof handlers.annotation === "function";
     const { client: c, path: endpoint } = await this.#dial(undefined);
     const where = `the seat service at ${endpoint}`;
     let from = since;
     try {
       if (thread !== undefined) AgoraClient.#threads(c, where);
+      if (wantsAnnotations) AgoraClient.#annotations(c, where, "never deliver an annotation");
       if (from === undefined) {
         const status = /** @type {any} */ (await c.request("status", { roomId }))?.status;
         try { from = nativeCursor(status?.epoch, status?.committed); }
@@ -415,25 +506,39 @@ class AgoraClient {
       c.close();
       if (ending && was === "open") handlers[ending.kind]?.(ending.error);
     };
-    /** @param {any} raw */
-    const deliver = (raw) => {
+    /** @param {{ message?: any, annotation?: any }} event */
+    const deliver = (event) => {
+      if (event.annotation !== undefined) {
+        let read;
+        try { read = AgoraClient.#annotation(event.annotation, epoch, "event-invalid"); }
+        catch (e) { return finish({ kind: "refused", error: /** @type {ClientError} */ (e) }); }
+        if (read.sequence <= position) return;
+        try { handlers.annotation?.(read.a); }
+        catch (e) { return finish({ kind: "refused", error: refused("handler-threw", `the annotation handler threw at ${read.a.cursor}: ${said(e)}; the subscription ended before it`, { cause: e }) }); }
+        position = read.sequence;
+        return;
+      }
       let read;
-      try { read = AgoraClient.#message(raw, roomId, epoch, "event-invalid"); }
+      try { read = AgoraClient.#message(event.message, roomId, epoch, "event-invalid"); }
       catch (e) { return finish({ kind: "refused", error: /** @type {ClientError} */ (e) }); }
       if (read.sequence <= position) return;
       try { handlers.message(read.m); }
       catch (e) { return finish({ kind: "refused", error: refused("handler-threw", `the message handler threw at ${read.m.cursor}: ${said(e)}; the subscription ended before it`, { cause: e }) }); }
       position = read.sequence;
     };
-    /** @param {any} raw */
-    const listener = (raw) => {
-      if (state === "opening") pending.push(raw);
-      else if (state === "open") deliver(raw);
+    /** @param {{ message?: any, annotation?: any }} event */
+    const accept = (event) => {
+      if (state === "opening") pending.push(event);
+      else if (state === "open") deliver(event);
     };
+    /** @param {any} raw */
+    const listener = (raw) => accept({ message: raw });
+    /** @param {any} raw */
+    const annotationListener = (raw) => accept({ annotation: raw });
     this.#open.add(handle);
     c.socket.once("close", () => finish({ kind: "dark", error: dark("service-dark", `${where} closed the connection`) }));
     try {
-      const result = /** @type {any} */ (await c.subscribe(roomId, from, listener, thread));
+      const result = /** @type {any} */ (await c.subscribe(roomId, from, listener, thread, wantsAnnotations ? annotationListener : undefined));
       let checkpoint;
       try { checkpoint = validateNativeCheckpoint(result?.checkpoint); }
       catch (e) { throw refused("subscribe-result-invalid", `the subscription carried no valid checkpoint (${said(e)})`, { cause: e }); }
@@ -549,6 +654,76 @@ class AgoraClient {
   }
 
   /**
+   * Annotate one message (docs/ANNOTATIONS.md): edit or withdraw a message this author posted, or
+   * pin or unpin one. The annotation is its own record; the message is never rewritten. Refused
+   * `annotations-unsupported` before anything is sent when the service does not offer
+   * annotations-v1. Outcomes and resending are exactly an append's: on `unknown-acceptance` resend
+   * under the returned `operationId`.
+   * @param {RoomRef} room @param {AnnotateRequest} request @returns {Promise<AnnotateReceipt>}
+   */
+  async annotate(room, request) {
+    const operationId = request?.operationId ?? randomUUID().replaceAll("-", "");
+    try {
+      return await this.#annotate(room, request, operationId);
+    } catch (e) {
+      const error = e instanceof ClientError ? e : refused("annotation-invalid", said(e), { cause: e });
+      error.operationId ??= operationId;
+      throw error;
+    }
+  }
+
+  /** @param {RoomRef} room @param {AnnotateRequest} request @param {string} operationId @returns {Promise<AnnotateReceipt>} */
+  async #annotate(room, request, operationId) {
+    const roomId = this.#roomId(room);
+    if (typeof request !== "object" || request === null) throw refused("annotation-invalid", "annotate takes { act, target, text?, author, operationId? }");
+    if (typeof operationId !== "string" || !OPERATION_ID_RE.test(operationId)) throw refused("operation-id-invalid", "an operation id is 16-128 letters, digits, _ or -");
+    const { act, target, text } = request;
+    if (typeof act !== "string" || !ANNOTATION_ACTS.has(act)) throw refused("annotation-invalid", "act is edit, withdraw, pin or unpin");
+    if (typeof target !== "string" || !OPERATION_ID_RE.test(target)) throw refused("annotation-invalid", "target is a message id");
+    if (act === "edit") {
+      if (typeof text !== "string") throw refused("annotation-invalid", "an edit carries its new text");
+      if (Buffer.byteLength(text, "utf8") > TEXT_MAX_BYTES) throw refused("text-too-long", `the text is over ${TEXT_MAX_BYTES} bytes`);
+    } else if (text !== undefined) throw refused("annotation-invalid", `a ${act} carries no text`);
+    const author = request.author;
+    if (typeof author?.name !== "string" || !AUTHOR_KINDS.has(author.kind) || !author.name.trim() || author.name.length > 120)
+      throw refused("author-invalid", "author is { kind: human | agent | system, name: 1-120 characters, ref? }");
+    if (author.ref !== undefined) {
+      if (this.clientName === undefined)
+        throw refused("author-ref-without-client", "an author ref is an app client's own id for the person, and this client declared no client name");
+      if (typeof author.ref !== "string" || !AUTHOR_REF_PATTERN.test(author.ref)) throw refused("author-ref-invalid", "an author ref is 1-64 letters, digits or . _ @ + -");
+    }
+    let conn;
+    try { conn = await this.#live(); }
+    catch (e) {
+      const error = /** @type {ClientError} */ (e);
+      if (error.outcome === "dark") throw dark(error.code, `room-dark: ${error.message}; nothing was annotated and no cursor was issued`, { cause: error, operationId });
+      throw error;
+    }
+    const { client: c, accountId } = conn;
+    AgoraClient.#annotations(c, "this seat's service", "not keep an annotation");
+    if (this.#secret !== undefined && typeof text === "string" && text.includes(this.#secret))
+      throw refused("service-secret-in-text", "the text carries the seat service secret; nothing was annotated");
+    const operation = { kind: "annotation", operationId, authorName: author.name, authorKind: author.kind,
+      annotation: { act, target, ...(act === "edit" ? { text } : {}) },
+      ...(author.ref !== undefined ? { authorRef: author.ref } : {}) };
+    if (nativeFramePayloadBytes({ roomId, operation, protocol: NATIVE_PROTOCOL, type: "append", requestId: "0".repeat(32) }) > NATIVE_FRAME_MAX)
+      throw refused("text-too-long", "the annotation would not fit one native frame");
+    /** @type {any} */
+    let ack;
+    try { ack = await c.request("append", { roomId, operation }); }
+    catch (e) { throw classify(e, { append: true, operationId, where: "this seat's service" }); }
+    const receipt = { roomId, accountId, operationId, id: ack?.id, cursor: ack?.cursor };
+    try {
+      const epoch = this.#epochs.get(roomId);
+      if (epoch) assertReceiptContext(receipt, { roomId, accountId, operationId, epoch });
+      else validateNativeCommitReceipt(receipt);
+    } catch (e) {
+      throw refused("receipt-mismatch", `the receipt does not answer this operation (${said(e)})`, { cause: e });
+    }
+    return { id: String(ack.id), cursor: String(ack.cursor), duplicate: ack.duplicate === true, operationId };
+  }
+
+  /**
    * The seam `upload` and `attachment` hand to their module: this client's room resolution, live
    * connection, offered capabilities and outcome constructors.
    * @returns {import("./client-attachments.mjs").AttachmentSeam}
@@ -598,6 +773,8 @@ class AgoraClient {
     AgoraClient.#cursor(since, "since");
     AgoraClient.#thread(thread);
     if (typeof handlers?.message !== "function") throw refused("handlers-invalid", "follow needs handlers with a message function");
+    if (handlers.annotation !== undefined && typeof handlers.annotation !== "function") throw refused("handlers-invalid", "an annotation handler is a function");
+    const onAnnotation = handlers.annotation;
     const ladder = tuning.backoffMs ?? FOLLOW_BACKOFF_MS;
     if (!Array.isArray(ladder) || !ladder.length || !ladder.every((ms) => Number.isFinite(ms) && ms >= 0))
       throw refused("backoff-invalid", "backoffMs is a non-empty list of non-negative milliseconds");
@@ -640,6 +817,13 @@ class AgoraClient {
             handlers.message(m);
             cursor = m.cursor;
           },
+          // an annotation moves the cursor like a message, so a resubscription after a dark
+          // period starts past it and never hands it over twice
+          ...(onAnnotation ? { annotation: (/** @type {ClientAnnotation} */ a) => {
+            if (stopped) return;
+            onAnnotation(a);
+            cursor = a.cursor;
+          } } : {}),
           dark: ended,
           refused: ended,
         });

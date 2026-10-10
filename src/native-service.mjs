@@ -446,7 +446,7 @@ export class NativeRoomService {
      * shapes; #broadcast writes through sendFrame, which is duck-typed for the same reason.
      * Per stream, per room: the last sequence written to it, and the thread a thread-scoped
      * subscription narrows to.
-     * @type {Map<net.Socket | import("node:stream").Duplex, Map<string, { sequence: number, thread?: string }>>} */
+     * @type {Map<net.Socket | import("node:stream").Duplex, Map<string, { sequence: number, thread?: string, annotations?: boolean }>>} */
     this.subscriptions = new Map();
     /** @type {number | undefined} */
     this.panePid = undefined;
@@ -508,8 +508,10 @@ export class NativeRoomService {
     if (options.roomId && (this.rooms.has(options.roomId) || this.roomOpenings.has(options.roomId)))
       throw new AgoraError(`native room ${options.roomId} is already open on this service`);
     const activity = (async () => {
+      // a room this service makes is log version 2 (docs/ANNOTATIONS.md): text held by digest,
+      // annotations carried; a room made before keeps the version it was made with
       const store = await NativeRoomStore.create({ root: this.root, roomId: options.roomId, epoch: options.epoch,
-        hostAccountId: this.accountId, now: this.now });
+        hostAccountId: this.accountId, now: this.now, logVersion: 2 });
       if (!this.running) {
         await store.close();
         throw new AgoraError("native service stopped while creating the room; the room was not opened by this service");
@@ -728,9 +730,20 @@ export class NativeRoomService {
       // A thread narrows the room to one thread's root and its replies (threads-v1). The store
       // refuses a root it does not hold, or one that is itself a reply, before anything is read.
       const thread = frame.thread === undefined ? undefined : validateNativeId(requiredString(frame.thread, "thread id"), "thread id");
+      // annotations-v1 (docs/ANNOTATIONS.md): the reader asks for annotation records by name
+      if (frame.annotations !== undefined && typeof frame.annotations !== "boolean")
+        throw codedRefusal("annotations-invalid", "annotations is true or false");
+      const withAnnotations = frame.annotations === true;
       if (frame.type === "read") {
         const view = store.view({ ...(since ? { since } : {}), ...(limit !== undefined ? { limit } : {}), ...(thread !== undefined ? { thread } : {}) });
-        const messages = view.messages;
+        // annotations-v1: a reader that asks for annotations gets them in log order beside the
+        // messages, and a page is cut over both; a reader that does not ask is carried past them
+        // exactly as it is carried past board records, and its frames are what they always were
+        const annotations = withAnnotations ? view.annotations : [];
+        const isAnnotation = new Set(annotations);
+        const messages = annotations.length
+          ? [...view.messages, ...annotations].sort((x, y) => parseNativeCursor(x.cursor).sequence - parseNativeCursor(y.cursor).sequence)
+          : view.messages;
         // The page must be the END the STORE would select, or the limit this refusal names is a
         // limit for a different set of messages. `native-store.mjs` slices `-limit` when there is no
         // `since` (the newest N) and forward from the cursor when there is (the oldest N after it).
@@ -749,7 +762,9 @@ export class NativeRoomService {
             : page.length ? parseNativeCursor(page.at(-1).cursor).sequence
             : since ? parseNativeCursor(since).sequence : store.status().committed;
           return { protocol: NATIVE_PROTOCOL, type: "read-result", requestId: frame.requestId,
-            roomId, messages: page, checkpoint: store.checkpoint(sequence) };
+            roomId, messages: withAnnotations ? page.filter((x) => !isAnnotation.has(x)) : page,
+            ...(withAnnotations ? { annotations: page.filter((x) => isAnnotation.has(x)) } : {}),
+            checkpoint: store.checkpoint(sequence) };
         };
         const whole = envelope(messages.length);
         const bytes = nativeFramePayloadBytes(whole);
@@ -797,15 +812,22 @@ export class NativeRoomService {
       const backlogCount = committed - start.sequence;
       if (backlogCount > 10_000)
         throw new AgoraError(`native subscription backlog has ${backlogCount} records; read forward before subscribing (no cursor advanced)`);
-      const backlog = backlogCount ? store.read({ since, limit: backlogCount, ...(thread !== undefined ? { thread } : {}) }) : [];
+      const replay = backlogCount ? store.view({ since, limit: backlogCount, ...(thread !== undefined ? { thread } : {}) }) : undefined;
+      /** @type {{ message?: any, annotation?: any, cursor: string }[]} the replay in log order; annotations only when asked for */
+      const backlog = !replay ? []
+        : [...replay.messages.map((message) => ({ message, cursor: message.cursor })),
+          ...(withAnnotations ? replay.annotations.map((annotation) => ({ annotation, cursor: annotation.cursor })) : [])]
+          .sort((x, y) => parseNativeCursor(x.cursor).sequence - parseNativeCursor(y.cursor).sequence);
       // One event frame per message, so the batch bound above does not apply -- but a SINGLE
       // oversized message still cannot cross, and it would surface here as the encoder's byte
       // range with no cursor to identify it. Name it the same way the read path does.
-      const replayFrames = backlog.map((message) => {
-        const event = { protocol: NATIVE_PROTOCOL, type: "event", requestId: message.id, roomId, message };
+      const replayFrames = backlog.map((entry) => {
+        const event = entry.annotation
+          ? { protocol: NATIVE_PROTOCOL, type: "event", requestId: entry.annotation.id, roomId, annotation: entry.annotation }
+          : { protocol: NATIVE_PROTOCOL, type: "event", requestId: entry.message.id, roomId, message: entry.message };
         const size = nativeFramePayloadBytes(event);
         if (size > NATIVE_FRAME_MAX)
-          throw codedRefusal("read-batch-refused", `message ${message.cursor} alone encodes to ${size} bytes `
+          throw codedRefusal("read-batch-refused", `message ${entry.cursor} alone encodes to ${size} bytes `
             + `and one native protocol frame holds ${NATIVE_FRAME_MAX}; this protocol cannot deliver it `
             + `(no cursor advanced)`);
         return encodeNativeFrame(event);
@@ -816,7 +838,8 @@ export class NativeRoomService {
       if (socket.writableLength + replayBytes > MAX_PENDING_WRITE)
         throw new AgoraError(`native subscription backlog needs ${replayBytes} buffered bytes; read forward before subscribing (no cursor advanced)`);
       for (const encoded of replayFrames) socket.write(encoded);
-      this.subscriptions.get(socket)?.set(roomId, { sequence: committed, ...(thread !== undefined ? { thread } : {}) });
+      this.subscriptions.get(socket)?.set(roomId, { sequence: committed, ...(thread !== undefined ? { thread } : {}),
+        ...(withAnnotations ? { annotations: true } : {}) });
       socket.write(resultFrame);
       return;
     }
@@ -834,7 +857,10 @@ export class NativeRoomService {
         { accountId: member ? member.binding.accountId : this.accountId,
           ...(!member && local.clientName !== undefined ? { via: local.clientName } : {}) }));
       sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "append-ack", requestId: frame.requestId, roomId, ...receipt });
-      if (receipt.kind !== "board") {
+      if (receipt.kind === "annotation" && !receipt.duplicate) {
+        const annotation = store.view({ since: `${store.manifest.epoch}:${parseNativeCursor(receipt.cursor).sequence - 1}`, limit: 1 }).annotations[0];
+        if (annotation) this.#broadcastAnnotation(roomId, annotation, store);
+      } else if (receipt.kind !== "board" && receipt.kind !== "annotation") {
         const message = store.read({ since: `${store.manifest.epoch}:${parseNativeCursor(receipt.cursor).sequence - 1}`, limit: 1 })[0];
         if (message) this.#broadcast(roomId, message);
       }
@@ -855,6 +881,30 @@ export class NativeRoomService {
         continue;
       }
       if (sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "event", requestId: message.id, roomId, message })) rooms.set(roomId, { ...held, sequence });
+    }
+  }
+
+  /**
+   * An annotation goes to the subscriptions that asked for annotations (annotations-v1) and, on a
+   * thread subscription, only when the message it names is in that thread. Every other
+   * subscription is carried past it, as past a board record: its position is not moved here, and
+   * the next message it is sent covers the record.
+   * @param {string} roomId @param {any} annotation @param {NativeRoomStore} store
+   */
+  #broadcastAnnotation(roomId, annotation, store) {
+    const sequence = parseNativeCursor(annotation.cursor).sequence;
+    for (const [socket, rooms] of this.subscriptions) {
+      const held = rooms.get(roomId);
+      if (held === undefined || !held.annotations || sequence <= held.sequence) continue;
+      if (held.thread !== undefined) {
+        const index = store.messageIndex.get(annotation.target);
+        const target = index === undefined ? undefined : store.records[index].message;
+        if (!target || (target.id !== held.thread && target.thread !== held.thread)) {
+          rooms.set(roomId, { ...held, sequence });
+          continue;
+        }
+      }
+      if (sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "event", requestId: annotation.id, roomId, annotation })) rooms.set(roomId, { ...held, sequence });
     }
   }
 
@@ -1264,6 +1314,9 @@ export class NativeServiceClient {
     this.pending = new Map();
     /** @type {Map<string, Set<(message: any) => void>>} */
     this.listeners = new Map();
+    /** The annotation listeners of subscriptions that asked for annotations (annotations-v1).
+     * @type {Map<string, Set<(annotation: any) => void>>} */
+    this.annotationListeners = new Map();
     /** What the service offered on its welcome; empty for a service that predates offers, which
      * serves no request that needs one. Set by `connect` (or by the member handshake).
      * @type {Set<string>} */
@@ -1369,13 +1422,24 @@ export class NativeServiceClient {
   /**
    * `thread` narrows the subscription to one thread's root and replies (threads-v1); the caller
    * checks the capability first, because a service without it would subscribe to the whole room.
+   * `onAnnotation`, when given, asks the service for annotation events too (annotations-v1); the
+   * caller checks the capability first, as for a thread.
    * @param {string} roomId @param {string} since @param {(message: any) => void} listener @param {string} [thread]
+   * @param {(annotation: any) => void} [onAnnotation]
    */
-  async subscribe(roomId, since, listener, thread) {
+  async subscribe(roomId, since, listener, thread, onAnnotation) {
     const listeners = this.listeners.get(roomId) ?? new Set();
     listeners.add(listener); this.listeners.set(roomId, listeners);
-    try { return await this.request("subscribe", { roomId, since, ...(thread !== undefined ? { thread } : {}) }); }
-    catch (e) { listeners.delete(listener); throw e; }
+    const annotationListeners = this.annotationListeners.get(roomId) ?? new Set();
+    if (onAnnotation) { annotationListeners.add(onAnnotation); this.annotationListeners.set(roomId, annotationListeners); }
+    try {
+      return await this.request("subscribe", { roomId, since, ...(thread !== undefined ? { thread } : {}),
+        ...(onAnnotation ? { annotations: true } : {}) });
+    } catch (e) {
+      listeners.delete(listener);
+      if (onAnnotation) annotationListeners.delete(onAnnotation);
+      throw e;
+    }
   }
 
   /** @param {Uint8Array} bytes */
@@ -1387,6 +1451,11 @@ export class NativeServiceClient {
       if (!value || typeof value !== "object" || Array.isArray(value)) continue;
       const frame = /** @type {Record<string, any>} */ (value);
       if (frame.type === "event") {
+        // an annotation event reaches only a subscription that asked for annotations
+        if (frame.annotation !== undefined && frame.message === undefined) {
+          for (const listener of this.annotationListeners.get(frame.roomId) ?? []) listener(frame.annotation);
+          continue;
+        }
         for (const listener of this.listeners.get(frame.roomId) ?? []) listener(frame.message);
         continue;
       }
