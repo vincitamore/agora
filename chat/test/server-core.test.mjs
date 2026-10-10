@@ -304,11 +304,11 @@ for (const host of HOSTS) {
     assert.equal((await k.call("p-grace", "/chat/post", { json: { text: "not allowed" } })).status, 403);
     assert.equal((await k.call("p-lin", "/chat/threads")).status, 403);
     assert.equal((await k.call("p-lin", "/chat/stream?thread=main")).status, 403);
-    for (const [method, p] of [["POST", "/chat/upload"], ["GET", "/chat/file/abc"], ["GET", "/chat/thumb/abc"], ["POST", "/chat/annotate"],
-      ["POST", "/chat/react"], ["POST", "/chat/purge"], ["GET", "/chat/search?q=x"]]) {
+    // the extension's routes are built (server-ext tests them); a bare request is a shape error, not 501
+    for (const [method, p, status] of /** @type {const} */ ([["POST", "/chat/upload", 400], ["GET", "/chat/file/abc", 400], ["GET", "/chat/thumb/abc", 400],
+      ["POST", "/chat/annotate", 400], ["POST", "/chat/react", 400], ["POST", "/chat/purge", 400], ["POST", "/chat/scan", 400], ["GET", "/chat/search?q=x", 200]])) {
       const r = await k.call("p-ada", p, { method });
-      assert.equal(r.status, 501, `${method} ${p}`);
-      assert.equal(r.body.error.code, "NOT_IMPLEMENTED");
+      assert.equal(r.status, status, `${method} ${p}: ${JSON.stringify(r.body)}`);
     }
     assert.equal((await k.call("p-ada", "/chat/nothing-here")).status, 404);
     assert.equal((await k.call("p-ada", "/chat/post")).status, 405);

@@ -31,6 +31,7 @@ import { pathToFileURL } from "node:url";
  *   attachments?: Array<Record<string, any>>, [key: string]: unknown }} RoomMessage
  * @typedef {{ id: string, cursor: string, ts: string, act: string, target: string, text?: string,
  *   author: { id?: string, name: string, kind: string, ref?: string }, via?: string }} RoomAnnotation
+ * @typedef {{ id: string, cursor: string, ts: string, purged: string[], thread?: string, reason: string, by: { name: string, ref?: string }, via?: string }} RoomPurge
  * @typedef {{ id: string, cursor: string, duplicate: boolean, operationId: string }} Receipt
  * @typedef {{ kind: 'human' | 'agent' | 'system', name: string, ref?: string }} Author
  * @typedef {{ text: string, author: Author, thread?: string, trailers?: Array<[string, string]>, operationId: string, attachments?: Array<Record<string, any>> }} AppendRequest
@@ -42,10 +43,11 @@ import { pathToFileURL } from "node:url";
  *   read(room: string, options: { since?: string, limit?: number, thread?: string }): Promise<ReadResult>,
  *   append(room: string, request: AppendRequest): Promise<Receipt>,
  *   annotate(room: string, request: Record<string, any>): Promise<Receipt>,
+ *   purge(room: string, request: Record<string, any>): Promise<Receipt & { purged: string[], blobsRemoved: number, facesOutOfReach: unknown[] }>,
  *   upload(room: string, request: Record<string, any>): Promise<Record<string, any>>,
  *   attachment(room: string, ref: { id: string, digest: string }): Promise<Record<string, any>>,
  *   follow(room: string, options: { since?: string, thread?: string },
- *     handlers: { message(m: RoomMessage): void, annotation?(a: RoomAnnotation): void, state?(s: FollowState, error?: unknown): void },
+ *     handlers: { message(m: RoomMessage): void, annotation?(a: RoomAnnotation): void, purge?(p: RoomPurge): void, state?(s: FollowState, error?: unknown): void },
  *     tuning?: { backoffMs?: readonly number[] }): AgoraFollow,
  *   close(): void,
  * }} AgoraClient
@@ -98,6 +100,7 @@ const START_WAIT_MS = 5000;
  * @typedef {{
  *   message?(m: RoomMessage): void,
  *   annotation?(a: RoomAnnotation): void,
+ *   purge?(p: RoomPurge): void,
  *   state?(s: FollowState, code?: string): void,
  *   reset?(): void,
  * }} RoomListener
@@ -317,6 +320,8 @@ export async function openRoom(options) {
       hub.follow = c.follow(alias, from.since ? { since: from.since } : {}, {
         message: (m) => each((l) => l.message?.(m)),
         annotation: (a) => each((l) => l.annotation?.(a)),
+        // asked only of a service that keeps purges: agora/client refuses a purge handler elsewhere
+        ...(c.capabilities.has("purge-v1") ? { purge: (/** @type {RoomPurge} */ p) => each((l) => l.purge?.(p)) } : {}),
         state: (s, e) => {
           if (generation !== hub.generation) return;
           setState(s, e);
@@ -352,6 +357,8 @@ export async function openRoom(options) {
     annotate: async (request) => (await link()).annotate(alias, request),
     /** @param {Record<string, any>} request */
     upload: async (request) => (await link()).upload(alias, request),
+    /** @param {Record<string, any>} request */
+    purge: async (request) => (await link()).purge(alias, request),
     /** @param {{ id: string, digest: string }} ref */
     attachment: async (ref) => (await link()).attachment(alias, ref),
     fold: agora.foldAnnotations,

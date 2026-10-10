@@ -28,7 +28,8 @@ import * as pushServer from "../push/server.mjs";
 import { handleAnnotate, handlePurge, handleReact } from "./annotate.mjs";
 import { createPosting, fail, json, MESSAGE_ID, personRef } from "./post.mjs";
 import { asFault, openRoom } from "./room.mjs";
-import { handleSearch } from "./search.mjs";
+import { handleScan } from "./scan.mjs";
+import { forgetPurge, handleSearch, reindexEdit } from "./search.mjs";
 import { openKitStore, parseCursor, parseMentions } from "./store.mjs";
 import { createStreams, toBrowser } from "./stream.mjs";
 import { handleFile, handleThumb, handleUpload } from "./uploads.mjs";
@@ -117,6 +118,7 @@ export const CHAT_ROUTES = Object.freeze([
   "GET /chat/thread/:root",
   "GET /chat/stream",
   "POST /chat/post",
+  "POST /chat/scan",
   "POST /chat/upload",
   "GET /chat/file/:id",
   "GET /chat/thumb/:digest",
@@ -348,6 +350,7 @@ export async function createChat(options) {
       } catch (e) {
         log(`chat: an annotation was not indexed (${a.cursor}): ${said(e)}`);
       }
+      if (fresh) reindexEdit(store, room.fold, a, currentPeople());
       if (!news || !fresh) return;
       emit("annotation", toBrowser(a), { thread: store.threadOf(a.target) ?? a.target, mentions: [], waiting: [] });
     },
@@ -363,6 +366,7 @@ export async function createChat(options) {
   room.listen({
     message: (m) => index.message(m, caughtUp),
     annotation: (a) => index.annotation(a, caughtUp),
+    purge: (p) => forgetPurge(store, p.purged, log),
   });
   const streams = createStreams({
     room, store, hooks, log,
@@ -389,7 +393,7 @@ export async function createChat(options) {
   /** @type {Record<string, PartHandler>} */
   const parts = {
     upload: handleUpload, file: handleFile, thumb: handleThumb,
-    annotate: handleAnnotate, react: handleReact, purge: handlePurge, search: handleSearch,
+    annotate: handleAnnotate, react: handleReact, purge: handlePurge, search: handleSearch, scan: handleScan,
   };
   /** @param {PartHandler} handler @param {Request} req @param {Person} person */
   async function part(handler, req, person) {
@@ -555,6 +559,7 @@ export async function createChat(options) {
       }
       if (head === "post" && !arg && method === "POST") return posting.handle(req, person);
       if (head === "position" && !arg && method === "POST") return position(req, person);
+      if (head === "scan" && !arg && method === "POST") return part(parts.scan, req, person);
       if (head === "upload" && !arg && method === "POST") return part(parts.upload, req, person);
       if (head === "file" && arg && !extra && method === "GET") return part(parts.file, req, person);
       if (head === "thumb" && arg && !extra && method === "GET") return part(parts.thumb, req, person);
