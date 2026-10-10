@@ -203,6 +203,26 @@ export function parseSubscription(body, push) {
   return { ok: true, sub: { endpoint: b.endpoint, p256dh, auth } };
 }
 
+/** The page a notification opens: the thread's root id goes where `{root}` stands. */
+export const DEFAULT_THREAD_URL = "/?thread={root}";
+
+/**
+ * The URL a notification opens, from the host's template (`push.threadUrl`). The template is a
+ * same-origin path naming `{root}` exactly once; the root is URL-encoded into it. A push with no
+ * thread (a test or a probe) opens the template's text before `{root}` up to its path, so
+ * `/?thread={root}` opens `/` and `/app/t/{root}` opens `/app/t/`. Anything else is refused at start.
+ * @param {string} template
+ * @returns {(root: string | null) => string}
+ */
+export function threadUrlFrom(template) {
+  if (typeof template !== "string" || !template.startsWith("/") || template.startsWith("//") || template.startsWith("/\\")
+    || template.split("{root}").length !== 2 || /[\s\\]/.test(template)) {
+    throw new Error("push.threadUrl is a same-origin path naming {root} once, such as /?thread={root}");
+  }
+  const bare = template.slice(0, template.indexOf("{root}")).split(/[?#]/)[0];
+  return (root) => (root ? template.replace("{root}", encodeURIComponent(root)) : bare);
+}
+
 /**
  * The kit's push routes and the policy, over one store and one sender. With `push: null` (a host that
  * turned push off) the prefs route still answers and every `/push/` route is 404 `PUSH_OFF`.
@@ -214,14 +234,14 @@ export function parseSubscription(body, push) {
  *     notifyText: (e: { message: Record<string, any>, threadRoot?: Record<string, any> }) => { title: string, body: string },
  *   },
  *   base?: string,
- *   threadUrl?: (root: string | null) => string,
+ *   threadUrl?: string | ((root: string | null) => string),
  *   ttl?: number,
  * }} options
  */
 export function createPushService(options) {
   const { store, push, hooks } = options;
   const base = (options.base ?? "/chat").replace(/\/$/, "");
-  const threadUrl = options.threadUrl ?? ((root) => (root ? `/?thread=${encodeURIComponent(root)}` : "/"));
+  const threadUrl = typeof options.threadUrl === "function" ? options.threadUrl : threadUrlFrom(options.threadUrl ?? DEFAULT_THREAD_URL);
   const ttl = options.ttl ?? 24 * 3600;
 
   /**

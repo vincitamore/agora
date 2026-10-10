@@ -61,7 +61,7 @@ import { handleFile, handleThumb, handleUpload } from "./uploads.mjs";
  *   clientName: string,
  *   storeDir: string,
  *   hooks: ChatHooks,
- *   push: { vapidFile: string, subject: string, allowEndpoint?: (url: URL) => boolean } | null,
+ *   push: { vapidFile: string, subject: string, threadUrl?: string, allowEndpoint?: (url: URL) => boolean } | null,
  *   log?: (line: string) => void,
  *   tuning?: { keepAliveMs?: number, presenceMs?: number, restartMs?: number, peopleMs?: number },
  * }} ChatOptions
@@ -188,6 +188,9 @@ export async function createChat(options) {
   for (const key of /** @type {const} */ (["identify", "authorize", "people", "scanText", "scanUpload", "notifyText", "presence"])) {
     if (typeof hooks?.[key] !== "function") throw new TypeError(`createChat needs the hook ${key}`);
   }
+  // a bad notification URL is the host's configuration error: refused before anything is opened
+  const threadUrlFrom = /** @type {any} */ (pushServer).threadUrlFrom;
+  if (options.push?.threadUrl !== undefined && typeof threadUrlFrom === "function") threadUrlFrom(options.push.threadUrl);
   const log = options.log ?? ((line) => console.error(line));
   const tuning = options.tuning ?? {};
 
@@ -260,7 +263,8 @@ export async function createChat(options) {
       try { sender = await api.createPush(options.push); }
       catch (e) { log(`chat: push did not start (the routes answer without it): ${said(e)}`); }
     }
-    const service = api.createPushService({ store: opened, push: sender, hooks: { people: hooks.people, notifyText: hooks.notifyText }, base: "/chat" });
+    const service = api.createPushService({ store: opened, push: sender, hooks: { people: hooks.people, notifyText: hooks.notifyText }, base: "/chat",
+      ...(options.push?.threadUrl !== undefined ? { threadUrl: options.push.threadUrl } : {}) });
     return { service, store: opened };
   }
 

@@ -54,7 +54,9 @@
   worker.addEventListener("notificationclick", (/** @type {any} */ event) => {
     const data = (event.notification && event.notification.data) || {};
     event.notification.close();
-    const url = new URL(typeof data.url === "string" ? data.url : "/", worker.location.origin).href;
+    // the server sends a same-origin path; anything that resolves elsewhere opens the app's root instead
+    const asked = new URL(typeof data.url === "string" ? data.url : "/", worker.location.origin);
+    const url = asked.origin === worker.location.origin ? asked.href : new URL("/", worker.location.origin).href;
     event.waitUntil((async () => {
       const windows = await worker.clients.matchAll({ type: "window", includeUncontrolled: true });
       const same = windows.find((/** @type {any} */ c) => new URL(c.url).origin === worker.location.origin);

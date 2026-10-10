@@ -36,7 +36,7 @@ const chat = await createChat({
     presence: async () => ({ state: "ready" | "busy" | "away" | "dark", lastSeen?, running? }),
     residentName: "the resident",
   },
-  push: { vapidFile, subject } | null,
+  push: { vapidFile, subject, threadUrl? } | null,
 });
 
 // in Bun.serve's fetch, after the host's own checks and session:
@@ -48,38 +48,104 @@ await chat.close();
 ```
 
 `chat.handle` answers a request under `/chat/` and returns `null` for any other path, so the host
-falls through to its own routes.
+falls through to its own routes. With no `person` given, the kit asks `hooks.identify(req)`; no person
+from either is 401 `UNAUTHENTICATED`.
+
+`chat.on("message" | "annotation", (value, meta) => {})` hears each new record once, in the browser's
+shape, with `meta = { thread, mentions: [personId], waiting: [personId] }`; it returns an
+unsubscribe. A record that predates the kit's start is indexed and never emitted.
+
+`push.threadUrl` is the page a notification opens: a same-origin path that names `{root}` once, where
+the thread's root id is URL-encoded. The default is `/?thread={root}`. A push with no thread (a test
+or a probe) opens the template's path before `{root}`, so `/app/?thread={root}` opens `/app/`. Any
+other value is refused when `createChat` starts.
 
 ## Routes
 
-All under `/chat/`. JSON answers are `{ ok, data?, error? }`. The host's cross-site checks and
-session sit in front of every route.
+All under `/chat/`. JSON answers are `{ ok, data?, error? }`; an error is `{ code, message?, ... }`.
+The host's cross-site checks and session sit in front of every route.
 
 | Route | Body / query | Answer |
 |---|---|---|
-| `GET /chat/state` | | `{ room, me, resident: presence, capabilities, version }` |
-| `GET /chat/threads` | `scope=all\|mine`, `context=<k=v>`, `before`, `limit` | `{ threads: [{ root, lastAt, lastBy, unread: bool, waiting: [personId], cards: [{ type, id }] }] }` |
-| `GET /chat/thread/:root` | `since` | `{ messages (folded), through }` |
-| `GET /chat/stream` | `thread=<root>\|main` (SSE) | events `message`, `annotation`, `state` (`live\|dark\|refused`), `presence` |
-| `POST /chat/post` | `{ text, thread?, operationId, trailers?, attachments?, alsoToRoom? }` | 200 `{ receipt }`; 202 `ACCEPTANCE_UNKNOWN { operationId }`; 409 `ROOM_REFUSED { code }`; 422 `TEXT_REFUSED { reason }`; 503 `ROOM_DARK` |
+| `GET /chat/state` | | `{ room, me: { id, name, ref? }, resident: { name, ...presence }, capabilities: [service capabilities], version, link: { state: "live" \| "dark" \| "refused", reason? } }` |
+| `GET /chat/threads` | `scope=all\|mine`, `context=<k>=<v>` (repeatable, all must match), `before=<lastCursor>`, `limit` (1-200, default 50) | `{ threads: [summary], through }` |
+| `GET /chat/thread/:root` | `:root` is a root id or `main`; `since` | `{ messages (folded), annotations, through }`; `annotations` are those whose target is not in `messages` |
+| `GET /chat/stream` | `thread=<root>\|main` (SSE); `Last-Event-ID` or `since` resumes | events below |
+| `POST /chat/post` | `{ text, thread?, operationId?, trailers?: [[key, value]], attachments?, alsoToRoom? }` | 200 `{ receipt: { id, cursor, duplicate, operationId, thread }, alsoToRoom?: { id, cursor, duplicate }, warn? }`; 202 `ACCEPTANCE_UNKNOWN { operationId }`; 409 `ROOM_REFUSED { refusal }`; 422 `TEXT_REFUSED { reason }`; 503 `ROOM_DARK` |
+| `POST /chat/scan` | `{ text }` | `{ warn? }`; 422 `TEXT_REFUSED { reason }` |
 | `POST /chat/upload` | raw body, `X-File-Name`, `Content-Type` | `{ attachment, thumb? }`; 413 `TOO_LARGE`; 422 `UPLOAD_REFUSED { reason }` |
 | `GET /chat/file/:id` | `digest` | the bytes; `X-Content-Type-Options: nosniff`; non-images `Content-Disposition: attachment`; `Cache-Control: private` |
 | `GET /chat/thumb/:digest` | | the kit's thumbnail, or 404 |
 | `POST /chat/annotate` | `{ act, target, text? }` | `{ receipt }` |
 | `POST /chat/react` | `{ target, name: "<short word>", on: bool }` | `{ names: [personId] }` (kit store, names only) |
 | `POST /chat/purge` | `{ targets?, thread?, reason }` | `{ purged, facesOutOfReach }` (authorize `purge`) |
-| `POST /chat/position` | `{ thread, cursor }` | `{}` |
+| `POST /chat/position` | `{ thread: <root>\|"main", cursor }` | `{}`; a position never moves back within an epoch |
 | `GET /chat/search` | `q`, `scope=messages\|files`, `context` | `{ hits: [{ message, snippet }], coverage: { through } }` |
-| `GET /chat/push/key` | | the VAPID public key |
+| `GET /chat/push/key` | | `{ publicKey }`, the VAPID public key |
 | `POST /chat/push/subscribe` | a push subscription | stored |
-| `DELETE /chat/push/subscribe` | the subscription's endpoint | removed |
-| `POST /chat/push/test` | | a test push to the caller |
-| `POST /chat/push/ack` | `{ push id }` | the receipt a delivered push was shown |
+| `DELETE /chat/push/subscribe` | `{ endpoint }` | `{ removed }` |
+| `POST /chat/push/test` | | a test push to the caller; 409 with no subscription |
+| `POST /chat/push/ack` | `{ pushId, event?: "shown" \| "clicked" }` | recorded; 404 for a push that was not sent to the caller |
 | `GET\|PUT /chat/prefs` | `{ notify: { mentions, asks, mine, all }, lockScreen: "title-line" \| "generic" }` | the person's prefs |
+
+Other answers on any route: 400 `BAD_REQUEST`, 401 `UNAUTHENTICATED`, 403 `FORBIDDEN` (`authorize`
+said no), 404 `NOT_FOUND` (an unknown thread root carries `refusal`), 405 `METHOD_NOT_ALLOWED`,
+413 `TOO_LARGE`, 501 `NOT_IMPLEMENTED`, 503 `STOPPED` (the kit is closing). With `push: null` the
+`/chat/push/*` routes answer 404 `PUSH_OFF` and `/chat/prefs` still answers.
 
 The four post outcomes follow `agora/client`'s three (`refused`, `dark`, `unknown-acceptance`) plus
 the host's own text scan: a 202 is resent by the client under the same `operationId`, never by the
-kit on its own.
+kit on its own. The kit derives the room's operation id from the person and the draft id, so one
+person's draft id never answers for another's. With no `operationId` the kit mints a draft id per
+person, thread and words until a definite answer. An "also send to the room" copy that fails after
+the reply landed answers with the copy's outcome and `error.posted` naming the reply; a resend under
+the same id answers the reply as a duplicate and retries the copy.
+
+`POST /chat/scan` runs `hooks.scanText` and nothing else: no append, no index, no push, no position.
+It answers what a post of the same text would: `{ warn }` when the scan warns, `{}` when it passes,
+422 `TEXT_REFUSED { reason }` when it refuses (`reason: "scan-failed"` when the scan throws). A
+composer calls it before sending, so a warning reaches the person while they can still change the
+words; `POST /chat/post` scans again and stays the authority.
+
+### Shapes
+
+A **message**, as the browser receives it, is agora's wire message without `room` and `author.id`:
+`{ id, cursor, ts, text, author: { name, kind, ref? }, thread?, via?, to?, trailers?: [{ key, value }],
+attachments?, edited?, withdrawn?, pinned?, purged? }`. It arrives folded: an edit's text replaces
+the original, and a withdrawal or a purge empties it.
+
+A **thread summary**: `{ root, last, lastAt, lastBy: { name, kind, ref? }, lastCursor, unread: bool,
+waiting: [personId], cards: [{ type, id }] }`. `root` is the root message and `last` the newest
+message, both folded message objects; on a thread with no reply `last` is the root. `scope=mine` is
+the threads the person posted in, is mentioned in, or is named in by a `waiting:` that stands. A
+thread is unread when its last record is past the person's position, except when the last word is
+the person's own.
+
+### Stream events
+
+`GET /chat/stream` sends history and then live records, each once, with `retry: 5000` and keep-alive
+comments. `main` carries the whole room, replies included; a root carries that thread.
+
+| event | `id:` | data |
+|---|---|---|
+| `message` | its cursor | a message |
+| `annotation` | its cursor | `{ id, cursor, ts, act, target, text?, author, via?, message }`; `message` is the target folded with it, or `null` when the kit does not hold it |
+| `purge` | its cursor | `{ id, cursor, ts, purged: [messageId], thread?, reason, by: { name, ref? } }`; a root's stream receives only its thread's ids, and nothing for a purge that took none |
+| `state` | the history's `through`, on the first | `{ state: "live" \| "dark" \| "refused", reason?, through? }`; the first after history carries `through` |
+| `presence` | | `{ name, state, lastSeen?, running? }`, from the host's `presence` hook, refreshed while a stream is open |
+
+The server never sends `reconnecting`: that is the client's own state while its EventSource
+reconnects. `refused` with `reason: "room-reset"` means the room's epoch changed and the client
+reloads.
+
+### Purge in the kit
+
+The kit's room follow passes a `purge` handler to `agora/client`, which then subscribes with
+`purges: true` on a service that offers `purge-v1`. Each purge, whoever appended it (the kit's own
+`POST /chat/purge`, the CLI's `agora room purge`, another app), removes the purged messages' text
+from the kit's index (`forgetText`), so search and the thread list stop showing it, and goes to every
+open stream as a `purge` event; the client strikes the text it already shows. A service without
+`purge-v1` sends no purge events; the kit then learns of a purge only when its index is rebuilt.
 
 ## Client half
 
@@ -93,13 +159,60 @@ registerCard("plan", {
 });
 registerBlock("evidence", (source, ctx) => HTMLElement);
 
-mountChat(el, {
+const view = mountChat(el, {
   base: "/chat",
   context: () => [["context", "item=alpha; screen=detail"]],
   onOpenThread, people,
+  thread,        // optional: open this thread at mount
+  now,           // optional: the clock the ledger reads; a fixed one renders the same page twice
 });
+// view = { unmount(), open(root), back(), refresh() }
 // ctx = { person, thread, post(text, trailers?), theme, now() }
 ```
+
+`open(root)` shows a thread (opening the thread already open only shows it, so an `onOpenThread` that
+routes back into `open` cannot loop); `back()` returns to the list on a phone; `refresh()` reloads the
+list.
+
+A card renderer marks its controls and its state with attributes and classes the kit owns:
+
+- `data-chat-action="<name>"` on a button runs that card's `actions[name]`;
+- `data-chat-you` on the rendered element (or `waiting: <me>` on the message) marks the card as
+  waiting on the viewer;
+- classes `chat-card`, `chat-card--edge`, `chat-card--receipt`, `chat-risk-2` (a 2 px ink edge),
+  `chat-risk-3` (a double edge), `chat-card-head`, `chat-card-id`, `chat-card-kind`,
+  `chat-card-status` (`.is-you`), `chat-card-body`, `chat-card-title`, `chat-card-lines`,
+  `chat-card-foot`, `chat-card-actions`, `chat-btn`, `chat-btn-go`, `chat-btn-locked`,
+  `chat-line-add`, `chat-line-del`, `chat-evidence`, `chat-ev-line`, `chat-ev-cmd`, `chat-ev-age`,
+  `chat-faint`. Risk is shown by line weight, never colour.
+
+The thread pane carries a `.chat-composer` slot the composer mounts into.
+
+## Push
+
+`push/sw.js` is a classic worker the host's own service worker imports:
+
+```js
+importScripts("/chat/push/sw.js");
+self.agoraChatPush.configure({ base: "/chat", headers: { "<host header>": "1" } });
+```
+
+A push's payload is `{ v: 1, pushId, kind: "message" | "test" | "probe", title, body, thread?, url }`,
+encrypted per RFC 8291 and signed with the VAPID key in `push.vapidFile`. The worker shows it, tagged
+by thread, and posts `POST /chat/push/ack { pushId, event: "shown" }`. A click posts
+`{ pushId, event: "clicked" }`, then focuses an open window of the app and sends it
+`{ type: "agora-chat-open-thread", thread, url }`, or opens `url` when none is open. A `url` that
+resolves to another origin opens the app's root instead.
+
+The client half's push helpers: `import { subscribePush, unsubscribePush, sendTestPush,
+onOpenThreadFromPush, pushSupported } from "/chat/push/client.js"`; subscribe only from a user
+gesture.
+
+Policy: one push per person per message, under the first reason that applies (a mention, a
+`waiting:` naming them, a reply in a thread they posted in, everything), as their prefs allow; never
+to the author. The lock screen shows `notifyText`, clipped, or under `lockScreen: "generic"` "New
+message" and no body. A message push is `Urgency: high`, a test push `normal`; TTL 24 hours.
+Subscription endpoints are limited to the browsers' push services.
 
 ## Rules the kit owns
 
@@ -144,7 +257,9 @@ type.
 `kit.sqlite` under `storeDir`: read positions, reactions (names), push subscriptions and prefs, the
 message index (FTS5) with the trailers `context`, `waiting` and `card` indexed, and thumbnails by
 digest under `thumbs/`. Everything is rebuildable from the room except subscriptions, prefs and
-reactions.
+reactions. Push keeps its own tables (`push_*`, versioned in `push_meta`); the index's schema is
+`PRAGMA user_version`. The index catches up from the room before its follow starts, and rebuilds
+when the room's epoch changes.
 
 ## Serving the client half
 

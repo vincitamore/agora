@@ -78,3 +78,12 @@ test("a click focuses an open window and names the thread; with none open it ope
   await none.fire("notificationclick", { notification: { data: { pushId: "c".repeat(32), thread: null, url: "/" }, close() {} } });
   assert.deepEqual(none.opened, ["https://app.example/"]);
 });
+
+test("a click whose url resolves to another origin opens the app's root instead", async () => {
+  const w = await worker({ windows: [] });
+  await w.fire("notificationclick", { notification: { data: { pushId: "d".repeat(32), thread: "r3", url: "https://elsewhere.example/?thread=r3" }, close() {} } });
+  assert.deepEqual(w.opened, ["https://app.example/"]);
+  const v = await worker({ windows: [] });
+  await v.fire("notificationclick", { notification: { data: { pushId: "e".repeat(32), thread: "r4", url: "//elsewhere.example/r4" }, close() {} } });
+  assert.deepEqual(v.opened, ["https://app.example/"]);
+});

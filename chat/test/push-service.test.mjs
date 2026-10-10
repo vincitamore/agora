@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { createPush, createPushService } from "../push/server.mjs";
+import { createPush, createPushService, threadUrlFrom, DEFAULT_THREAD_URL } from "../push/server.mjs";
 import { openPushStore, DEFAULT_PREFS } from "../push/store.mjs";
 import { recipientsFor, lockScreenText, parsePrefs, waitingOn } from "../push/policy.mjs";
 import { startFakePushService } from "../push/fake-service.mjs";
@@ -216,4 +216,38 @@ test("the store keeps push's tables beside another owner's in one kit.sqlite", a
   const tables = db.query("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all().map((/** @type {any} */ r) => r.name);
   assert.deepEqual(tables, ["positions", "push_meta", "push_prefs", "push_sent", "push_subscriptions"]);
   db.close();
+});
+
+test("push.threadUrl: a same-origin template naming {root} once; a push with no thread opens its path", () => {
+  const byDefault = threadUrlFrom(DEFAULT_THREAD_URL);
+  assert.equal(byDefault("r1"), "/?thread=r1");
+  assert.equal(byDefault(null), "/");
+  const hosted = threadUrlFrom("/app/rooms/{root}?from=push");
+  assert.equal(hosted("a b/c"), "/app/rooms/a%20b%2Fc?from=push", "the root is encoded into its place");
+  assert.equal(hosted(null), "/app/rooms/");
+  assert.equal(threadUrlFrom("/app/?thread={root}")(null), "/app/");
+  for (const bad of ["https://elsewhere.example/?thread={root}", "//elsewhere.example/{root}", "/\\elsewhere/{root}",
+    "/?thread=", "/{root}/{root}", "relative/{root}", "/a b/{root}"]) {
+    assert.throws(() => threadUrlFrom(bad), /same-origin path naming \{root\} once/, bad);
+  }
+});
+
+test("a string threadUrl is what a notification opens", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "chat-push-"));
+  const fake = await startFakePushService();
+  const store = await openPushStore({ storeDir: dir });
+  t.after(async () => {
+    store.close();
+    await fake.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+  const push = await createPush({ vapidFile: path.join(dir, "vapid.json"), subject: "mailto:ops@example.org", allowEndpoint: fake.allows });
+  const service = createPushService({ store, push, threadUrl: "/app/t/{root}",
+    hooks: { people: async () => people, notifyText: () => ({ title: "t", body: "b" }) } });
+  const sub = await fake.subscribe();
+  store.saveSubscription("bob", { endpoint: sub.endpoint, ...sub.keys });
+  await service.notify({ message: { id: "m1", thread: "root7", author: { kind: "human", name: "Alice", ref: "alice" }, text: "@bob" }, mentions: ["bob"], participants: [] });
+  assert.equal(fake.arrivals.at(-1)?.payload?.url, "/app/t/root7");
+  assert.throws(() => createPushService({ store, push, threadUrl: "https://elsewhere.example/{root}",
+    hooks: { people: async () => people, notifyText: () => ({ title: "t", body: "b" }) } }), /same-origin/);
 });
