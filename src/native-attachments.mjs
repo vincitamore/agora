@@ -100,8 +100,21 @@ function refusal(code, detail) {
 const connections = new WeakMap();
 /** Bytes promised to uploads in flight, per room directory, so two uploads cannot both fit one gap. @type {Map<string, number>} */
 const reservations = new Map();
-/** One install at a time per room directory: the quota check and the rename are one step. @type {Map<string, Promise<unknown>>} */
+/** One custody step at a time per room directory: the quota check and the rename are one step, an
+ * append that names durable bytes is checked and committed as one, and a purge's collection
+ * re-reads the room's references and removes blobs as one. @type {Map<string, Promise<unknown>>} */
 const roomLocks = new Map();
+/**
+ * Digests an upload installed or confirmed recently, per room directory, to when the hold lapses.
+ * A purge's collection passes over a held digest: the uploader holds a reference it has not yet
+ * appended, and those bytes must be there when it does. An append that names the digest ends the
+ * hold (from then the room's own reference keeps the bytes); otherwise it lapses after
+ * `CUSTODY_HOLD_MS`, and a later collection (the next purge, or the next open of the room) takes
+ * bytes nothing references. @type {Map<string, Map<string, number>>}
+ */
+const holds = new Map();
+/** How long an upload's hold on its digest lasts without an append that names it. */
+export const CUSTODY_HOLD_MS = 60 * 60 * 1000;
 /** Expired upload ids remembered per connection, so a late chunk says expired rather than unknown. */
 const EXPIRED_MEMORY = 64;
 const BLOB_RE = /^sha256-[a-f0-9]{64}$/;
@@ -384,6 +397,9 @@ export async function handleAttachmentFrame(context, frame) {
       const target = custodyPath(upload.directory, upload.digest);
       const recordFile = custodyRecordPath(upload.directory, upload.digest);
       await withRoomLock(upload.directory, async () => {
+        // the uploader is about to name these bytes in an append: no purge's collection takes them
+        // from under it, whether this install puts them in custody or finds them already there
+        hold(upload.directory, upload.digest, now() + CUSTODY_HOLD_MS);
         // identical bytes already in custody keep the record of their first install
         if ((await installedSize(target)) !== undefined) return;
         const detected = detectAttachmentType(upload.head);
@@ -468,6 +484,43 @@ async function syncDirectory(directory) {
   finally { await handle.close(); }
 }
 
+/** @param {string} directory @param {string} digest @param {number} until */
+function hold(directory, digest, until) {
+  let room = holds.get(directory);
+  if (!room) holds.set(directory, room = new Map());
+  room.set(digest, Math.max(until, room.get(digest) ?? 0));
+}
+
+/** @param {string} directory @param {string} digest @param {number} at */
+function held(directory, digest, at) {
+  const room = holds.get(directory);
+  const until = room?.get(digest);
+  if (until === undefined) return false;
+  if (until > at) return true;
+  room?.delete(digest);
+  return false;
+}
+
+/**
+ * Run `fn` under the room's custody lock: the service checks and commits an append that names
+ * durable bytes inside it, so a purge's collection never reads the room's references between the
+ * check and the commit. @template T @param {string} roomDirectory @param {() => Promise<T>} fn
+ */
+export function withCustodyLock(roomDirectory, fn) {
+  return withRoomLock(roomDirectory, fn);
+}
+
+/**
+ * An append that names these digests committed: the room's own reference keeps the bytes now, so
+ * the uploads' holds end. Called under the custody lock. @param {string} roomDirectory @param {Iterable<string>} digests
+ */
+export function releaseHolds(roomDirectory, digests) {
+  const room = holds.get(roomDirectory);
+  if (!room) return;
+  for (const d of digests) room.delete(d);
+  if (!room.size) holds.delete(roomDirectory);
+}
+
 /**
  * Let go of what a purge released (docs/PURGE.md): for each digest no unpurged message references
  * (the store's `custodyCensus().released`), remove its blob and its `.type` custody record. Run
@@ -475,13 +528,20 @@ async function syncDirectory(directory) {
  * already gone is passed over, so the service runs it after every purge and again when it opens a
  * purged room, which finishes a collection a crash interrupted. A blob is removed before its record,
  * so a crash between the two leaves a record with no blob, which nothing reads and the next run removes.
- * @param {string} roomDirectory @param {Iterable<string>} released
+ * `census` is called under the lock and names what no unpurged message references (the store's
+ * `custodyCensus().released`); a digest an upload holds is passed over.
+ * @param {string} roomDirectory @param {() => Iterable<string>} census
+ * @param {{ now?: () => number, requested?: () => void }} [deps] `requested` runs before the lock is
+ *   waited for (a test seam that lets a test interleave an install or an append deterministically)
  * @returns {Promise<{ blobsRemoved: number }>}
  */
-export async function collectReleasedCustody(roomDirectory, released) {
-  const digests = [...released].filter((d) => typeof d === "string" && DIGEST_RE.test(d));
-  if (!digests.length) return { blobsRemoved: 0 };
+export async function collectReleasedCustody(roomDirectory, census, deps = {}) {
+  const now = deps.now ?? Date.now;
+  deps.requested?.();
   return withRoomLock(roomDirectory, async () => {
+    // what is released is read HERE, under the lock every install and every attachment-carrying
+    // append takes: an append committed a moment ago is a reference, and a held upload is one too
+    const digests = [...census()].filter((d) => typeof d === "string" && DIGEST_RE.test(d) && !held(roomDirectory, d, now()));
     let blobsRemoved = 0;
     for (const digest of digests) {
       const blob = custodyPath(roomDirectory, digest);

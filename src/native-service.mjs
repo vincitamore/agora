@@ -9,7 +9,7 @@ import { NativeFrameDecoder, NATIVE_FRAME_MAX, NATIVE_PROTOCOL, encodeNativeFram
   nativeHandshakeProof, parseNativeCursor,
   validateNativeEnvelope, validateNativeId, verifyNativeHandshakeProof } from "./native-protocol.mjs";
 import { NativeRoomStore } from "./native-store.mjs";
-import { assertDurableAttachments, collectReleasedCustody, handleAttachmentFrame, isAttachmentFrame } from "./native-attachments.mjs";
+import { assertDurableAttachments, collectReleasedCustody, handleAttachmentFrame, isAttachmentFrame, releaseHolds, withCustodyLock } from "./native-attachments.mjs";
 import { MEMBER_PHASES, buildRouteBinding, buildRouteDescriptor, memberHandshakeProof, memberMayRequest,
   memberTranscript, mintRouteSecret, removeRouteSecret, routeKey, validatePublicNodeKey,
   verifyMemberHandshakeProof, writeRouteSecret } from "./native-member.mjs";
@@ -407,6 +407,14 @@ export class NativeRoomService {
     this.accountId = options.accountId;
     this.seatLabel = options.seatLabel.trim();
     this.now = options.now ?? (() => new Date());
+    /**
+     * Test seams, never set by the product: `afterCustodyCheck(roomId)` runs under the custody lock
+     * between an attachment-carrying append's check and its commit; `collectionRequested(roomId)`
+     * runs when a purge's collection asks for that lock. Together they let a test interleave a purge
+     * with an append deterministically.
+     * @type {{ afterCustodyCheck?: (roomId: string) => unknown, collectionRequested?: (roomId: string) => void } | undefined}
+     */
+    this.testHooks = undefined;
     this.nonce = options.nonce ?? randomUUID().replaceAll("-", "");
     validateNativeId(this.nonce, "service nonce");
     this.bootEpoch = randomUUID().replaceAll("-", "");
@@ -538,7 +546,7 @@ export class NativeRoomService {
         // a purged room's custody lets go of what its purges released; a collection a crash
         // interrupted is finished here (docs/PURGE.md)
         if (store.purged.size) {
-          try { await collectReleasedCustody(store.directory, store.custodyCensus().released); }
+          try { await collectReleasedCustody(store.directory, () => store.custodyCensus().released); }
           catch (error) { await store.close(); throw error; }
         }
         this.rooms.set(roomId, store);
@@ -861,21 +869,34 @@ export class NativeRoomService {
       // A purge removes text from this seat's own record; a remote member's route never reaches it
       if (member && kind === "purge")
         throw codedRefusal("purge-refused-remote", "a purge is appended on this seat's own connections; a member route may not purge");
-      // a durable attachment names bytes this room's custody must already hold
-      if (/** @type {any} */ (operation).attachments !== undefined)
-        await assertDurableAttachments({ root: this.root, socket, send: (answer) => sendFrame(socket, answer),
-          openRoom: (id) => this.openRoom(id) }, roomId, /** @type {any} */ (operation).attachments);
       // The store stamps author.id and derives the message id from this account id, so a member's
       // posts carry its own minted principal rather than the host's. A local connection that
       // declared a client name has its messages stamped `via` that name; a member declares none.
-      const receipt = /** @type {any} */ (await store.append(/** @type {any} */ (operation),
+      const commit = async () => /** @type {any} */ (await store.append(/** @type {any} */ (operation),
         { accountId: member ? member.binding.accountId : this.accountId,
           ...(!member && local.clientName !== undefined ? { via: local.clientName } : {}) }));
+      const attachments = /** @type {any} */ (operation).attachments;
+      // A durable attachment names bytes this room's custody must already hold. The check and the
+      // commit are one step under the room's custody lock, the lock a purge's collection takes to
+      // read the room's references: so the bytes cannot be collected between the check that found
+      // them and the commit that references them. Once committed, the room's reference keeps them
+      // and the upload's hold ends.
+      const receipt = attachments === undefined ? await commit()
+        : await withCustodyLock(store.directory, async () => {
+          await assertDurableAttachments({ root: this.root, socket, send: (answer) => sendFrame(socket, answer),
+            openRoom: (id) => this.openRoom(id) }, roomId, attachments);
+          await this.testHooks?.afterCustodyCheck?.(roomId);
+          const committed = await commit();
+          if (Array.isArray(attachments))
+            releaseHolds(store.directory, attachments.map((a) => a?.digest).filter((d) => typeof d === "string"));
+          return committed;
+        });
       if (receipt.kind === "purge") {
         // custody lets go of what this purge released; what any unpurged message names is kept.
         // The copies a face already published are out of a purge's reach; the face record log that
         // lists them is the faces' to read, so the list is empty until that reading lands.
-        const { blobsRemoved } = await collectReleasedCustody(store.directory, store.custodyCensus().released);
+        const { blobsRemoved } = await collectReleasedCustody(store.directory, () => store.custodyCensus().released,
+          { requested: () => this.testHooks?.collectionRequested?.(roomId) });
         sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "append-ack", requestId: frame.requestId, roomId, ...receipt,
           blobsRemoved, facesOutOfReach: [] });
         return;
