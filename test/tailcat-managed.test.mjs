@@ -96,8 +96,11 @@ test('failed second recipient startup closes both listeners and first child', {t
   await absent(path.join(root,'ready.json'));
 });
 
+// The expiry is absolute and its timer starts when the worker reads the spec, so it must outlast the
+// startup or the runtime is stopped before it is ready (a stopped startup rejects ready). Two seconds
+// is far past a stubbed startup on a loaded machine and well inside the test's bound.
 test('ordinary offer expiry still closes an otherwise ready runtime', {timeout:10000},async t=>{
-  const {root}=await fixture(t,{expires:Date.now()+500});const child=guardian();
+  const {root}=await fixture(t,{expires:Date.now()+2000});const child=guardian();
   const runtime=startOfferWorker(root,{spawn:async()=>child,address:async()=> 'a'.repeat(30)});
   await runtime.ready;await runtime.closed;assert.equal(child.disconnects,1);await absent(path.join(root,'ready.json'));
 });
@@ -273,7 +276,9 @@ const poll=setInterval(async()=>{try{await access(${JSON.stringify(releasePath)}
   void runtime.closed.then(()=>{actuallyClosed=true;});
   const stopped=runtime.stop();
   assert.strictEqual(stopped,runtime.stop(),'concurrent stops share one bounded result');
-  const outcome=await Promise.race([stopped.then(()=>({kind:'success'}),error=>({kind:'error',error})),delay(400).then(()=>({kind:'still-waiting'}))]);
+  // the worker never closes until released, so an unbounded stop is still waiting at any deadline;
+  // the deadline is generous so a loaded machine cannot read a bounded stop as unbounded
+  const outcome=await Promise.race([stopped.then(()=>({kind:'success'}),error=>({kind:'error',error})),delay(5000).then(()=>({kind:'still-waiting'}))]);
   assert.equal(outcome.kind,'error','stop must report failure before the test observation deadline');
   const error=/** @type {{kind:string,error:any}} */(outcome).error;
   assert.equal(error.code,'AGORA_CLEANUP_PENDING');

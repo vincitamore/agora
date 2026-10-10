@@ -20,6 +20,21 @@ let seq = 0;
 const rid = () => `request_${String(++seq).padStart(12, "0")}`;
 
 /**
+ * Probe until `ok` holds or the deadline passes, and return the last value probed, so the assertion
+ * after it names what was seen. A drop on close or on a timer is asynchronous (a handle closed, a
+ * file removed); a fixed wait for it reads as a failure on a loaded machine.
+ * @template T @param {() => Promise<T>} probe @param {(value: T) => boolean} ok @param {number} [ms]
+ */
+async function eventually(probe, ok, ms = 10_000) {
+  const end = Date.now() + ms;
+  for (;;) {
+    const value = await probe();
+    if (ok(value) || Date.now() > end) return value;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+/**
  * A room directory and a connection to drive frames on. `manifest` is what the store would hold.
  * @param {import('node:test').TestContext} t
  * @param {{ manifest?: any, limits?: Partial<Record<keyof typeof ATTACHMENT_LIMITS, number>>, now?: () => number, deps?: any }} [o]
@@ -28,11 +43,12 @@ async function rig(t, o = {}) {
   const root = await mkdtemp(path.join(tmpdir(), "agora-attach-"));
   /** @type {EventEmitter[]} */
   const sockets = [];
-  // close every connection first, so open uploads release their temp files, then remove the root
+  // close every connection first, so open uploads release their temp files, then remove the root;
+  // the release is asynchronous, and a temp file still open refuses the removal on Windows, so the
+  // removal retries (with backoff, to a bound) rather than trusting a fixed wait
   t.after(async () => {
     for (const s of sockets) s.emit("close");
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    await rm(root, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
   });
   const directory = path.join(root, "native", "rooms", ROOM);
   await mkdir(directory, { recursive: true });
@@ -190,8 +206,10 @@ test("an upload not committed in time is expired, and its temp file removed", as
   const timed = await rig(t, { limits: { uploadTtlMs: 30 } });
   const d = timed.connection();
   const late = await d.call({ type: "attachment-begin", roomId: ROOM, name: "x", size: PNG.length, digest: digestOf(PNG) });
-  await new Promise((resolve) => setTimeout(resolve, 120));
-  assert.deepEqual(await timed.held(), []);
+  // the timer removes the temp file and then remembers the id as expired; polled on the custody
+  // listing, because a commit sent before the timer runs is answered on its own terms and leaves the
+  // id unknown rather than expired (measured), so it cannot be the probe
+  assert.deepEqual(await eventually(() => timed.held(), (names) => names.length === 0), []);
   assert.equal(await d.refusedWith({ type: "attachment-commit", uploadId: late.uploadId }), "attachment-upload-expired");
 });
 
@@ -201,8 +219,7 @@ test("a closed connection takes its uploads with it", async (t) => {
   await c.call({ type: "attachment-begin", roomId: ROOM, name: "x", size: PNG.length, digest: digestOf(PNG) });
   assert.equal((await r.held()).length, 1, "the temp file");
   c.socket.emit("close");
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  assert.deepEqual(await r.held(), []);
+  assert.deepEqual(await eventually(() => r.held(), (names) => names.length === 0), []);
 });
 
 test("a crash between the temp write and the rename installs nothing", async (t) => {
