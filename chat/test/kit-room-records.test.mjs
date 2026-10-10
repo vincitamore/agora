@@ -92,7 +92,22 @@ test("a kit thread, a PNG reply from the CLI, its edit and purge, and a pushed m
   const seat = await startSeat(t);
   const fake = await startFakePushService();
   const dir = await mkdtemp(path.join(tmpdir(), "agora-chat-records-"));
-  const chat = await createChat({
+  /** @type {{ close(): void }[]} */
+  const streams = [];
+  /** @type {{ stop(force?: boolean): void } | null} */
+  let server = null;
+  /** @type {Awaited<ReturnType<typeof createChat>> | null} */
+  let chat = null;
+  // one after-hook, registered before anything that can throw: each step runs whatever failed
+  // before it, and the directory goes last (with retries, for a file Windows still holds a moment)
+  t.after(async () => {
+    for (const s of streams) { try { s.close(); } catch { /* closed */ } }
+    try { server?.stop(true); } catch { /* stopped */ }
+    try { await chat?.close(); } catch { /* closed */ }
+    try { await fake.close(); } catch { /* closed */ }
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  });
+  chat = await createChat({
     agoraDir: seat.agoraDir, agoraState: seat.state, agoraConfig: seat.config, room: seat.alias, clientName: "example-app",
     storeDir: path.join(dir, "kit"),
     hooks: {
@@ -109,23 +124,15 @@ test("a kit thread, a PNG reply from the CLI, its edit and purge, and a pushed m
     log: () => {},
     tuning: { keepAliveMs: 1000, presenceMs: 500, restartMs: 500, peopleMs: 0 },
   });
-  const server = BunRuntime.serve({
+  const served = BunRuntime.serve({
     port: 0, hostname: "127.0.0.1",
     async fetch(/** @type {Request} */ req) {
       const who = PEOPLE.find((p) => p.id === req.headers.get("x-person")) ?? null;
       return (await chat.handle(req, who)) ?? new Response("the host's own", { status: 404 });
     },
   });
-  const base = `http://127.0.0.1:${server.port}`;
-  /** @type {{ close(): void }[]} */
-  const streams = [];
-  t.after(async () => {
-    for (const s of streams) s.close();
-    server.stop(true);
-    await chat.close();
-    await fake.close();
-    await rm(dir, { recursive: true, force: true });
-  });
+  server = served;
+  const base = `http://127.0.0.1:${served.port}`;
   /** @param {string} who @param {string} p @param {unknown} [body] */
   const call = async (who, p, body) => {
     const res = await fetch(`${base}${p}`, body === undefined ? { headers: { "x-person": who } }
