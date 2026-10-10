@@ -364,7 +364,10 @@ are no trailers and the whole text is body. No partial parses.
 
 Known keys: `to` (address list; repeatable and comma-separated), `re` (a message id, so a work
 item has an identity on a transport with no threads), `claim`, `release`, `verdict`, `exhibit`,
-`because`. **Unknown keys are parsed, carried, rendered, and never acted on.** That is the whole
+`because`; and three an app writes and indexes, never the tool: `card` (a reference to a record the
+app loads at render time, with the body as the readable fallback), `waiting` (a question waiting on
+a person) and `context` (where in the app a post was written). **Unknown keys are parsed, carried,
+rendered, and never acted on.** That is the whole
 versioning story: additive growth, no version field. Narrowing a key's meaning is the only
 breaking change.
 

@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { parseSignature } from "../src/core.mjs";
-import { formatTrailers, matchesAddress, parseTrailers, TRAILER_VALUE_MAX, trailerValueOk } from "../src/trailers.mjs";
+import { formatTrailers, KNOWN_KEYS, matchesAddress, parseTrailers, TRAILER_VALUE_MAX, trailerValueOk } from "../src/trailers.mjs";
 
 test("a message with no block is all body", () => {
   assert.deepEqual(parseTrailers("just a line"), { body: "just a line", trailers: [], to: [] });
@@ -152,6 +152,30 @@ test("ack: none is a known trailer; honouring it is not the parser's job", () =>
   assert.equal(r.body, "heads up, no receipt needed");
   assert.deepEqual(r.trailers, [{ key: "ack", value: "none" }]);
   assert.deepEqual(formatTrailers(r.trailers), "ack: none");
+});
+
+test("card, waiting and context are known trailers: a block of only them is a block, and they round-trip after the others", () => {
+  assert.deepEqual(KNOWN_KEYS.slice(-3), ["card", "waiting", "context"]);
+  const r = parseTrailers("plan 12 is ready for review\n\ncard: plan P-0012\nwaiting: person-7\ncontext: item=alpha; screen=detail");
+  assert.equal(r.body, "plan 12 is ready for review");
+  assert.deepEqual(r.trailers, [
+    { key: "card", value: "plan P-0012" },
+    { key: "waiting", value: "person-7" },
+    { key: "context", value: "item=alpha; screen=detail" },
+  ]);
+  assert.deepEqual(r.to, [], "none of the three addresses anyone");
+  assert.deepEqual(parseTrailers("see the card\n\ncard: view V-0001").trailers, [{ key: "card", value: "view V-0001" }], "alone, still a block");
+  // written after every older known key, in their own fixed order, then unknown keys as given
+  const block = formatTrailers([
+    { key: "context", value: "item=alpha" },
+    { key: "severity", value: "high" },
+    { key: "card", value: "plan P-0012" },
+    { key: "to", value: "Grace" },
+    { key: "waiting", value: "person-7" },
+    { key: "ack", value: "none" },
+  ]);
+  assert.equal(block, ["to: Grace", "ack: none", "card: plan P-0012", "waiting: person-7", "context: item=alpha", "severity: high"].join("\n"));
+  assert.deepEqual(parseTrailers(`body\n\n${block}`).trailers.map((t) => t.key), ["to", "ack", "card", "waiting", "context", "severity"]);
 });
 
 test("an address matches a bearer by whole segments, from the left", () => {

@@ -21,11 +21,17 @@ import { parseSignature } from "./core.mjs";
  * committed. It is not a `re:`: it implies no thread, changes no delivery, and renders like any
  * other trailer. What it does is folded in `carry`, off this session's own ledger and no one
  * else's, so a counterpart cannot withdraw anything of ours by naming it.
+ *
+ * `card: <type> <id>`, `waiting: <person id>` and `context: <k>=<v>; <k>=<v>` are an app's keys. A
+ * card is a reference to a record the app loads from its own source of truth at render time (the
+ * body is the readable fallback); `waiting` marks a question as waiting on a person; `context`
+ * says where in the app a post was written. Known so that a block carrying only them is a block,
+ * and so an app can index them. The tool renders them and never acts on them.
  * @typedef {{ key: string, value: string }} Trailer
  */
 
 /** The keys this tool knows. Order is the order the emitter writes them in. */
-export const KNOWN_KEYS = Object.freeze(["to", "re", "withdraws", "claim", "release", "verdict", "exhibit", "because", "ack"]);
+export const KNOWN_KEYS = Object.freeze(["to", "re", "withdraws", "claim", "release", "verdict", "exhibit", "because", "ack", "card", "waiting", "context"]);
 
 /** One cap for parse and emit: a value past this, empty, or containing a newline, is not a trailer. */
 export const TRAILER_VALUE_MAX = 400;
