@@ -42,6 +42,7 @@ import { uploadFile, prepareFile, filesOf, sizeWords, UploadError } from "./uplo
  *   storage?: Storage | null,
  *   onPosted?: (receipt: any, thread: string | null) => void,
  *   fetch?: typeof fetch,
+ *   messageOf?: (id: string) => any,
  * }} ComposerOptions
  */
 
@@ -51,7 +52,7 @@ const OUTBOX_RETRY_MS = [2000, 5000, 10000, 30000, 60000];
 const TEXT_LINES_MAX = 8;
 
 /**
- * @typedef {{ unmount(): void, focus(): void, setText(text: string): void, sheet(mode: "attach" | null): void, addFiles(files: File[]): void, edit(messageId: string): Promise<void>, actions(messageId: string): Promise<void>, reaction(event: { target: string, reactions: unknown }): void, purge(event: { id?: string, ts?: string, purged?: unknown, reason?: string }): void }} ComposerHandle
+ * @typedef {{ unmount(): void, focus(): void, setText(text: string): void, sheet(mode: "attach" | null): void, addFiles(files: File[]): void, edit(messageId: string): Promise<void>, actions(messageId: string): Promise<void>, reaction(event: { target: string, reactions: unknown }): void, purge(event: { id?: string, ts?: string, purged?: unknown, reason?: string }): void, annotation(event: { act?: string, target?: string, text?: string, ts?: string }): void }} ComposerHandle
  */
 
 /** @type {ComposerOptions} */
@@ -527,7 +528,7 @@ export function mountComposer(el, ctx, options = {}) {
   let files = [];
   /** @type {{ text: string, warn: string } | null} */
   let warned = null;
-  /** @type {{ id: string, original: any } | null} */
+  /** @type {{ id: string, original: any, loading?: boolean } | null} */
   let editingMsg = null;
   let sending = false;
 
@@ -597,7 +598,7 @@ export function mountComposer(el, ctx, options = {}) {
   const drawSend = () => {
     const pending = files.some((f) => f.state === "reading" || f.state === "uploading");
     const empty = !input.value.trim() && !files.some((f) => f.state === "ready");
-    send.toggleAttribute("disabled", sending || pending || empty);
+    send.toggleAttribute("disabled", sending || pending || empty || !!editingMsg?.loading);
     send.textContent = editingMsg ? "save" : warned && warned.text === input.value ? "send anyway" : "send";
     send.setAttribute("data-warned", warned && warned.text === input.value ? "true" : "false");
     // the button's words change its width, and so the box's: measure the box again
@@ -778,7 +779,7 @@ export function mountComposer(el, ctx, options = {}) {
     sending = true;
     drawSend();
     try {
-      if (editingMsg) { await saveEdit(text); return; }
+      if (editingMsg) { if (!editingMsg.loading) await saveEdit(text); return; }
       const words = text.trim() ? text : ready.map((f) => f.name).join(", ");
       if (!(warned && warned.text === input.value)) {
         const scan = await scanText(o, words);
@@ -845,30 +846,106 @@ export function mountComposer(el, ctx, options = {}) {
   const rowIsMine = (row) => {
     const id = row.getAttribute("data-id") ?? "";
     if (mineIds.has(id)) return true;
-    return isMine(known.get(id), me);
+    return isMine(heldMessage(id), me);
   };
 
-  /** @param {string} id */
-  const startEdit = async (id) => {
-    const m = await messageOf(id);
-    if (!m || m.withdrawn) { showNotice("error", ["that message cannot be edited now"]); return; }
-    editingMsg = { id, original: m };
-    const s = splitMessage(m.text);
-    input.value = s.body;
-    warned = null;
-    clearNotice();
+  /**
+   * The message as this page already holds it: the ledger's own copy (the host's `messageOf`, kept
+   * current by the stream's annotations), else the composer's. Null when neither has it.
+   * @param {string} id
+   */
+  const heldMessage = (id) => {
+    let m = null;
+    if (o.messageOf) { try { m = o.messageOf(id) ?? null; } catch { m = null; } }
+    return m ?? known.get(id) ?? null;
+  };
+  /** @param {string} words @param {Array<Node | string>} [more] */
+  const drawEditing = (words, more = []) => {
     while (editing.firstChild) editing.removeChild(editing.firstChild);
     const cancel = h("button", { type: "button", class: "chat-cmp-link" }, ["cancel"]);
     cancel.addEventListener("click", stopEdit);
-    editing.appendChild(h("span", {}, [`editing your message from ${clock(m.ts)}`]));
+    editing.appendChild(h("span", {}, [words, ...more]));
     editing.appendChild(cancel);
     editing.hidden = false;
+  };
+  /** The box takes no typing while it waits for words to be put in it. @param {boolean} on */
+  const lockBox = (on) => {
+    input.readOnly = on;
+    if (on) input.setAttribute("aria-busy", "true"); else input.removeAttribute("aria-busy");
+  };
+  /** The draft as typed, kept now: the edit borrows the box and `stopEdit` gives the draft back. */
+  const keepDraft = () => {
+    if (draftTimer) { clearTimeout(draftTimer); draftTimer = null; }
+    writeJson(storage, dKey, input.value.trim() ? { text: input.value, alsoToRoom: alsoBox.checked, at: new Date().toISOString() } : null);
+  };
+  /** @param {string} id @param {any} m */
+  const beginEdit = (id, m) => {
+    editingMsg = { id, original: m };
+    input.value = splitMessage(m.text).body;
+    lockBox(false);
+    warned = null;
+    clearNotice();
+    drawEditing(`editing your message from ${clock(m.ts)}`);
     wrap.setAttribute("data-editing", "true");
     fit(); drawSend();
     input.focus();
   };
+
+  /**
+   * Edit one of the reader's messages. The box is filled from the words the page already holds, at
+   * once, so there is no moment in which typing can be lost. Only when the page holds nothing does
+   * it ask the room; the box is read-only until the words are in it, and if anything reached the box
+   * in that window anyway, the box keeps it and the composer says what the room's words are.
+   * @param {string} id
+   */
+  const startEdit = async (id) => {
+    if (editingMsg && editingMsg.id === id) { input.focus(); return; }
+    if (!editingMsg) keepDraft();
+    const held = heldMessage(id);
+    if (held) {
+      if (held.withdrawn || held.purged) { showNotice("error", ["that message cannot be edited now"]); return; }
+      beginEdit(id, held);
+      return;
+    }
+    editingMsg = { id, original: null, loading: true };
+    const before = input.value;
+    lockBox(true);
+    warned = null;
+    clearNotice();
+    drawEditing("loading your message");
+    wrap.setAttribute("data-editing", "loading");
+    drawSend();
+    await loadThread();
+    if (gone || !editingMsg || editingMsg.id !== id) return;
+    const m = known.get(id) ?? null;
+    if (!m || m.withdrawn || m.purged) { stopEdit(); showNotice("error", ["that message cannot be edited now"]); return; }
+    if (input.value === before) { beginEdit(id, m); return; }
+    // something reached the box while it waited: it is the person's, and it stays
+    const typed = input.value;
+    beginEdit(id, m);
+    input.value = typed;
+    fit(); drawSend();
+    roomWordsDiffer(m);
+  };
+  /**
+   * Say, in the composer, that the room's words for the message being edited are not what the box
+   * holds, with a way to take them; the box is never changed without the person's hand.
+   * @param {any} m
+   */
+  const roomWordsDiffer = (m) => {
+    const words = splitMessage(m.text).body;
+    const take = h("button", { type: "button", class: "chat-cmp-link" }, ["use the room's words"]);
+    take.addEventListener("click", () => {
+      if (!editingMsg || editingMsg.id !== m.id) return;
+      input.value = words;
+      clearNotice(); fit(); drawSend(); input.focus();
+    });
+    const first = words.split("\n").find((l) => l.trim()) ?? "";
+    showNotice("info", [h("strong", {}, ["your words are kept"]), ` · the room has this message as “${first.length > 80 ? first.slice(0, 79) + "…" : first}”; saving replaces it with what is in the box`, h("span", { class: "chat-cmp-notice-acts" }, [take])]);
+  };
   const stopEdit = () => {
     editingMsg = null;
+    lockBox(false);
     editing.hidden = true;
     wrap.removeAttribute("data-editing");
     const d = readJson(storage, dKey);
@@ -879,18 +956,19 @@ export function mountComposer(el, ctx, options = {}) {
   };
   /** @param {string} text */
   const saveEdit = async (text) => {
-    if (!editingMsg) return;
+    const ed = editingMsg;
+    if (!ed || !ed.original) return;
     if (!text.trim()) { showNotice("error", ["an edit keeps some words; to take a message back, withdraw it"]); return; }
     if (!(warned && warned.text === input.value)) {
       const scan = await scanText(o, text);
       if (scan.refuse) { showNotice("refuse", [h("strong", {}, ["not saved"]), ` · ${scan.refuse}. Change the words; this cannot be saved as it is.`]); return; }
       if (scan.warn) { warned = { text: input.value, warn: scan.warn }; showNotice("warn", [h("strong", {}, ["check before saving"]), ` · ${scan.warn}`]); return; }
     }
-    const r = await call(o, "/annotate", { method: "POST", body: JSON.stringify({ act: "edit", target: editingMsg.id, text: text + trailerBlock(editingMsg.original.text) }) });
+    const r = await call(o, "/annotate", { method: "POST", body: JSON.stringify({ act: "edit", target: ed.id, text: text + trailerBlock(ed.original.text) }) });
     if (!r) { showNotice("error", ["not saved · offline; the edit is still here"]); return; }
     if (!(r.status === 200 && r.body?.ok)) { showNotice("error", [`not saved · ${r.body?.error?.reason ?? r.body?.error?.refusal?.code ?? r.body?.error?.message ?? r.body?.error?.code ?? r.status}`]); return; }
-    known.set(editingMsg.id, { ...editingMsg.original, text: text + trailerBlock(editingMsg.original.text), edited: { at: new Date().toISOString() } });
-    stopEdit();
+    known.set(ed.id, { ...ed.original, text: text + trailerBlock(ed.original.text), edited: { at: new Date().toISOString() } });
+    if (editingMsg === ed) stopEdit();
   };
 
   /** @param {string} id */
@@ -929,9 +1007,11 @@ export function mountComposer(el, ctx, options = {}) {
   /** @param {string} id */
   const openActions = async (id) => {
     if (purged.has(id)) return;
-    if (!known.has(id) && !mineIds.has(id)) await messageOf(id);
+    if (!heldMessage(id) && !mineIds.has(id)) await messageOf(id);
     if (gone) return;
     const row = /** @type {HTMLElement | null} */ (ledger?.querySelector(`[data-id="${id.replace(/[^A-Za-z0-9_-]/g, "")}"]`) ?? null);
+    // a withdrawn message takes nothing more: no reaction, no edit, no second withdrawal
+    if (row?.classList.contains("is-withdrawn") || heldMessage(id)?.withdrawn) { closeActions(); return; }
     while (actionsEl.firstChild) actionsEl.removeChild(actionsEl.firstChild);
     const who = row?.querySelector(".chat-msg-who")?.textContent ?? "";
     const at = row?.querySelector(".chat-msg-time")?.textContent ?? "";
@@ -952,7 +1032,7 @@ export function mountComposer(el, ctx, options = {}) {
       words.appendChild(b);
     }
     actionsEl.appendChild(words);
-    if (row && rowIsMine(row) && !row.classList.contains("is-withdrawn") && !known.get(id)?.withdrawn) {
+    if (row && rowIsMine(row)) {
       const edit = h("button", { type: "button", class: "chat-cmp-option" }, ["edit"]);
       edit.addEventListener("click", () => { closeActions(); void startEdit(id); });
       const wd = h("button", { type: "button", class: "chat-cmp-option" }, ["withdraw"]);
@@ -995,7 +1075,14 @@ export function mountComposer(el, ctx, options = {}) {
         }
         continue;
       }
-      if (!row.querySelector(".chat-msg-more") && !row.classList.contains("is-withdrawn")) {
+      if (row.classList.contains("is-withdrawn")) {
+        // a withdrawn message keeps its place and nothing else: no reactions line, no "more" control
+        row.querySelector(".chat-msg-more")?.remove();
+        body.querySelector(".chat-reacts")?.remove();
+        if (actionsEl.getAttribute("data-id") === id && !actionsEl.hidden) closeActions();
+        continue;
+      }
+      if (!row.querySelector(".chat-msg-more")) {
         const more = h("button", { type: "button", class: "chat-msg-more", "aria-label": "React, edit or withdraw", title: "react, edit or withdraw" }, ["···"]);
         more.addEventListener("click", (ev) => { ev.stopPropagation(); openActions(id); });
         row.appendChild(more);
@@ -1093,6 +1180,23 @@ export function mountComposer(el, ctx, options = {}) {
     },
     /** A stream's `purge` event: the rows it took lose their words and keep their place. */
     purge: applyPurge,
+    /**
+     * A stream's `annotation` event. When it changes the message being edited, the composer says so
+     * and leaves the box as the person has it; a withdrawal ends the edit.
+     * @param {{ act?: string, target?: string, text?: string, ts?: string }} a
+     */
+    annotation(a) {
+      if (gone || !a || typeof a.target !== "string") return;
+      const m = known.get(a.target);
+      if (m && a.act === "withdraw") known.set(a.target, { ...m, withdrawn: m.withdrawn ?? { at: a.ts } });
+      if (!editingMsg || editingMsg.id !== a.target || editingMsg.loading) return;
+      if (a.act === "withdraw") { stopEdit(); showNotice("error", ["that message was withdrawn while you edited it; the edit was not saved"]); return; }
+      if (a.act !== "edit" || typeof a.text !== "string" || !editingMsg.original) return;
+      const next = { ...editingMsg.original, text: a.text, edited: { at: a.ts } };
+      known.set(a.target, next);
+      editingMsg = { id: a.target, original: next };
+      if (splitMessage(a.text).body !== input.value.replace(/\s+$/, "")) roomWordsDiffer(next);
+    },
   };
   mounted.set(el, handle);
   return handle;

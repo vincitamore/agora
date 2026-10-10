@@ -337,6 +337,8 @@ export function mountChat(el, options) {
     try {
       mountComposer(composer, ctxFor(root), {
         base,
+        // an edit starts from the words this ledger shows, never from a fetch the person waits on
+        messageOf: (id) => (active === root && view ? view.messages().find((m) => m.id === id) ?? null : null),
         ...(options.people ? { people: options.people } : {}),
         ...(options.context ? { context: options.context } : {}),
       });
@@ -350,7 +352,11 @@ export function mountChat(el, options) {
           markRead();
         }
       },
-      annotation: (a) => { if (active === root && view && a && typeof a === "object") view.annotate(a); },
+      annotation: (a) => {
+        if (active !== root || !view || !a || typeof a !== "object") return;
+        view.annotate(a);
+        composerIn(composer)?.annotation(a);
+      },
       // someone reacted: the composer draws the reactions line under each row
       reaction: (r) => { if (active === root && r && typeof r === "object") composerIn(composer)?.reaction(r); },
       // a purge, whoever made it: the composer strikes the rows it took, which it draws on

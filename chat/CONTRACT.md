@@ -77,10 +77,10 @@ The host's cross-site checks and session sit in front of every route.
 | `GET /chat/file/:id` | `digest` | the bytes, only while a message with its words carries it and the reader may read its thread (404 otherwise); `X-Content-Type-Options: nosniff`; non-images as `application/octet-stream` with `Content-Disposition: attachment`; `Cache-Control: private` |
 | `GET /chat/thumb/:digest` | | the kit's thumbnail, or 404 |
 | `POST /chat/annotate` | `{ act, target, text?, operationId? }` | `{ receipt, warn? }`; edit and withdraw are the author's own (by ref), 403 otherwise |
-| `POST /chat/react` | `{ target, name: "<short word>", on: bool }` | `{ names: [personId], reactions }`: the people who chose that name, and the message's reactions as now folded (kit store, names only) |
+| `POST /chat/react` | `{ target, name: "<short word>", on: bool }` | `{ names: [personId], reactions }`: the people who chose that name, and the message's reactions as now folded (kit store, names only); 409 `WITHDRAWN` for a new reaction on a withdrawn message (taking one back still answers) |
 | `POST /chat/purge` | `{ targets?, thread?, reason, operationId? }` | `{ purged, facesOutOfReach, blobsRemoved, receipt }` (authorize `purge`); 202/409/503 as post |
 | `POST /chat/position` | `{ thread: <root>\|"main", cursor }` | `{}`; a position never moves back within an epoch |
-| `GET /chat/search` | `q`, `scope=messages\|files`, `context`, `limit` (1-200, default 50) | `{ hits: [{ message, snippet }], coverage: { through, at } }`; `at` is the time of the newest record the index holds through `through` (`null` while it holds none), which the search sheet prints as "searched through <day> <time>"; every word as a prefix; `messages` searches the words, `files` the names |
+| `GET /chat/search` | `q`, `scope=messages\|files`, `context`, `limit` (1-200, default 50) | `{ hits: [{ message, snippet }], coverage: { through, at } }`; `at` is the time of the newest record the index holds through `through` (`null` while it holds none), which the search sheet prints as "searched through <day> <time>"; every word as a prefix; `messages` searches the words, `files` the names; the words are the message's body alone, so a trailer block and a signature line are never matched and never in a `snippet` (a trailer is metadata: `context` filters by it) |
 | `GET /chat/push/key` | | `{ publicKey }`, the VAPID public key |
 | `POST /chat/push/subscribe` | a push subscription | stored |
 | `DELETE /chat/push/subscribe` | `{ endpoint }` | `{ removed }` |
@@ -203,17 +203,18 @@ The thread pane carries a `.chat-composer` slot the composer mounts into.
 import { configureComposer, registerAttachAction, composerIn } from "/chat/client/composer.js";
 import { mountSearch } from "/chat/client/search.js";
 
-configureComposer({ reactions?, storage?, onPosted? });   // optional: options every composer mounted later uses
+configureComposer({ reactions?, storage?, onPosted?, messageOf? });   // optional: options every composer mounted later uses
 registerAttachAction("handover", { label: "hand over a password", note: "never posted", run: (ctx) => {} });
 composerIn(el.querySelector(".chat-composer"))                  // the mounted composer's handle, or undefined
-// handle = { unmount(), focus(), setText(text), sheet("attach" | null), addFiles(files), edit(id), actions(id), reaction(event) }
+// handle = { unmount(), focus(), setText(text), sheet("attach" | null), addFiles(files), edit(id), actions(id), reaction(event), purge(event), annotation(event) }
 
 const search = mountSearch(el, { base: "/chat", onOpen: (root, messageId) => view.open(root), onClose, context?, now? });
 // search = { unmount(), focus(), search(q) }
 ```
 
 `mountChat` mounts the composer in each thread it opens with its own `base`, `people` and
-`context`, and hands the open thread's `reaction` and `purge` events to it, so a host that calls
+`context`, lends it the ledger's own messages (`messageOf`), and hands the open thread's `reaction`,
+`purge` and `annotation` events to it, so a host that calls
 `mountChat` calls nothing else to post, react or see a purge struck; `configureComposer` is only for
 what `mountChat` does not carry. The composer's and the search sheet's styles are in `chat.css`.
 
@@ -222,6 +223,12 @@ an offline send, a 503 or a 5xx keeps it and resends under the same `operationId
 hands it back to the composer with the reason, never resent. It calls `POST /chat/scan` before a
 send and before an edit's save; a warning offers "send anyway", a refusal never does. Edit and
 withdraw are offered only on the reader's own message, matched by `author.ref`, never by name.
+An edit starts from the words the page already shows (`messageOf(id)`, else the composer's own
+copy), so the box is filled in the same turn as the click; only a message the page does not hold is
+read from the room, and the box is read-only until its words are in it. Nothing the person typed is
+overwritten: when the room's words differ from the box (something reached it while it waited, or an
+edit from elsewhere arrives), the composer says so and offers "use the room's words". A withdrawn
+message shows no reactions line and no "more" control, and its actions are not offered.
 Reactions are one word each (`seen`, `thanks`, `agreed`, `done` unless `reactions` names others). A
 registered attach action is a dashed button in the composer row and the attach sheet; what it does
 never passes through the room. Images are re-encoded before upload (metadata dropped, longest edge
