@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en" data-theme="dim">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Chat kit composer dev page</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&amp;display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../client/chat.css">
+<link rel="stylesheet" href="./theme.css">
+<style>
+  /* the dev host's search drawer: the kit's search sheet mounted in the host's own frame */
+  .dev-drawer { position: fixed; inset: 0 0 0 auto; width: min(460px, 100vw); border-left: 1px solid var(--t-rule); z-index: 5; }
+  .dev-drawer[hidden] { display: none; }
+  .dev-host-sheet { position: fixed; left: 0; right: 0; bottom: 0; padding: 16px 18px 30px; background: var(--t-raised); border-top: 2px dashed var(--t-ink); color: var(--t-ink); font: 14px/1.5 "IBM Plex Sans", sans-serif; z-index: 6; }
+  .dev-host-sheet button { min-height: 44px; font: 13px "IBM Plex Mono", monospace; background: transparent; color: inherit; border: 1px solid var(--t-btn-rule); padding: 0 14px; }
+</style>
+</head>
+<body>
+<!--
+  The writing half on the reading half's dev page: compose-fixtures.js answers the composer's, the
+  uploads', the message sheet's and the search sheet's routes over fixtures.js.
+  Query: theme=dim|light, thread=plan|ledger|labels|pump, and scene, one of
+    compose   a draft with the mention list open
+    attach    the attach sheet holding one photo (the phone's "+")
+    warn      the scan's warning shown before send, with "send anyway"
+    refuse    the scan's refusal: no "send anyway"
+    outbox    offline: a post kept in the outbox, waiting for the room
+    actions   the message sheet on the reader's own message, a reaction given
+    edit      editing the reader's own message
+    search    the search sheet open over the chat
+    purge     a reply purged elsewhere while the thread is open: its words leave the page
+  Serve chat/ statically (bun chat/dev/serve.mjs) and open /dev/compose.html.
+-->
+<div id="chat"></div>
+<div id="drawer" class="dev-drawer" hidden></div>
+<script type="module">
+  import { installFixtures, PEOPLE, NOW, ROOTS, THREADS } from "./fixtures.js";
+  import { installComposeFixtures, samplePhoto } from "./compose-fixtures.js";
+  const params = new URLSearchParams(location.search);
+  document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dim");
+  const scene = params.get("scene") ?? "";
+  if (params.get("fresh") !== "0") { try { for (const k of Object.keys(localStorage)) if (k.startsWith("agora-chat:")) localStorage.removeItem(k); } catch {} }
+  installFixtures("/chat");
+  installComposeFixtures("/chat");
+  await import("./host.js");
+  const { mountChat } = await import("../client/index.js");
+  const { configureComposer, registerAttachAction, composerIn } = await import("../client/composer.js");
+  const { mountSearch } = await import("../client/search.js");
+
+  configureComposer({ base: "/chat", people: async () => PEOPLE, context: () => [["context", "zone=north; screen=dev"]] });
+  registerAttachAction("handover", {
+    label: "hand over a password",
+    note: "never posted",
+    run: ({ close }) => {
+      close();
+      const s = document.createElement("div");
+      s.className = "dev-host-sheet";
+      s.textContent = "The host's own sheet opens here; the kit only drew the button. ";
+      const b = document.createElement("button"); b.textContent = "close"; b.onclick = () => s.remove();
+      s.appendChild(b); document.body.appendChild(s);
+    },
+  });
+
+  const threadKey = params.get("thread") ?? (scene === "search" ? "" : "plan");
+  const thread = ROOTS[threadKey];
+  window.chat = mountChat(document.getElementById("chat"), {
+    base: "/chat",
+    context: () => [["context", "zone=north; screen=dev"]],
+    people: async () => PEOPLE,
+    now: () => new Date(NOW),
+    ...(thread ? { thread } : {}),
+  });
+
+  const until = async (fn, ms = 4000) => { const t0 = Date.now(); for (;;) { const v = fn(); if (v) return v; if (Date.now() - t0 > ms) return null; await new Promise((r) => setTimeout(r, 25)); } };
+  const slot = await until(() => { const el = document.querySelector(".chat-composer"); return el && composerIn(el) ? el : null; });
+  const cmp = slot ? composerIn(slot) : null;
+  const input = () => document.querySelector(".chat-cmp-input");
+  const type = (text) => { const i = input(); i.focus(); i.value = text; i.setSelectionRange(text.length, text.length); i.dispatchEvent(new Event("input", { bubbles: true })); };
+  const clickSend = () => document.querySelector(".chat-cmp-send").click();
+  const mine = () => (THREADS[thread] ?? []).find((m) => m.author.ref === PEOPLE[0].id);
+  Object.assign(window.__chatDev, { composer: cmp, samplePhoto, mine, THREADS });
+  await until(() => document.querySelector(".chat-msg"));
+  await new Promise((r) => setTimeout(r, 150));
+
+  if (scene === "compose" && cmp) type("Open bay 2 at one, like the others. @ra");
+  if (scene === "attach" && cmp) {
+    cmp.sheet("attach");
+    cmp.addFiles([await samplePhoto()]);
+    type("the new vent motor, for the record");
+    await until(() => document.querySelector('.chat-cmp-file[data-state="ready"]'));
+  }
+  if (scene === "warn" && cmp) { type("The row 8 controller login is password: tomato-42, if you need it."); clickSend(); await until(() => document.querySelector(".chat-cmp-notice:not([hidden])")); }
+  if (scene === "refuse" && cmp) { type("-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----"); clickSend(); await until(() => document.querySelector(".chat-cmp-notice:not([hidden])")); }
+  if (scene === "outbox" && cmp) {
+    window.__chatDev.setOffline(true);
+    type("Back in the north house. Bay 2 reads 27 °C now.");
+    clickSend();
+    await until(() => document.querySelector('.chat-cmp-ob[data-state="queued"]'));
+  }
+  if ((scene === "actions" || scene === "edit") && cmp) {
+    const m = mine();
+    if (m && scene === "actions") {
+      await cmp.actions(m.id);
+      const seen = await until(() => [...document.querySelectorAll(".chat-cmp-react")].find((b) => b.textContent === "seen"));
+      seen?.click();
+      await until(() => document.querySelector(`.chat-msg[data-id="${m.id}"] .chat-reacts`) && document.querySelector(".chat-cmp-actions")?.hidden);
+      await cmp.actions(m.id);
+    }
+    if (m && scene === "edit") await cmp.edit(m.id);
+  }
+  if (scene === "purge") {
+    await until(() => document.querySelectorAll(".chat-msg-more").length);
+    window.__chatDev.purge(THREADS[thread][1].id, "asked to remove the reading");
+    await until(() => document.querySelector(".chat-msg.is-purged"));
+  }
+  if (scene === "search") {
+    const d = document.getElementById("drawer");
+    d.hidden = false;
+    const s = mountSearch(d, { base: "/chat", now: () => new Date(NOW), onClose: () => { d.hidden = true; }, onOpen: (root) => { d.hidden = true; window.chat.open(root); } });
+    await s.search("vent");
+  }
+  document.documentElement.setAttribute("data-scene-ready", scene || "none");
+</script>
+</body>
+</html>
