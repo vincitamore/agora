@@ -18,7 +18,7 @@
 import { h } from "./markdown.js";
 import { renderThreadList, rootId } from "./list.js";
 import { renderThread, bodyOf, contextOf, clock, dayLabel } from "./thread.js";
-import { mountComposer } from "./composer.js";
+import { mountComposer, composerIn } from "./composer.js";
 
 export { registerCard } from "./cards.js";
 export { registerBlock } from "./blocks.js";
@@ -343,6 +343,8 @@ export function mountChat(el, options) {
         }
       },
       annotation: (a) => { if (active === root && view && a && typeof a === "object") view.annotate(a); },
+      // someone reacted: the composer draws the reactions line under each row
+      reaction: (r) => { if (active === root && r && typeof r === "object") composerIn(composer)?.reaction(r); },
       state: onState,
       presence: (p) => { presence = p; drawPresence(); },
     }, (s) => { if (s === "reconnecting") { roomState = "reconnecting"; drawState(); } });

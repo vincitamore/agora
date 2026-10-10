@@ -98,6 +98,7 @@ import { handleFile, handleThumb, handleUpload } from "./uploads.mjs";
  *   fail: (status: number, code: string, message: string, extra?: Record<string, unknown>) => Response,
  *   toBrowser: <M extends Record<string, any>>(m: M) => Omit<M, 'room'>,
  *   on: Chat['on'],
+ *   reacted: (target: string, thread: string | null | undefined) => void,
  * }} ChatKit
  */
 /** @typedef {(req: Request, person: Person, kit: ChatKit) => Promise<Response | null>} PartHandler */
@@ -386,6 +387,7 @@ export async function createChat(options) {
     options, hooks, room, store, log, on,
     people: currentPeople,
     personRef, json, fail, toBrowser,
+    reacted: (target, thread) => streams.reaction(target, thread),
   };
 
   // push is its own part (push/): its routes, its own tables in kit.sqlite, and a notify for each new message

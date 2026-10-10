@@ -137,6 +137,7 @@ comments. `main` carries the whole room, replies included; a root carries that t
 | `message` | its cursor | a message |
 | `annotation` | its cursor | `{ id, cursor, ts, act, target, text?, author, via?, message }`; `message` is the target folded with it, or `null` when the kit does not hold it |
 | `purge` | its cursor | `{ id, cursor, ts, purged: [messageId], thread?, reason, by: { name, ref? } }`; a root's stream receives only its thread's ids, and nothing for a purge that took none |
+| `reaction` | none | `{ target, reactions: [{ name, people }] }`, the message's reactions as they now stand (`[]` when the last was taken back), sent to every live stream on its thread when anyone reacts; a reaction is the kit's, not a room record, so it carries no `id:` and moves no resume point, and a reconnecting stream reads reactions folded into the messages again |
 | `state` | the history's `through`, on the first | `{ state: "live" \| "dark" \| "refused", reason?, through? }`; the first after history carries `through` |
 | `presence` | | `{ name, state, lastSeen?, running? }`, from the host's `presence` hook, refreshed while a stream is open |
 
@@ -205,7 +206,7 @@ import { mountSearch } from "/chat/client/search.js";
 configureComposer({ base: "/chat", people, context, reactions? });   // options every composer mounted later uses
 registerAttachAction("handover", { label: "hand over a password", note: "never posted", run: (ctx) => {} });
 composerIn(el.querySelector(".chat-composer"))                  // the mounted composer's handle, or undefined
-// handle = { unmount(), focus(), setText(text), sheet("attach" | null), addFiles(files), edit(id), actions(id) }
+// handle = { unmount(), focus(), setText(text), sheet("attach" | null), addFiles(files), edit(id), actions(id), reaction(event) }
 
 const search = mountSearch(el, { base: "/chat", onOpen: (root, messageId) => view.open(root), onClose, context?, now? });
 // search = { unmount(), focus(), search(q) }

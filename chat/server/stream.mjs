@@ -16,6 +16,10 @@
  *   null when the kit has not seen the target), `id:` its cursor;
  * - `purge`: `{ id, cursor, ts, purged, thread?, reason, by }`, the messages a purge took (on a
  *   thread's stream, only that thread's), `id:` its cursor; the browser strikes their text;
+ * - `reaction`: `{ target, reactions }`, a message's reactions as they now stand (`[]` when the last
+ *   was taken back), sent when anyone reacts, with no `id:`: a reaction is the kit's, not a room
+ *   record, so it moves no resume point, and a stream that reconnects reads it folded into the
+ *   message again;
  * - `state`: `{ state: 'live' | 'dark' | 'refused', reason?, through? }`; the first after the history
  *   carries `through` and `id:` it, so a reconnecting EventSource resumes from there;
  * - `presence`: the host's presence for the resident, `{ name, state, lastSeen?, running? }`,
@@ -27,7 +31,7 @@
 
 import { parseCursor } from "./store.mjs";
 import { asFault } from "./room.mjs";
-import { withReactions } from "./annotate.mjs";
+import { withReactions, reactionsOf } from "./annotate.mjs";
 
 /** A comment line on the stream, so a proxy does not decide it has gone quiet. */
 export const KEEP_ALIVE_MS = 25_000;
@@ -375,8 +379,24 @@ export function createStreams(o) {
     });
   }
 
+  /**
+   * A reaction changed: every live stream that hears the message's thread gets its reactions as they
+   * now stand. A stream still reading its history is skipped: the history folds them in when it is
+   * delivered, after this change.
+   * @param {string} target @param {string | null | undefined} thread the target's thread root, as the index has it
+   */
+  function reaction(target, thread) {
+    const reactions = reactionsOf(o.store, [target]).get(target) ?? [];
+    for (const m of members) {
+      if (m.phase !== "live") continue;
+      if (m.thread !== null && thread !== m.thread && !m.ids.has(target)) continue;
+      m.send("reaction", { target, reactions });
+    }
+  }
+
   return {
     open,
+    reaction,
     /** Whether any stream is open (for the host's diagnostics and the kit's tests). */
     anyOpen: () => streams.size > 0,
     close() {

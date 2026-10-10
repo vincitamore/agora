@@ -138,6 +138,7 @@ export async function handleReact(req, person, kit) {
   if (thread === undefined) return kit.fail(404, "NOT_FOUND", "There is no such message.");
   if (!kit.hooks.authorize(person, "react", { target, thread })) return kit.fail(403, "FORBIDDEN", "You cannot do that here.");
   kit.store.setReaction(target, name, person.id, on);
+  kit.reacted(target, thread);
   const reactions = reactionsOf(kit.store, [target]).get(target) ?? [];
   return kit.json(200, { ok: true, data: { names: reactions.find((r) => r.name === name)?.people ?? [], reactions } });
 }

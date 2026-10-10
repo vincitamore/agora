@@ -51,7 +51,7 @@ const OUTBOX_RETRY_MS = [2000, 5000, 10000, 30000, 60000];
 const TEXT_LINES_MAX = 8;
 
 /**
- * @typedef {{ unmount(): void, focus(): void, setText(text: string): void, sheet(mode: "attach" | null): void, addFiles(files: File[]): void, edit(messageId: string): Promise<void>, actions(messageId: string): Promise<void> }} ComposerHandle
+ * @typedef {{ unmount(): void, focus(): void, setText(text: string): void, sheet(mode: "attach" | null): void, addFiles(files: File[]): void, edit(messageId: string): Promise<void>, actions(messageId: string): Promise<void>, reaction(event: { target: string, reactions: unknown }): void }} ComposerHandle
  */
 
 /** @type {ComposerOptions} */
@@ -1098,6 +1098,15 @@ export function mountComposer(el, ctx, options = {}) {
     addFiles,
     edit: startEdit,
     actions: openActions,
+    /**
+     * A stream's `reaction` event: the message's reactions as they now stand, from anyone.
+     * @param {{ target: string, reactions: unknown }} event
+     */
+    reaction(event) {
+      if (gone || !event || typeof event.target !== "string") return;
+      reacted.set(event.target, reactionsOf({ reactions: event.reactions }) ?? new Map());
+      if (ledger) decorate(ledger);
+    },
   };
   mounted.set(el, handle);
   return handle;

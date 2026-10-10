@@ -387,6 +387,44 @@ test("the client half reads the reactions the server serves, in the one shape it
   assert.deepEqual([...(reactionsOf(shown) ?? [])], want, "the stream's message event");
 });
 
+test("a reaction reaches every open stream on its thread at once, as the message's reactions now stand", SLOW, async (t) => {
+  const k = await setup(t);
+  const id = (await k.call("p-ada", "/chat/post", { text: "react to this live" })).body.data.receipt.id;
+  const other = (await k.call("p-ada", "/chat/post", { text: "another thread" })).body.data.receipt.id;
+  const reply = (await k.call("p-ada", "/chat/post", { text: "a reply in it", thread: id })).body.data.receipt.id;
+  await k.indexed(reply);
+  await k.indexed(other);
+  const grace = await k.stream("p-grace", `thread=${id}`);
+  const lin = await k.stream("p-lin", `thread=${id}`);
+  const room = await k.stream("p-lin", "thread=main");
+  const elsewhere = await k.stream("p-grace", `thread=${other}`);
+  const reactionsOn = (/** @type {any} */ s, /** @type {string} */ target) => s.of("reaction").filter((/** @type {any} */ e) => e.data.target === target);
+
+  await k.call("p-ada", "/chat/react", { target: reply, name: "seen", on: true });
+  const want = [{ name: "seen", people: ["p-ada"] }];
+  for (const [who, s] of /** @type {const} */ ([["grace", grace], ["lin", lin], ["main", room]])) {
+    const got = /** @type {any} */ (await s.until(() => reactionsOn(s, reply)[0], `the reaction on ${who}'s stream`));
+    assert.deepEqual(got.data, { target: reply, reactions: want }, who);
+    assert.equal(got.id, undefined, "a reaction moves no resume point");
+  }
+  await k.call("p-grace", "/chat/react", { target: reply, name: "seen", on: true });
+  await lin.until(() => reactionsOn(lin, reply).length === 2, "the second reaction");
+  assert.deepEqual(reactionsOn(lin, reply)[1].data.reactions, [{ name: "seen", people: ["p-ada", "p-grace"] }]);
+  await k.call("p-ada", "/chat/react", { target: reply, name: "seen", on: false });
+  await k.call("p-grace", "/chat/react", { target: reply, name: "seen", on: false });
+  await grace.until(() => reactionsOn(grace, reply).length === 4, "taken back");
+  assert.deepEqual(reactionsOn(grace, reply)[3].data.reactions, [], "the last taken back is an empty list");
+  // the root's own reactions reach its thread's streams too; another thread's stream hears none of it
+  await k.call("p-lin", "/chat/react", { target: id, name: "done", on: true });
+  await grace.until(() => reactionsOn(grace, id)[0], "the root's reaction");
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(elsewhere.of("reaction").length, 0, "another thread's stream hears no reaction");
+  // a stream opened afterwards reads them folded into the message
+  const late = await k.stream("p-grace", `thread=${id}`);
+  const root = /** @type {any} */ (await late.until(() => late.of("message").find((e) => e.data.id === id), "the root on a new stream")).data;
+  assert.deepEqual(root.reactions, [{ name: "done", people: ["p-lin"] }]);
+});
+
 test("search: words and file names, context, coverage, and what a reader may see", SLOW, async (t) => {
   const k = await setup(t);
   const a = await k.call("p-ada", "/chat/post", { text: "the valve schedule for tuesday", trailers: [["context", "item=alpha; screen=detail"]] });

@@ -130,6 +130,9 @@ export function installComposeFixtures(base) {
       if (!served) list.push({ name: b.name, people: [...names] });
       const kept = list.filter((r) => r.people.length);
       if (kept.length) target.reactions = kept; else delete target.reactions;
+      // every open stream on the thread hears it, as the kit's streams do
+      const where = target.thread ?? target.id;
+      setTimeout(() => { for (const s of streams) if (s.readyState !== 2 && (s.thread === "main" || s.thread === where)) s.emit("reaction", { target: target.id, reactions: kept }); }, 30);
       return ok({ names: [...names], reactions: kept });
     }
     if (path === "/search") {
