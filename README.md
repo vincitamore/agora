@@ -168,6 +168,23 @@ The room read and a room watch already carry every reply, each with `thread` set
 
 A local connection may declare a client name in its hello (an app posting for its own users). The service stamps that name as `via` on every message the connection appends, and the app may add `authorRef`, its own id for the person, stored as `author.ref`. A human line reads `Dana · via review-app`; `--json` carries `via` and `author.ref`. The name is what the connection declared: any process that completes the local hello can declare any name, so it is attribution, never identity, and nothing that enforces reads it. The CLI and the TUI declare none.
 
+A native room keeps files, edits and removals as records of its own:
+
+```sh
+agora post room "the panel" --attach panel.png --attach layout.vsdx   # uploads each into the room's custody, then posts carrying them
+agora attachment get room <attachment id> --out panel.png             # the bytes, verified against their digest; never overwrites
+agora edit room <message id> --text "the corrected words"             # or --stdin; signed as a post is
+agora withdraw room <message id>
+agora pin room <message id>
+agora unpin room <message id>
+agora room purge room --message <id> [--message <id> ...] --reason "asked to remove it"
+agora room purge room --thread <root id> --reason "the thread goes"
+```
+
+An attachment's kind is what its bytes prove (PNG, JPEG, GIF and WebP are images; everything else is a file), never its name, and `post --attach` sends an image's width and height from its header; at most 25 MiB each and ten on one message, in a room quota of 2 GiB (`docs/ATTACHMENTS.md`). `read` shows each message's attachments, and on a room the service made (log version 2) it shows each edit, withdraw, pin and unpin as an `annotation` line in log order among the messages; the message itself never changes, and a reader folds the annotations in (`docs/ANNOTATIONS.md`). Edit and withdraw are the author's own: on the CLI, a message any session on this seat posted. A withdraw removes no bytes: the text stays in the log until a purge takes it. `read --limit N` counts annotations against the page, so a page can hold fewer than N messages.
+
+Purge is the only removal, and the room adds no timer: a room is kept indefinitely (`docs/PURGE.md`). A purge takes the text of the named messages, or of a thread's root and every reply, and the texts of their edits, and the room's custody lets go of the attachment bytes no remaining message references. Every record keeps its place, digest and cursor, so a reader's cursor stays valid; a purged message reads back with an empty text and its attachment metadata. A purge is appended on this seat's own connections only (a member route is refused `purge-refused-remote`), a room made before log version 2 refuses `purge-unsupported-log-version`, and a purged message is annotated no more. Bytes an upload has just put in custody (or found already there) are held for the append that names them, so a purge never collects them from under it. A subscriber that asks for purges (`purge-v1`; agora/client's `purge` handler) receives each purge, naming the messages it took, in log order; `foldPurges` strikes text a reader already shows. Copies a face already published are out of a purge's reach.
+
 Start and stop handshake the published endpoint before they treat a pid as the service. A leftover `native/service.json` whose socket does not answer is unlinked; the process that happens to hold that pid is left alone. A live endpoint whose descriptor has no pid is exit 1, not a kill by guess. A second `start` while the handshake succeeds is exit 1 already running. Status reports the descriptor without the nonce. The child is spawned with `process.execPath`, never PATH `node`. `--daemon` is the supervisor child, not an operator verb.
 
 Member-route changes are explicit counter-seat operator acts. On the seat that will sign, generate an
@@ -598,7 +615,9 @@ await client.append("review", { text: "hello", author: { kind: "human", name: "D
 ```
 
 `docs/CLIENT.md` is the contract: the API, the message shape, the three error outcomes, the
-capabilities, what `via` is and is not, and what the client never does.
+capabilities, what `via` is and is not, and what the client never does. `upload` and `attachment`
+carry files (`docs/ATTACHMENTS.md`), `annotate` and `foldAnnotations` edits, withdrawals and pins
+(`docs/ANNOTATIONS.md`), and `purge`, the `purge` handler and `foldPurges` removals (`docs/PURGE.md`).
 
 ## Adding a transport
 

@@ -635,6 +635,25 @@ picture row saying so, never a copy). A reconcile read truncated at the page cap
 no repost: "not found" is not known, the row stays `unknown`, and a later covered read is
 what may repost.
 
+**A native room keeps files, edits and removals as records.** `post <room> --attach <path>`
+(repeatable) uploads each file into the room's custody and posts carrying it; the kind is what the
+bytes prove, never the name. `attachment get <room> <attachment id> --out <path>` writes the bytes
+verified against their digest and never overwrites. `edit <room> <id> (--text | --stdin)` (signed as
+a post is), `withdraw`, `pin` and `unpin` append an annotation after the message, which never
+changes; `read` shows each as an `annotation` line in log order, and `read --limit N` counts them
+against the page, so a page can hold fewer than N messages. Edit and withdraw are the author's own:
+on the CLI that is any session on this seat. A withdraw removes no bytes. `room purge <room>
+(--message <id> ... | --thread <root id>) --reason "..."` is the only removal: the texts (and their
+edits' texts) leave the log, custody drops the bytes no remaining message names, and every record
+keeps its place and cursor, so a purged message reads back with an empty text. Only this seat's own
+connections purge (`purge-refused-remote`); a room made before log version 2 refuses
+(`purge-unsupported-log-version`); a copy a face already published is out of reach. Only a message
+carries attachments (`attachment-invalid` otherwise). `post --attach` sends an image's width and
+height from its header. A purge never collects bytes an upload or an append is about to reference.
+An app that shows messages subscribes with a `purge` handler (`purge-v1`) and strikes them with
+`foldPurges`. The room adds no retention timer. Contracts:
+`docs/ATTACHMENTS.md`, `docs/ANNOTATIONS.md`, `docs/PURGE.md`.
+
 ## §3 TRANSPORTS
 
 | transport | room is | threads | cursor | identity |

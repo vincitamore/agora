@@ -175,7 +175,8 @@ test("the boundary's generation names the log file: absent is room.frames, N is 
   await opened.append({ operationId: "op_v2_generation_2", authorName: "Ada", authorKind: "human", text: "next" }, { accountId: ACCOUNT });
   await opened.close();
   assert.equal(JSON.parse(await readFile(boundaryPath, "utf8")).generation, 1);
-  assert.equal((await readFile(path.join(dir, "room.frames"))).length, 0, "generation 0 was not written");
+  // generation 0 was never written to again, and the open removed it: the boundary names 1 (docs/PURGE.md)
+  await assert.rejects(readFile(path.join(dir, "room.frames")), { code: "ENOENT" });
   const again = await NativeRoomStore.open({ root, roomId: ROOM });
   assert.deepEqual(again.read().map((m) => m.text), ["kept", "next"]);
   await again.close();

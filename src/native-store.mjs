@@ -1,7 +1,7 @@
 // @ts-check
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, open, readFile, realpath, rename, rm, stat } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, realpath, rename, rm, stat } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
 import { AgoraError } from "./core.mjs";
@@ -27,6 +27,9 @@ const TEXT_DIGEST_RE = /^sha256:[a-f0-9]{64}$/;
 const LOG_RECORD_MAX = 1024 * 1024;
 const MESSAGE_TEXT_MAX = 256 * 1024;
 const ATTACHMENT_MAX = 32;
+const PURGE_TARGETS_MAX = 1000;
+const PURGE_REASON_MAX = 1000;
+const GENERATION_FILE_RE = /^room\.frames(?:\.(\d+))?$/;
 const DEFAULT_RECORD_LIMIT = 100_000;
 const DEFAULT_CLAIM_LEASE_MS = 3_600_000;
 const CLAIM_LEASE_CAP_MS = 86_400_000;
@@ -45,20 +48,45 @@ export const textDigest = (text) => `sha256:${createHash("sha256").update(text, 
 
 /**
  * The part of a record its `recordDigest` covers. Version 1: everything but the digest itself.
- * Version 2: also without `message.text` and `annotation.text`, which their `textDigest` commits to.
+ * Version 2: also without `message.text` and `annotation.text`, which their `textDigest` commits to,
+ * and without the `purged` marker a purge sets beside a removed text (docs/PURGE.md), so removing a
+ * text leaves every digest, and so every reader's checkpoint, standing.
  * @param {any} unsigned the record without `recordDigest`
  */
 function signedPart(unsigned) {
   if (unsigned.version !== LOG_VERSION_2) return unsigned;
-  if (unsigned.message && "text" in unsigned.message) {
-    const { text: _text, ...message } = unsigned.message;
+  if (unsigned.message && ("text" in unsigned.message || "purged" in unsigned.message)) {
+    const { text: _text, purged: _purged, ...message } = unsigned.message;
     return { ...unsigned, message };
   }
-  if (unsigned.annotation && "text" in unsigned.annotation) {
-    const { text: _text, ...annotation } = unsigned.annotation;
+  if (unsigned.annotation && ("text" in unsigned.annotation || "purged" in unsigned.annotation)) {
+    const { text: _text, purged: _purged, ...annotation } = unsigned.annotation;
     return { ...unsigned, annotation };
   }
   return unsigned;
+}
+
+/**
+ * The messages a purge takes the text of: its targets, and with a thread the root and every reply
+ * the room held, less the ones an earlier purge already took, in log order. One function decides it
+ * at append and again on scan, so the `purged` list a record carries is checked, never trusted.
+ * @param {{ targets: string[], thread?: string }} purge
+ * @param {(id: string) => number | undefined} sequenceOf a message's sequence, or undefined
+ * @param {(root: string) => string[]} repliesOf the ids of a root's replies so far
+ * @param {(id: string) => boolean} alreadyPurged
+ */
+function purgeScope(purge, sequenceOf, repliesOf, alreadyPurged) {
+  const ids = new Set(purge.targets);
+  if (purge.thread !== undefined) { ids.add(purge.thread); for (const id of repliesOf(purge.thread)) ids.add(id); }
+  return [...ids].filter((id) => !alreadyPurged(id))
+    .sort((a, b) => /** @type {number} */ (sequenceOf(a)) - /** @type {number} */ (sequenceOf(b)));
+}
+
+/** A `purged` marker as a record carries it: when, and by which purge record. @param {unknown} value */
+function validPurgedMarker(value) {
+  const m = /** @type {any} */ (value);
+  return Boolean(m) && typeof m === "object" && !Array.isArray(m) && Object.keys(m).length === 2 &&
+    typeof m.at === "string" && typeof m.purge === "string" && /^[A-Za-z0-9_-]{16,128}$/.test(m.purge);
 }
 
 /** @param {any} unsigned */
@@ -66,6 +94,30 @@ const recordDigestOf = (unsigned) => nativeDigest(signedPart(unsigned));
 
 /** The log file of a generation: 0 is `room.frames`, N is `room.frames.<N>`. @param {number} generation */
 export const generationFile = (generation) => generation === 0 ? "room.frames" : `room.frames.${generation}`;
+
+/**
+ * Remove every log generation file but the one the boundary names: what an interrupted purge left
+ * behind (docs/PURGE.md). Only names of the generation shape are touched.
+ * @param {string} directory @param {number} keep
+ */
+async function removeOtherGenerations(directory, keep) {
+  const removed = [];
+  for (const name of await readdir(directory)) {
+    const match = GENERATION_FILE_RE.exec(name);
+    if (!match || name === generationFile(keep)) continue;
+    await rm(path.join(directory, name), { force: true });
+    removed.push(name);
+  }
+  if (removed.length) await syncDirectory(directory);
+  return removed;
+}
+
+/**
+ * Where a test may stop a purge's rewrite, as a crash would: after the next generation is written
+ * and synced but before the boundary names it, or after the boundary names it but before the old
+ * generation is removed. A hook that throws leaves the files exactly as they are at that stage.
+ * @typedef {{ purgeStage?: (stage: 'generation-written' | 'boundary-installed') => void | Promise<void> }} PurgeHooks
+ */
 
 /**
  * A stored message or annotation as a reader receives it: without its `textDigest`, which is the
@@ -316,13 +368,27 @@ function manifestLogVersion(manifest) {
 }
 
 /**
- * An annotation record read back: its identity is its committed position, it names a message the
- * log already held, and only an edit carries a text, which must hash to its text digest.
- * @param {any} record @param {any} manifest @param {number} sequence @param {Map<string, any>} messages
+ * What a scan carries from record to record: the messages so far (an annotation's target and a
+ * purge's scope are among them), each thread's replies, the purge records by id, which message each
+ * purge took, and the text-less records still waiting for the later purge that names them.
+ * @typedef {{ messages: Map<string, any>, threads: Map<string, string[]>, purges: Map<string, { sequence: number, ts: string, purged: Set<string> }>,
+ *   purgedBy: Map<string, string>, pending: Array<{ sequence: number, covers: string, purge: string, at: string, what: string }> }} ScanContext
  */
-function validateAnnotationRecord(record, manifest, sequence, messages) {
+
+/** @returns {ScanContext} */
+const scanContext = () => ({ messages: new Map(), threads: new Map(), purges: new Map(), purgedBy: new Map(), pending: [] });
+
+/**
+ * An annotation record read back: its identity is its committed position, it names a message the
+ * log already held, and only an edit carries a text, which must hash to its text digest. An edit a
+ * purge stripped carries no text and a `purged` marker instead, checked once the scan reaches the
+ * purge it names.
+ * @param {any} record @param {any} manifest @param {number} sequence @param {ScanContext} ctx
+ */
+function validateAnnotationRecord(record, manifest, sequence, ctx) {
+  const messages = ctx.messages;
   const at = `native room log annotation at sequence ${sequence}`;
-  if (record.message || record.board) throw new AgoraError(`${at} carries a message or a board act; do not advance or truncate it`);
+  if (record.message || record.board || record.purge) throw new AgoraError(`${at} carries a message, a board act or a purge; do not advance or truncate it`);
   const a = record.annotation;
   if (!a || typeof a !== "object" || Array.isArray(a) || a.id !== messageId(manifest.roomId, record.accountId, record.operationId) ||
       a.author?.id !== record.accountId || a.cursor !== nativeCursor(manifest.epoch, sequence) || typeof a.ts !== "string")
@@ -335,10 +401,17 @@ function validateAnnotationRecord(record, manifest, sequence, messages) {
     throw new AgoraError(`${at} carries an invalid author ref; do not advance or truncate it`);
   if (a.act === "edit") {
     if (!TEXT_DIGEST_RE.test(a.textDigest ?? "")) throw new AgoraError(`${at} is an edit without a text digest; do not advance or truncate it`);
-    if (!("text" in a)) throw new AgoraError(`${at} has no text and no purge names it; do not advance or truncate it`);
-    if (typeof a.text !== "string" || textDigest(a.text) !== a.textDigest)
-      throw new AgoraError(`${at} carries a text that does not match its text digest; do not advance or truncate it`);
-  } else if ("text" in a || "textDigest" in a) {
+    if (!("text" in a)) {
+      // a purge took this edit's text with its message's: the purge that names the message, later in
+      // the log, must say so (checked when the scan ends)
+      if (!validPurgedMarker(a.purged)) throw new AgoraError(`${at} has no text and no purge names it; do not advance or truncate it`);
+      ctx.pending.push({ sequence, covers: a.target, purge: a.purged.purge, at: a.purged.at, what: at });
+    } else {
+      if ("purged" in a) throw new AgoraError(`${at} carries a text and a purge marker; do not advance or truncate it`);
+      if (typeof a.text !== "string" || textDigest(a.text) !== a.textDigest)
+        throw new AgoraError(`${at} carries a text that does not match its text digest; do not advance or truncate it`);
+    }
+  } else if ("text" in a || "textDigest" in a || "purged" in a) {
     throw new AgoraError(`${at} carries a text on a ${a.act}; do not advance or truncate it`);
   }
 }
@@ -358,10 +431,40 @@ function boundaryGeneration(boundary, manifest) {
 }
 
 /**
- * @param {any} record @param {any} manifest @param {number} expectedSequence @param {string | null} expectedPreviousDigest
- * @param {Map<string, any>} [messages] the messages scanned so far, by id: an annotation's target must be one of them
+ * A purge record read back (docs/PURGE.md): its identity is its committed position, and the list of
+ * messages it says it took is exactly the one its targets and thread name over the log before it.
+ * @param {any} record @param {any} manifest @param {number} sequence @param {ScanContext} ctx
  */
-function validateRecord(record, manifest, expectedSequence, expectedPreviousDigest, messages = new Map()) {
+function validatePurgeRecord(record, manifest, sequence, ctx) {
+  const at = `native room log purge at sequence ${sequence}`;
+  if (record.message || record.board || record.annotation) throw new AgoraError(`${at} carries a message, a board act or an annotation; do not advance or truncate it`);
+  const p = record.purge;
+  if (!p || typeof p !== "object" || Array.isArray(p) || p.id !== messageId(manifest.roomId, record.accountId, record.operationId) ||
+      p.cursor !== nativeCursor(manifest.epoch, sequence) || typeof p.ts !== "string")
+    throw new AgoraError(`${at} does not match its committed position; do not advance or truncate it`);
+  const idOk = (/** @type {unknown} */ id) => typeof id === "string" && /^[A-Za-z0-9_-]{16,128}$/.test(id);
+  if (!Array.isArray(p.targets) || !p.targets.every(idOk) || (p.thread !== undefined && !idOk(p.thread)) ||
+      (!p.targets.length && p.thread === undefined) || typeof p.reason !== "string" || !p.reason ||
+      !p.by || typeof p.by.name !== "string" ||
+      (p.by.ref !== undefined && (typeof p.by.ref !== "string" || !AUTHOR_REF_PATTERN.test(p.by.ref) || p.via === undefined)) ||
+      (p.via !== undefined && (typeof p.via !== "string" || !CLIENT_NAME_PATTERN.test(p.via))) || !Array.isArray(p.purged))
+    throw new AgoraError(`${at} is not a purge; do not advance or truncate it`);
+  if (!p.targets.every((/** @type {string} */ id) => ctx.messages.has(id)) ||
+      (p.thread !== undefined && (!ctx.messages.has(p.thread) || ctx.messages.get(p.thread).thread !== undefined)))
+    throw new AgoraError(`${at} names a message the log did not hold before it; do not advance or truncate it`);
+  const scope = purgeScope(p, (id) => parseNativeCursor(ctx.messages.get(id).cursor).sequence,
+    (root) => ctx.threads.get(root) ?? [], (id) => ctx.purgedBy.has(id));
+  if (scope.length !== p.purged.length || scope.some((id, i) => p.purged[i] !== id))
+    throw new AgoraError(`${at} lists messages its targets and thread do not name; do not advance or truncate it`);
+  ctx.purges.set(p.id, { sequence, ts: p.ts, purged: new Set(scope) });
+  for (const id of scope) ctx.purgedBy.set(id, p.id);
+}
+
+/**
+ * @param {any} record @param {any} manifest @param {number} expectedSequence @param {string | null} expectedPreviousDigest
+ * @param {ScanContext} [ctx] what the scan has read so far: an annotation's target and a purge's scope must be in it
+ */
+function validateRecord(record, manifest, expectedSequence, expectedPreviousDigest, ctx = scanContext()) {
   const logVersion = manifestLogVersion(manifest);
   if (!record || typeof record !== "object" || record.version !== logVersion || record.roomId !== manifest.roomId || record.epoch !== manifest.epoch)
     throw new AgoraError("native room log contains a record for another room or protocol version");
@@ -381,7 +484,9 @@ function validateRecord(record, manifest, expectedSequence, expectedPreviousDige
         record.cursor !== nativeCursor(manifest.epoch, expectedSequence))
       throw new AgoraError("native room board identity does not match its committed position");
   } else if (logVersion === LOG_VERSION_2 && record.kind === "annotation") {
-    validateAnnotationRecord(record, manifest, expectedSequence, messages);
+    validateAnnotationRecord(record, manifest, expectedSequence, ctx);
+  } else if (logVersion === LOG_VERSION_2 && record.kind === "purge") {
+    validatePurgeRecord(record, manifest, expectedSequence, ctx);
   } else {
     // version 1 reads exactly as before; version 2 knows its kinds
     if (logVersion === LOG_VERSION_2 && record.kind !== undefined)
@@ -402,11 +507,20 @@ function validateRecord(record, manifest, expectedSequence, expectedPreviousDige
       const m = record.message;
       if (!TEXT_DIGEST_RE.test(m.textDigest ?? ""))
         throw new AgoraError(`native room log message at sequence ${expectedSequence} carries no text digest; do not advance or truncate it`);
-      // the text is outside the record digest, so the digest of the text is what holds it
-      if (!("text" in m))
-        throw new AgoraError(`native room log message at sequence ${expectedSequence} has no text and no purge names it; do not advance or truncate it`);
-      if (typeof m.text !== "string" || textDigest(m.text) !== m.textDigest)
-        throw new AgoraError(`native room log message at sequence ${expectedSequence} carries a text that does not match its text digest; do not advance or truncate it`);
+      // the text is outside the record digest, so the digest of the text is what holds it; a text a
+      // purge removed leaves a marker naming that purge, which must come later in the log and name
+      // this message (checked when the scan ends)
+      if (!("text" in m)) {
+        if (!validPurgedMarker(m.purged))
+          throw new AgoraError(`native room log message at sequence ${expectedSequence} has no text and no purge names it; do not advance or truncate it`);
+        ctx.pending.push({ sequence: expectedSequence, covers: m.id, purge: m.purged.purge, at: m.purged.at,
+          what: `native room log message at sequence ${expectedSequence}` });
+      } else {
+        if ("purged" in m)
+          throw new AgoraError(`native room log message at sequence ${expectedSequence} carries a text and a purge marker; do not advance or truncate it`);
+        if (typeof m.text !== "string" || textDigest(m.text) !== m.textDigest)
+          throw new AgoraError(`native room log message at sequence ${expectedSequence} carries a text that does not match its text digest; do not advance or truncate it`);
+      }
     }
   }
   const { recordDigest, ...unsigned } = record;
@@ -427,8 +541,8 @@ async function scan(handle, manifest, boundary) {
   let position = 0;
   /** @type {any[]} */
   const records = [];
-  /** @type {Map<string, any>} the messages scanned so far, for the annotations that name them */
-  const messages = new Map();
+  /** what the scan has read so far, for the annotations and purges that name it */
+  const ctx = scanContext();
   while (position < boundary.end) {
     const header = Buffer.alloc(4);
     if (boundary.end - position < 4) throw new AgoraError(`native room committed boundary ends inside a header at offset ${position}`);
@@ -445,13 +559,26 @@ async function scan(handle, manifest, boundary) {
     let parsed;
     try { parsed = JSON.parse(UTF8.decode(payload)); }
     catch { throw new AgoraError(`native room log contains invalid UTF-8 or JSON at offset ${position}; do not advance or truncate it`); }
-    const record = validateRecord(parsed, manifest, records.length + 1, records.at(-1)?.recordDigest ?? null, messages);
+    const record = validateRecord(parsed, manifest, records.length + 1, records.at(-1)?.recordDigest ?? null, ctx);
     records.push(record);
-    if (record.message) messages.set(record.message.id, record.message);
+    if (record.message) {
+      ctx.messages.set(record.message.id, record.message);
+      if (record.message.thread !== undefined) {
+        const replies = ctx.threads.get(record.message.thread);
+        if (replies) replies.push(record.message.id);
+        else ctx.threads.set(record.message.thread, [record.message.id]);
+      }
+    }
     position += 4 + body.length;
   }
   if (records.length !== boundary.sequence || (records.at(-1)?.recordDigest ?? null) !== boundary.digest)
     throw new AgoraError("native room log does not match its acknowledged sequence/digest boundary; do not advance or truncate it");
+  // a record without its text is a damaged room unless a LATER purge names it, at the time it says
+  for (const p of ctx.pending) {
+    const purge = ctx.purges.get(p.purge);
+    if (!purge || purge.sequence <= p.sequence || !purge.purged.has(p.covers) || purge.ts !== p.at)
+      throw new AgoraError(`${p.what} has no text and no purge names it; do not advance or truncate it`);
+  }
   const recoveredTailBytes = size - boundary.end;
   if (recoveredTailBytes) {
     // Only bytes beyond the separately synced committed boundary are unacknowledged. A short log
@@ -477,19 +604,28 @@ async function scan(handle, manifest, boundary) {
  *   author: { id, name, kind, ref? }, via?, textDigest?, text?, ts, cursor } }`; `act` is edit,
  *   withdraw, pin or unpin, `target` a message the log already holds, and only an edit carries a
  *   text, held as a message's is (`annotation.text` outside the digest).
+ * - purge (version 2 only, docs/PURGE.md): `{ kind: "purge", purge: { id, targets, thread?, reason,
+ *   by: { name, ref? }, via?, purged, ts, cursor } }`; `purged` lists, in log order, the messages it
+ *   took (its targets, and with a thread the root and every reply before it, less any an earlier
+ *   purge took). After it commits the log is rewritten as its next generation: each message it took
+ *   loses `message.text` and gains `message.purged: { at, purge }`, and each edit annotation on one
+ *   loses `annotation.text` and gains the same marker; both fields are outside the digest, so every
+ *   record keeps its digest, sequence and cursor. On scan a record without its text must carry a
+ *   marker naming a later purge that took it.
  *
- * Readers receive messages and annotations without `textDigest`. The committed boundary
+ * Readers receive messages and annotations without `textDigest`; a purged one carries `purged` and
+ * no text. The committed boundary
  * (`committed.json`) is `{ version: 1, roomId, epoch, sequence, end, digest, generation? }`; an
  * absent generation is 0, the file `room.frames`, and generation N is `room.frames.<N>`.
  */
 export class NativeRoomStore {
-  /** @param {string} directory @param {any} manifest @param {any} boundary @param {import('node:fs/promises').FileHandle} handle @param {{server: net.Server, endpoint: {host:string,port:number}, identity:string}} writer @param {any[]} records @param {number} end @param {number} recoveredTailBytes @param {() => Date} now */
-  constructor(directory, manifest, boundary, handle, writer, records, end, recoveredTailBytes, now) {
+  /** @param {string} directory @param {any} manifest @param {any} boundary @param {import('node:fs/promises').FileHandle} handle @param {{server: net.Server, endpoint: {host:string,port:number}, identity:string}} writer @param {any[]} records @param {number} end @param {number} recoveredTailBytes @param {() => Date} now @param {PurgeHooks} [hooks] */
+  constructor(directory, manifest, boundary, handle, writer, records, end, recoveredTailBytes, now, hooks) {
     this.directory = directory;
     /** `room.json`'s `logVersion`, absent read as 1. @type {1 | 2} */
     this.logVersion = manifestLogVersion(manifest);
-    /** The log generation the committed boundary names (absent is 0). Read side only here: a purge
-     * (docs/PURGE.md) is the one writer of a generation above 0. */
+    /** The log generation the committed boundary names (absent is 0). A purge (docs/PURGE.md) is the
+     * one writer of a generation above 0: it writes the next one and moves the boundary to it. */
     this.generation = boundaryGeneration(boundary, manifest);
     this.logPath = path.join(directory, generationFile(this.generation));
     this.boundaryPath = path.join(directory, "committed.json");
@@ -520,6 +656,13 @@ export class NativeRoomStore {
     /** A message's id to the indices of the annotation records that name it, ascending; rebuilt on open.
      * @type {Map<string, number[]>} */
     this.annotationIndex = new Map();
+    /** The messages a purge took, to when and by which purge record; rebuilt on open. A purged
+     * message is annotated no more, and a purge passes over it.
+     * @type {Map<string, { at: string, purge: string }>} */
+    this.purged = new Map();
+    /** Test seam: the stages of a purge's rewrite, so a test can stop it where a crash would.
+     * @type {PurgeHooks | undefined} */
+    this.hooks = hooks;
     records.forEach((r, i) => { this.#applyBoard(r); this.#index(r, i); });
   }
 
@@ -590,7 +733,7 @@ export class NativeRoomStore {
     }
   }
 
-  /** @param {{ root: string, roomId: string, now?: () => Date }} options */
+  /** @param {{ root: string, roomId: string, now?: () => Date, hooks?: PurgeHooks }} options */
   static async open(options) {
     const requestedDirectory = roomDirectory(options.root, options.roomId);
     let physical;
@@ -617,12 +760,24 @@ export class NativeRoomStore {
       try { boundary = JSON.parse(await readFile(path.join(directory, "committed.json"), "utf8")); }
       catch { throw new AgoraError(`native room ${options.roomId} has no valid committed boundary`); }
       const generation = boundaryGeneration(boundary, manifest);
+      // The boundary is the one truth about which generation is the log (docs/PURGE.md). Any other
+      // generation file is what a purge interrupted left: a half-written next generation when the
+      // crash came before the boundary's rename, or the previous one when it came after. Neither
+      // holds anything the named generation does not, so both are removed before the scan.
+      await removeOtherGenerations(directory, generation);
       handle = await open(path.join(directory, generationFile(generation)), "r+");
       const scanned = await scan(handle, manifest, boundary);
-      return new NativeRoomStore(directory, manifest, boundary, handle, writer, scanned.records, scanned.end, scanned.recoveredTailBytes,
-        options.now ?? (() => new Date()));
+      const store = new NativeRoomStore(directory, manifest, boundary, handle, writer, scanned.records, scanned.end, scanned.recoveredTailBytes,
+        options.now ?? (() => new Date()), options.hooks);
+      handle = undefined;
+      // a purge whose record committed while its rewrite did not finish is finished now: the texts
+      // its record names do not survive a reopen
+      try { await store.completePurges(); }
+      catch (e) { await store.close().catch(() => {}); throw e; }
+      return store;
     } catch (e) {
       if (handle) await handle.close();
+      // the store's close released the writer if a store was made; releasing twice is harmless
       await releaseWriter(writer);
       throw e;
     }
@@ -647,9 +802,16 @@ export class NativeRoomStore {
    */
   async #append(input, authenticated) {
     if (this.closed) throw new AgoraError("native room store is closed");
-    if (/** @type {any} */ (input).kind === "board") return this.#appendBoard(/** @type {any} */ (input), authenticated);
-    if (/** @type {any} */ (input).kind === "annotation") return this.#appendAnnotation(/** @type {any} */ (input), authenticated);
-    if (input.kind !== undefined && input.kind !== "message") throw refusal("append-kind-invalid", "an append is a message, a board act or an annotation");
+    const kind = /** @type {any} */ (input)?.kind;
+    if (kind !== undefined && kind !== "message" && kind !== "board" && kind !== "annotation" && kind !== "purge")
+      throw refusal("append-kind-invalid", "an append is a message, a board act, an annotation or a purge");
+    // Only a message carries attachments. Anything else that names some is refused, never stored
+    // without them: a caller must not believe it attached what was dropped.
+    if (kind !== undefined && kind !== "message" && /** @type {any} */ (input).attachments !== undefined)
+      throw refusal("attachment-invalid", `a ${kind} carries no attachments; only a message does`);
+    if (kind === "board") return this.#appendBoard(/** @type {any} */ (input), authenticated);
+    if (kind === "annotation") return this.#appendAnnotation(/** @type {any} */ (input), authenticated);
+    if (kind === "purge") return this.#appendPurge(/** @type {any} */ (input), authenticated);
     validateNativeId(input.operationId, "operation id");
     validateNativeId(authenticated.accountId, "account id");
     // `via` is the client name the CONNECTION declared, handed in beside the account by the service;
@@ -885,6 +1047,9 @@ export class NativeRoomStore {
       throw refusal("annotation-target-unknown", `native room ${this.manifest.roomId} holds no message ${target}`);
     if (this.withdrawn.has(target))
       throw refusal("annotation-target-withdrawn", `message ${target} is withdrawn; nothing more is annotated on it`);
+    // a purged message stays purged: an edit would put text back, and nothing else is owed it
+    if (this.purged.has(target))
+      throw refusal("annotation-target-purged", `message ${target} was purged; nothing more is annotated on it`);
     const message = this.records[at].message;
     if (act === "edit" || act === "withdraw") {
       const sameRef = message.author.ref === input.authorRef && (message.author.ref === undefined || message.via === via);
@@ -906,6 +1071,179 @@ export class NativeRoomStore {
     const record = { ...unsigned, recordDigest: recordDigestOf(unsigned) };
     await this.#commit(record, key);
     return { id: annotation.id, cursor: annotation.cursor, duplicate: false, kind: "annotation" };
+  }
+
+  /**
+   * A purge (docs/PURGE.md): a record of its own naming the messages whose text leaves the room (its
+   * targets, and with a thread the root and every reply), after which the log is rewritten as its
+   * next generation without those texts or the texts of their edits. Every record keeps its place,
+   * digest and cursor, so every reader's checkpoint stays valid. Version 2 rooms only. Whether this
+   * connection may purge at all (a member route may not) is the service's call, made before it appends.
+   * A resend of a committed purge is its original receipt, and finishes the rewrite if it had not.
+   * @param {{ kind: 'purge', operationId: string, purge: unknown, authorKind?: string, authorName?: string, authorRef?: string, via?: unknown }} input
+   * @param {{ accountId: string, via?: string }} authenticated
+   */
+  async #appendPurge(input, authenticated) {
+    if (this.logVersion !== LOG_VERSION_2)
+      throw refusal("purge-unsupported-log-version", `native room ${this.manifest.roomId} is a version 1 room, whose records commit to their text; purge needs a version 2 room`);
+    validateNativeId(input.operationId, "operation id");
+    validateNativeId(authenticated.accountId, "account id");
+    const via = authenticated.via;
+    if (via !== undefined && (typeof via !== "string" || !CLIENT_NAME_PATTERN.test(via)))
+      throw refusal("client-name-invalid", "a client name is a lowercase letter then 1-39 lowercase letters, digits or hyphens");
+    if (input.via !== undefined)
+      throw refusal("operation-via-refused", "via is stamped from the connection's declared client name, never taken from an operation");
+    if (input.authorRef !== undefined && via === undefined)
+      throw refusal("author-ref-without-client", "an authorRef is an app client's own id for the person, and this connection declared no client name");
+    if (input.authorRef !== undefined && (typeof input.authorRef !== "string" || !AUTHOR_REF_PATTERN.test(input.authorRef)))
+      throw refusal("author-ref-invalid", "an authorRef is 1-64 letters, digits or . _ @ + -");
+    if (typeof input.authorName !== "string" || !input.authorName.trim() || input.authorName.length > 120)
+      throw refusal("purge-invalid", "a purge needs a bounded author label: who asked for it");
+    const raw = input.purge;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw))
+      throw refusal("purge-invalid", "a purge is { targets, thread?, reason }");
+    const p = /** @type {Record<string, unknown>} */ (raw);
+    const unknown = Object.keys(p).filter((k) => !["targets", "thread", "reason"].includes(k));
+    if (unknown.length) throw refusal("purge-invalid", `a purge carries only targets, thread and reason, not ${unknown.join(", ")}`);
+    const targets = p.targets ?? [];
+    if (!Array.isArray(targets) || targets.length > PURGE_TARGETS_MAX || !targets.every((t) => typeof t === "string" && /^[A-Za-z0-9_-]{16,128}$/.test(t)))
+      throw refusal("purge-invalid", `a purge's targets are up to ${PURGE_TARGETS_MAX} message ids`);
+    if (new Set(targets).size !== targets.length) throw refusal("purge-invalid", "a purge names each target once");
+    const thread = p.thread;
+    if (thread !== undefined && (typeof thread !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(thread)))
+      throw refusal("purge-invalid", "a purge's thread is its root message's id");
+    if (!targets.length && thread === undefined) throw refusal("purge-invalid", "a purge names at least one message or a thread");
+    if (typeof p.reason !== "string" || !p.reason.trim() || p.reason.length > PURGE_REASON_MAX)
+      throw refusal("purge-invalid", `a purge carries a reason of 1-${PURGE_REASON_MAX} characters`);
+    const reason = p.reason.trim();
+    const by = { name: input.authorName.trim(), ...(input.authorRef !== undefined ? { ref: input.authorRef } : {}) };
+    const payload = { accountId: authenticated.accountId, targets, ...(thread !== undefined ? { thread } : {}), reason, by,
+      ...(via !== undefined ? { via } : {}) };
+    const payloadDigest = nativeDigest({ purge: payload });
+    const key = `${authenticated.accountId}\0${input.operationId}`;
+    const existing = this.operations.get(key);
+    if (existing) {
+      if (existing.payloadDigest !== payloadDigest || !existing.purge)
+        throw new AgoraError(`native operation ${input.operationId} was already committed with different bytes`);
+      await this.#completePurges();
+      return { id: existing.purge.id, cursor: existing.purge.cursor, duplicate: true, kind: "purge", purged: [...existing.purge.purged] };
+    }
+    for (const target of targets)
+      if (!this.messageIndex.has(target)) throw refusal("purge-target-unknown", `native room ${this.manifest.roomId} holds no message ${target}`);
+    // a thread is named by its root, which is itself top-level (thread-root-unknown, thread-root-not-top-level)
+    if (thread !== undefined) this.threadRoot(thread);
+    if (this.records.length >= this.manifest.recordLimit)
+      throw new AgoraError(`native room reached its ${this.manifest.recordLimit}-record resident limit; retain or archive explicitly before accepting more`);
+    const purged = purgeScope({ targets, ...(thread !== undefined ? { thread } : {}) },
+      (id) => this.messageIndex.get(id), (root) => (this.threadIndex.get(root) ?? []).map((i) => this.records[i].message.id),
+      (id) => this.purged.has(id));
+    const sequence = this.records.length + 1;
+    const purge = { id: messageId(this.manifest.roomId, authenticated.accountId, input.operationId),
+      targets, ...(thread !== undefined ? { thread } : {}), reason, by, ...(via !== undefined ? { via } : {}),
+      purged, ts: this.now().toISOString(), cursor: nativeCursor(this.manifest.epoch, sequence) };
+    const unsigned = { version: this.logVersion, roomId: this.manifest.roomId, epoch: this.manifest.epoch, sequence,
+      accountId: authenticated.accountId, operationId: input.operationId, kind: "purge",
+      payloadDigest, previousDigest: this.records.at(-1)?.recordDigest ?? null, purge };
+    const record = { ...unsigned, recordDigest: recordDigestOf(unsigned) };
+    await this.#commit(record, key);
+    await this.#completePurges();
+    return { id: purge.id, cursor: purge.cursor, duplicate: false, kind: "purge", purged: [...purged] };
+  }
+
+  /**
+   * Finish every purge whose record is committed: when a record a purge took still holds its text
+   * (the rewrite after the purge record was interrupted, or has not run yet), write the next
+   * generation without those texts. Safe to call at any time; nothing to do is a no-op. Runs on the
+   * append queue, so no append interleaves with a rewrite.
+   */
+  async completePurges() {
+    const run = this.queue.then(() => this.#completePurges());
+    this.queue = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  /** @param {any} record the record with the texts a purge took removed and marked, or itself */
+  #stripped(record) {
+    if (record.message && "text" in record.message && this.purged.has(record.message.id)) {
+      const { text: _text, ...message } = record.message;
+      return { ...record, message: { ...message, purged: { ...this.purged.get(record.message.id) } } };
+    }
+    if (record.kind === "annotation" && "text" in record.annotation && this.purged.has(record.annotation.target)) {
+      const { text: _text, ...annotation } = record.annotation;
+      return { ...record, annotation: { ...annotation, purged: { ...this.purged.get(record.annotation.target) } } };
+    }
+    return record;
+  }
+
+  async #completePurges() {
+    if (this.closed) throw new AgoraError("native room store is closed");
+    if (!this.purged.size || this.records.every((r) => this.#stripped(r) === r)) return { rewritten: false };
+    const next = this.generation + 1;
+    const file = path.join(this.directory, generationFile(next));
+    const records = this.records.map((r) => this.#stripped(r));
+    // A leftover file of this name is a half-written generation no boundary ever named; "w+"
+    // truncates it. Nothing reads it until the boundary below names it.
+    const handle = await open(file, "w+", 0o600);
+    let end = 0;
+    try {
+      for (const record of records) {
+        const frame = storedFrame(record);
+        await writeAll(handle, frame, end);
+        end += frame.length;
+      }
+      await handle.sync();
+      await syncDirectory(this.directory);
+    } catch (error) {
+      await handle.close().catch(() => {});
+      await rm(file, { force: true }).catch(() => {});
+      throw Object.assign(new AgoraError(`purge-rewrite-failed: the purge is committed and its texts remain until a reopen or a resend finishes it (${error instanceof Error ? error.message : String(error)})`), { code: "purge-rewrite-failed" });
+    }
+    try { await this.hooks?.purgeStage?.("generation-written"); }
+    catch (error) { await handle.close().catch(() => {}); this.closed = true; throw error; }
+    const boundary = { ...this.boundary, end, generation: next };
+    try {
+      await writeDurableAtomic(this.boundaryPath, JSON.stringify(boundary, null, 2) + "\n");
+    } catch (error) {
+      // as for a commit: once the boundary's publication began, which generation it names is unknown
+      // until a reopen reads it, and the reopen removes whichever generation it does not name
+      await handle.close().catch(() => {});
+      this.closed = true;
+      const code = /** @type {NodeJS.ErrnoException} */ (error)?.code;
+      throw Object.assign(new AgoraError(`purge-rewrite-failed: the committed-boundary publication failed; acceptance of the new generation is unknown and the writer must reopen${typeof code === "string" ? ` (${code})` : ""}`), { code: "purge-rewrite-failed" });
+    }
+    const old = this.handle;
+    const oldPath = this.logPath;
+    this.handle = handle;
+    this.end = end;
+    this.records = records;
+    this.boundary = boundary;
+    this.generation = next;
+    this.logPath = file;
+    this.operations = new Map(records.map((r) => [`${r.accountId}\0${r.operationId}`, r]));
+    await old.close().catch(() => {});
+    await this.hooks?.purgeStage?.("boundary-installed");
+    await rm(oldPath, { force: true });
+    await syncDirectory(this.directory);
+    return { rewritten: true, generation: next };
+  }
+
+  /**
+   * What a room's custody may let go of after a purge: the digests of the attachments on purged
+   * messages that no unpurged message names. Custody's own collector (src/native-attachments.mjs)
+   * removes them; a digest any unpurged message references is never in this set.
+   * @returns {{ released: Set<string>, referenced: Set<string> }}
+   */
+  custodyCensus() {
+    /** @type {Set<string>} */
+    const referenced = new Set();
+    /** @type {Set<string>} */
+    const onPurged = new Set();
+    for (const r of this.records) {
+      if (!r.message?.attachments) continue;
+      const into = this.purged.has(r.message.id) ? onPurged : referenced;
+      for (const a of r.message.attachments) if (typeof a.digest === "string") into.add(a.digest);
+    }
+    return { released: new Set([...onPurged].filter((d) => !referenced.has(d))), referenced };
   }
 
   /** @param {string} subject */
@@ -1014,10 +1352,17 @@ export class NativeRoomStore {
     const annotationInView = (a) => thread === undefined || inView(this.records[/** @type {number} */ (this.messageIndex.get(a.target))].message);
     /** @param {any[]} records */
     const annotations = (records) => records.filter((r) => r.kind === "annotation" && annotationInView(r.annotation)).map((r) => withoutTextDigest(r.annotation));
+    /** A purge as a reader receives it; in a thread view, narrowed to the thread's messages and
+     * present only when it took one of them. @param {any[]} records */
+    const purges = (records) => records.filter((r) => r.kind === "purge").map((r) => {
+      const p = structuredClone(r.purge);
+      if (thread !== undefined) p.purged = p.purged.filter((/** @type {string} */ id) => inView(this.records[/** @type {number} */ (this.messageIndex.get(id))].message));
+      return p;
+    }).filter((p) => p.purged.length);
     if (!options.since) {
       if (thread === undefined) {
         const window = this.records.slice(-limit);
-        return { messages: messages(window), annotations: annotations(window), through: this.records.length };
+        return { messages: messages(window), annotations: annotations(window), purges: purges(window), through: this.records.length };
       }
       const at = /** @type {number} */ (this.messageIndex.get(thread));
       const indices = [at, ...(this.threadIndex.get(thread) ?? [])].sort((a, b) => a - b).slice(-limit);
@@ -1025,7 +1370,7 @@ export class NativeRoomStore {
       const from = indices[0] ?? 0;
       const named = indices.flatMap((i) => this.annotationIndex.get(this.records[i].message.id) ?? []).filter((i) => i >= from).sort((a, b) => a - b);
       return { messages: indices.map((i) => withoutTextDigest(this.records[i].message)),
-        annotations: named.map((i) => withoutTextDigest(this.records[i].annotation)), through: this.records.length };
+        annotations: named.map((i) => withoutTextDigest(this.records[i].annotation)), purges: purges(this.records.slice(from)), through: this.records.length };
     }
     const cursor = parseNativeCursor(options.since);
     // The plan (which sequences a read delivers, or a refusal that advances nothing) is decided by
@@ -1036,7 +1381,7 @@ export class NativeRoomStore {
     if (plan.$ === "RefusedEpoch") throw new AgoraError(`native room cursor belongs to epoch ${cursor.epoch}, not live epoch ${this.manifest.epoch}; recover explicitly without advancing`);
     if (plan.$ === "RefusedFuture") throw new AgoraError(`native room cursor ${cursor.sequence} exceeds committed sequence ${this.records.length}; recover explicitly without advancing`);
     const selected = this.records.slice(Number(plan.from) - 1, Number(plan.to));
-    return { messages: messages(selected), annotations: annotations(selected), through: Number(plan.to) };
+    return { messages: messages(selected), annotations: annotations(selected), purges: purges(selected), through: Number(plan.to) };
   }
 
   /**
@@ -1057,6 +1402,11 @@ export class NativeRoomStore {
 
   /** @param {any} record @param {number} index */
   #index(record, index) {
+    if (record.kind === "purge") {
+      for (const id of record.purge.purged)
+        if (!this.purged.has(id)) this.purged.set(id, { at: record.purge.ts, purge: record.purge.id });
+      return;
+    }
     if (record.kind === "annotation") {
       const { act, target } = record.annotation;
       if (act === "withdraw") this.withdrawn.add(target);
@@ -1116,7 +1466,8 @@ export class NativeRoomStore {
   status() {
     return { roomId: this.manifest.roomId, epoch: this.manifest.epoch, hostAccountId: this.manifest.hostAccountId,
       committed: this.records.length, latestCursor: nativeCursor(this.manifest.epoch, this.records.length), latestDigest: this.records.at(-1)?.recordDigest ?? null,
-      recordLimit: this.manifest.recordLimit, recoveredTailBytes: this.recoveredTailBytes, logVersion: this.logVersion };
+      recordLimit: this.manifest.recordLimit, recoveredTailBytes: this.recoveredTailBytes, logVersion: this.logVersion,
+      ...(this.logVersion === LOG_VERSION_2 ? { generation: this.generation } : {}) };
   }
 
   async close() {

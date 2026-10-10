@@ -43,10 +43,10 @@ const append = (c, operation) => c.request("append", { roomId: ROOM, operation: 
 /** @param {Promise<unknown>} p @param {string} code */
 const refusedAs = (p, code) => assert.rejects(p, (e) => { assert.equal(/** @type {any} */ (e).code, code, String(e)); return true; });
 
-test("the welcome offers threads-v1, client-name-v1, attachments-v1 and annotations-v1, and echoes the client name the service took", async (t) => {
+test("the welcome offers threads-v1, client-name-v1, attachments-v1, annotations-v1 and purge-v1, and echoes the client name the service took", async (t) => {
   const { connect } = await fixture(t);
   const plain = await connect();
-  assert.deepEqual([...plain.capabilities].sort(), ["annotations-v1", "attachments-v1", "client-name-v1", "threads-v1"]);
+  assert.deepEqual([...plain.capabilities].sort(), ["annotations-v1", "attachments-v1", "client-name-v1", "purge-v1", "threads-v1"]);
   assert.equal(plain.clientName, undefined);
   const named = await connect("review-app");
   assert.equal(named.clientName, "review-app");
