@@ -1,0 +1,21 @@
+{
+  "name": "@agora/chat",
+  "version": "1.0.0",
+  "description": "A chat kit for a web app whose signed-in people talk with agents in an agora room: a server half the host mounts in its own HTTP server, and a phone-first client half with no build step.",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "bun": ">=1.1"
+  },
+  "exports": {
+    "./server": "./server/index.mjs",
+    "./client": "./client/index.js",
+    "./push/server": "./push/server.mjs",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "test": "bun test test",
+    "check": "tsc -p ."
+  }
+}

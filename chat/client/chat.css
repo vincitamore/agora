@@ -1,0 +1,72 @@
+/*
+ * The chat kit's stylesheet. Every colour and typeface comes from one of the --chat-* variables
+ * below; a host maps its own tokens onto them (on :root, or on the element the chat mounts in) and
+ * the kit uses nothing else. The defaults are neutral and readable in both schemes.
+ */
+
+:root {
+  --chat-bg: #f6f6f4;
+  --chat-panel: #ffffff;
+  --chat-raised: #eeeeeb;
+  --chat-rule: #d9d9d4;
+  --chat-rule2: #e8e8e4;
+  --chat-card-rule: #c8c8c2;
+  --chat-btn-rule: #b9b9b2;
+  --chat-ink: #1c1c1a;
+  --chat-ink2: #4a4a45;
+  --chat-ink3: #7a7a73;
+  --chat-evbg: #f0f0ec;
+  --chat-ev: #2b2b28;
+  --chat-you: #2f5d8a;
+  --chat-warn: #9a5b00;
+  --chat-add: #2f6b3a;
+  --chat-go-bg: #1c1c1a;
+  --chat-go-ink: #ffffff;
+  --chat-font-prose: Georgia, "Times New Roman", serif;
+  --chat-font-mono: ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
+  --chat-font-ui: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --chat-bg: #161615;
+    --chat-panel: #1d1d1b;
+    --chat-raised: #262624;
+    --chat-rule: #34342f;
+    --chat-rule2: #2a2a27;
+    --chat-card-rule: #45453f;
+    --chat-btn-rule: #55554e;
+    --chat-ink: #e8e8e3;
+    --chat-ink2: #b8b8b0;
+    --chat-ink3: #85857d;
+    --chat-evbg: #20201e;
+    --chat-ev: #d6d6cf;
+    --chat-you: #8fb4dc;
+    --chat-warn: #e0a24a;
+    --chat-add: #8cc596;
+    --chat-go-bg: #e8e8e3;
+    --chat-go-ink: #161615;
+  }
+}
+
+.chat {
+  background: var(--chat-bg);
+  color: var(--chat-ink);
+  font-family: var(--chat-font-ui);
+  min-width: 0;
+}
+
+.chat-panel { background: var(--chat-panel); border: 1px solid var(--chat-rule); }
+.chat-raised { background: var(--chat-raised); }
+.chat-rule { border-color: var(--chat-rule); }
+.chat-muted { color: var(--chat-ink2); }
+.chat-faint { color: var(--chat-ink3); }
+.chat-prose { font-family: var(--chat-font-prose); }
+.chat-mono, .chat code, .chat pre { font-family: var(--chat-font-mono); }
+.chat-evidence { background: var(--chat-evbg); color: var(--chat-ev); font-family: var(--chat-font-mono); }
+.chat-card { border: 1px solid var(--chat-card-rule); background: var(--chat-panel); }
+.chat-btn { border: 1px solid var(--chat-btn-rule); background: var(--chat-panel); color: var(--chat-ink); font-family: var(--chat-font-ui); min-height: 44px; }
+.chat-btn-go { background: var(--chat-go-bg); color: var(--chat-go-ink); border-color: var(--chat-go-bg); }
+.chat-you { color: var(--chat-you); }
+.chat-warn { color: var(--chat-warn); }
+.chat-add { color: var(--chat-add); }
