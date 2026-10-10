@@ -73,14 +73,14 @@ The host's cross-site checks and session sit in front of every route.
 | `GET /chat/stream` | `thread=<root>\|main` (SSE); `Last-Event-ID` or `since` resumes | events below |
 | `POST /chat/post` | `{ text, thread?, operationId?, trailers?: [[key, value]], attachments?, alsoToRoom? }` | 200 `{ receipt: { id, cursor, duplicate, operationId, thread }, alsoToRoom?: { id, cursor, duplicate }, warn? }`; 202 `ACCEPTANCE_UNKNOWN { operationId }`; 409 `ROOM_REFUSED { refusal }`; 422 `TEXT_REFUSED { reason }`; 503 `ROOM_DARK` |
 | `POST /chat/scan` | `{ text }` | `{ warn? }`; 422 `TEXT_REFUSED { reason }` |
-| `POST /chat/upload` | raw body, `X-File-Name`, `Content-Type` | `{ attachment, thumb? }`; 413 `TOO_LARGE`; 422 `UPLOAD_REFUSED { reason }` |
-| `GET /chat/file/:id` | `digest` | the bytes; `X-Content-Type-Options: nosniff`; non-images `Content-Disposition: attachment`; `Cache-Control: private` |
+| `POST /chat/upload` | raw body, `X-File-Name` (percent-encoded), `Content-Type`, optional `X-Image-Width`/`X-Image-Height`; or `X-Thumb-For: <digest>` with a thumbnail's bytes | `{ attachment, thumb? }`, or `{ thumb }` for a thumbnail; 413 `TOO_LARGE`; 422 `UPLOAD_REFUSED { reason }`; 409 `ROOM_REFUSED { refusal }`; 503 `ROOM_DARK` |
+| `GET /chat/file/:id` | `digest` | the bytes, only while a message with its words carries it and the reader may read its thread (404 otherwise); `X-Content-Type-Options: nosniff`; non-images as `application/octet-stream` with `Content-Disposition: attachment`; `Cache-Control: private` |
 | `GET /chat/thumb/:digest` | | the kit's thumbnail, or 404 |
-| `POST /chat/annotate` | `{ act, target, text? }` | `{ receipt }` |
-| `POST /chat/react` | `{ target, name: "<short word>", on: bool }` | `{ names: [personId] }` (kit store, names only) |
-| `POST /chat/purge` | `{ targets?, thread?, reason }` | `{ purged, facesOutOfReach }` (authorize `purge`) |
+| `POST /chat/annotate` | `{ act, target, text?, operationId? }` | `{ receipt, warn? }`; edit and withdraw are the author's own (by ref), 403 otherwise |
+| `POST /chat/react` | `{ target, name: "<short word>", on: bool }` | `{ names: [personId], reactions }`: the people who chose that name, and the message's reactions as now folded (kit store, names only) |
+| `POST /chat/purge` | `{ targets?, thread?, reason, operationId? }` | `{ purged, facesOutOfReach, blobsRemoved, receipt }` (authorize `purge`); 202/409/503 as post |
 | `POST /chat/position` | `{ thread: <root>\|"main", cursor }` | `{}`; a position never moves back within an epoch |
-| `GET /chat/search` | `q`, `scope=messages\|files`, `context` | `{ hits: [{ message, snippet }], coverage: { through } }` |
+| `GET /chat/search` | `q`, `scope=messages\|files`, `context`, `limit` (1-200, default 50) | `{ hits: [{ message, snippet }], coverage: { through } }`; every word as a prefix; `messages` searches the words, `files` the names |
 | `GET /chat/push/key` | | `{ publicKey }`, the VAPID public key |
 | `POST /chat/push/subscribe` | a push subscription | stored |
 | `DELETE /chat/push/subscribe` | `{ endpoint }` | `{ removed }` |
@@ -111,8 +111,14 @@ words; `POST /chat/post` scans again and stays the authority.
 
 A **message**, as the browser receives it, is agora's wire message without `room` and `author.id`:
 `{ id, cursor, ts, text, author: { name, kind, ref? }, thread?, via?, to?, trailers?: [{ key, value }],
-attachments?, edited?, withdrawn?, pinned?, purged? }`. It arrives folded: an edit's text replaces
-the original, and a withdrawal or a purge empties it.
+attachments?, edited?, withdrawn?, pinned?, purged?, reactions? }`. It arrives folded: an edit's text
+replaces the original, and a withdrawal or a purge empties it.
+
+`reactions: [{ name, people: [personId] }]` is folded in from the kit's store on every message the
+kit serves (the thread and room routes, the thread list's `root` and `last`, search hits, the
+stream's `message` and the `message` of an `annotation` event): each name once, in the order first
+chosen, with the people who chose it in the order they did; absent when there are none. Names,
+never counts. It is an array, not an object keyed by name, because a name is the person's word.
 
 A **thread summary**: `{ root, last, lastAt, lastBy: { name, kind, ref? }, lastCursor, unread: bool,
 waiting: [personId], cards: [{ type, id }] }`. `root` is the root message and `last` the newest
@@ -144,8 +150,10 @@ The kit's room follow passes a `purge` handler to `agora/client`, which then sub
 `purges: true` on a service that offers `purge-v1`. Each purge, whoever appended it (the kit's own
 `POST /chat/purge`, the CLI's `agora room purge`, another app), removes the purged messages' text
 from the kit's index (`forgetText`), so search and the thread list stop showing it, and goes to every
-open stream as a `purge` event; the client strikes the text it already shows. A service without
-`purge-v1` sends no purge events; the kit then learns of a purge only when its index is rebuilt.
+open stream as a `purge` event; the client strikes the text it already shows. A purge appended
+while the kit was stopped reaches the index when it starts: on a `purge-v1` service the follow
+resumes where the index stood, and the purges it replays are applied. A service without `purge-v1`
+sends no purge events; the kit then learns of a purge only when its index is rebuilt.
 
 ## Client half
 
@@ -187,6 +195,34 @@ A card renderer marks its controls and its state with attributes and classes the
   `chat-faint`. Risk is shown by line weight, never colour.
 
 The thread pane carries a `.chat-composer` slot the composer mounts into.
+
+### The writing half
+
+```js
+import { configureComposer, registerAttachAction, composerIn } from "/chat/client/composer.js";
+import { mountSearch } from "/chat/client/search.js";
+
+configureComposer({ base: "/chat", people, context, reactions? });   // options every composer mounted later uses
+registerAttachAction("handover", { label: "hand over a password", note: "never posted", run: (ctx) => {} });
+composerIn(el.querySelector(".chat-composer"))                  // the mounted composer's handle, or undefined
+// handle = { unmount(), focus(), setText(text), sheet("attach" | null), addFiles(files), edit(id), actions(id) }
+
+const search = mountSearch(el, { base: "/chat", onOpen: (root, messageId) => view.open(root), onClose, context?, now? });
+// search = { unmount(), focus(), search(q) }
+```
+
+The composer posts through an outbox kept in `localStorage` per base: a 200 removes a post, a 202,
+an offline send, a 503 or a 5xx keeps it and resends under the same `operationId`, any other answer
+hands it back to the composer with the reason, never resent. It calls `POST /chat/scan` before a
+send and before an edit's save; a warning offers "send anyway", a refusal never does. Edit and
+withdraw are offered only on the reader's own message, matched by `author.ref`, never by name.
+Reactions are one word each (`seen`, `thanks`, `agreed`, `done` unless `reactions` names others). A
+registered attach action is a dashed button in the composer row and the attach sheet; what it does
+never passes through the room. Images are re-encoded before upload (metadata dropped, longest edge
+2560, a 320 px thumbnail sent by `X-Thumb-For`).
+
+`registerAttachAction` throws unless it is given `{ label, run }`. The search sheet's status says
+how far the record was searched, never how many hits.
 
 ## Push
 
