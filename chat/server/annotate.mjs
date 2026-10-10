@@ -137,6 +137,10 @@ export async function handleReact(req, person, kit) {
   const thread = kit.store.threadOf(target);
   if (thread === undefined) return kit.fail(404, "NOT_FOUND", "There is no such message.");
   if (!kit.hooks.authorize(person, "react", { target, thread })) return kit.fail(403, "FORBIDDEN", "You cannot do that here.");
+  // a withdrawn message takes no new reaction; one already given can still be taken back
+  if (on && /** @type {{ withdrawn: number } | null} */ (once(kit.store.db, "select withdrawn from messages where id = ?", (st) => st.get(target)))?.withdrawn) {
+    return kit.fail(409, "WITHDRAWN", "That message was withdrawn.");
+  }
   kit.store.setReaction(target, name, person.id, on);
   kit.reacted(target, thread);
   const reactions = reactionsOf(kit.store, [target]).get(target) ?? [];

@@ -327,6 +327,10 @@ test("annotate: the author edits and withdraws, anyone may pin; an edit re-index
   const shown = thread.body.data.messages.find((/** @type {any} */ m) => m.id === id);
   assert.ok(shown.withdrawn && shown.pinned);
   assert.equal((await k.call("p-ada", "/chat/search?q=second")).body.data.hits.length, 0, "a withdrawn message is not found");
+  const late = await k.call("p-grace", "/chat/react", { target: id, name: "seen", on: true });
+  assert.equal(late.status, 409, "a withdrawn message takes no new reaction");
+  assert.equal(late.body.error.code, "WITHDRAWN");
+  assert.equal((await k.call("p-grace", "/chat/react", { target: id, name: "seen", on: false })).status, 200, "taking one back is still allowed");
 });
 
 test("react keeps names, never counts", SLOW, async (t) => {
@@ -451,6 +455,73 @@ test("search: words and file names, context, coverage, and what a reader may see
   assert.equal((await k.call("p-ada", "/chat/search?q=")).status, 400);
   assert.equal((await k.call("p-ada", "/chat/search?q=x&scope=all")).status, 400);
   assert.equal((await k.call("p-ada", "/chat/search?q=x&limit=0")).status, 400);
+});
+
+test("search reads a message's words, never its trailer block: not in a snippet, not as a match", SLOW, async (t) => {
+  const k = await setup(t);
+  const a = await k.call("p-ada", "/chat/post", { text: "the spare pump sits beside the tank", trailers: [["context", "zone=north; bay=quarry"]] });
+  assert.equal(a.status, 200, JSON.stringify(a.body));
+  const id = a.body.data.receipt.id;
+  await k.indexed(id);
+  const tank = await k.call("p-ada", "/chat/search?q=tank");
+  assert.deepEqual(tank.body.data.hits.map((/** @type {any} */ h) => h.message.id), [id]);
+  const snippet = tank.body.data.hits[0].snippet;
+  assert.match(snippet, /beside the tank/);
+  assert.doesNotMatch(snippet, /context|zone|north|quarry/, `the snippet is the words alone: ${snippet}`);
+  assert.match(tank.body.data.hits[0].message.text, /context: zone=north/, "the message itself still carries its trailers");
+  for (const q of ["zone", "north", "quarry", "context"]) {
+    assert.deepEqual((await k.call("p-ada", `/chat/search?q=${q}`)).body.data.hits, [], `a trailer's word is metadata, not content: ${q}`);
+  }
+  assert.deepEqual((await k.call("p-ada", "/chat/search?q=pump&context=zone%3Dnorth")).body.data.hits.map((/** @type {any} */ h) => h.message.id), [id], "the trailer still filters, as metadata");
+
+  // an edit keeps its trailer block under the new words (the composer does that); search reads the words
+  const edit = await k.call("p-ada", "/chat/annotate", { act: "edit", target: id, text: "the spare pump sits beside the cistern\n\ncontext: zone=north; bay=quarry" });
+  assert.equal(edit.status, 200, JSON.stringify(edit.body));
+  const end = Date.now() + 20_000;
+  /** @type {any} */
+  let found = null;
+  while (Date.now() < end && !(found = (await k.call("p-ada", "/chat/search?q=cistern")).body.data.hits[0])) await new Promise((r) => setTimeout(r, 50));
+  assert.ok(found, "the edit reached the index");
+  assert.doesNotMatch(found.snippet, /context|zone|north|quarry/, `the edited snippet is the words alone: ${found.snippet}`);
+  assert.deepEqual((await k.call("p-ada", "/chat/search?q=quarry")).body.data.hits, [], "the edit's trailer is not content either");
+});
+
+test("the searchable text drops the trailer block and the signature line, and nothing else", async () => {
+  const { searchableText } = await import("../server/store.mjs");
+  assert.equal(searchableText("the spare pump\n\ncontext: zone=north\nwaiting: p-ada\n\n-- Resident/watch"), "the spare pump");
+  assert.equal(searchableText("the spare pump\n\n-- Resident/watch"), "the spare pump");
+  assert.equal(searchableText("a note: with a colon\nand a second line"), "a note: with a colon\nand a second line", "a body line that looks like a key is still the body");
+  assert.equal(searchableText("time: 14:00\nplace: bay 2"), "time: 14:00\nplace: bay 2", "a paragraph of unknown keys alone is the body, as agora reads it");
+  assert.equal(searchableText(undefined), "");
+});
+
+test("a store from before the words-only index is emptied for a rebuild; what is kept stays", SLOW, async (t) => {
+  const { openKitStore } = await import("../server/store.mjs");
+  const dir = await mkdtemp(path.join(tmpdir(), "agora-chat-migrate-"));
+  t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
+  /** One value, from a statement finalized at once (an open statement holds the file on Windows). @param {any} db @param {string} sql */
+  const one = (db, sql) => { const st = db.prepare(sql); try { return Object.values(st.get() ?? {})[0]; } finally { st.finalize(); } };
+  const epoch = "a".repeat(32);
+  // a version-1 store as the earlier build left it: the trailer block in the searchable text
+  const v1 = await openKitStore(dir);
+  v1.db.run("pragma user_version = 1");
+  v1.db.run("insert into meta (key, value) values ('index_epoch', ?), ('index_through', ?)", epoch, `${epoch}:4`);
+  v1.db.run("insert into messages (id, seq, cursor, ts, thread, author_kind, author_name, json) values ('m1', 4, ?, '2026-10-09T14:00:00Z', null, 'human', 'Ada', '{}')", `${epoch}:4`);
+  v1.db.run("insert into message_fts (id, thread, text, files) values ('m1', 'm1', 'the tank context: zone=north', '')");
+  v1.db.run("insert into reactions (target, name, person, at) values ('m1', 'seen', 'p-ada', '2026-10-09T14:01:00Z')");
+  v1.db.run("insert into positions (person, thread, cursor, epoch, seq, at) values ('p-ada', 'main', ?, ?, 4, '2026-10-09T14:01:00Z')", `${epoch}:4`, epoch);
+  assert.equal(one(v1.db, "pragma user_version"), 1);
+  v1.close();
+
+  const v2 = await openKitStore(dir);
+  try {
+    assert.equal(one(v2.db, "pragma user_version"), 2);
+    assert.equal(one(v2.db, "select count(*) from meta where key in ('index_epoch', 'index_through')"), 0, "the next open rebuilds the index from the room");
+    assert.equal(one(v2.db, "select count(*) from message_fts"), 0);
+    assert.equal(one(v2.db, "select count(*) from messages"), 0);
+    assert.equal(one(v2.db, "select count(*) from reactions"), 1, "reactions are kept");
+    assert.equal(one(v2.db, "select count(*) from positions"), 1, "read positions are kept");
+  } finally { v2.close(); }
 });
 
 test("search leaves out threads the reader may not read", SLOW, async (t) => {

@@ -22,9 +22,10 @@
 
 import { mkdirSync } from "node:fs";
 import path from "node:path";
+import { splitMessage } from "../client/thread.js";
 
 /** The schema this build writes; `PRAGMA user_version` carries it. */
-export const KIT_SCHEMA_VERSION = 1;
+export const KIT_SCHEMA_VERSION = 2;
 
 /**
  * Each step takes the database from version N to N+1. A step is never edited once released; a
@@ -62,7 +63,25 @@ const MIGRATIONS = Object.freeze([
     primary key (target, name, person));
   create table thumbs (digest text primary key, path text not null, created text not null);
   `,
+  // 1 -> 2: the searchable text is the message's words alone (no trailer block, no signature). An
+  // index built before held the trailers, so it is emptied and rebuilt from the room on the next
+  // open; what is kept (positions, reactions, thumbs) stays.
+  `
+  delete from messages; delete from annotations; delete from message_trailers; delete from message_context;
+  delete from mentions; delete from message_files; delete from message_fts;
+  delete from meta where key in ('index_epoch', 'index_through');
+  `,
 ]);
+
+/**
+ * The words search reads in a message: its body, without the trailer block or the signature line.
+ * Those are metadata: the context filter and the trailers table read them, a snippet never shows
+ * them and a query never matches them.
+ * @param {unknown} text
+ */
+export function searchableText(text) {
+  return typeof text === "string" ? splitMessage(text).body : "";
+}
 
 /** The trailer keys the kit indexes: rendered and queried, never acted on. */
 export const KIT_TRAILER_KEYS = Object.freeze(["card", "waiting", "context", "re"]);
@@ -231,7 +250,8 @@ function makeStore(db, storeDir) {
       insertFile.run(m.id, a.id, a.digest, a.name, a.kind, a.mimetype ?? null, a.size ?? null);
       files.push(a.name);
     }
-    if (!m.purged && (m.text || files.length)) insertFts.run(m.id, thread ?? m.id, m.text ?? "", files.join("\n"));
+    const words = searchableText(m.text);
+    if (!m.purged && (words || files.length)) insertFts.run(m.id, thread ?? m.id, words, files.join("\n"));
     return true;
   });
 
@@ -248,7 +268,7 @@ function makeStore(db, storeDir) {
     } else if (a.act === "edit" && !target.withdrawn && typeof a.text === "string") {
       const files = /** @type {Array<{ name: string }>} */ (db.query("select name from message_files where message = ?").all(a.target)).map((f) => f.name);
       db.run("delete from message_fts where id = ?", a.target);
-      insertFts.run(a.target, target.thread ?? a.target, a.text, files.join("\n"));
+      insertFts.run(a.target, target.thread ?? a.target, searchableText(a.text), files.join("\n"));
     }
     return true;
   });
