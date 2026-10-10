@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Chat kit dev page, framed</title>
+<style>html, body { margin: 0; background: #000; } iframe { display: block; border: 0; }</style>
+</head>
+<body>
+<!--
+  The dev page inside a frame of an exact size, so a phone width (390, 360) can be looked at, and
+  captured, in a desktop browser whose window will not shrink that far. Query: w, h, and the dev
+  page's own query in q (url-encoded).
+-->
+<iframe id="f" title="Chat kit dev page"></iframe>
+<script>
+  const p = new URLSearchParams(location.search);
+  const f = document.getElementById("f");
+  f.style.width = (Number(p.get("w")) || 390) + "px";
+  f.style.height = (Number(p.get("h")) || 844) + "px";
+  f.src = "./index.html?" + (p.get("q") || "");
+</script>
+</body>
+</html>
