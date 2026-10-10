@@ -60,6 +60,7 @@ Refusals:
 | `annotation-target-withdrawn` | the target is already withdrawn; applies to every act |
 | `annotation-invalid` | an unknown act, an unknown key, a missing or oversized text on `edit`, a text on any other act |
 | `annotation-unsupported-log-version` | the room is version 1 |
+| `annotation-target-purged` | the target was purged (`docs/PURGE.md`); applies to every act |
 
 `pin` and `unpin` may come from any author the host admits; who may pin is the host
 application's decision, made before it appends.
@@ -82,6 +83,8 @@ foldAnnotations(messages, annotations)
   //    text replaced by the latest edit
 ```
 
+An edit whose message was purged carries `purged` and no text.
+
 Folding rules: a later edit replaces an earlier one; a withdrawal wins over any edit, earlier or
 later; the last of `pin` and `unpin` decides `pinned`. Folding is a reader's act; the tool keeps no
 folded state.
@@ -101,7 +104,8 @@ answered exactly as before.
 in log order among the messages: under `--json` as its own line, `{ type: "annotation", alias, id,
 cursor, ts, act, target, text?, author, via? }`, and for a person as one line naming who did what to
 which message, with an edit's text indented below it. The host cuts a `--limit` page over messages
-and annotations together. Only `read` asks: `join`, `watch`, `cursor --now` and `carry` read
+and annotations together, so a page can hold fewer than N messages: `--limit N` counts annotations
+against it. Only `read` asks: `join`, `watch`, `cursor --now` and `carry` read
 messages as before, and a watch is carried past annotation records. The verbs that append
 annotations are `agora edit`, `agora withdraw`, `agora pin` and `agora unpin` (`docs/PURGE.md` lists
 them with the other native record verbs).
