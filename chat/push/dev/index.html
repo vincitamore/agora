@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chat kit push</title>
+<style>
+  :root { --bg: #f6f5f1; --ink: #1d1c1a; --ink2: #5b5953; --rule: #d9d6cc; --ok: #2f6b3a; --bad: #9a3324; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #1b1c1e; --ink: #e9e7e1; --ink2: #a5a39c; --rule: #34363a; --ok: #7cc48a; --bad: #e68a7a; } }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.45 system-ui, sans-serif; }
+  main { max-width: 720px; margin: 0 auto; padding: 24px 16px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p { color: var(--ink2); margin: 0 0 16px; }
+  button { font: inherit; padding: 8px 14px; border: 1px solid var(--rule); background: transparent; color: var(--ink); border-radius: 6px; cursor: pointer; margin-right: 8px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 16px; font: 13px/1.4 ui-monospace, monospace; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--rule); }
+  th { color: var(--ink2); font-weight: 500; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); }
+  #state { font: 13px/1.4 ui-monospace, monospace; margin-top: 12px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Push</h1>
+  <p>Subscribe this browser, send a test push through its push service, and watch the answer and the acknowledgement.</p>
+  <button id="sub">Turn on notifications</button><button id="test">Send a test push</button>
+  <div id="state">permission: <span id="perm"></span> · subscription: <span id="ep">none</span></div>
+  <div id="seen"></div>
+  <table>
+    <thead><tr><th>push</th><th>kind</th><th>sent</th><th>push service</th><th>shown (ack)</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+</main>
+<script type="module">
+  import { subscribePush, sendTestPush } from "/chat/push/client.js";
+  const $ = (id) => document.getElementById(id);
+  const reg = await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+  await navigator.serviceWorker.ready;
+  const show = async () => {
+    $("perm").textContent = Notification.permission;
+    const sub = await reg.pushManager.getSubscription();
+    $("ep").textContent = sub ? new URL(sub.endpoint).host : "none";
+  };
+  await show();
+  window.devPush = {
+    subscribe: async () => { const s = await subscribePush({ serviceWorker: reg }); await show(); return s.endpoint; },
+    test: () => sendTestPush({ serviceWorker: reg }),
+    seen: [],
+  };
+  $("sub").onclick = () => window.devPush.subscribe().catch((e) => { $("state").textContent += `\n${e.code ?? ""} ${e.message}`; });
+  $("test").onclick = () => window.devPush.test().catch((e) => { $("state").textContent += `\n${e.code ?? ""} ${e.message}`; });
+  navigator.serviceWorker.addEventListener("message", (e) => {
+    if (e.data?.type !== "dev-push-received") return;
+    window.devPush.seen.push(e.data);
+    const line = document.createElement("div");
+    line.textContent = `service worker received ${e.data.pushId?.slice(0, 8)} "${e.data.title}" at ${e.data.at}`;
+    line.className = "ok";
+    $("seen").append(line);
+  });
+  const td = (text, cls) => { const c = document.createElement("td"); c.textContent = text ?? ""; if (cls) c.className = cls; return c; };
+  const poll = async () => {
+    const r = await fetch("/dev/records", { cache: "no-store" }).then((x) => x.json()).catch(() => null);
+    if (r?.ok) {
+      $("rows").replaceChildren(...r.data.map((x) => {
+        const tr = document.createElement("tr");
+        tr.append(td(x.id.slice(0, 8)), td(x.kind), td(x.sentAt.slice(11, 19)),
+          td(x.status == null ? (x.answer ?? "") : `${x.status}${x.endpoint ? " " + new URL(x.endpoint).host : ""}`, x.status === 201 ? "ok" : "bad"),
+          td(x.ackedAt ? x.ackedAt.slice(11, 19) : "not yet", x.ackedAt ? "ok" : ""));
+        return tr;
+      }));
+    }
+  };
+  setInterval(poll, 1000);
+  poll();
+</script>
+</body>
+</html>
