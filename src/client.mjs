@@ -23,12 +23,16 @@ import { AgoraError, configPath, expandHome, loadConfig, stateDir } from "./core
 import { NativeServiceClient } from "./native-service.mjs";
 import { NATIVE_FRAME_MAX, NATIVE_PROTOCOL, nativeCursor, nativeFramePayloadBytes, parseNativeCursor } from "./native-protocol.mjs";
 import { AUTHOR_REF_PATTERN, CLIENT_NAME_PATTERN } from "./protocol/common.mjs";
+import { validateWireAttachment } from "./protocol/attachment.mjs";
+import { ATTACHMENTS_CAPABILITY, readAttachment, uploadAttachment } from "./client-attachments.mjs";
 import { validateNativeCheckpoint, validateNativeReadCoverage } from "./protocol/read.mjs";
 import { assertReceiptContext, validateNativeCommitReceipt } from "./protocol/receipt.mjs";
 import { wireMessage } from "./render.mjs";
 import { trailerKeyOk, trailerValueOk, withTrailers } from "./trailers.mjs";
 import { fittingReadLimit, validateNativeThread } from "./transports/native.mjs";
 import { nativeMessage, readServiceDescriptor } from "./wake/subscriber.mjs";
+
+export * from "./client-attachments.mjs";
 
 /**
  * `refused`: a definite no. The service answered no on a live socket, or this client refused before
@@ -57,7 +61,11 @@ import { nativeMessage, readServiceDescriptor } from "./wake/subscriber.mjs";
  */
 /** `cursor` is the last position delivered or covered. @typedef {{ readonly cursor: string, close(): void }} ClientSubscription */
 /** `ref` is the app's own id for the person, stamped as `author.ref`; only on a client that declared a name. @typedef {{ kind: 'human' | 'agent' | 'system', name: string, ref?: string }} ClientAuthor */
-/** @typedef {{ text: string, author: ClientAuthor, thread?: string, trailers?: Array<[string, string]>, operationId?: string }} AppendRequest */
+/**
+ * `attachments` are references `upload` returned (docs/ATTACHMENTS.md), each checked by
+ * `validateWireAttachment` before anything is sent.
+ * @typedef {{ text: string, author: ClientAuthor, thread?: string, trailers?: Array<[string, string]>, operationId?: string, attachments?: import("./protocol/attachment.mjs").WireAttachment[] }} AppendRequest
+ */
 /** @typedef {{ id: string, cursor: string, duplicate: boolean, operationId: string }} AppendReceipt */
 /** @typedef {'live' | 'dark' | 'refused'} FollowState */
 /** @typedef {{ message: (m: ClientMessage) => void, state?: (state: FollowState, error?: ClientError) => void }} FollowHandlers */
@@ -470,7 +478,7 @@ class AgoraClient {
   /** @param {RoomRef} room @param {AppendRequest} request @param {string} operationId @returns {Promise<AppendReceipt>} */
   async #append(room, request, operationId) {
     const roomId = this.#roomId(room);
-    if (typeof request !== "object" || request === null) throw refused("append-invalid", "append takes { text, author, thread?, trailers?, operationId? }");
+    if (typeof request !== "object" || request === null) throw refused("append-invalid", "append takes { text, author, thread?, trailers?, operationId?, attachments? }");
     if (typeof operationId !== "string" || !OPERATION_ID_RE.test(operationId)) throw refused("operation-id-invalid", "an operation id is 16-128 letters, digits, _ or -");
     if (typeof request.text !== "string") throw refused("text-invalid", "text is a string");
     const author = request.author;
@@ -494,6 +502,13 @@ class AgoraClient {
     }
     const text = withTrailers(request.text, entries);
     if (Buffer.byteLength(text, "utf8") > TEXT_MAX_BYTES) throw refused("text-too-long", `the text is over ${TEXT_MAX_BYTES} bytes`);
+    /** @type {import("./protocol/attachment.mjs").WireAttachment[] | undefined} */
+    let attachments;
+    if (request.attachments !== undefined) {
+      if (!Array.isArray(request.attachments)) throw refused("attachment-invalid", "attachments is a list of the references upload returned");
+      try { attachments = request.attachments.map((a) => validateWireAttachment(a)); }
+      catch (e) { throw refused("attachment-invalid", `an attachment is not a valid reference (${said(e)})`, { cause: e }); }
+    }
     let conn;
     try { conn = await this.#live(); }
     catch (e) {
@@ -503,12 +518,17 @@ class AgoraClient {
     }
     const { client: c, accountId } = conn;
     if (request.thread !== undefined) AgoraClient.#threads(c, "this seat's service");
+    // a durable reference goes only to a service that holds custody; an older one would store it
+    // as bare metadata with no bytes behind it
+    if (attachments?.some((a) => a.lifetime === "durable") && !c.capabilities?.has(ATTACHMENTS_CAPABILITY))
+      throw refused("attachments-unsupported", "this seat's service offers no attachments-v1; nothing was posted");
     // the seat-private secret never enters a room, whoever typed it
     if (this.#secret !== undefined && text.includes(this.#secret))
       throw refused("service-secret-in-text", "the text carries the seat service secret; nothing was posted");
     const operation = { operationId, authorName: author.name, authorKind: author.kind, text,
       ...(request.thread !== undefined ? { thread: request.thread } : {}),
-      ...(author.ref !== undefined ? { authorRef: author.ref } : {}) };
+      ...(author.ref !== undefined ? { authorRef: author.ref } : {}),
+      ...(attachments?.length ? { attachments } : {}) };
     // the frame the request client will write, measured as the encoder measures it, so an append
     // that cannot cross is refused here rather than thrown from inside the send
     if (nativeFramePayloadBytes({ roomId, operation, protocol: NATIVE_PROTOCOL, type: "append", requestId: "0".repeat(32) }) > NATIVE_FRAME_MAX)
@@ -526,6 +546,39 @@ class AgoraClient {
       throw refused("receipt-mismatch", `the receipt does not answer this operation (${said(e)})`, { cause: e });
     }
     return { id: String(ack.id), cursor: String(ack.cursor), duplicate: ack.duplicate === true, operationId };
+  }
+
+  /**
+   * The seam `upload` and `attachment` hand to their module: this client's room resolution, live
+   * connection, offered capabilities and outcome constructors.
+   * @returns {import("./client-attachments.mjs").AttachmentSeam}
+   */
+  #attachmentSeam() {
+    return {
+      roomId: (room) => this.#roomId(/** @type {RoomRef} */ (room)),
+      live: () => this.#live(),
+      capabilities: () => this.#capabilities,
+      refused, dark, classify,
+    };
+  }
+
+  /**
+   * Upload one file into a room's custody (docs/ATTACHMENTS.md); the reference it resolves with
+   * goes into `append`'s `attachments`.
+   * @param {RoomRef} room @param {import("./client-attachments.mjs").UploadRequest} request
+   * @returns {Promise<import("./protocol/attachment.mjs").WireAttachment>}
+   */
+  upload(room, request) {
+    return uploadAttachment(this.#attachmentSeam(), room, request);
+  }
+
+  /**
+   * Read one installed attachment's bytes, verified against its digest. Local connections only.
+   * @param {RoomRef} room @param {import("./client-attachments.mjs").AttachmentRef} ref
+   * @returns {Promise<import("./client-attachments.mjs").AttachmentBytes>}
+   */
+  attachment(room, ref) {
+    return readAttachment(this.#attachmentSeam(), room, ref);
   }
 
   /**

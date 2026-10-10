@@ -99,6 +99,7 @@ import { runUsageSessionsCli } from "../src/session-accounting.mjs";
 import { readShadowArgs, runEconomyShadowCli, ShadowInputError } from "../src/economy/shadow.mjs";
 import { clearStandDown, clearWatchStop, completeStandDownAck, declareStandDown, listStandDowns, standDownRequested } from "../src/stand-down.mjs";
 import { DEFAULT_DEAF_SECONDS, DEFAULT_IDLE_SECONDS, DEFAULT_MAX_CONTEXT, DEFAULT_MIN_CONTEXT, ROOM_MECHANICS_DOC, assertResidentSlug, configuredResidents, planCycle, readInheritMarker, removeInheritMarker, renderResidentPrompt, restartCommand, writeInheritMarker } from "../src/resident.mjs";
+import { nativeRecordArgumentRefusal, nativeRecordVerb, prepareAttachments, runNativeRecordVerb } from "../src/cli-native-records.mjs";
 import { FACE_ATTACHMENT_MODES, FACE_BUILT, FACE_SELECTORS, appendFaceRecord, facePolicyPath, listFaceRecords, normalizeSelectors, readFacePolicy, selectFaces, writeFacePolicy } from "../src/faces.mjs";
 
 /**
@@ -184,6 +185,7 @@ const SCHEMA = {
         "--fyi": "emit ack: none, licensing the reader's silence. Honouring it is a judgement; the tool never filters, suppresses or delays on an incoming ack:",
         "--face <name>": "native rooms: also publish this post to the named face of the room (slack, github), whatever the room's policy would have chosen; repeatable or comma-separated. A name that is not a face of the room, a transport with no audience, or a face that is off is a refused row on the receipt, never an exit code: the native post is the outcome",
         "--no-face": "native rooms: this post stays native only, whatever the room's policy says",
+        "--attach <path>": "native rooms: upload this file into the room's custody and carry it on the post, repeatable (images and files; docs/ATTACHMENTS.md)",
       },
       does: "post one message signed as this session's bearer, with any trailers in a block above the signature; prints id and cursor. On a native room --claim is a board acquire before the message (refused if a live holder is present; an expired lease is no holder); --lease sets the claim's length in seconds; the receipt also carries one row per face of the room (pending | published | refused | unknown), read from the seat's face records; agora faces <room> --for <cursor> reads them again later",
     },
@@ -198,7 +200,7 @@ const SCHEMA = {
       does: "force-drop a native board holder. The human label is cooperative (the caller supplies authorKind; the store refuses an agent label; the event records session and bearer). Slack and other transports have no board",
     },
     room: {
-      args: ["faces <room> | add-remote <alias> <descriptor-path>"],
+      args: ["faces <room> | add-remote <alias> <descriptor-path> | purge <room>"],
       options: {
         "--add <transport>": `give the native room a face on this transport (${FACE_BUILT.join(", ")}); the token is borrowed from a configured room of that transport. A github face is the --via room's issue: one comment per faced post, no threads, no upload (an image faces as its link or its digest)`,
         "--via <room>": "with --add: the configured room whose token and target the face borrows (default: the one configured room of that transport); a github face takes its repo and issue from here",
@@ -213,9 +215,28 @@ const SCHEMA = {
         "--pictures": "shorthand for --attachments pictures: image attachments are uploaded to the face from the seat's verified copy",
         "--face <transport>": "which face an edit applies to, when the room has more than one",
         "--show": "print the record and change nothing (the default with no edit option)",
+        "--message <id>": "with purge: a message whose text is removed, repeatable",
+        "--reason <text>": "with purge: why, recorded on the purge record (required)",
       },
-      does: "faces: the face policy of a native room — which transports carry a copy of which of its posts, per author kind, read from and written to the seat's own state (never the shared config), with where the record lives and when it was last written; an unknown transport, selector or mode is refused by name and nothing is written. add-remote: verify a route descriptor the operator carried from another seat's host and PRINT the native-remote room row to paste; it never writes the shared config, and the row carries no roomId because the descriptor's binding is the one source",
+      does: "faces: the face policy of a native room — which transports carry a copy of which of its posts, per author kind, read from and written to the seat's own state (never the shared config), with where the record lives and when it was last written; an unknown transport, selector or mode is refused by name and nothing is written. add-remote: verify a route descriptor the operator carried from another seat's host and PRINT the native-remote room row to paste; it never writes the shared config, and the row carries no roomId because the descriptor's binding is the one source. purge: remove the text of the named messages (--message, repeatable) or of a whole thread (--thread <root id>) from a version 2 native room, with the attachment bytes no remaining message references; every record keeps its place in the chain (docs/PURGE.md)",
     },
+    attachment: {
+      args: ["get <room> <attachment id>"],
+      options: { "--out <path>": "where the verified bytes are written (required; never overwrites)" },
+      does: "native rooms: read one attachment from the room's custody, verified against its digest, into a file (docs/ATTACHMENTS.md)",
+    },
+    edit: {
+      args: ["<room>", "<message id>"],
+      options: { "--text <text>": "the new text", "--stdin": "the new text from stdin" },
+      does: "native rooms: append an edit annotation to one of your own messages; readers fold the latest edit in (docs/ANNOTATIONS.md)",
+    },
+    withdraw: {
+      args: ["<room>", "<message id>"],
+      options: {},
+      does: "native rooms: append a withdraw annotation to one of your own messages; every reader folds it (not the --withdraws trailer, which carry folds for its own author)",
+    },
+    pin: { args: ["<room>", "<message id>"], options: {}, does: "native rooms: append a pin annotation to a message" },
+    unpin: { args: ["<room>", "<message id>"], options: {}, does: "native rooms: append an unpin annotation to a message" },
     faces: {
       args: ["<room>"],
       options: {
@@ -487,6 +508,10 @@ const OPTIONS = /** @type {const} */ ({
   restart: { type: "string" },
   face: { type: "string", multiple: true },
   "no-face": { type: "boolean", default: false },
+  attach: { type: "string", multiple: true },
+  message: { type: "string", multiple: true },
+  reason: { type: "string" },
+  text: { type: "string" },
   unknown: { type: "boolean", default: false },
   add: { type: "string" },
   via: { type: "string" },
@@ -913,6 +938,11 @@ export const ARGUMENT_PREFLIGHTS = Object.freeze([
       if (!String(rest[1]).trim()) return "agora room add-remote needs a descriptor path";
       return undefined;
     },
+  },
+  {
+    name: "native-records",
+    matches: ({ verb, roomAlias }) => nativeRecordVerb(verb, roomAlias) !== undefined,
+    refusal: (context) => nativeRecordArgumentRefusal(context),
   },
   {
     name: "watch-codex-bridge",
@@ -1720,6 +1750,13 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
     return bad ? EXIT.error : EXIT.ok;
   }
 
+  // The native record verbs (attachment get, edit, withdraw, pin, unpin, room purge) run in their
+  // own module once config, session and bearer are resolved; docs/PURGE.md lists them.
+  const recordVerb = nativeRecordVerb(verb, roomAlias);
+  if (recordVerb !== undefined)
+    return await runNativeRecordVerb({ name: recordVerb, sub: roomAlias, rest, values, cfg, stateRoot,
+      sessionDir: sdir, bearer, json });
+
   if (verb === "room") {
     // `agora room add-remote <alias> <descriptor-path>`: validates the route descriptor the
     // operator carried and PRINTS the config row. It does not write agora.json — the tool never
@@ -2168,6 +2205,14 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       const choice = faceChoice(values);
       if (choice !== undefined && room.transport !== "native") throw new AgoraError(`--face and --no-face belong to a native room; "${roomAlias}" is a ${room.transport} room, and a post there is already where its readers are`, EXIT.usage);
       if (values.split && room.transport === "native") throw new AgoraError(`--split chunks a Slack post; "${roomAlias}" is a native room, whose message is one message, and a face carries no split`, EXIT.usage);
+      // `--attach` uploads into the room's custody first; the post then carries the references
+      // (docs/ATTACHMENTS.md). Elsewhere a file is a transport's own business.
+      /** @type {import('../src/protocol/attachment.mjs').WireAttachment[] | undefined} */
+      let attachments;
+      if (values.attach?.length) {
+        if (room.transport !== "native") throw new AgoraError(`--attach belongs to a native room; "${roomAlias}" is a ${room.transport} room`, EXIT.usage);
+        attachments = await prepareAttachments({ roomAlias, room, cfg, stateRoot, paths: values.attach.map(String) });
+      }
       /** @type {{ transport: string, code: string, reason: string }[]} */
       let faceRefusals = [];
       /** @type {'none' | string[] | undefined} */
@@ -2223,7 +2268,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       try {
         for (const piece of pieces) {
           const intent = await beginCarryPost(sdir, roomAlias, session, bearer.name, payload(piece));
-          last = await recordedPost(transport, sdir, payload(piece), { thread, ...(wireChoice === undefined ? {} : { face: wireChoice }) }, { session, bearer: bearer.name });
+          last = await recordedPost(transport, sdir, payload(piece), { thread, ...(wireChoice === undefined ? {} : { face: wireChoice }), ...(attachments?.length ? { attachments } : {}) }, { session, bearer: bearer.name });
           await captureCarryPost(sdir, roomAlias, session, bearer.name, payload(piece), last, intent);
           ids.push(last.id);
         }

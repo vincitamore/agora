@@ -119,7 +119,7 @@ export function nativeTransport(room, { actor, stateRoot, session, connect }) {
      * session receives the service's push before this request returns, and a ledger written
      * after the receipt lost that race (measured: a session's own posts delivered back to it).
      */
-    async post(text, { thread, face, beforeSend } = {}) {
+    async post(text, { thread, face, beforeSend, attachments } = {}) {
       /** @type {import('../native-service.mjs').NativeServiceClient} */
       let c;
       try { c = await client(); }
@@ -128,7 +128,7 @@ export function nativeTransport(room, { actor, stateRoot, session, connect }) {
       if (thread !== undefined) requireThreads(c, "this seat's service");
       const operationId = randomUUID().replaceAll("-", "");
       if (beforeSend) await beforeSend(nativeMessageId(roomId, (await readServiceDescriptor(stateRoot)).accountId, operationId));
-      const receipt = await c.request("append", { roomId, operation: { operationId, authorName: actor.name, authorKind: actor.kind, text, ...(thread !== undefined ? { thread } : {}) }, ...(face === undefined ? {} : { face }) });
+      const receipt = await c.request("append", { roomId, operation: { operationId, authorName: actor.name, authorKind: actor.kind, text, ...(thread !== undefined ? { thread } : {}), ...(attachments?.length ? { attachments } : {}) }, ...(face === undefined ? {} : { face }) });
       return { id: String(receipt.id), cursor: String(receipt.cursor), ...(Array.isArray(receipt.faces) ? { faces: receipt.faces } : {}) };
     },
     /**

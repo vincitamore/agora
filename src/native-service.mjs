@@ -9,6 +9,7 @@ import { NativeFrameDecoder, NATIVE_FRAME_MAX, NATIVE_PROTOCOL, encodeNativeFram
   nativeHandshakeProof, parseNativeCursor,
   validateNativeEnvelope, validateNativeId, verifyNativeHandshakeProof } from "./native-protocol.mjs";
 import { NativeRoomStore } from "./native-store.mjs";
+import { assertDurableAttachments, handleAttachmentFrame, isAttachmentFrame } from "./native-attachments.mjs";
 import { MEMBER_PHASES, buildRouteBinding, buildRouteDescriptor, memberHandshakeProof, memberMayRequest,
   memberTranscript, mintRouteSecret, removeRouteSecret, routeKey, validatePublicNodeKey,
   verifyMemberHandshakeProof, writeRouteSecret } from "./native-member.mjs";
@@ -706,6 +707,13 @@ export class NativeRoomService {
       });
       return;
     }
+    // Attachment custody (docs/ATTACHMENTS.md) answers its own frames. A member session never gets
+    // here with one: memberMayRequest refused the type above.
+    if (!member && isAttachmentFrame(frame.type)) {
+      await handleAttachmentFrame({ root: this.root, socket, send: (answer) => sendFrame(socket, answer),
+        openRoom: (id) => this.openRoom(id), ...(local.clientName !== undefined ? { clientName: local.clientName } : {}) }, frame);
+      return;
+    }
     const roomId = requiredString(frame.roomId, "room id");
     if (member && roomId !== member.binding.roomId)
       throw codedRefusal("member-room-refused", "a member session may only reach the room its route binds");
@@ -815,6 +823,10 @@ export class NativeRoomService {
     if (frame.type === "append") {
       const operation = frame.operation;
       if (!operation || typeof operation !== "object" || Array.isArray(operation)) throw new AgoraError("native append needs an operation object");
+      // a durable attachment names bytes this room's custody must already hold
+      if (/** @type {any} */ (operation).attachments !== undefined)
+        await assertDurableAttachments({ root: this.root, socket, send: (answer) => sendFrame(socket, answer),
+          openRoom: (id) => this.openRoom(id) }, roomId, /** @type {any} */ (operation).attachments);
       // The store stamps author.id and derives the message id from this account id, so a member's
       // posts carry its own minted principal rather than the host's. A local connection that
       // declared a client name has its messages stamped `via` that name; a member declares none.

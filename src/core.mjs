@@ -80,8 +80,9 @@ const execFileAsync = promisify(execFile);
 /** @typedef {{ thread?: string, since?: string, limit?: number, pages?: number }} ReadOptions */
 /**
  * `face` is a native room's post-time face choice: transports named by `--face`, `"none"` for
- * `--no-face`, absent for the room's own policy. Only the native transport reads it.
- * @typedef {{ thread?: string, face?: 'none' | string[], beforeSend?: (id: string) => Promise<void> | void }} PostOptions
+ * `--no-face`, absent for the room's own policy. Only the native transport reads it. `attachments` are
+ * the durable references a native post carries (`post --attach`, docs/ATTACHMENTS.md).
+ * @typedef {{ thread?: string, face?: 'none' | string[], beforeSend?: (id: string) => Promise<void> | void, attachments?: import('./protocol/attachment.mjs').WireAttachment[] }} PostOptions
  */
 /**
  * What a transport implements. `read` returns messages ascending, each carrying a cursor.
