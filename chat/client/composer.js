@@ -408,21 +408,21 @@ export function isMine(m, me) {
 }
 
 /**
- * A served message's reactions, as names by word. Read in either shape a server may send:
- * `[{ name, who: [personId] }]` or `{ <name>: [personId] }`.
+ * A served message's reactions, as the people by word. The kit serves one shape on every message
+ * (CONTRACT.md, the message): `reactions: [{ name, people: [personId] }]`, each name once, in the
+ * order first chosen, and no field when there are none. An array, never an object keyed by name: a
+ * name is a person's word, so it is never used as a key.
  * @param {any} m
  * @returns {Map<string, string[]> | null}
  */
 export function reactionsOf(m) {
   const r = m?.reactions;
-  if (!r || typeof r !== "object") return null;
+  if (!Array.isArray(r)) return null;
   /** @type {Map<string, string[]>} */
   const out = new Map();
-  const ids = (/** @type {any} */ v) => (Array.isArray(v) ? v.map((x) => (typeof x === "string" ? x : x?.id ?? x?.ref)).filter((x) => typeof x === "string") : []);
-  if (Array.isArray(r)) {
-    for (const e of r) if (e && typeof e.name === "string") out.set(e.name, ids(e.who ?? e.names ?? e.people));
-  } else {
-    for (const [k, v] of Object.entries(r)) out.set(k, ids(v));
+  for (const e of r) {
+    if (!e || typeof e.name !== "string" || !Array.isArray(e.people)) continue;
+    out.set(e.name, e.people.filter((/** @type {unknown} */ x) => typeof x === "string"));
   }
   return out;
 }
@@ -909,9 +909,8 @@ export function mountComposer(el, ctx, options = {}) {
   const react = async (id, word, on) => {
     const r = await call(o, "/react", { method: "POST", body: JSON.stringify({ target: id, name: word, on }) });
     if (!r || !(r.status === 200 && r.body?.ok)) return false;
-    const byWord = reacted.get(id) ?? new Map();
-    byWord.set(word, Array.isArray(r.body.data?.names) ? r.body.data.names.map(String) : []);
-    reacted.set(id, byWord);
+    // the answer carries the message's reactions as now folded: the same shape every message has
+    reacted.set(id, reactionsOf({ reactions: r.body.data?.reactions ?? [] }) ?? new Map());
     if (ledger) decorate(ledger);
     return true;
   };

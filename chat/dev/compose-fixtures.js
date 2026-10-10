@@ -122,12 +122,15 @@ export function installComposeFixtures(base) {
       const target = Object.values(THREADS).flat().find((m) => m.id === b.target);
       if (!target) return fail(404, "NOT_FOUND");
       const served = (target.reactions ?? []).find((r) => r.name === b.name);
-      const names = new Set(ROOM.reactions.get(k) ?? served?.who ?? []);
+      const names = new Set(ROOM.reactions.get(k) ?? served?.people ?? []);
       if (b.on) names.add(ME.id); else names.delete(ME.id);
       ROOM.reactions.set(k, [...names]);
-      // the served message carries its reactions as names with who, as the kit's next round sends them
-      target.reactions = [...(target.reactions ?? []).filter((r) => r.name !== b.name), ...(names.size ? [{ name: b.name, who: [...names] }] : [])];
-      return ok({ names: [...names] });
+      // the kit's shape (CONTRACT.md): [{ name, people }], names in the order first chosen, no field when none
+      const list = (target.reactions ?? []).map((r) => (r.name === b.name ? { name: r.name, people: [...names] } : r));
+      if (!served) list.push({ name: b.name, people: [...names] });
+      const kept = list.filter((r) => r.people.length);
+      if (kept.length) target.reactions = kept; else delete target.reactions;
+      return ok({ names: [...names], reactions: kept });
     }
     if (path === "/search") {
       const q = (url.searchParams.get("q") ?? "").toLowerCase().split(/\s+/).filter(Boolean);
@@ -155,7 +158,7 @@ export function installComposeFixtures(base) {
 
   // one served message already carries reactions: the root of the plan thread
   const planRoot = Object.values(THREADS).find((list) => list[0]?.text.startsWith("Is the north vent"))?.[0];
-  if (planRoot) planRoot.reactions = [{ name: "seen", who: ["p-ravi", "p-dana"] }];
+  if (planRoot) planRoot.reactions = [{ name: "seen", people: ["p-ravi", "p-dana"] }];
 
   window.__chatDev = {
     ROOM,

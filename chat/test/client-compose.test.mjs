@@ -266,8 +266,10 @@ test("own messages are matched by ref, never by name; served reactions and purge
   assert.equal(isMine({ author: { kind: "human", name: "pat", ref: "p-2" } }, me), false);
   assert.equal(isMine({ author: { kind: "agent", name: "pat", ref: "p-1" } }, me), false);
   assert.equal(isMine({ author: { kind: "human", name: "x", ref: "r-1" } }, { id: "p-1", name: "pat", ref: "r-1" }), true, "a person's ref, when it has one, is what the kit stamps");
-  assert.deepEqual([...(reactionsOf({ reactions: [{ name: "seen", who: ["p-1", "p-2"] }] }) ?? [])], [["seen", ["p-1", "p-2"]]]);
-  assert.deepEqual([...(reactionsOf({ reactions: { done: ["p-3"] } }) ?? [])], [["done", ["p-3"]]]);
+  assert.deepEqual([...(reactionsOf({ reactions: [{ name: "seen", people: ["p-1", "p-2"] }, { name: "done", people: ["p-3"] }] }) ?? [])], [["seen", ["p-1", "p-2"]], ["done", ["p-3"]]]);
+  // one shape only: an object keyed by name, or people under another key, is not read
+  assert.equal(reactionsOf({ reactions: { done: ["p-3"] } }), null);
+  assert.deepEqual([...(reactionsOf({ reactions: [{ name: "seen", who: ["p-1"] }] }) ?? [])], []);
   assert.equal(reactionsOf({}), null);
   assert.deepEqual(purgedOf({ text: "", purged: { at: "2026-10-10T10:00:00Z", purge: "x" } }), { at: "2026-10-10T10:00:00Z" });
   assert.deepEqual(purgedOf({ text: "", purged: true }), {});

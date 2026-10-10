@@ -367,6 +367,26 @@ test("react keeps names, never counts", SLOW, async (t) => {
   assert.equal((await k.call("p-lin", "/chat/react", { target: id, name: "agree", on: true })).status, 403);
 });
 
+test("the client half reads the reactions the server serves, in the one shape it serves", SLOW, async (t) => {
+  const { reactionsOf } = await import("../client/composer.js");
+  const k = await setup(t);
+  const id = (await k.call("p-ada", "/chat/post", { text: "one shape for reactions" })).body.data.receipt.id;
+  await k.indexed(id);
+  assert.equal(reactionsOf((await k.call("p-grace", `/chat/thread/${id}`)).body.data.messages[0]), null, "no field, nothing read");
+  await k.call("p-grace", "/chat/react", { target: id, name: "seen", on: true });
+  await k.call("p-ada", "/chat/react", { target: id, name: "done", on: true });
+  const answer = (await k.call("p-ada", "/chat/react", { target: id, name: "seen", on: true })).body.data;
+  const want = [["seen", ["p-grace", "p-ada"]], ["done", ["p-ada"]]];
+  assert.deepEqual([...(reactionsOf({ reactions: answer.reactions }) ?? [])], want, "the react answer");
+  const served = (await k.call("p-grace", `/chat/thread/${id}`)).body.data.messages.find((/** @type {any} */ m) => m.id === id);
+  assert.deepEqual([...(reactionsOf(served) ?? [])], want, "the thread route");
+  const listed = (await k.call("p-grace", "/chat/threads")).body.data.threads.find((/** @type {any} */ x) => x.root.id === id);
+  assert.deepEqual([...(reactionsOf(listed.root) ?? [])], want, "the thread list");
+  const s = await k.stream("p-grace", `thread=${id}`);
+  const shown = /** @type {any} */ (await s.until(() => s.of("message").find((e) => e.data.id === id), "the message on the stream")).data;
+  assert.deepEqual([...(reactionsOf(shown) ?? [])], want, "the stream's message event");
+});
+
 test("search: words and file names, context, coverage, and what a reader may see", SLOW, async (t) => {
   const k = await setup(t);
   const a = await k.call("p-ada", "/chat/post", { text: "the valve schedule for tuesday", trailers: [["context", "item=alpha; screen=detail"]] });

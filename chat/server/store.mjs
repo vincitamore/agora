@@ -440,13 +440,6 @@ function makeStore(db, storeDir) {
       if (on) db.run("insert or ignore into reactions (target, name, person, at) values (?, ?, ?, ?)", target, name, person, now());
       else db.run("delete from reactions where target = ? and name = ? and person = ?", target, name, person);
     },
-    /** @param {string} target @returns {Record<string, string[]>} each name with who chose it, never a count */
-    reactions(target) {
-      /** @type {Record<string, string[]>} */
-      const out = {};
-      for (const r of /** @type {Array<{ name: string, person: string }>} */ (db.query("select name, person from reactions where target = ? order by at").all(target))) (out[r.name] ??= []).push(r.person);
-      return out;
-    },
     /** @param {string} digest @param {string} file a path under `thumbsDir` */
     putThumb(digest, file) {
       db.run("insert into thumbs (digest, path, created) values (?, ?, ?) on conflict(digest) do update set path = excluded.path", digest, file, now());
