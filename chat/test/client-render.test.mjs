@@ -88,11 +88,11 @@ class El_ extends Node_ {
 };
 const doc = /** @type {any} */ (globalThis).document;
 
-const { parseMarkdown, parseInline, renderMarkdown, safeHref } = await import("../client/markdown.js");
+const { parseMarkdown, parseInline, plainInline, renderMarkdown, safeHref } = await import("../client/markdown.js");
 const { registerBlock } = await import("../client/blocks.js");
 const { registerCard } = await import("../client/cards.js");
 const { renderThread, splitMessage, COLLAPSE_AT, dayLabel } = await import("../client/thread.js");
-const { renderThreadList } = await import("../client/list.js");
+const { renderThreadList, firstLine, titleText } = await import("../client/list.js");
 
 const NOW = new Date(2026, 9, 9, 14, 16);
 /** @type {any} */
@@ -287,4 +287,23 @@ test("the list: activity order, unread dot, waiting marker, card chips, context 
   assert.match(items[1].textContent, /bare-id/);
   items[2].click();
   assert.deepEqual(opened, ["old"]);
+});
+
+test("a title keeps a literal underscore; emphasis keeps its words and drops its marks", () => {
+  assert.equal(titleText("Link to SITE_CT_PHONE610"), "Link to SITE_CT_PHONE610");
+  assert.equal(firstLine(/** @type {any} */ ({ id: "r", text: "Link to SITE_CT_PHONE610\nsecond line" })), "Link to SITE_CT_PHONE610");
+  assert.equal(titleText("the _north_ vent and **pump_2** on `a_b`"), "the north vent and pump_2 on a_b");
+  assert.equal(titleText("## A__B__C and snake_case_name"), "A__B__C and snake_case_name");
+  assert.equal(titleText("see [SITE_CT_PHONE610](https://example.com/x) now"), "see SITE_CT_PHONE610 now");
+  assert.equal(titleText("\\_kept\\_ and *star*"), "_kept_ and star");
+  assert.equal(plainInline("x_1 * y_2"), "x_1 * y_2");
+});
+
+test("a body with snake_case names is not mangled; _word_ at a boundary is still emphasis", () => {
+  const box = render("Port SITE_CT_PHONE610 on sw_core_1, A__B__C and x__y; the _north_ one.");
+  assert.equal(box.textContent, "Port SITE_CT_PHONE610 on sw_core_1, A__B__C and x__y; the north one.");
+  assert.equal(all(box, "em").length, 1);
+  assert.equal(all(box, "em")[0].textContent, "north");
+  assert.equal(all(box, "strong").length, 0);
+  assert.deepEqual(parseInline("__bold__ and **also**").filter((n) => n.type === "strong").length, 2);
 });

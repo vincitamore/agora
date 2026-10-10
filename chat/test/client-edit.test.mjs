@@ -166,6 +166,7 @@ function room(served) {
       if (path === "/scan") return ok({});
       if (path === "/annotate") return ok({ receipt: { id: "a-1" } });
       if (path === "/react") return ok({ names: [], reactions: [] });
+      if (path === "/post") return ok({ receipt: { id: `p-${requests.length}` } });
       return /** @type {any} */ ({ status: 404, json: async () => ({ ok: false }) });
     },
   };
@@ -335,4 +336,39 @@ test("a withdrawal while the actions sheet is open closes it", async () => {
   s.view.annotate(/** @type {any} */ (w));
   await tick();
   assert.equal(sheet.hidden, true);
+});
+
+test("a host opens a composer of its own, prefilled, for a new thread or under a given root", async () => {
+  const rm = room([ROOT]);
+  const fetch = /** @type {any} */ (rm.fetch);
+  /** the context a card renderer is handed, for the thread the host chose @param {string | null} thread */
+  const hostCtx = (thread) => ({ person: ME, thread, theme: "light", now: () => NOW, post: async () => ({}) });
+  const context = () => /** @type {Array<[string, string]>} */ ([["context", "device=SITE_CT_PHONE610"]]);
+  // a new thread: the first line is its title
+  const sheetA = doc.createElement("div");
+  const a = mountComposer(sheetA, hostCtx(null), { base: `/k${++bases}`, storage: null, fetch, context });
+  a.setText("Link to SITE_CT_PHONE610\nport 7 flaps");
+  assert.equal(sheetA.getAttribute("data-mode"), "new");
+  assert.equal(sheetA.querySelector(".chat-cmp-input").value, "Link to SITE_CT_PHONE610\nport 7 flaps");
+  sheetA.querySelector(".chat-cmp-send").click();
+  await tick(); await tick();
+  const postA = rm.requests.filter((x) => x.path === "/post").map((x) => x.body);
+  assert.equal(postA.length, 1);
+  assert.equal(postA[0].text, "Link to SITE_CT_PHONE610\nport 7 flaps");
+  assert.equal(postA[0].thread ?? null, null, "a new thread: no root on the wire");
+  assert.deepEqual(postA[0].trailers, [["context", "device=SITE_CT_PHONE610"]]);
+  a.unmount();
+
+  // under a given root
+  const sheetB = doc.createElement("div");
+  const b = mountComposer(sheetB, hostCtx("root"), { base: `/k${++bases}`, storage: null, fetch });
+  b.setText("same device again");
+  assert.equal(sheetB.getAttribute("data-mode"), "reply");
+  sheetB.querySelector(".chat-cmp-send").click();
+  await tick(); await tick();
+  const postB = rm.requests.filter((x) => x.path === "/post").map((x) => x.body);
+  assert.equal(postB.length, 2);
+  assert.equal(postB[1].thread, "root");
+  assert.equal(postB[1].text, "same device again");
+  b.unmount();
 });

@@ -199,9 +199,16 @@ export function parseInline(src, inLink = false) {
         if (href) { text(); out.push({ type: "link", href, children: [{ type: "text", text: url }] }); i += url.length; continue; }
       }
     }
+    // a run of `_` inside a word is literal, the whole run: `A__B` never opens on its second `_`
+    if (c === "_" && i > 0 && /[A-Za-z0-9]/.test(src[i - 1])) {
+      const run = rest.match(/^_+/)?.[0] ?? "_";
+      buf += run; i += run.length; continue;
+    }
     if ((c === "*" || c === "_") && src[i + 1] === c) {
       const marker = c + c;
-      const close = src.indexOf(marker, i + 2);
+      // `__` closes only at a word boundary, as it opens (above): `__a__b c__` is one strong run
+      let close = src.indexOf(marker, i + 2);
+      if (c === "_") while (close > -1 && /[A-Za-z0-9_]/.test(src[close + 2] ?? "")) close = src.indexOf(marker, close + 1);
       if (close > i + 2 && !/\s/.test(src[i + 2]) && !/\s/.test(src[close - 1])) {
         text();
         out.push({ type: "strong", children: parseInline(src.slice(i + 2, close), inLink) });
@@ -210,8 +217,7 @@ export function parseInline(src, inLink = false) {
       }
     }
     if (c === "*" || c === "_") {
-      const wordBefore = i > 0 && /[A-Za-z0-9]/.test(src[i - 1]);
-      if (!(c === "_" && wordBefore) && i + 1 < src.length && !/\s/.test(src[i + 1])) {
+      if (i + 1 < src.length && !/\s/.test(src[i + 1])) {
         let close = i + 1;
         while ((close = src.indexOf(c, close)) > -1) {
           const after = src[close + 1];
@@ -232,6 +238,18 @@ export function parseInline(src, inLink = false) {
   }
   text();
   return out;
+}
+
+/**
+ * One line of the markdown subset as plain text: what a reader sees, without the marks. Emphasis
+ * keeps its words and drops its markers; a literal `_` or `*` the parser leaves as text (inside a
+ * name such as `SITE_CT_PHONE610`) stays; code keeps its text; a link is its text.
+ * @param {string} src
+ */
+export function plainInline(src) {
+  /** @param {Inline[]} nodes @returns {string} */
+  const flat = (nodes) => nodes.map((n) => (n.type === "text" || n.type === "code" ? n.text : n.type === "br" ? " " : flat(n.children))).join("");
+  return flat(parseInline(src));
 }
 
 /** @param {Inline[]} nodes @param {Node} into */

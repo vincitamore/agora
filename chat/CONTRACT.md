@@ -200,17 +200,26 @@ The thread pane carries a `.chat-composer` slot the composer mounts into.
 ### The writing half
 
 ```js
-import { configureComposer, registerAttachAction, composerIn } from "/chat/client/composer.js";
+import { configureComposer, registerAttachAction, mountComposer, composerIn } from "/chat/client/composer.js";
 import { mountSearch } from "/chat/client/search.js";
 
 configureComposer({ reactions?, storage?, onPosted?, messageOf? });   // optional: options every composer mounted later uses
 registerAttachAction("handover", { label: "hand over a password", note: "never posted", run: (ctx) => {} });
+const handle = mountComposer(slot, ctx, { base?, people?, context?, reactions?, storage?, onPosted?, messageOf? });   // ctx as above, thread: root | null
 composerIn(el.querySelector(".chat-composer"))                  // the mounted composer's handle, or undefined
 // handle = { unmount(), focus(), setText(text), sheet("attach" | null), addFiles(files), edit(id), actions(id), reaction(event), purge(event), annotation(event) }
 
 const search = mountSearch(el, { base: "/chat", onOpen: (root, messageId) => view.open(root), onClose, context?, now? });
 // search = { unmount(), focus(), search(q) }
 ```
+
+A host opens a composer of its own (a lookup that drafts a message about what it found) with
+`mountComposer` into any element it owns, then fills it with `handle.setText(text)`. Its `ctx` is
+the one a card renderer is handed; the composer reads `thread` and `person` from it and hands the
+whole of it to an attach action's `run`. `thread: null` starts a new thread, whose first line is its
+title; a root id replies under that root. `context`
+is the trailers every post from it carries, as `mountChat`'s. Mounting into a slot that already
+holds a composer replaces it, and `unmount()` takes it out; the draft is kept per base and thread.
 
 `mountChat` mounts the composer in each thread it opens with its own `base`, `people` and
 `context`, lends it the ledger's own messages (`messageOf`), and hands the open thread's `reaction`,
@@ -269,7 +278,9 @@ Subscription endpoints are limited to the browsers' push services.
   mono for code, evidence and addresses.
 - **A markdown subset**: paragraphs, lists, emphasis, code, fenced blocks, and links only to
   `https:` and the same origin. Never an image from text, never raw HTML, never a `javascript:`
-  link.
+  link. `_` and `__` open and close emphasis only at a word boundary, so `snake_case`, `A__B` and
+  `SITE_CT_PHONE610` stay as written. A thread's title is its root's first line through the same
+  subset, as plain text: emphasis keeps its words and drops its marks, a literal `_` stays.
 - **Text from outside is inert**: escaped, never interpreted.
 - Posts past 600 characters are collapsed behind "show all".
 - **A card is a reference, never a payload.** A message carries a card as a trailer

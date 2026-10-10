@@ -9,7 +9,7 @@
  * is the line under the title. Unread is a boolean and waiting a list of person ids: no counts.
  */
 
-import { h } from "./markdown.js";
+import { h, plainInline } from "./markdown.js";
 import { bodyOf, contextOf, shortWhen } from "./thread.js";
 
 /** How many of a thread's cards the list names. */
@@ -43,8 +43,15 @@ export function firstLine(m) {
   if (!m) return "";
   if (m.withdrawn) return "withdrawn";
   const line = bodyOf(m).split("\n").find((l) => l.trim()) ?? "";
-  // the list shows a line, not markup: strip the emphasis and code marks a reader would not type
-  return line.replace(/[*_`]+/g, "").replace(/^#+\s*/, "").trim();
+  return titleText(line);
+}
+
+/**
+ * A line as a title: the markdown subset read as plain text (a heading's `#` dropped, emphasis
+ * marks dropped, a literal `_` inside a name kept). @param {string} line
+ */
+export function titleText(line) {
+  return plainInline(line.replace(/^ {0,3}#+\s*/, "")).trim();
 }
 
 /**

@@ -17,7 +17,7 @@
  */
 
 import { h } from "./markdown.js";
-import { renderThreadList, rootId } from "./list.js";
+import { renderThreadList, rootId, titleText } from "./list.js";
 import { renderThread, bodyOf, contextOf, clock, dayLabel } from "./thread.js";
 import { mountComposer, composerIn } from "./composer.js";
 
@@ -297,7 +297,7 @@ export function mountChat(el, options) {
     const summary = threads.find((t) => rootId(t) === root);
     const fromList = summary && typeof summary.root !== "string" ? summary.root : undefined;
     const r = rootMsg ?? fromList;
-    const line = r ? (bodyOf(r).split("\n").find((l) => l.trim()) ?? "").replace(/[*_`]+/g, "").trim() : "";
+    const line = r ? titleText(bodyOf(r).split("\n").find((l) => l.trim()) ?? "") : "";
     title.textContent = line || root;
     cap.textContent = r ? `thread · opened ${dayLabel(r.ts, now())} ${clock(r.ts)} by ${r.author?.name ?? ""}` : "thread";
     const people = [...new Set(messages.filter((m) => m.author?.kind === "human").map((m) => m.author.name))];

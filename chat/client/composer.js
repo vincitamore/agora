@@ -446,7 +446,10 @@ function trailerBlock(text) {
 }
 
 /**
- * Mount the composer into the thread pane's `.chat-composer` slot.
+ * Mount the composer into a slot: the thread pane's `.chat-composer`, or a host's own sheet. `thread`
+ * is the root it replies under, `null` for a new thread; `person` is the reader (edit and withdraw
+ * are offered on their own messages); the whole context is what a host's attach action is handed.
+ * A composer already in the slot is unmounted first.
  * @param {HTMLElement} el
  * @param {import("./index.js").ChatContext} ctx
  * @param {ComposerOptions} [options]
