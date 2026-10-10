@@ -54,3 +54,21 @@ def Laws.nothing_to_break(a, l, f, e, cursor, now, gone):
 
 def Laws.refusal_changes_nothing(stored, cursor, now):
   {==}
+
+def Laws.ownership_is_account_and_lease(account, lease, a, l, f, e):
+  {==}
+
+def Laws.fence_is_the_holders(a, l, f, e):
+  {==}
+
+def Laws.live_lease_is_the_holder(a, l, f, e, now, live):
+  %live : {Bool.pick(K.Holder, _, K.Held{a, l, f, e}, K.NoHolder{}) == K.Held{a, l, f, e} : K.Holder}
+  {==}
+
+def Laws.expired_lease_is_no_holder(a, l, f, e, now, gone):
+  %gone : {(Bool.pick(K.Holder, _, K.Held{a, l, f, e}, K.NoHolder{}), K.live(K.NoHolder{}, now))
+           == (K.NoHolder{}, K.NoHolder{}) : K.Holder & K.Holder}
+  {==}
+
+def Laws.applied_holder_stands(h, stored):
+  {==}
