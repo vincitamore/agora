@@ -2,11 +2,12 @@
 // agora/client and annotations (docs/ANNOTATIONS.md): `foldAnnotations` as a pure function, and
 // `annotate`, `read`, `subscribe` and `follow` against a real seat service. The client sends an
 // annotation, or asks for annotation events, only to a service that offered annotations-v1: the
-// tests that need the offer run when the service makes it, and the refusal a service without it
-// earns runs when it does not, so each build exercises the side it serves.
+// service offers it, and the refusal a service without it earns runs against an offer with the
+// name removed.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { foldAnnotations } from "../src/client.mjs";
+import { NativeServiceClient } from "../src/native-service.mjs";
 import { ADA, EPOCH, failure, seat, until } from "./client-fixtures.mjs";
 
 const at = (/** @type {number} */ n) => `${EPOCH}:${n}`;
@@ -52,9 +53,18 @@ test("foldAnnotations: the latest edit replaces the text, a withdrawal wins over
 });
 
 test("a service without annotations-v1: annotate and an annotation handler are refused before anything is sent; a read has no annotations", { timeout: 30_000 }, async (t) => {
+  // this build's service offers annotations-v1, so the client is shown an offer without it: the
+  // side an older service earns, against the real frames
+  const original = NativeServiceClient.connect;
+  NativeServiceClient.connect = async (endpoint) => {
+    const c = await original.call(NativeServiceClient, endpoint);
+    c.capabilities.delete("annotations-v1");
+    return c;
+  };
+  t.after(() => { NativeServiceClient.connect = original; });
   const s = await seat(t);
   const app = await s.open();
-  if (app.capabilities.has("annotations-v1")) { t.skip("this service offers annotations-v1"); return; }
+  assert.equal(app.capabilities.has("annotations-v1"), false);
   const m = await app.append("house", { text: "words", author: ADA });
   const refusal = await failure(app.annotate("house", { act: "pin", target: m.id, author: ADA }));
   assert.deepEqual([refusal.outcome, refusal.code], ["refused", "annotations-unsupported"]);
@@ -68,7 +78,7 @@ test("a service without annotations-v1: annotate and an annotation handler are r
 test("annotate, read and fold: edit and withdraw are the author's, pin anyone's; a malformed request is refused before it is sent", { timeout: 30_000 }, async (t) => {
   const s = await seat(t);
   const app = await s.open({ clientName: "example-app" });
-  if (!app.capabilities.has("annotations-v1")) { t.skip("annotations-v1 is offered once the capability lands in the vocabulary and LOCAL_OFFER"); return; }
+  assert.ok(app.capabilities.has("annotations-v1"), "the seat service offers annotations-v1");
   const dana = { kind: /** @type {const} */ ("human"), name: "Dana", ref: "person.1" };
   const erin = { kind: /** @type {const} */ ("human"), name: "Erin", ref: "person.2" };
   const m = await app.append("house", { text: "a question", author: dana });
@@ -108,7 +118,7 @@ test("annotate, read and fold: edit and withdraw are the author's, pin anyone's;
 test("a subscriber with no annotation handler is carried past annotations; one with a handler gets each once, in order", { timeout: 30_000 }, async (t) => {
   const s = await seat(t);
   const app = await s.open();
-  if (!app.capabilities.has("annotations-v1")) { t.skip("annotations-v1 is offered once the capability lands in the vocabulary and LOCAL_OFFER"); return; }
+  assert.ok(app.capabilities.has("annotations-v1"), "the seat service offers annotations-v1");
   const one = await app.append("house", { text: "one", author: ADA });
   await app.annotate("house", { act: "pin", target: one.id, author: ADA });
   /** @type {string[]} */
@@ -132,7 +142,7 @@ test("a subscriber with no annotation handler is carried past annotations; one w
 test("follow delivers each annotation once across a dark period", { timeout: 30_000 }, async (t) => {
   const s = await seat(t);
   const poster = await s.open();
-  if (!poster.capabilities.has("annotations-v1")) { t.skip("annotations-v1 is offered once the capability lands in the vocabulary and LOCAL_OFFER"); return; }
+  assert.ok(poster.capabilities.has("annotations-v1"), "the seat service offers annotations-v1");
   const app = await s.open();
   /** @type {string[]} */
   const seen = [];

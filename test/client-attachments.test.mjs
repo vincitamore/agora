@@ -8,29 +8,12 @@ import { createHash, randomBytes } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { connect } from "../src/client.mjs";
-import { NativeServiceClient } from "../src/native-service.mjs";
 import { custodyPath } from "../src/native-attachments.mjs";
 import { durableAttachmentId } from "../src/protocol/attachment.mjs";
 import { ADA, ROOM, failure, seat, stub } from "./client-fixtures.mjs";
 
 const digestOf = (/** @type {Uint8Array} */ b) => `sha256:${createHash("sha256").update(b).digest("hex")}`;
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-
-/**
- * The seat service offers `attachments-v1` once the capability joins the vocabulary and the local
- * offer (an integrator's patch beside this unit). Until then the frames are served but not offered,
- * so the client is told the offer here; once the service offers it this adds nothing.
- * @param {import('node:test').TestContext} t
- */
-function offerCustody(t) {
-  const original = NativeServiceClient.connect;
-  NativeServiceClient.connect = async (endpoint) => {
-    const c = await original.call(NativeServiceClient, endpoint);
-    c.capabilities.add("attachments-v1");
-    return c;
-  };
-  t.after(() => { NativeServiceClient.connect = original; });
-}
 
 /** @param {ReadableStream<Uint8Array>} stream */
 async function drain(stream) {
@@ -41,7 +24,6 @@ async function drain(stream) {
 }
 
 test("a 25 MiB image round trip: upload, append, read back, and the bytes verified against the digest", { timeout: 120_000 }, async (t) => {
-  offerCustody(t);
   const s = await seat(t);
   const app = await s.open({ clientName: "example-app" });
   const bytes = Buffer.concat([PNG_SIGNATURE, randomBytes(25 * 1024 * 1024 - PNG_SIGNATURE.length)]);
@@ -54,7 +36,7 @@ test("a 25 MiB image round trip: upload, append, read back, and the bytes verifi
   assert.equal(messages.length, 1);
   assert.equal(messages[0].id, receipt.id);
   const [carried] = /** @type {any[]} */ (messages[0].attachments);
-  for (const key of /** @type {const} */ (["id", "digest", "name", "kind", "size", "mimetype", "width", "height"]))
+  for (const key of /** @type {const} */ (["id", "digest", "lifetime", "name", "kind", "size", "mimetype", "width", "height"]))
     assert.equal(carried[key], a[key], `the message carries the reference's ${key}`);
   assert.equal(carried.path, undefined, "a record never carries a path");
 
@@ -66,7 +48,6 @@ test("a 25 MiB image round trip: upload, append, read back, and the bytes verifi
 });
 
 test("a PDF and a PNG read back with the kind and type custody recorded", { timeout: 30_000 }, async (t) => {
-  offerCustody(t);
   const s = await seat(t);
   const app = await s.open();
   const pdfBytes = Buffer.from("%PDF-1.7\n1 0 obj << /Type /Catalog >> endobj\n%%EOF\n");
@@ -84,7 +65,6 @@ test("a PDF and a PNG read back with the kind and type custody recorded", { time
 });
 
 test("an append naming bytes custody does not hold is refused and nothing is appended", { timeout: 30_000 }, async (t) => {
-  offerCustody(t);
   const s = await seat(t);
   const app = await s.open();
   const absent = Buffer.from("never uploaded");
@@ -101,7 +81,6 @@ test("an append naming bytes custody does not hold is refused and nothing is app
 });
 
 test("bytes altered in custody are never delivered as the attachment", { timeout: 60_000 }, async (t) => {
-  offerCustody(t);
   const s = await seat(t);
   const app = await s.open();
   const room = path.join(s.root, "native", "rooms", ROOM);
@@ -134,8 +113,7 @@ test("a service that offers no custody is sent nothing; one that drops mid-uploa
   assert.deepEqual([r.outcome, r.code], ["refused", "attachments-unsupported"]);
   assert.deepEqual(quiet.frames.filter((f) => String(f.type).startsWith("attachment-")), []);
 
-  offerCustody(t);
-  const dropping = await stub(t, { offer: { advertised: ["threads-v1"], required: [] },
+  const dropping = await stub(t, { offer: { advertised: ["threads-v1", "attachments-v1"], required: [] },
     answer: (f) => (f.type === "attachment-begin" ? { type: "attachment-ready", uploadId: "upload_0000000001", chunkMax: 262144 } : f.type === "attachment-chunk" ? "drop" : undefined) });
   const other = await connect({ state: dropping.root, config: dropping.config });
   t.after(() => other.close());

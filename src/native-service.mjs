@@ -39,7 +39,7 @@ function codedRefusal(code, detail) {
  * older service ignores a field it does not know and would answer the whole room.
  * `client-name-v1` is local-only: a member session cannot declare a client name.
  */
-const LOCAL_OFFER = validateCapabilityOffer({ advertised: ["threads-v1", "client-name-v1"], required: [] });
+const LOCAL_OFFER = validateCapabilityOffer({ advertised: ["threads-v1", "client-name-v1", "attachments-v1", "annotations-v1"], required: [] });
 const MEMBER_OFFER = validateCapabilityOffer({ advertised: ["threads-v1"], required: [] });
 
 const MAX_PENDING_WRITE = 2 * 1024 * 1024;

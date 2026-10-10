@@ -21,11 +21,11 @@ test("read, append and subscribe; a message has the shape read --json prints; an
   const s = await seat(t);
   const app = await s.open();
   assert.deepEqual(app.rooms(), [{ alias: "house", roomId: ROOM, transport: "native" }], "a native row with a malformed id and another transport's row are not served");
-  assert.deepEqual([...app.capabilities].sort(), ["client-name-v1", "threads-v1"]);
+  assert.deepEqual([...app.capabilities].sort(), ["annotations-v1", "attachments-v1", "client-name-v1", "threads-v1"]);
   assert.deepEqual(app.seat, { accountId: ACCOUNT, label: "seat-a" });
 
   const empty = await app.read("house");
-  assert.deepEqual(empty, { messages: [], through: `${EPOCH}:0` });
+  assert.deepEqual(empty, { messages: [], annotations: [], through: `${EPOCH}:0` });
 
   const first = await app.append("house", { text: "hello from the app", author: ADA, trailers: [["to", "Grace/watch"], ["note", " one line "]] });
   assert.match(first.id, /^[a-f0-9]{64}$/);

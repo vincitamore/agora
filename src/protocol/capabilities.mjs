@@ -9,8 +9,11 @@ import { validateAcceptedHostContext, validateNativeAccountRef } from './identit
 
 /** The closed vocabulary this build can negotiate. `threads-v1`: thread-scoped read and subscribe,
  * and an append whose thread root the host verifies. `client-name-v1`: a local connection may
- * declare a client name, which the host stamps as `via` on that connection's messages. */
-export const NATIVE_CAPABILITIES = Object.freeze(/** @type {const} */ (['contracts-v2', 'board-v1', 'threads-v1', 'client-name-v1']));
+ * declare a client name, which the host stamps as `via` on that connection's messages.
+ * `attachments-v1`: a local connection may upload durable attachments into a room's custody, append
+ * a message naming them, and read their bytes back (docs/ATTACHMENTS.md). `annotations-v1`: a read
+ * or subscription may ask for annotation records, and an append may carry one (docs/ANNOTATIONS.md). */
+export const NATIVE_CAPABILITIES = Object.freeze(/** @type {const} */ (['contracts-v2', 'board-v1', 'threads-v1', 'client-name-v1', 'attachments-v1', 'annotations-v1']));
 /** @param {unknown} value */
 function capabilities(value) {
   const result = readArray(value, 'capabilities', PROTOCOL_LIMITS.capabilities, (v) => readEnum(v, 'capabilities', NATIVE_CAPABILITIES));
