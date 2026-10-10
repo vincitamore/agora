@@ -67,8 +67,10 @@ const execFileAsync = promisify(execFile);
  */
 /**
  * `scannedThrough`, on a native thread read, is the room cursor the host's scan accounts for: past
- * the last reply when the records after it are outside the thread.
- * @typedef {{ gap?: ReadGap, scannedThrough?: string }} GapCarrier
+ * the last reply when the records after it are outside the thread. `annotations`, on a native read
+ * that asked for them, is the annotation records in the window (docs/ANNOTATIONS.md), in the shape
+ * `read --json` prints.
+ * @typedef {{ gap?: ReadGap, scannedThrough?: string, annotations?: ReturnType<typeof import('./render.mjs').wireAnnotation>[] }} GapCarrier
  */
 /**
  * What a read returns: the messages, ascending, and on the array itself the gap, when the walk
@@ -77,7 +79,9 @@ const execFileAsync = promisify(execFile);
  * wants); a caller that must not step over a backlog reads `.gap`.
  * @typedef {Message[] & GapCarrier} ReadResult
  */
-/** @typedef {{ thread?: string, since?: string, limit?: number, pages?: number }} ReadOptions */
+/** `annotations` asks a native room whose service offers annotations-v1 for its annotation records
+ * too; every other transport, and a service without the offer, ignores it.
+ * @typedef {{ thread?: string, since?: string, limit?: number, pages?: number, annotations?: boolean }} ReadOptions */
 /**
  * `face` is a native room's post-time face choice: transports named by `--face`, `"none"` for
  * `--no-face`, absent for the room's own policy. Only the native transport reads it. `attachments` are

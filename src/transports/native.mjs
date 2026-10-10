@@ -2,6 +2,7 @@
 import { randomUUID } from "node:crypto";
 import { AgoraError } from "../core.mjs";
 import { nativeMessageId, parseNativeCursor } from "../native-protocol.mjs";
+import { wireAnnotation } from "../render.mjs";
 import { ServiceDarkError, connectSeatService, nativeMessage, readServiceDescriptor, requireThreads, validateNativeRoomId } from "../wake/subscriber.mjs";
 
 /**
@@ -34,11 +35,12 @@ export function fittingReadLimit(error) {
  * A native read result as every transport reports one. For a thread read the host's checkpoint is
  * where its scan ended, which can lie past the last reply; it rides on the array as
  * `scannedThrough` (a room cursor), the way a gap does, so a caller that needs it reads it and every
- * other caller keeps a plain list.
+ * other caller keeps a plain list. A read that asked for annotations carries them the same way.
  * @param {any} result @param {string | undefined} thread
  */
 export function nativeReadResult(result, thread) {
   const messages = /** @type {import('../core.mjs').ReadResult} */ (Array.isArray(result?.messages) ? result.messages.map(nativeMessage) : []);
+  if (Array.isArray(result?.annotations)) messages.annotations = result.annotations.map(wireAnnotation);
   const checkpoint = result?.checkpoint;
   if (thread !== undefined && checkpoint && typeof checkpoint.epoch === "string" && Number.isSafeInteger(checkpoint.sequence))
     messages.scannedThrough = `${checkpoint.epoch}:${checkpoint.sequence}`;
@@ -92,14 +94,17 @@ export function nativeTransport(room, { actor, stateRoot, session, connect }) {
      * A `thread` narrows the read to that thread's root and replies, ascending. With `since`, the
      * limit bounds the records the host scans rather than the messages it returns, and the result
      * carries `scannedThrough`, the room position the scan accounts for, so a caller can go on from
-     * there when the thread was quiet in that stretch.
+     * there when the thread was quiet in that stretch. `annotations` asks for the annotation
+     * records too, only of a service that offers annotations-v1; the host then cuts the page over
+     * messages and annotations together, in log order.
      */
-    async read({ thread, since, limit } = {}) {
+    async read({ thread, since, limit, annotations } = {}) {
       const c = await client();
       if (thread !== undefined) requireThreads(c, "this seat's service");
       let result;
       try {
-        result = await c.request("read", { roomId, ...(thread !== undefined ? { thread } : {}), ...(since ? { since } : {}), ...(limit ? { limit } : {}) });
+        result = await c.request("read", { roomId, ...(thread !== undefined ? { thread } : {}), ...(since ? { since } : {}), ...(limit ? { limit } : {}),
+          ...(annotations === true && c.capabilities.has("annotations-v1") ? { annotations: true } : {}) });
       } catch (e) {
         if (c.socket.destroyed) throw new ServiceDarkError(`seat service went dark during the read: ${e instanceof Error ? e.message : String(e)}`);
         throw e;

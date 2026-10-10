@@ -97,7 +97,12 @@ answered exactly as before.
 
 ## CLI
 
-`read --json` prints an annotation as its own line with `type: "annotation"`. The verbs that append
+`read` on a native room asks for annotations when the service offers annotations-v1 and prints each
+in log order among the messages: under `--json` as its own line, `{ type: "annotation", alias, id,
+cursor, ts, act, target, text?, author, via? }`, and for a person as one line naming who did what to
+which message, with an edit's text indented below it. The host cuts a `--limit` page over messages
+and annotations together. Only `read` asks: `join`, `watch`, `cursor --now` and `carry` read
+messages as before, and a watch is carried past annotation records. The verbs that append
 annotations are `agora edit`, `agora withdraw`, `agora pin` and `agora unpin` (`docs/PURGE.md` lists
 them with the other native record verbs).
 

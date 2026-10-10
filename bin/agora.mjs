@@ -77,7 +77,8 @@ import { FOLLOW_CAP, FOLLOW_IDLE_MINUTES, aliasThreads, dropFollow, followableMe
 import { withThreads } from "../src/threads.mjs";
 import { carryState, carryWindow, foldRoom, renderCarry } from "../src/carry.mjs";
 import { buildRecord, writeRecord as writeExportRecord } from "../src/export-record.mjs";
-import { decorate, human, wireMessage } from "../src/render.mjs";
+import { decorate, human, humanAnnotation, wireMessage } from "../src/render.mjs";
+import { parseNativeCursor } from "../src/native-protocol.mjs";
 import { formatTrailers, matchesAddress, parseTrailers, TRAILER_VALUE_MAX, trailerKeyOk, trailerValueOk, withTrailers } from "../src/trailers.mjs";
 import { SLACK_TEXT_MAX, chunkAtLines, encodeSlackText } from "../src/transports/slack.mjs";
 import { fittingReadLimit } from "../src/transports/native.mjs";
@@ -639,10 +640,23 @@ async function readWithinFrame(transport, options, onShrink) {
  */
 
 function printMessages(msgs, json, alias) {
+  const annotations = /** @type {import('../src/core.mjs').ReadResult} */ (msgs).annotations ?? [];
+  // a native read that asked for annotations: each is printed in log order among the messages, by
+  // the sequence of the room's one cursor
+  const at = (/** @type {string} */ cursor) => parseNativeCursor(cursor).sequence;
+  let next = 0;
+  const printAnnotationsBefore = (/** @type {number} */ sequence) => {
+    for (; next < annotations.length && at(annotations[next].cursor) < sequence; next++) {
+      const a = annotations[next];
+      console.log(json ? JSON.stringify({ type: "annotation", alias, ...a }) : humanAnnotation(a) + "\n");
+    }
+  };
   for (const m of msgs) {
+    if (annotations.length) printAnnotationsBefore(at(m.cursor));
     const rest = wireMessage(m);
     console.log(json ? JSON.stringify({ type: "message", alias, ...rest }) : human(rest) + "\n");
   }
+  printAnnotationsBefore(Infinity);
 }
 
 /** First N characters of a message, whitespace collapsed. Rendering only; never a summary of meaning. */
@@ -2145,7 +2159,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       if (values.threads && thread) throw new AgoraError(`--threads folds the room's live threads into the read; it cannot be combined with --thread`, EXIT.usage);
       const limit = positive(values.limit, "limit");
       const pages = positive(values.pages, "pages");
-      let msgs = await readWithinFrame(transport, { thread, since: values.since, limit, pages }, (shown, asked) =>
+      let msgs = await readWithinFrame(transport, { thread, since: values.since, limit, pages, annotations: true }, (shown, asked) =>
         console.error(`agora: requested ${asked} messages; the host fit and returned ${shown} in one native frame`));
       // a read after a cursor that could not walk back to it returns NOTHING rather than a window
       // from the middle of the backlog, so the empty result must say which of the two it is
