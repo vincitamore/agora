@@ -129,7 +129,7 @@ test("cli: join pages when its own DEFAULT batch is too large, and a smaller bat
       assert.equal(recovered.code, 0, `${label}: emitted recovery page refused: ${recovered.stderr}`);
       const pageRows = typed(recovered.stdout);
       assert.ok(pageRows.length, `${label}: recovery stopped before reaching every omitted row`);
-      if (/requested \d+ messages; the host fit and returned \d+/.test(recovered.stderr)) recoveryShrank = true;
+      if (/requested \d+ entries \(messages and annotations\); the host fit and returned \d+/.test(recovered.stderr)) recoveryShrank = true;
       for (const row of pageRows) recoveredIds.add(row.id);
       since = pageRows.at(-1).cursor;
     }
@@ -156,7 +156,7 @@ test("cli: join pages when its own DEFAULT batch is too large, and a smaller bat
     assert.equal(read.code, 0, `default native read did not use the host-sized retry: ${read.stderr}`);
     const returned = typed(read.stdout);
     assert.ok(returned.length > 0 && returned.length < 20, "default native read did not shrink its oversized page");
-    assert.match(read.stderr, new RegExp(`requested 20 messages; the host fit and returned ${returned.length}`),
+    assert.match(read.stderr, new RegExp(`requested 20 entries \\(messages and annotations\\); the host fit and returned ${returned.length}`),
       "default native read did not report its host-sized retry");
   }
 

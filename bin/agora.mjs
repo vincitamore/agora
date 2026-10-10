@@ -627,7 +627,9 @@ async function readWithinFrame(transport, options, onShrink) {
     // caller REPORTS it, which is why onShrink is a required parameter rather than an option: a call
     // site that cannot say what it dropped has no business shrinking.
     const reportedAsked = asked ?? selected;
-    if (msgs.length < reportedAsked) onShrink(msgs.length, reportedAsked);
+    // the host cuts a page over messages and annotations together, so what it returned is both
+    const returned = msgs.length + (/** @type {any} */ (msgs).annotations?.length ?? 0);
+    if (returned < reportedAsked) onShrink(returned, reportedAsked);
     return msgs;
   }
 }
@@ -2160,7 +2162,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       const limit = positive(values.limit, "limit");
       const pages = positive(values.pages, "pages");
       let msgs = await readWithinFrame(transport, { thread, since: values.since, limit, pages, annotations: true }, (shown, asked) =>
-        console.error(`agora: requested ${asked} messages; the host fit and returned ${shown} in one native frame`));
+        console.error(`agora: requested ${asked} entries (messages and annotations); the host fit and returned ${shown} in one native frame`));
       // a read after a cursor that could not walk back to it returns NOTHING rather than a window
       // from the middle of the backlog, so the empty result must say which of the two it is
       const gap = /** @type {any} */ (msgs).gap;
