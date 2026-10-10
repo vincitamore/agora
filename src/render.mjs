@@ -69,6 +69,31 @@ export function attachmentLines(m) {
     : "";
 }
 
+/**
+ * An annotation (docs/ANNOTATIONS.md): an edit, withdraw, pin or unpin of a message, as `read
+ * --json` prints it (with `type: "annotation"` and `alias` beside it) and as `agora/client`
+ * delivers it. Built field by field, so nothing the record carries beyond the contract leaks out.
+ * @param {any} a
+ * @returns {{ id: string, cursor: string, ts: string, act: 'edit' | 'withdraw' | 'pin' | 'unpin', target: string, text?: string, author: { id: string, name: string, kind: string, ref?: string }, via?: string }}
+ */
+export function wireAnnotation(a) {
+  const author = a?.author ?? {};
+  return {
+    id: String(a.id), cursor: String(a.cursor), ts: String(a.ts), act: a.act, target: String(a.target),
+    ...(typeof a.text === "string" ? { text: a.text } : {}),
+    author: { id: String(author.id), name: String(author.name), kind: String(author.kind),
+      ...(typeof author.ref === "string" ? { ref: author.ref } : {}) },
+    ...(typeof a.via === "string" && a.via ? { via: a.via } : {}),
+  };
+}
+
+/** How the CLI shows an annotation to a person: who did what to which message, and an edit's text. @param {ReturnType<typeof wireAnnotation>} a */
+export function humanAnnotation(a) {
+  const who = a.via ? `${a.author.name} · via ${a.via}` : a.author.name;
+  const head = `[${a.ts}] ${who} (${a.author.kind}) ${a.act} ${a.target}  cursor ${a.cursor}`;
+  return a.text !== undefined ? `${head}\n${indent(a.text)}` : head;
+}
+
 /** @param {ReturnType<typeof decorate>} m */
 export function human(m) {
   return `${headerLine(m)}\n${trailerLine(m)}${indent(m.text)}${attachmentLines(m)}`;

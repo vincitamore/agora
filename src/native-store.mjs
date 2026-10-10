@@ -12,8 +12,18 @@ import { nativeCursor, nativeDigest, nativeMessageId, parseNativeCursor, validat
 import { AUTHOR_REF_PATTERN, CLIENT_NAME_PATTERN, ProtocolValidationError } from "./protocol/common.mjs";
 import { validateBoardPayload } from "./protocol/operation.mjs";
 
+/**
+ * Log version 1 commits to a message's text inside its record digest. Log version 2
+ * (docs/ANNOTATIONS.md) commits to the text by `message.textDigest` and keeps `message.text`
+ * outside the digest, so a later purge can remove the text without breaking the chain; it is also
+ * the only version that carries `annotation` records. A room's version is `room.json`'s
+ * `logVersion` (absent is 1) and every record in its log carries that version.
+ */
 const LOG_VERSION = 1;
+const LOG_VERSION_2 = 2;
 const MANIFEST_VERSION = 1;
+export const ANNOTATION_ACTS = Object.freeze(["edit", "withdraw", "pin", "unpin"]);
+const TEXT_DIGEST_RE = /^sha256:[a-f0-9]{64}$/;
 const LOG_RECORD_MAX = 1024 * 1024;
 const MESSAGE_TEXT_MAX = 256 * 1024;
 const ATTACHMENT_MAX = 32;
@@ -29,6 +39,42 @@ const sha256 = (bytes) => createHash("sha256").update(bytes).digest();
 
 /** @param {string} roomId @param {string} accountId @param {string} operationId */
 const messageId = nativeMessageId;
+
+/** The digest a version 2 record carries for a text: sha256 over its UTF-8 bytes. @param {string} text */
+export const textDigest = (text) => `sha256:${createHash("sha256").update(text, "utf8").digest("hex")}`;
+
+/**
+ * The part of a record its `recordDigest` covers. Version 1: everything but the digest itself.
+ * Version 2: also without `message.text` and `annotation.text`, which their `textDigest` commits to.
+ * @param {any} unsigned the record without `recordDigest`
+ */
+function signedPart(unsigned) {
+  if (unsigned.version !== LOG_VERSION_2) return unsigned;
+  if (unsigned.message && "text" in unsigned.message) {
+    const { text: _text, ...message } = unsigned.message;
+    return { ...unsigned, message };
+  }
+  if (unsigned.annotation && "text" in unsigned.annotation) {
+    const { text: _text, ...annotation } = unsigned.annotation;
+    return { ...unsigned, annotation };
+  }
+  return unsigned;
+}
+
+/** @param {any} unsigned */
+const recordDigestOf = (unsigned) => nativeDigest(signedPart(unsigned));
+
+/** The log file of a generation: 0 is `room.frames`, N is `room.frames.<N>`. @param {number} generation */
+export const generationFile = (generation) => generation === 0 ? "room.frames" : `room.frames.${generation}`;
+
+/**
+ * A stored message or annotation as a reader receives it: without its `textDigest`, which is the
+ * record's own commitment rather than a field of the conversation. @param {any} stored
+ */
+function withoutTextDigest(stored) {
+  const { textDigest: _digest, ...rest } = structuredClone(stored);
+  return rest;
+}
 
 /** A refusal whose name is a property, so the service carries it on the wire as `code` and a caller
  * decides on the name, never on the prose. @param {string} code @param {string} detail */
@@ -253,15 +299,71 @@ function validateAttachment(value) {
   if (typeof a.digest !== "string" || !/^sha256:[a-f0-9]{64}$/.test(a.digest)) throw new AgoraError("native attachment needs a sha256 digest");
   if (!Number.isSafeInteger(a.size) || Number(a.size) < 0) throw new AgoraError("native attachment needs a non-negative byte size");
   if ("path" in a || "url" in a) throw new AgoraError("native room records never store sender-local attachment paths or transport URLs");
+  // a reference's lifetime is part of it: a durable attachment reads back as durable, so a reader
+  // knows the room's custody holds its bytes (docs/ATTACHMENTS.md); metadata-only names none
+  if (a.lifetime !== undefined && a.lifetime !== "offer" && a.lifetime !== "durable")
+    throw new AgoraError("native attachment lifetime must be offer or durable");
   return { id: a.id, name: a.name, kind: a.kind, size: a.size, digest: a.digest,
+    ...(a.lifetime !== undefined ? { lifetime: a.lifetime } : {}),
     ...(typeof a.mimetype === "string" ? { mimetype: a.mimetype.slice(0, 200) } : {}),
     ...(Number.isSafeInteger(a.width) && Number(a.width) > 0 ? { width: a.width } : {}),
     ...(Number.isSafeInteger(a.height) && Number(a.height) > 0 ? { height: a.height } : {}) };
 }
 
-/** @param {any} record @param {any} manifest @param {number} expectedSequence @param {string | null} expectedPreviousDigest */
-function validateRecord(record, manifest, expectedSequence, expectedPreviousDigest) {
-  if (!record || typeof record !== "object" || record.version !== LOG_VERSION || record.roomId !== manifest.roomId || record.epoch !== manifest.epoch)
+/** A manifest's log version: absent is 1 (a room made before the field existed). @param {any} manifest @returns {1 | 2} */
+function manifestLogVersion(manifest) {
+  return manifest?.logVersion === LOG_VERSION_2 ? LOG_VERSION_2 : LOG_VERSION;
+}
+
+/**
+ * An annotation record read back: its identity is its committed position, it names a message the
+ * log already held, and only an edit carries a text, which must hash to its text digest.
+ * @param {any} record @param {any} manifest @param {number} sequence @param {Map<string, any>} messages
+ */
+function validateAnnotationRecord(record, manifest, sequence, messages) {
+  const at = `native room log annotation at sequence ${sequence}`;
+  if (record.message || record.board) throw new AgoraError(`${at} carries a message or a board act; do not advance or truncate it`);
+  const a = record.annotation;
+  if (!a || typeof a !== "object" || Array.isArray(a) || a.id !== messageId(manifest.roomId, record.accountId, record.operationId) ||
+      a.author?.id !== record.accountId || a.cursor !== nativeCursor(manifest.epoch, sequence) || typeof a.ts !== "string")
+    throw new AgoraError(`${at} does not match its committed position; do not advance or truncate it`);
+  if (!ANNOTATION_ACTS.includes(a.act) || typeof a.target !== "string" || !messages.has(a.target))
+    throw new AgoraError(`${at} names no act or no earlier message; do not advance or truncate it`);
+  if (a.via !== undefined && (typeof a.via !== "string" || !CLIENT_NAME_PATTERN.test(a.via)))
+    throw new AgoraError(`${at} carries an invalid via; do not advance or truncate it`);
+  if (a.author.ref !== undefined && (typeof a.author.ref !== "string" || !AUTHOR_REF_PATTERN.test(a.author.ref) || a.via === undefined))
+    throw new AgoraError(`${at} carries an invalid author ref; do not advance or truncate it`);
+  if (a.act === "edit") {
+    if (!TEXT_DIGEST_RE.test(a.textDigest ?? "")) throw new AgoraError(`${at} is an edit without a text digest; do not advance or truncate it`);
+    if (!("text" in a)) throw new AgoraError(`${at} has no text and no purge names it; do not advance or truncate it`);
+    if (typeof a.text !== "string" || textDigest(a.text) !== a.textDigest)
+      throw new AgoraError(`${at} carries a text that does not match its text digest; do not advance or truncate it`);
+  } else if ("text" in a || "textDigest" in a) {
+    throw new AgoraError(`${at} carries a text on a ${a.act}; do not advance or truncate it`);
+  }
+}
+
+/**
+ * The generation the committed boundary names: absent is 0. A purge is the only writer of a
+ * generation above 0, and a version 1 room refuses purge, so a version 1 room is always at 0.
+ * @param {any} boundary @param {any} manifest
+ */
+function boundaryGeneration(boundary, manifest) {
+  const generation = boundary?.generation ?? 0;
+  if (!Number.isSafeInteger(generation) || generation < 0)
+    throw new AgoraError("native room committed boundary names an invalid generation; do not advance or truncate the log");
+  if (generation > 0 && manifestLogVersion(manifest) !== LOG_VERSION_2)
+    throw new AgoraError("native room committed boundary names a generation above 0 in a version 1 room; do not advance or truncate the log");
+  return generation;
+}
+
+/**
+ * @param {any} record @param {any} manifest @param {number} expectedSequence @param {string | null} expectedPreviousDigest
+ * @param {Map<string, any>} [messages] the messages scanned so far, by id: an annotation's target must be one of them
+ */
+function validateRecord(record, manifest, expectedSequence, expectedPreviousDigest, messages = new Map()) {
+  const logVersion = manifestLogVersion(manifest);
+  if (!record || typeof record !== "object" || record.version !== logVersion || record.roomId !== manifest.roomId || record.epoch !== manifest.epoch)
     throw new AgoraError("native room log contains a record for another room or protocol version");
   if (record.sequence !== expectedSequence) throw new AgoraError(`native room log sequence gap: expected ${expectedSequence}, got ${record.sequence}`);
   validateNativeId(record.operationId, "operation id");
@@ -278,7 +380,12 @@ function validateRecord(record, manifest, expectedSequence, expectedPreviousDige
     if (record.boardId !== messageId(manifest.roomId, record.accountId, record.operationId) ||
         record.cursor !== nativeCursor(manifest.epoch, expectedSequence))
       throw new AgoraError("native room board identity does not match its committed position");
+  } else if (logVersion === LOG_VERSION_2 && record.kind === "annotation") {
+    validateAnnotationRecord(record, manifest, expectedSequence, messages);
   } else {
+    // version 1 reads exactly as before; version 2 knows its kinds
+    if (logVersion === LOG_VERSION_2 && record.kind !== undefined)
+      throw new AgoraError(`native room log record at sequence ${expectedSequence} has an unknown kind; do not advance or truncate it`);
     if (!record.message || record.message.id !== messageId(manifest.roomId, record.accountId, record.operationId) ||
         record.message.author?.id !== record.accountId || record.message.room !== manifest.roomId ||
         record.message.cursor !== nativeCursor(manifest.epoch, expectedSequence)) throw new AgoraError("native room log message identity does not match its committed position");
@@ -291,9 +398,19 @@ function validateRecord(record, manifest, expectedSequence, expectedPreviousDige
       throw new AgoraError(`native room log message at sequence ${expectedSequence} carries an invalid author ref; do not advance or truncate it`);
     if (author.ref !== undefined && via === undefined)
       throw new AgoraError(`native room log message at sequence ${expectedSequence} carries an author ref without a via; do not advance or truncate it`);
+    if (logVersion === LOG_VERSION_2) {
+      const m = record.message;
+      if (!TEXT_DIGEST_RE.test(m.textDigest ?? ""))
+        throw new AgoraError(`native room log message at sequence ${expectedSequence} carries no text digest; do not advance or truncate it`);
+      // the text is outside the record digest, so the digest of the text is what holds it
+      if (!("text" in m))
+        throw new AgoraError(`native room log message at sequence ${expectedSequence} has no text and no purge names it; do not advance or truncate it`);
+      if (typeof m.text !== "string" || textDigest(m.text) !== m.textDigest)
+        throw new AgoraError(`native room log message at sequence ${expectedSequence} carries a text that does not match its text digest; do not advance or truncate it`);
+    }
   }
   const { recordDigest, ...unsigned } = record;
-  if (!/^sha256:[a-f0-9]{64}$/.test(recordDigest ?? "") || nativeDigest(unsigned) !== recordDigest)
+  if (!/^sha256:[a-f0-9]{64}$/.test(recordDigest ?? "") || recordDigestOf(unsigned) !== recordDigest)
     throw new AgoraError(`native room log record digest mismatch at sequence ${expectedSequence}; do not advance or truncate it`);
   return record;
 }
@@ -310,6 +427,8 @@ async function scan(handle, manifest, boundary) {
   let position = 0;
   /** @type {any[]} */
   const records = [];
+  /** @type {Map<string, any>} the messages scanned so far, for the annotations that name them */
+  const messages = new Map();
   while (position < boundary.end) {
     const header = Buffer.alloc(4);
     if (boundary.end - position < 4) throw new AgoraError(`native room committed boundary ends inside a header at offset ${position}`);
@@ -326,7 +445,9 @@ async function scan(handle, manifest, boundary) {
     let parsed;
     try { parsed = JSON.parse(UTF8.decode(payload)); }
     catch { throw new AgoraError(`native room log contains invalid UTF-8 or JSON at offset ${position}; do not advance or truncate it`); }
-    records.push(validateRecord(parsed, manifest, records.length + 1, records.at(-1)?.recordDigest ?? null));
+    const record = validateRecord(parsed, manifest, records.length + 1, records.at(-1)?.recordDigest ?? null, messages);
+    records.push(record);
+    if (record.message) messages.set(record.message.id, record.message);
     position += 4 + body.length;
   }
   if (records.length !== boundary.sequence || (records.at(-1)?.recordDigest ?? null) !== boundary.digest)
@@ -341,11 +462,36 @@ async function scan(handle, manifest, boundary) {
   return { records, end: boundary.end, recoveredTailBytes };
 }
 
+/**
+ * The records a native room's log holds (docs/ANNOTATIONS.md, docs/PURGE.md). Every record carries
+ * `{ version, roomId, epoch, sequence, accountId, operationId, payloadDigest, previousDigest,
+ * recordDigest }`; `version` is the room's log version and `recordDigest` chains them.
+ *
+ * - message: `{ message: { id, room, thread?, author: { id, name, kind, ref? }, via?, text, ts,
+ *   cursor, attachments? } }`. Version 2 adds `message.textDigest` (sha256 of the UTF-8 text) inside
+ *   the digested part and keeps `message.text` outside it: `recordDigest` is computed over the record
+ *   with `message.text` removed, and `payloadDigest` names `textDigest` where version 1 names `text`.
+ *   On scan a present text must hash to its `textDigest`.
+ * - board: `{ kind: "board", board, boardId, cursor, expiresAt?, leaseMs?, broken?, actor? }`.
+ * - annotation (version 2 only): `{ kind: "annotation", annotation: { id, act, target,
+ *   author: { id, name, kind, ref? }, via?, textDigest?, text?, ts, cursor } }`; `act` is edit,
+ *   withdraw, pin or unpin, `target` a message the log already holds, and only an edit carries a
+ *   text, held as a message's is (`annotation.text` outside the digest).
+ *
+ * Readers receive messages and annotations without `textDigest`. The committed boundary
+ * (`committed.json`) is `{ version: 1, roomId, epoch, sequence, end, digest, generation? }`; an
+ * absent generation is 0, the file `room.frames`, and generation N is `room.frames.<N>`.
+ */
 export class NativeRoomStore {
   /** @param {string} directory @param {any} manifest @param {any} boundary @param {import('node:fs/promises').FileHandle} handle @param {{server: net.Server, endpoint: {host:string,port:number}, identity:string}} writer @param {any[]} records @param {number} end @param {number} recoveredTailBytes @param {() => Date} now */
   constructor(directory, manifest, boundary, handle, writer, records, end, recoveredTailBytes, now) {
     this.directory = directory;
-    this.logPath = path.join(directory, "room.frames");
+    /** `room.json`'s `logVersion`, absent read as 1. @type {1 | 2} */
+    this.logVersion = manifestLogVersion(manifest);
+    /** The log generation the committed boundary names (absent is 0). Read side only here: a purge
+     * (docs/PURGE.md) is the one writer of a generation above 0. */
+    this.generation = boundaryGeneration(boundary, manifest);
+    this.logPath = path.join(directory, generationFile(this.generation));
     this.boundaryPath = path.join(directory, "committed.json");
     this.manifest = manifest;
     this.boundary = boundary;
@@ -368,11 +514,24 @@ export class NativeRoomStore {
     /** A thread root's id to the indices of the records that reply in it, ascending; rebuilt on open.
      * @type {Map<string, number[]>} */
     this.threadIndex = new Map();
+    /** The messages a withdraw annotation has named: no annotation is admitted on one again.
+     * Derived from the log alone and rebuilt on every open. @type {Set<string>} */
+    this.withdrawn = new Set();
+    /** A message's id to the indices of the annotation records that name it, ascending; rebuilt on open.
+     * @type {Map<string, number[]>} */
+    this.annotationIndex = new Map();
     records.forEach((r, i) => { this.#applyBoard(r); this.#index(r, i); });
   }
 
-  /** @param {{ root: string, roomId?: string, epoch?: string, hostAccountId: string, recordLimit?: number, now?: () => Date }} options */
+  /**
+   * `logVersion` 2 makes a room whose records commit to text by digest and which carries
+   * annotations (docs/ANNOTATIONS.md); the default stays 1, the format every room had before, so a
+   * caller that names nothing writes exactly what it always wrote. The seat service makes version 2.
+   * @param {{ root: string, roomId?: string, epoch?: string, hostAccountId: string, recordLimit?: number, logVersion?: 1 | 2, now?: () => Date }} options
+   */
   static async create(options) {
+    const logVersion = options.logVersion ?? LOG_VERSION;
+    if (logVersion !== LOG_VERSION && logVersion !== LOG_VERSION_2) throw new AgoraError("native room log version must be 1 or 2");
     const roomId = options.roomId ?? randomUUID().replaceAll("-", "");
     const epoch = options.epoch ?? randomUUID().replaceAll("-", "");
     validateNativeEpoch(epoch);
@@ -401,12 +560,15 @@ export class NativeRoomStore {
         throw new AgoraError("native room identity changed while acquiring its writer; refusing without publishing it");
       const manifest = { version: MANIFEST_VERSION, roomId, epoch, hostAccountId: options.hostAccountId, recordLimit,
         claimLeaseMs: DEFAULT_CLAIM_LEASE_MS, claimLeaseCapMs: CLAIM_LEASE_CAP_MS,
-        createdAt: (options.now ?? (() => new Date()))().toISOString() };
+        createdAt: (options.now ?? (() => new Date()))().toISOString(),
+        // a version 1 room's manifest stays the bytes it always was: absent reads as 1
+        ...(logVersion === LOG_VERSION_2 ? { logVersion } : {}) };
       await writeDurableAtomic(path.join(directory, "room.json"), JSON.stringify(manifest, null, 2) + "\n");
       log = await open(path.join(directory, "room.frames"), "wx+", 0o600);
       await log.sync();
       await syncDirectory(directory);
-      const boundary = { version: 1, roomId, epoch, sequence: 0, end: 0, digest: null };
+      const boundary = { version: 1, roomId, epoch, sequence: 0, end: 0, digest: null,
+        ...(logVersion === LOG_VERSION_2 ? { generation: 0 } : {}) };
       boundaryPublicationStarted = true;
       await writeDurableAtomic(path.join(directory, "committed.json"), JSON.stringify(boundary, null, 2) + "\n");
       return new NativeRoomStore(directory, manifest, boundary, log, writer, [], 0, 0,
@@ -446,12 +608,16 @@ export class NativeRoomStore {
       catch { throw new AgoraError(`native room ${options.roomId} has no valid manifest`); }
       if (manifest?.version !== MANIFEST_VERSION || manifest.roomId !== options.roomId || !ROOM_RE.test(manifest.roomId ?? "") ||
           !/^[A-Za-z0-9_-]{16,128}$/.test(manifest.hostAccountId ?? "") || !Number.isSafeInteger(manifest.recordLimit) ||
-          manifest.recordLimit < 1 || manifest.recordLimit > 10_000_000) throw new AgoraError(`native room ${options.roomId} manifest is invalid`);
+          manifest.recordLimit < 1 || manifest.recordLimit > 10_000_000 ||
+          (manifest.logVersion !== undefined && manifest.logVersion !== LOG_VERSION && manifest.logVersion !== LOG_VERSION_2))
+        throw new AgoraError(`native room ${options.roomId} manifest is invalid`);
       validateNativeEpoch(manifest.epoch);
-      handle = await open(path.join(directory, "room.frames"), "r+");
+      // the boundary names the generation, so it is read before the log it points at is opened
       let boundary;
       try { boundary = JSON.parse(await readFile(path.join(directory, "committed.json"), "utf8")); }
       catch { throw new AgoraError(`native room ${options.roomId} has no valid committed boundary`); }
+      const generation = boundaryGeneration(boundary, manifest);
+      handle = await open(path.join(directory, generationFile(generation)), "r+");
       const scanned = await scan(handle, manifest, boundary);
       return new NativeRoomStore(directory, manifest, boundary, handle, writer, scanned.records, scanned.end, scanned.recoveredTailBytes,
         options.now ?? (() => new Date()));
@@ -482,6 +648,8 @@ export class NativeRoomStore {
   async #append(input, authenticated) {
     if (this.closed) throw new AgoraError("native room store is closed");
     if (/** @type {any} */ (input).kind === "board") return this.#appendBoard(/** @type {any} */ (input), authenticated);
+    if (/** @type {any} */ (input).kind === "annotation") return this.#appendAnnotation(/** @type {any} */ (input), authenticated);
+    if (input.kind !== undefined && input.kind !== "message") throw refusal("append-kind-invalid", "an append is a message, a board act or an annotation");
     validateNativeId(input.operationId, "operation id");
     validateNativeId(authenticated.accountId, "account id");
     // `via` is the client name the CONNECTION declared, handed in beside the account by the service;
@@ -502,14 +670,19 @@ export class NativeRoomStore {
     if (input.thread !== undefined) validateNativeId(input.thread, "thread id");
     if (input.attachments && (!Array.isArray(input.attachments) || input.attachments.length > ATTACHMENT_MAX)) throw new AgoraError(`native post carries more than ${ATTACHMENT_MAX} attachments`);
     const attachments = input.attachments?.map(validateAttachment);
-    const payload = { accountId: authenticated.accountId, authorName: input.authorName.trim(), authorKind: input.authorKind ?? "agent", text: input.text,
+    const v2 = this.logVersion === LOG_VERSION_2;
+    // version 2 commits to the text by its digest everywhere a digest covers it, the payload's
+    // included, so removing the text later leaves every digest standing
+    const digestOfText = v2 ? textDigest(input.text) : undefined;
+    const payload = { accountId: authenticated.accountId, authorName: input.authorName.trim(), authorKind: input.authorKind ?? "agent",
+      ...(v2 ? { textDigest: digestOfText } : { text: input.text }),
       ...(input.thread ? { thread: input.thread } : {}), ...(attachments?.length ? { attachments } : {}),
       ...(via !== undefined ? { via } : {}), ...(input.authorRef !== undefined ? { authorRef: input.authorRef } : {}) };
     const payloadDigest = nativeDigest(payload);
     const key = `${authenticated.accountId}\0${input.operationId}`;
     const existing = this.operations.get(key);
     if (existing) {
-      if (existing.payloadDigest !== payloadDigest) throw new AgoraError(`native operation ${input.operationId} was already committed with different bytes`);
+      if (existing.payloadDigest !== payloadDigest || !existing.message) throw new AgoraError(`native operation ${input.operationId} was already committed with different bytes`);
       return { id: existing.message.id, cursor: existing.message.cursor, duplicate: true };
     }
     // a reply names a root the room holds and that is itself top-level: one level, as on Slack
@@ -523,12 +696,13 @@ export class NativeRoomStore {
       author: { id: authenticated.accountId, name: payload.authorName, kind: payload.authorKind,
         ...(input.authorRef !== undefined ? { ref: input.authorRef } : {}) },
       ...(via !== undefined ? { via } : {}),
+      ...(v2 ? { textDigest: digestOfText } : {}),
       text: input.text, ts: this.now().toISOString(), cursor: nativeCursor(this.manifest.epoch, sequence),
       ...(attachments?.length ? { attachments } : {}) };
-    const unsigned = { version: LOG_VERSION, roomId: this.manifest.roomId, epoch: this.manifest.epoch, sequence,
+    const unsigned = { version: this.logVersion, roomId: this.manifest.roomId, epoch: this.manifest.epoch, sequence,
       accountId: authenticated.accountId, operationId: input.operationId,
       payloadDigest, previousDigest: this.records.at(-1)?.recordDigest ?? null, message };
-    const record = { ...unsigned, recordDigest: nativeDigest(unsigned) };
+    const record = { ...unsigned, recordDigest: recordDigestOf(unsigned) };
     await this.#commit(record, key);
     return { id: message.id, cursor: message.cursor, duplicate: false };
   }
@@ -625,14 +799,14 @@ export class NativeRoomStore {
         throw new AgoraError(`native board kernel named a holder the store did not ask for on ${payload.subject}: refusing before commit`);
     }
     const expiresAt = kernelHolder && (payload.action === "claim" || payload.action === "renew") ? kernelHolder.expiresAt : undefined;
-    const unsigned = { version: LOG_VERSION, roomId: this.manifest.roomId, epoch: this.manifest.epoch, sequence,
+    const unsigned = { version: this.logVersion, roomId: this.manifest.roomId, epoch: this.manifest.epoch, sequence,
       accountId: authenticated.accountId, operationId: input.operationId, kind: "board",
       payloadDigest, previousDigest: this.records.at(-1)?.recordDigest ?? null,
       board: payload, boardId, cursor,
       ...(expiresAt ? { expiresAt, leaseMs } : {}),
       ...(payload.action === "break" && stored ? { broken: { accountId: stored.accountId, cursor: stored.cursor, expiresAt: stored.expiresAt },
         actor: { name: input.authorName ?? "", kind: input.authorKind ?? "unknown", session: input.session ?? "default" } } : {}) };
-    const record = { ...unsigned, recordDigest: nativeDigest(unsigned) };
+    const record = { ...unsigned, recordDigest: recordDigestOf(unsigned) };
     await this.#commit(record, key);
     this.#applyBoard(record);
     /** @param {{ accountId: string, cursor: string, expiresAt: string } | undefined} h */
@@ -643,6 +817,95 @@ export class NativeRoomStore {
       ...(payload.action === "contest" ? { held: Boolean(live), holder: holderView(stored) } : {}),
       ...(payload.action === "break" ? { broken: true, holder: holderView(stored),
         actor: { name: input.authorName ?? "", kind: input.authorKind ?? "unknown", session: input.session ?? "default" } } : {}) };
+  }
+
+  /**
+   * An annotation (docs/ANNOTATIONS.md): an edit, withdraw, pin or unpin of a message the room
+   * holds, appended as its own record after it; the message's record never changes. Version 2 rooms
+   * only, so a version 1 log keeps exactly the record kinds an older build reads. An edit's text is
+   * held like a message's: by its digest inside the record digest, the text itself outside it.
+   * Edit and withdraw are the author's own: the target's account must be the append's, and where the
+   * target carries an `author.ref` (an app's id for the person) the append must carry the same ref
+   * from the same client. A target with no ref is answered for by an append with no ref, so a person
+   * an app names never edits a message the seat's own agents posted. Who may pin is the host's call,
+   * made before it appends.
+   * @param {{ kind: 'annotation', operationId: string, annotation: unknown, authorKind?: string, authorName?: string, authorRef?: string, via?: unknown }} input
+   * @param {{ accountId: string, via?: string }} authenticated
+   */
+  async #appendAnnotation(input, authenticated) {
+    if (this.logVersion !== LOG_VERSION_2)
+      throw refusal("annotation-unsupported-log-version", `native room ${this.manifest.roomId} is a version 1 room; annotations need a version 2 room`);
+    validateNativeId(input.operationId, "operation id");
+    validateNativeId(authenticated.accountId, "account id");
+    const via = authenticated.via;
+    if (via !== undefined && (typeof via !== "string" || !CLIENT_NAME_PATTERN.test(via)))
+      throw refusal("client-name-invalid", "a client name is a lowercase letter then 1-39 lowercase letters, digits or hyphens");
+    if (input.via !== undefined)
+      throw refusal("operation-via-refused", "via is stamped from the connection's declared client name, never taken from an operation");
+    if (input.authorRef !== undefined && via === undefined)
+      throw refusal("author-ref-without-client", "an authorRef is an app client's own id for the person, and this connection declared no client name");
+    if (input.authorRef !== undefined && (typeof input.authorRef !== "string" || !AUTHOR_REF_PATTERN.test(input.authorRef)))
+      throw refusal("author-ref-invalid", "an authorRef is 1-64 letters, digits or . _ @ + -");
+    if (typeof input.authorName !== "string" || !input.authorName.trim() || input.authorName.length > 120) throw new AgoraError("native annotation needs a bounded author label");
+    if (input.authorKind && !["human", "agent", "unknown", "system"].includes(input.authorKind)) throw new AgoraError("native annotation author kind is invalid");
+    const raw = input.annotation;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw))
+      throw refusal("annotation-invalid", "an annotation is { act, target, text? }");
+    const a = /** @type {Record<string, unknown>} */ (raw);
+    const unknown = Object.keys(a).filter((k) => !["act", "target", "text"].includes(k));
+    if (unknown.length) throw refusal("annotation-invalid", `an annotation carries only act, target and text, not ${unknown.join(", ")}`);
+    if (typeof a.act !== "string" || !ANNOTATION_ACTS.includes(a.act))
+      throw refusal("annotation-invalid", "an annotation's act is edit, withdraw, pin or unpin");
+    if (typeof a.target !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(a.target))
+      throw refusal("annotation-invalid", "an annotation's target is a message id");
+    if (a.act === "edit") {
+      if (typeof a.text !== "string" || Buffer.byteLength(a.text) > MESSAGE_TEXT_MAX)
+        throw refusal("annotation-invalid", `an edit carries a text of at most ${MESSAGE_TEXT_MAX} bytes`);
+    } else if (a.text !== undefined) {
+      throw refusal("annotation-invalid", `a ${a.act} carries no text`);
+    }
+    const act = /** @type {'edit' | 'withdraw' | 'pin' | 'unpin'} */ (a.act);
+    const target = a.target;
+    const digestOfText = act === "edit" ? textDigest(/** @type {string} */ (a.text)) : undefined;
+    const authorName = input.authorName.trim();
+    const authorKind = input.authorKind ?? "agent";
+    const payload = { accountId: authenticated.accountId, authorName, authorKind, act, target,
+      ...(digestOfText ? { textDigest: digestOfText } : {}),
+      ...(via !== undefined ? { via } : {}), ...(input.authorRef !== undefined ? { authorRef: input.authorRef } : {}) };
+    const payloadDigest = nativeDigest({ annotation: payload });
+    const key = `${authenticated.accountId}\0${input.operationId}`;
+    const existing = this.operations.get(key);
+    if (existing) {
+      if (existing.payloadDigest !== payloadDigest || !existing.annotation)
+        throw new AgoraError(`native operation ${input.operationId} was already committed with different bytes`);
+      return { id: existing.annotation.id, cursor: existing.annotation.cursor, duplicate: true, kind: "annotation" };
+    }
+    const at = this.messageIndex.get(target);
+    if (at === undefined)
+      throw refusal("annotation-target-unknown", `native room ${this.manifest.roomId} holds no message ${target}`);
+    if (this.withdrawn.has(target))
+      throw refusal("annotation-target-withdrawn", `message ${target} is withdrawn; nothing more is annotated on it`);
+    const message = this.records[at].message;
+    if (act === "edit" || act === "withdraw") {
+      const sameRef = message.author.ref === input.authorRef && (message.author.ref === undefined || message.via === via);
+      if (message.author.id !== authenticated.accountId || !sameRef)
+        throw refusal("annotation-not-author", `only the author of message ${target} may ${act} it`);
+    }
+    if (this.records.length >= this.manifest.recordLimit)
+      throw new AgoraError(`native room reached its ${this.manifest.recordLimit}-record resident limit; retain or archive explicitly before accepting more`);
+    const sequence = this.records.length + 1;
+    const annotation = { id: messageId(this.manifest.roomId, authenticated.accountId, input.operationId), act, target,
+      author: { id: authenticated.accountId, name: authorName, kind: authorKind,
+        ...(input.authorRef !== undefined ? { ref: input.authorRef } : {}) },
+      ...(via !== undefined ? { via } : {}),
+      ...(digestOfText ? { textDigest: digestOfText, text: /** @type {string} */ (a.text) } : {}),
+      ts: this.now().toISOString(), cursor: nativeCursor(this.manifest.epoch, sequence) };
+    const unsigned = { version: this.logVersion, roomId: this.manifest.roomId, epoch: this.manifest.epoch, sequence,
+      accountId: authenticated.accountId, operationId: input.operationId, kind: "annotation",
+      payloadDigest, previousDigest: this.records.at(-1)?.recordDigest ?? null, annotation };
+    const record = { ...unsigned, recordDigest: recordDigestOf(unsigned) };
+    await this.#commit(record, key);
+    return { id: annotation.id, cursor: annotation.cursor, duplicate: false, kind: "annotation" };
   }
 
   /** @param {string} subject */
@@ -694,7 +957,9 @@ export class NativeRoomStore {
       throw e;
     }
     const boundary = { version: 1, roomId: this.manifest.roomId, epoch: this.manifest.epoch, sequence: record.sequence,
-      end: start + frame.length, digest: record.recordDigest };
+      end: start + frame.length, digest: record.recordDigest,
+      // the generation is kept as the boundary carried it; a version 1 boundary never names one
+      ...(this.boundary.generation !== undefined ? { generation: this.generation } : {}) };
     try {
       await writeDurableAtomic(this.boundaryPath, JSON.stringify(boundary, null, 2) + "\n");
     } catch (error) {
@@ -744,12 +1009,23 @@ export class NativeRoomStore {
     /** @param {any} m */
     const inView = (m) => thread === undefined || m.id === thread || m.thread === thread;
     /** @param {any[]} records */
-    const messages = (records) => records.filter((r) => r.message && inView(r.message)).map((r) => structuredClone(r.message));
+    const messages = (records) => records.filter((r) => r.message && inView(r.message)).map((r) => withoutTextDigest(r.message));
+    /** An annotation is in a thread view when the message it names is. @param {any} a */
+    const annotationInView = (a) => thread === undefined || inView(this.records[/** @type {number} */ (this.messageIndex.get(a.target))].message);
+    /** @param {any[]} records */
+    const annotations = (records) => records.filter((r) => r.kind === "annotation" && annotationInView(r.annotation)).map((r) => withoutTextDigest(r.annotation));
     if (!options.since) {
-      if (thread === undefined) return { messages: messages(this.records.slice(-limit)), through: this.records.length };
+      if (thread === undefined) {
+        const window = this.records.slice(-limit);
+        return { messages: messages(window), annotations: annotations(window), through: this.records.length };
+      }
       const at = /** @type {number} */ (this.messageIndex.get(thread));
       const indices = [at, ...(this.threadIndex.get(thread) ?? [])].sort((a, b) => a - b).slice(-limit);
-      return { messages: indices.map((i) => structuredClone(this.records[i].message)), through: this.records.length };
+      // the annotations on the window's messages, from the oldest message in it on
+      const from = indices[0] ?? 0;
+      const named = indices.flatMap((i) => this.annotationIndex.get(this.records[i].message.id) ?? []).filter((i) => i >= from).sort((a, b) => a - b);
+      return { messages: indices.map((i) => withoutTextDigest(this.records[i].message)),
+        annotations: named.map((i) => withoutTextDigest(this.records[i].annotation)), through: this.records.length };
     }
     const cursor = parseNativeCursor(options.since);
     // The plan (which sequences a read delivers, or a refusal that advances nothing) is decided by
@@ -759,7 +1035,8 @@ export class NativeRoomStore {
     const plan = Kernel.plan(cursor.epoch === this.manifest.epoch, kernelNat(this.records.length, "the committed sequence"), kernelNat(cursor.sequence, "the cursor sequence"), kernelNat(limit, "the read limit"));
     if (plan.$ === "RefusedEpoch") throw new AgoraError(`native room cursor belongs to epoch ${cursor.epoch}, not live epoch ${this.manifest.epoch}; recover explicitly without advancing`);
     if (plan.$ === "RefusedFuture") throw new AgoraError(`native room cursor ${cursor.sequence} exceeds committed sequence ${this.records.length}; recover explicitly without advancing`);
-    return { messages: messages(this.records.slice(Number(plan.from) - 1, Number(plan.to))), through: Number(plan.to) };
+    const selected = this.records.slice(Number(plan.from) - 1, Number(plan.to));
+    return { messages: messages(selected), annotations: annotations(selected), through: Number(plan.to) };
   }
 
   /**
@@ -780,6 +1057,14 @@ export class NativeRoomStore {
 
   /** @param {any} record @param {number} index */
   #index(record, index) {
+    if (record.kind === "annotation") {
+      const { act, target } = record.annotation;
+      if (act === "withdraw") this.withdrawn.add(target);
+      const named = this.annotationIndex.get(target);
+      if (named) named.push(index);
+      else this.annotationIndex.set(target, [index]);
+      return;
+    }
     if (!record.message) return;
     this.messageIndex.set(record.message.id, index);
     const thread = record.message.thread;
@@ -831,7 +1116,7 @@ export class NativeRoomStore {
   status() {
     return { roomId: this.manifest.roomId, epoch: this.manifest.epoch, hostAccountId: this.manifest.hostAccountId,
       committed: this.records.length, latestCursor: nativeCursor(this.manifest.epoch, this.records.length), latestDigest: this.records.at(-1)?.recordDigest ?? null,
-      recordLimit: this.manifest.recordLimit, recoveredTailBytes: this.recoveredTailBytes };
+      recordLimit: this.manifest.recordLimit, recoveredTailBytes: this.recoveredTailBytes, logVersion: this.logVersion };
   }
 
   async close() {
