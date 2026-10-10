@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en" data-theme="dim">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Chat kit on a real room</title>
+<link rel="stylesheet" href="../client/chat.css">
+<link rel="stylesheet" href="./theme.css">
+</head>
+<body>
+<!-- The kit's client half on the real routes real-host.mjs serves (no fixtures). Query: theme=dim|light. -->
+<div id="chat"></div>
+<script type="module">
+  const params = new URLSearchParams(location.search);
+  document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dim");
+  const { mountChat } = await import("../client/index.js");
+  const { configureComposer } = await import("../client/composer.js");
+  const PEOPLE = [{ id: "p-mei", name: "mei" }, { id: "p-ravi", name: "ravi" }, { id: "p-dana", name: "dana" }];
+  configureComposer({ base: "/chat", people: async () => PEOPLE, context: () => [["context", "zone=north"]] });
+  window.chat = mountChat(document.getElementById("chat"), { base: "/chat", people: async () => PEOPLE, context: () => [["context", "zone=north"]] });
+</script>
+</body>
+</html>
