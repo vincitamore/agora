@@ -1,0 +1,34 @@
+/*
+ * The dev page's host tokens: two theme sets (dim and light) from one list of names, mapped onto
+ * the kit's --chat-* variables exactly as a host maps its own. The kit reads only the variables.
+ */
+
+[data-theme="dim"] {
+  --t-bg: #1e232b; --t-panel: #232932; --t-raised: #2a313b; --t-rule: #353d48; --t-rule2: #2d343e;
+  --t-card-rule: #3d4653; --t-btn-rule: #4c5664; --t-ink: #dfe3e8; --t-ink2: #b0b8c2; --t-ink3: #97a1ae;
+  --t-evbg: #191d24; --t-ev: #c0c8d1; --t-you: #6cc4e3; --t-warn: #e3ad4a; --t-add: #8dd6a8;
+  --t-go-bg: #6cc4e3; --t-go-ink: #0f1a20;
+  color-scheme: dark;
+}
+
+[data-theme="light"] {
+  --t-bg: #f6f4ee; --t-panel: #efebe2; --t-raised: #fffdf8; --t-rule: #d9d3c5; --t-rule2: #e4dfd2;
+  --t-card-rule: #cfc8b8; --t-btn-rule: #a9a291; --t-ink: #1d1c19; --t-ink2: #3d3a33; --t-ink3: #6f6a5f;
+  --t-evbg: #ebe7dc; --t-ev: #2e2c27; --t-you: #0b5cad; --t-warn: #9a5f00; --t-add: #1d7a45;
+  --t-go-bg: #1d1c19; --t-go-ink: #fffdf8;
+  color-scheme: light;
+}
+
+[data-theme] {
+  --chat-bg: var(--t-bg); --chat-panel: var(--t-panel); --chat-raised: var(--t-raised);
+  --chat-rule: var(--t-rule); --chat-rule2: var(--t-rule2); --chat-card-rule: var(--t-card-rule);
+  --chat-btn-rule: var(--t-btn-rule); --chat-ink: var(--t-ink); --chat-ink2: var(--t-ink2);
+  --chat-ink3: var(--t-ink3); --chat-evbg: var(--t-evbg); --chat-ev: var(--t-ev); --chat-you: var(--t-you);
+  --chat-warn: var(--t-warn); --chat-add: var(--t-add); --chat-go-bg: var(--t-go-bg); --chat-go-ink: var(--t-go-ink);
+  --chat-font-prose: "Source Serif 4", Georgia, serif;
+  --chat-font-mono: "IBM Plex Mono", ui-monospace, monospace;
+  --chat-font-ui: "IBM Plex Sans", system-ui, sans-serif;
+}
+
+html, body { margin: 0; height: 100%; background: var(--t-bg); }
+#chat { height: 100vh; height: 100dvh; }

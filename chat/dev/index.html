@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en" data-theme="dim">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Chat kit dev page</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&amp;display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../client/chat.css">
+<link rel="stylesheet" href="./theme.css">
+</head>
+<body>
+<!--
+  The kit's client half with no server: fixtures.js answers the routes and plays the stream.
+  Query: theme=dim|light, thread=plan|ledger|labels|pump (opened at mount), state=live|dark.
+  Serve chat/ statically (bun chat/dev/serve.mjs) and open /dev/index.html: modules do not load
+  from file://.
+-->
+<div id="chat"></div>
+<script type="module">
+  import { installFixtures, PEOPLE, NOW, ROOTS } from "./fixtures.js";
+  const params = new URLSearchParams(location.search);
+  document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dim");
+  installFixtures("/chat");
+  await import("./host.js");
+  const { mountChat } = await import("../client/index.js");
+  const thread = ROOTS[params.get("thread") ?? ""];
+  window.chat = mountChat(document.getElementById("chat"), {
+    base: "/chat",
+    context: () => [["context", "screen=dev"]],
+    people: async () => PEOPLE,
+    now: () => new Date(NOW),
+    ...(thread ? { thread } : {}),
+  });
+</script>
+</body>
+</html>
