@@ -11,7 +11,8 @@
  * 720 px only one pane shows at a time (the layout is a container query, so it follows the element
  * the host mounts into, not the window). It reads `GET <base>/state`, `GET <base>/threads` and
  * `GET <base>/thread/:root`, keeps two server-sent event streams (`thread=main` for the list,
- * `thread=<root>` for the open thread), reconnects either with backoff when it closes, and says on
+ * `thread=<root>` for the open thread, whose `reaction` and `purge` events it hands to the
+ * composer), mounts the composer with the host's `base`, `people` and `context`, reconnects either with backoff when it closes, and says on
  * the state line whether the room is live, reconnecting, dark or refused.
  */
 
@@ -332,7 +333,14 @@ export function mountChat(el, options) {
     } catch (e) {
       ledger.appendChild(h("p", { class: "chat-empty", role: "alert" }, [`this thread could not be read: ${e instanceof Error ? e.message : String(e)}`]));
     }
-    try { mountComposer(composer, ctxFor(root)); } catch { /* the composer is mounted where it is built */ }
+    // the composer takes the host's options from mountChat, so a host calls nothing else to post
+    try {
+      mountComposer(composer, ctxFor(root), {
+        base,
+        ...(options.people ? { people: options.people } : {}),
+        ...(options.context ? { context: options.context } : {}),
+      });
+    } catch { /* the composer is mounted where it is built */ }
     threadStream = openStream(`${base}/stream?thread=${encodeURIComponent(root)}`, {
       message: (m) => {
         if (active !== root || !view || !m || typeof m !== "object") return;
@@ -345,6 +353,8 @@ export function mountChat(el, options) {
       annotation: (a) => { if (active === root && view && a && typeof a === "object") view.annotate(a); },
       // someone reacted: the composer draws the reactions line under each row
       reaction: (r) => { if (active === root && r && typeof r === "object") composerIn(composer)?.reaction(r); },
+      // a purge, whoever made it: the composer strikes the rows it took, which it draws on
+      purge: (p) => { if (active === root && p && typeof p === "object") composerIn(composer)?.purge(p); },
       state: onState,
       presence: (p) => { presence = p; drawPresence(); },
     }, (s) => { if (s === "reconnecting") { roomState = "reconnecting"; drawState(); } });
@@ -358,6 +368,7 @@ export function mountChat(el, options) {
   const mainStream = openStream(`${base}/stream?thread=main`, {
     message: () => queueList(),
     annotation: () => queueList(),
+    purge: () => queueList(),
     state: onState,
     presence: (p) => { presence = p; drawPresence(); },
   }, (s) => {

@@ -13,7 +13,6 @@
 
 import { h } from "./markdown.js";
 import { bodyOf, clock, shortWhen } from "./thread.js";
-import { adoptStyles } from "./composer.js";
 
 /**
  * @typedef {{
@@ -73,7 +72,6 @@ export function rootOf(m) {
  * @returns {{ unmount(): void, focus(): void, search(q: string, scope?: "messages" | "files"): Promise<void> }}
  */
 export function mountSearch(el, options = {}) {
-  adoptStyles();
   const base = String(options.base ?? "/chat").replace(/\/+$/, "");
   const doFetch = options.fetch ?? fetch;
   const now = options.now ?? (() => new Date());

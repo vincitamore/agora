@@ -203,7 +203,7 @@ The thread pane carries a `.chat-composer` slot the composer mounts into.
 import { configureComposer, registerAttachAction, composerIn } from "/chat/client/composer.js";
 import { mountSearch } from "/chat/client/search.js";
 
-configureComposer({ base: "/chat", people, context, reactions? });   // options every composer mounted later uses
+configureComposer({ reactions?, storage?, onPosted? });   // optional: options every composer mounted later uses
 registerAttachAction("handover", { label: "hand over a password", note: "never posted", run: (ctx) => {} });
 composerIn(el.querySelector(".chat-composer"))                  // the mounted composer's handle, or undefined
 // handle = { unmount(), focus(), setText(text), sheet("attach" | null), addFiles(files), edit(id), actions(id), reaction(event) }
@@ -211,6 +211,11 @@ composerIn(el.querySelector(".chat-composer"))                  // the mounted c
 const search = mountSearch(el, { base: "/chat", onOpen: (root, messageId) => view.open(root), onClose, context?, now? });
 // search = { unmount(), focus(), search(q) }
 ```
+
+`mountChat` mounts the composer in each thread it opens with its own `base`, `people` and
+`context`, and hands the open thread's `reaction` and `purge` events to it, so a host that calls
+`mountChat` calls nothing else to post, react or see a purge struck; `configureComposer` is only for
+what `mountChat` does not carry. The composer's and the search sheet's styles are in `chat.css`.
 
 The composer posts through an outbox kept in `localStorage` per base: a 200 removes a post, a 202,
 an offline send, a 503 or a 5xx keeps it and resends under the same `operationId`, any other answer

@@ -45,10 +45,9 @@
   installComposeFixtures("/chat");
   await import("./host.js");
   const { mountChat } = await import("../client/index.js");
-  const { configureComposer, registerAttachAction, composerIn } = await import("../client/composer.js");
+  const { registerAttachAction, composerIn } = await import("../client/composer.js");
   const { mountSearch } = await import("../client/search.js");
 
-  configureComposer({ base: "/chat", people: async () => PEOPLE, context: () => [["context", "zone=north; screen=dev"]] });
   registerAttachAction("handover", {
     label: "hand over a password",
     note: "never posted",

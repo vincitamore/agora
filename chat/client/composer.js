@@ -51,7 +51,7 @@ const OUTBOX_RETRY_MS = [2000, 5000, 10000, 30000, 60000];
 const TEXT_LINES_MAX = 8;
 
 /**
- * @typedef {{ unmount(): void, focus(): void, setText(text: string): void, sheet(mode: "attach" | null): void, addFiles(files: File[]): void, edit(messageId: string): Promise<void>, actions(messageId: string): Promise<void>, reaction(event: { target: string, reactions: unknown }): void }} ComposerHandle
+ * @typedef {{ unmount(): void, focus(): void, setText(text: string): void, sheet(mode: "attach" | null): void, addFiles(files: File[]): void, edit(messageId: string): Promise<void>, actions(messageId: string): Promise<void>, reaction(event: { target: string, reactions: unknown }): void, purge(event: { id?: string, ts?: string, purged?: unknown, reason?: string }): void }} ComposerHandle
  */
 
 /** @type {ComposerOptions} */
@@ -458,7 +458,6 @@ export function mountComposer(el, ctx, options = {}) {
   const o = { ...defaults, ...options };
   const base = String(o.base ?? "/chat").replace(/\/+$/, "");
   o.base = base;
-  adoptStyles();
   const thread = ctx.thread ?? null;
   const storage = storageOf(o);
   const box = outboxFor(o);
@@ -825,12 +824,9 @@ export function mountComposer(el, ctx, options = {}) {
   undo.push(box.subscribe(drawOutbox));
 
   // ---- edit, withdraw, reactions ----
-  /** @type {string | null} */
-  let through = null;
   const loadThread = async () => {
     if (!thread) return;
     const r = await call(o, `/thread/${encodeURIComponent(thread)}`);
-    if (typeof r?.body?.data?.through === "string") through = r.body.data.through;
     for (const m of r?.body?.data?.messages ?? []) {
       if (!m || typeof m.id !== "string") continue;
       known.set(m.id, m);
@@ -1034,31 +1030,20 @@ export function mountComposer(el, ctx, options = {}) {
     undo.push(() => ro.disconnect());
   }
 
-  // ---- purges: the reading half's streams do not listen for them, so the composer does ----
-  /** @type {EventSource | null} */
-  let purgeStream = null;
-  const listenForPurges = () => {
-    if (!thread || typeof EventSource !== "function") return;
-    const q = new URLSearchParams({ thread });
-    if (through) q.set("since", through);
-    purgeStream = new EventSource(`${base}/stream?${q}`, { withCredentials: true });
-    purgeStream.addEventListener("purge", (ev) => {
-      /** @type {any} */
-      let p = null;
-      try { p = JSON.parse(/** @type {MessageEvent} */ (ev).data); } catch { return; }
-      if (!p || !Array.isArray(p.purged)) return;
-      for (const id of p.purged) {
-        if (typeof id !== "string") continue;
-        purged.set(id, { at: typeof p.ts === "string" ? p.ts : undefined, reason: typeof p.reason === "string" ? p.reason : undefined });
-        const m = known.get(id);
-        if (m) known.set(id, { ...m, text: "", purged: { at: p.ts, purge: p.id } });
-        if (editingMsg && editingMsg.id === id) stopEdit();
-      }
-      if (!actionsEl.hidden && p.purged.includes(actionsEl.getAttribute("data-id"))) closeActions();
-      if (ledger) decorate(ledger);
-    });
+  // ---- purges: the thread's stream (index.js) hands each one over through the handle ----
+  /** @param {{ id?: string, ts?: string, purged?: unknown, reason?: string }} p */
+  const applyPurge = (p) => {
+    if (gone || !p || !Array.isArray(p.purged)) return;
+    for (const id of p.purged) {
+      if (typeof id !== "string") continue;
+      purged.set(id, { at: typeof p.ts === "string" ? p.ts : undefined, reason: typeof p.reason === "string" ? p.reason : undefined });
+      const m = known.get(id);
+      if (m) known.set(id, { ...m, text: "", purged: { at: p.ts, purge: p.id } });
+      if (editingMsg && editingMsg.id === id) stopEdit();
+    }
+    if (!actionsEl.hidden && p.purged.includes(actionsEl.getAttribute("data-id"))) closeActions();
+    if (ledger) decorate(ledger);
   };
-  undo.push(() => { if (purgeStream) purgeStream.close(); });
 
   // ---- start ----
   drawActions();
@@ -1076,7 +1061,6 @@ export function mountComposer(el, ctx, options = {}) {
     await loadThread();
     if (gone) return;
     if (ledger) decorate(ledger);
-    listenForPurges();
   })();
 
   const handle = {
@@ -1107,208 +1091,9 @@ export function mountComposer(el, ctx, options = {}) {
       reacted.set(event.target, reactionsOf({ reactions: event.reactions }) ?? new Map());
       if (ledger) decorate(ledger);
     },
+    /** A stream's `purge` event: the rows it took lose their words and keep their place. */
+    purge: applyPurge,
   };
   mounted.set(el, handle);
   return handle;
-}
-
-// ---------------------------------------------------------------------------------------------
-// the composer's and the search sheet's styles
-
-/**
- * The styles of the composer, the attach and message sheets, and the search sheet. They are
- * adopted as a constructed stylesheet (a host's style-src policy does not apply to one), or a
- * `<style>` where the browser has none; like `chat.css` they read only the `--chat-*` variables,
- * at the specificity of one class, so a host's own rules win.
- */
-export const COMPOSER_CSS = `
-.chat-cmp { border-top: 1px solid var(--chat-rule); background: var(--chat-bg); }
-.chat-cmp [hidden] { display: none !important; }
-.chat-cmp-wrap { display: flex; flex-direction: column; gap: 6px; padding: 12px 32px 16px; }
-.chat-cmp-row { display: flex; gap: 8px; align-items: stretch; }
-.chat-cmp-field { position: relative; flex: 1; min-width: 0; display: flex; }
-.chat-cmp-input {
-  flex: 1; min-width: 0; min-height: 44px; resize: none; margin: 0;
-  padding: 11px 14px; border: 1px solid var(--chat-rule); border-radius: 0; background: var(--chat-evbg);
-  color: var(--chat-ink); font-family: var(--chat-font-mono); font-size: 13px; line-height: 1.55;
-}
-.chat-cmp-input::placeholder { color: var(--chat-ink3); opacity: 1; }
-.chat-cmp-input:focus { outline: none; border-color: var(--chat-ink3); }
-.chat-cmp-input:focus-visible { outline: 1px solid var(--chat-ink3); outline-offset: 0; }
-.chat-cmp-attach, .chat-cmp-send, .chat-cmp-host, .chat-cmp-plus, .chat-cmp-option, .chat-cmp-react, .chat-cmp-close, .chat-cmp-link, .chat-msg-more, .chat-search-go, .chat-search-scope, .chat-search-close {
-  font-family: var(--chat-font-mono); color: var(--chat-ink); cursor: pointer; border-radius: 0;
-}
-.chat-cmp-attach { min-height: 44px; padding: 6px 14px; border: 1px solid var(--chat-btn-rule); background: transparent; font-size: 12.5px; }
-.chat-cmp-row-actions { display: flex; gap: 8px; }
-.chat-cmp-host {
-  min-height: 44px; padding: 6px 14px; border: 1px dashed var(--chat-btn-rule); background: transparent; font-size: 12.5px;
-  display: flex; justify-content: space-between; align-items: center; gap: 12px; text-align: left;
-}
-.chat-cmp-row .chat-cmp-host-note { display: none; }
-.chat-cmp-host-note { font-size: 11.5px; color: var(--chat-ink3); }
-.chat-cmp-send { min-height: 44px; padding: 6px 18px; border: 1px solid var(--chat-ink3); background: var(--chat-raised); font-size: 12.5px; font-weight: 600; }
-.chat-cmp-send[disabled] { cursor: default; color: var(--chat-ink3); border-color: var(--chat-rule); background: transparent; }
-.chat-cmp-send[data-warned="true"] { border-color: var(--chat-warn); color: var(--chat-warn); background: transparent; }
-.chat-cmp-plus { display: none; }
-.chat-cmp-foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 16px; font-family: var(--chat-font-mono); font-size: 11.5px; color: var(--chat-ink3); }
-.chat-cmp-also { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; color: var(--chat-ink2); }
-.chat-cmp-also-box { margin: 0; accent-color: var(--chat-ink); }
-.chat-cmp-sheet-head, .chat-cmp-options { display: none; }
-.chat-cmp .chat-cap, .chat-search .chat-cap { font-family: var(--chat-font-mono); font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--chat-ink3); }
-
-.chat-cmp-mentions {
-  position: absolute; left: 0; bottom: calc(100% + 4px); z-index: 3; min-width: 220px; max-width: 100%;
-  margin: 0; padding: 4px 0; list-style: none; background: var(--chat-raised); border: 1px solid var(--chat-card-rule);
-  font-family: var(--chat-font-mono); font-size: 13px;
-}
-.chat-cmp-mention { display: flex; justify-content: space-between; gap: 16px; padding: 8px 12px; min-height: 40px; align-items: center; cursor: pointer; }
-.chat-cmp-mention[aria-selected="true"] { background: var(--chat-panel); box-shadow: inset 3px 0 0 var(--chat-ink); }
-.chat-cmp-mention-id { color: var(--chat-ink3); font-size: 11.5px; }
-
-.chat-cmp-notice { padding: 8px 12px; border: 1px solid var(--chat-rule); border-left-width: 3px; font-size: 13.5px; line-height: 1.5; color: var(--chat-ink); }
-.chat-cmp-notice[data-kind="warn"] { border-color: var(--chat-warn); border-left-width: 3px; }
-.chat-cmp-notice[data-kind="refuse"] { border: 2px solid var(--chat-warn); border-left-width: 3px; }
-.chat-cmp-notice[data-kind="warn"] strong, .chat-cmp-notice[data-kind="refuse"] strong, .chat-cmp-notice[data-kind="error"] { color: var(--chat-warn); }
-.chat-cmp-notice strong { font-family: var(--chat-font-mono); font-size: 12.5px; font-weight: 600; }
-.chat-cmp-notice-acts { margin-left: 10px; }
-.chat-cmp-link { min-height: 32px; padding: 0 4px; border: 0; background: transparent; color: var(--chat-ink2); font-size: 12px; text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--chat-ink3); }
-.chat-cmp-editing { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-family: var(--chat-font-mono); font-size: 12px; color: var(--chat-ink2); border-left: 3px solid var(--chat-ink3); padding-left: 10px; }
-
-.chat-cmp-outbox { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
-.chat-cmp-ob {
-  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0 12px; align-items: center;
-  padding: 6px 10px; border: 1px dashed var(--chat-btn-rule); font-family: var(--chat-font-mono); font-size: 12px;
-}
-.chat-cmp-ob-text { color: var(--chat-ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.chat-cmp-ob-state { grid-column: 1; color: var(--chat-ink3); }
-.chat-cmp-ob[data-state="refused"] { border-style: solid; border-color: var(--chat-warn); }
-.chat-cmp-ob[data-state="refused"] .chat-cmp-ob-state { color: var(--chat-warn); }
-.chat-cmp-ob-acts { grid-column: 2; grid-row: 1 / span 2; display: flex; gap: 4px; }
-
-.chat-cmp-files { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-.chat-cmp-file {
-  display: grid; grid-template-columns: 64px minmax(0, 1fr) 44px; gap: 10px; align-items: center;
-  padding: 8px 10px; border: 1px solid var(--chat-rule); background: var(--chat-bg);
-}
-.chat-cmp-file-thumb { display: block; width: 64px; height: 48px; background: var(--chat-evbg); border: 1px solid var(--chat-rule); overflow: hidden; }
-.chat-cmp-file-thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
-.chat-cmp-file-words { display: flex; flex-direction: column; min-width: 0; font-family: var(--chat-font-mono); font-size: 12px; }
-.chat-cmp-file-name { color: var(--chat-ink); overflow-wrap: anywhere; }
-.chat-cmp-file-state { color: var(--chat-ink3); }
-.chat-cmp-file[data-state="refused"] { border-color: var(--chat-warn); }
-.chat-cmp-file[data-state="refused"] .chat-cmp-file-state { color: var(--chat-warn); }
-.chat-cmp-file-x { min-height: 44px; border: 0; background: transparent; color: var(--chat-ink3); font-family: var(--chat-font-mono); font-size: 16px; cursor: pointer; }
-
-/* message actions: the "more" control on each ledger row, and the sheet it opens */
-.chat-msg { position: relative; }
-.chat-msg-more {
-  position: absolute; top: 8px; right: 0; min-width: 36px; min-height: 28px; padding: 0 6px;
-  border: 1px solid transparent; background: var(--chat-bg); color: var(--chat-ink3); font-size: 12px; letter-spacing: .1em;
-  opacity: 0;
-}
-.chat-msg:hover .chat-msg-more, .chat-msg:focus-within .chat-msg-more, .chat-msg-more:focus-visible { opacity: 1; border-color: var(--chat-rule); }
-@media (hover: none) { .chat-msg-more { opacity: .75; } }
-.chat-msg-purged { margin: 0; font-family: var(--chat-font-mono); font-size: 12.5px; color: var(--chat-ink3); font-style: italic; }
-.chat-msg.is-purged .chat-msg-who, .chat-msg.is-purged .chat-msg-time { color: var(--chat-ink3); }
-.chat-reacts { font-family: var(--chat-font-mono); font-size: 11.5px; color: var(--chat-ink2); white-space: pre-wrap; }
-.chat-cmp-actions { display: flex; flex-direction: column; gap: 8px; }
-.chat-cmp-actions .chat-cmp-sheet-head, .chat-cmp-actions .chat-cmp-options { display: flex; }
-.chat-cmp-reacts { display: flex; flex-wrap: wrap; gap: 6px; }
-.chat-cmp-react { min-height: 44px; padding: 0 14px; border: 1px solid var(--chat-btn-rule); background: transparent; font-size: 13px; }
-.chat-cmp-react[aria-pressed="true"] { border-color: var(--chat-ink); background: var(--chat-bg); font-weight: 600; }
-.chat-cmp-react[data-failed="true"] { border-color: var(--chat-warn); }
-.chat-cmp-actions-err { margin: 0; font-family: var(--chat-font-mono); font-size: 12px; color: var(--chat-warn); }
-.chat-cmp-wrap[data-sheet="actions"] { border-top: 2px solid var(--chat-ink); background: var(--chat-raised); padding: 14px 32px 16px; }
-.chat-cmp-wrap[data-sheet="actions"] > :not(.chat-cmp-actions) { display: none; }
-.chat-cmp-wrap[data-editing] .chat-cmp-attach, .chat-cmp-wrap[data-editing] .chat-cmp-row-actions, .chat-cmp-wrap[data-editing] .chat-cmp-also, .chat-cmp-wrap[data-editing] .chat-cmp-plus, .chat-cmp-wrap[data-editing] .chat-cmp-files { display: none; }
-.chat-cmp-option[data-confirm="true"] { border-color: var(--chat-warn); color: var(--chat-warn); }
-
-.chat-thread-pane[data-chat-drop="true"] .chat-cmp { box-shadow: inset 0 2px 0 var(--chat-ink); }
-.chat-thread-pane[data-chat-drop="true"] .chat-cmp-hint-words { color: var(--chat-ink); }
-
-/* the sheets, on a phone and wherever "+" opened one */
-.chat-cmp-sheet-head { justify-content: space-between; align-items: baseline; }
-.chat-cmp-close { min-height: 44px; padding: 0; border: 0; background: transparent; font-size: 13px; color: var(--chat-ink2); }
-.chat-cmp-options { flex-direction: column; gap: 8px; }
-.chat-cmp-option { min-height: 52px; padding: 0 14px; text-align: left; border: 1px solid var(--chat-btn-rule); background: transparent; font-size: 14px; }
-.chat-cmp-sheet-actions { display: flex; flex-direction: column; gap: 8px; }
-.chat-cmp-options .chat-cmp-host { min-height: 52px; font-size: 14px; border-color: var(--chat-ink2); }
-
-@container chat (max-width: 719px) {
-  .chat-cmp { border-top: 0; }
-  .chat-cmp-wrap { padding: 10px 12px max(12px, env(safe-area-inset-bottom)); border-top: 1px solid var(--chat-rule); background: var(--chat-panel); gap: 8px; }
-  .chat-cmp-row { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; gap: 8px; align-items: end; }
-  .chat-cmp-plus { display: block; min-height: 44px; padding: 0; border: 1px solid var(--chat-btn-rule); background: transparent; font-size: 18px; }
-  .chat-cmp-plus[aria-expanded="true"] { border-color: var(--chat-ink); }
-  .chat-cmp-attach, .chat-cmp-row-actions { display: none; }
-  .chat-cmp-input { padding: 10px 12px; font-size: 16px; line-height: 1.45; }
-  .chat-cmp-send { min-width: 56px; padding: 0 10px; font-size: 13px; white-space: nowrap; }
-  .chat-cmp-foot { display: none; }
-  .chat-cmp-wrap[data-sheet="attach"] .chat-cmp-foot { display: flex; }
-  .chat-cmp-wrap[data-sheet="attach"] .chat-cmp-hint-words { display: none; }
-  .chat-cmp-mentions { min-width: 0; left: 0; right: 0; }
-  .chat-cmp-wrap[data-sheet="attach"], .chat-cmp-wrap[data-sheet="actions"] { border-top: 2px solid var(--chat-ink); background: var(--chat-raised); padding: 14px 18px max(30px, env(safe-area-inset-bottom)); gap: 8px; }
-  .chat-cmp-wrap[data-sheet="attach"] .chat-cmp-sheet-head, .chat-cmp-wrap[data-sheet="attach"] .chat-cmp-options { display: flex; }
-  .chat-cmp-wrap[data-sheet="attach"] .chat-cmp-row { grid-template-columns: minmax(0, 1fr) 64px; margin-top: 4px; }
-  .chat-cmp-wrap[data-sheet="attach"] .chat-cmp-plus { display: none; }
-  .chat-cmp-wrap[data-sheet="attach"] .chat-cmp-input { min-height: 46px; }
-  .chat-cmp-wrap[data-sheet="attach"] .chat-cmp-send { min-height: 46px; background: var(--chat-bg); }
-  .chat-thread-pane[data-chat-sheet] .chat-scroll { opacity: .5; }
-  .chat-msg-more { top: 6px; }
-  .chat-cmp-wrap[data-editing] .chat-cmp-row { grid-template-columns: minmax(0, 1fr) auto; }
-}
-
-/* the search sheet */
-.chat-search { display: flex; flex-direction: column; gap: 10px; min-height: 0; height: 100%; padding: 20px 24px; background: var(--chat-bg); color: var(--chat-ink); font-family: var(--chat-font-ui); container: chat-search / inline-size; box-sizing: border-box; }
-.chat-search *, .chat-search *::before, .chat-search *::after { box-sizing: border-box; }
-.chat-search [hidden] { display: none !important; }
-.chat-search-head { display: flex; justify-content: space-between; align-items: baseline; }
-.chat-search-close { min-height: 44px; border: 0; background: transparent; font-size: 13px; color: var(--chat-ink2); }
-.chat-search-form { display: flex; gap: 8px; margin: 0; }
-.chat-search-input { flex: 1; min-width: 0; min-height: 48px; padding: 0 16px; border: 1px solid var(--chat-ink3); border-radius: 0; background: var(--chat-evbg); color: var(--chat-ink); font-family: var(--chat-font-mono); font-size: 16px; }
-.chat-search-input:focus { outline: none; border-color: var(--chat-ink); }
-.chat-search-go { min-height: 48px; padding: 6px 22px; border: 1px solid var(--chat-ink3); background: var(--chat-raised); font-size: 13.5px; font-weight: 600; }
-.chat-search-scopes { display: flex; gap: 6px; flex-wrap: wrap; font-size: 12.5px; }
-.chat-search-scope { min-height: 40px; padding: 0 14px; border: 1px solid var(--chat-rule); background: transparent; color: var(--chat-ink2); font-size: 12.5px; }
-.chat-search-scope[aria-pressed="true"] { border-color: var(--chat-ink3); background: var(--chat-raised); color: var(--chat-ink); font-weight: 600; }
-.chat-search-status { font-family: var(--chat-font-mono); font-size: 12px; color: var(--chat-ink3); }
-.chat-search-status[data-kind="error"] { color: var(--chat-warn); }
-.chat-search-hits { list-style: none; margin: 0; padding: 0; overflow-y: auto; min-height: 0; flex: 1; border-top: 1px solid var(--chat-rule); }
-.chat-search-hit { border-bottom: 1px solid var(--chat-rule2); }
-.chat-search-hit > button {
-  display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 2px 14px; width: 100%; padding: 10px 4px; min-height: 52px;
-  border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; font: inherit;
-}
-.chat-search-hit > button:hover { background: var(--chat-raised); }
-.chat-search-when { font-family: var(--chat-font-mono); font-size: 12px; color: var(--chat-ink3); padding-top: 2px; }
-.chat-search-who { font-family: var(--chat-font-mono); font-size: 12px; color: var(--chat-ink2); }
-.chat-search-snippet { grid-column: 2; font-size: 14px; line-height: 1.45; color: var(--chat-ink); overflow-wrap: anywhere; }
-.chat-search-snippet mark { background: transparent; color: var(--chat-ink); font-weight: 600; text-decoration: underline; text-decoration-color: var(--chat-ink3); text-underline-offset: 3px; }
-.chat-search-file { grid-column: 2; font-family: var(--chat-font-mono); font-size: 12.5px; color: var(--chat-ink); overflow-wrap: anywhere; }
-.chat-search-file span { color: var(--chat-ink3); }
-@container chat-search (max-width: 520px) {
-  .chat-search { padding: 12px 18px; }
-  .chat-search-hit > button { grid-template-columns: auto minmax(0, 1fr); column-gap: 10px; }
-  .chat-search-snippet, .chat-search-file { grid-column: 1 / -1; }
-  .chat-search-go { padding: 6px 16px; }
-}
-`;
-
-let adopted = false;
-/** Adopt the composer's and the search sheet's styles once per document. */
-export function adoptStyles() {
-  if (adopted || typeof document === "undefined") return;
-  adopted = true;
-  try {
-    if (typeof CSSStyleSheet === "function" && "adoptedStyleSheets" in document) {
-      const sheet = new CSSStyleSheet();
-      sheet.replaceSync(COMPOSER_CSS);
-      document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
-      return;
-    }
-  } catch { /* fall back to a style element */ }
-  const style = document.createElement("style");
-  style.setAttribute("data-chat", "composer");
-  style.textContent = COMPOSER_CSS;
-  document.head.appendChild(style);
 }
