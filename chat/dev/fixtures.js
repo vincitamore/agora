@@ -12,6 +12,8 @@ const hex = (n) => n.toString(16).padStart(64, "0");
 
 const human = (name, ref) => ({ id: "seat-acct", name, kind: "human", ref });
 const agent = { id: "seat-acct", name: "resident", kind: "agent" };
+// a bearer signs as Name/role: one that fits the author column, and one longer than it
+const bearer = (name) => ({ id: "seat-acct", name, kind: "agent" });
 
 /** Build a wire message: the text as posted (body, trailer block, signature), with `trailers` read off it. */
 function msg(author, ts, body, { trailers = [], thread, sign } = {}) {
@@ -49,13 +51,13 @@ const B = b0.id;
 const threadB = [
   b0,
   msg(human("ravi", "p-ravi"), at(10, 8, 15, 36), "New emitters are in on rows 9 and 10. Move row 8 onto the night schedule so the seedlings stop drying out.", { thread: B }),
-  msg(agent, at(10, 8, 15, 38), "Planned as P-0398. Row 8 leaves the day schedule; its valve closes for about a second while it moves.",
-    { thread: B, sign: "resident", trailers: [["card", "plan P-0398"]] }),
+  msg(bearer("Tester/kit"), at(10, 8, 15, 38), "Planned as P-0398. Row 8 leaves the day schedule; its valve closes for about a second while it moves.",
+    { thread: B, sign: "Tester/kit", trailers: [["card", "plan P-0398"]] }),
   msg(human("ravi", "p-ravi"), at(10, 8, 15, 46), "New service code on the row 8 controller since the swap.",
     { thread: B, trailers: [["card", "receipt R-17"]] }),
   msg(human("mei", "p-mei"), at(10, 9, 11, 1), "Is it holding?", { thread: B }),
-  msg(agent, at(10, 9, 11, 2), "**Holding.** No pressure drops on row 8 since the move, none on 9 or 10 since the emitters went in on Oct 7. Watching row 8 until Friday.\n\n```evidence\n$ sensor history bed-4 rows 8-10 @ 3 h 14 m\n  row 8   0 drops since oct 8 15:40\n  rows 9, 10   0 since oct 7 13:42\n```",
-    { thread: B, sign: "resident", trailers: [["card", "view V-0007"], ["card", "watch W-0031"]] }),
+  msg(bearer("resident/settlement"), at(10, 9, 11, 2), "**Holding.** No pressure drops on row 8 since the move, none on 9 or 10 since the emitters went in on Oct 7. Watching row 8 until Friday.\n\n```evidence\n$ sensor history bed-4 rows 8-10 @ 3 h 14 m\n  row 8   0 drops since oct 8 15:40\n  rows 9, 10   0 since oct 7 13:42\n```",
+    { thread: B, sign: "resident/settlement", trailers: [["card", "view V-0007"], ["card", "watch W-0031"]] }),
 ];
 
 // ---- threads C and D: waiting on someone else ----
