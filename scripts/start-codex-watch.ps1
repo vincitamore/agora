@@ -102,12 +102,22 @@ function Stop-ProcessTree([int]$RootPid) {
     return $stopped
 }
 
+# One walk reads the process table once, so a child the shell spawns after that read is not in it
+# and survives the walk (measured under load: a timed-out arm left its Node watch running with its
+# parent shell gone). Walk again from the same root until a pass stops nothing; a dead parent's pid
+# still names its children in the table. Five passes bound it.
+function Stop-ProcessTreeUntilQuiet([int]$RootPid) {
+    for ($pass = 0; $pass -lt 5; $pass++) {
+        if (-not @(Stop-ProcessTree $RootPid).Count) { break }
+    }
+}
+
 function Stop-ArmedWatch($Armed) {
     if (-not $Armed -or -not $Armed.pid) { return $null }
     $watcherPid = [int]$Armed.pid
     $supervisorPid = Get-SupervisorPid $watcherPid
-    if ($supervisorPid) { Stop-ProcessTree $supervisorPid > $null }
-    Stop-ProcessTree $watcherPid > $null
+    if ($supervisorPid) { Stop-ProcessTreeUntilQuiet $supervisorPid }
+    Stop-ProcessTreeUntilQuiet $watcherPid
     Remove-Item -LiteralPath $armedPath -Force -ErrorAction SilentlyContinue
     return [pscustomobject]@{ watcherPid = $watcherPid; supervisorPid = $supervisorPid }
 }
@@ -310,7 +320,7 @@ $armingClock.Stop()
 if (-not $watcherPid) {
     # The watch may already be running under the worker shell without having published its
     # receipt yet; ending only the shell would orphan it. Reap the whole tree.
-    Stop-ProcessTree ([int]$created.ProcessId) > $null
+    Stop-ProcessTreeUntilQuiet ([int]$created.ProcessId)
     throw "Codex watch did not publish its subscribed armed receipt within $ArmingTimeoutSeconds seconds. Inspect $LogPrefix.stderr.log."
 }
 
