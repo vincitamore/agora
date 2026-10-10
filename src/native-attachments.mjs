@@ -16,13 +16,18 @@
  *
  * An attachment's id derives from its room and its digest (`durableAttachmentId`), so nothing maps
  * ids to blobs: an id that does not derive names nothing.
+ *
+ * Beside each blob, `sha256-<hex>.type` is its custody record: `{ kind, mimetype }` as recorded at
+ * the first install (the kind the bytes prove; the type `recordedMimetype` keeps). It is written
+ * before the blob's rename and removed if that rename fails, so an installed blob always has one.
+ * Reads and appends take the type from it, never from a client's claim.
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readdir, rename, rm, stat } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { AgoraError } from "./core.mjs";
-import { RENAME_RETRY } from "./native-store.mjs";
+import { RENAME_RETRY, writeDurableAtomic } from "./native-store.mjs";
 import { NATIVE_PROTOCOL } from "./native-protocol.mjs";
 import { ATTACHMENT_SNIFF_BYTES, detectAttachmentType, durableAttachmentId, validateWireAttachment } from "./protocol/attachment.mjs";
 
@@ -120,6 +125,28 @@ export function custodyDirectory(roomDirectory) {
 export function custodyPath(roomDirectory, digest) {
   if (!DIGEST_RE.test(digest)) throw refusal("attachment-unknown", "a digest is sha256:<64 hex>");
   return path.join(custodyDirectory(roomDirectory), `sha256-${digest.slice(7)}`);
+}
+
+/** The custody record beside a blob. @param {string} roomDirectory @param {string} digest */
+export function custodyRecordPath(roomDirectory, digest) {
+  return `${custodyPath(roomDirectory, digest)}.type`;
+}
+
+/**
+ * The recorded kind and type of an installed blob. A record that is missing, malformed, or names a
+ * kind the bytes contradict is not believed: the bytes' own word stands, and a file is then untyped.
+ * @param {string} roomDirectory @param {string} digest @param {Uint8Array} head the blob's first bytes
+ * @returns {Promise<{ kind: 'image' | 'file', mimetype: string }>}
+ */
+export async function custodyRecord(roomDirectory, digest, head) {
+  const detected = detectAttachmentType(head);
+  if (detected.kind === "image") return { kind: "image", mimetype: /** @type {string} */ (detected.mimetype) };
+  try {
+    const record = JSON.parse(await readFile(custodyRecordPath(roomDirectory, digest), "utf8"));
+    if (record?.kind === "file" && typeof record.mimetype === "string" && MIME_RE.test(record.mimetype) && !/^image\//i.test(record.mimetype))
+      return { kind: "file", mimetype: record.mimetype };
+  } catch { /* no record, or not one: the bytes' word */ }
+  return { kind: "file", mimetype: "application/octet-stream" };
 }
 
 /** @param {any} manifest @param {Limits} limits */
@@ -355,15 +382,23 @@ export async function handleAttachmentFrame(context, frame) {
       await handle.close();
       upload.handle = undefined;
       const target = custodyPath(upload.directory, upload.digest);
+      const recordFile = custodyRecordPath(upload.directory, upload.digest);
       await withRoomLock(upload.directory, async () => {
-        if ((await installedSize(target)) !== undefined) return; // identical bytes, already in custody
-        await renameRetrying(upload.temp, target, context.deps);
-        await syncDirectory(custodyDirectory(upload.directory));
+        // identical bytes already in custody keep the record of their first install
+        if ((await installedSize(target)) !== undefined) return;
+        const detected = detectAttachmentType(upload.head);
+        await writeDurableAtomic(recordFile, JSON.stringify({ kind: detected.kind, mimetype: recordedMimetype(detected, upload.declaredMimetype) }) + "\n");
+        try {
+          await renameRetrying(upload.temp, target, context.deps);
+          await syncDirectory(custodyDirectory(upload.directory));
+        } catch (e) {
+          if ((await installedSize(target)) === undefined) await rm(recordFile, { force: true }).catch(() => {});
+          throw e;
+        }
       });
-      const detected = detectAttachmentType(upload.head);
+      const recorded = await custodyRecord(upload.directory, upload.digest, upload.head);
       attachment = validateWireAttachment({ id: durableAttachmentId(upload.roomId, upload.digest), digest: upload.digest,
-        lifetime: "durable", name: upload.name, kind: detected.kind, size: upload.size,
-        mimetype: recordedMimetype(detected, upload.declaredMimetype) });
+        lifetime: "durable", name: upload.name, kind: recorded.kind, size: upload.size, mimetype: recorded.mimetype });
     } finally {
       await drop(state, upload);
     }
@@ -393,7 +428,11 @@ export async function handleAttachmentFrame(context, frame) {
       const want = Math.min(length, size - offset);
       const buffer = Buffer.alloc(want);
       const { bytesRead } = want ? await handle.read(buffer, 0, want, offset) : { bytesRead: 0 };
-      answer("attachment-data", { offset, data: buffer.subarray(0, bytesRead).toString("base64"), size, eof: offset + bytesRead >= size });
+      // every data frame carries the custody record's kind and type, so the first one answers both
+      const headBuffer = Buffer.alloc(ATTACHMENT_SNIFF_BYTES);
+      const { bytesRead: headRead } = await handle.read(headBuffer, 0, ATTACHMENT_SNIFF_BYTES, 0);
+      const { kind, mimetype } = await custodyRecord(store.directory, digest, headBuffer.subarray(0, headRead));
+      answer("attachment-data", { offset, data: buffer.subarray(0, bytesRead).toString("base64"), size, eof: offset + bytesRead >= size, kind, mimetype });
     } finally {
       await handle.close();
     }
@@ -431,7 +470,7 @@ async function syncDirectory(directory) {
 
 /**
  * Before a message append: every `durable` attachment it names must be installed in this room's
- * custody, its size and kind the bytes', or the append is refused and nothing is appended. A
+ * custody, its size the bytes' and its kind and type the custody record's, or the append is refused and nothing is appended. A
  * message that carries a durable attachment carries at most `perMessage` attachments in all.
  * @param {AttachmentContext | { root: string, openRoom?: (roomId: string) => Promise<CustodyRoom>, limits?: Partial<Limits> }} context
  * @param {string} roomId @param {unknown} attachments
@@ -455,10 +494,9 @@ export async function assertDurableAttachments(context, roomId, attachments) {
     const size = await installedSize(file);
     if (size === undefined) throw refusal("attachment-unknown", `attachment ${a.id} names bytes this room's custody does not hold; nothing was appended`);
     if (size !== a.size) throw refusal("attachment-unknown", `attachment ${a.id} says ${a.size} bytes and custody holds ${size}; nothing was appended`);
-    const head = await readHead(file);
-    const detected = detectAttachmentType(head);
-    if (detected.kind !== a.kind || (detected.kind === "image" && a.mimetype !== detected.mimetype))
-      throw refusal("attachment-unknown", `attachment ${a.id} says ${a.kind}${a.mimetype ? ` ${a.mimetype}` : ""} and its bytes are ${detected.kind}${detected.mimetype ? ` ${detected.mimetype}` : ""}; nothing was appended`);
+    const recorded = await custodyRecord(store.directory, a.digest, await readHead(file));
+    if (recorded.kind !== a.kind || (a.mimetype !== undefined && a.mimetype !== recorded.mimetype) || (recorded.kind === "image" && a.mimetype === undefined))
+      throw refusal("attachment-unknown", `attachment ${a.id} says ${a.kind}${a.mimetype ? ` ${a.mimetype}` : ""} and custody records ${recorded.kind} ${recorded.mimetype}; nothing was appended`);
   }
 }
 
@@ -477,7 +515,7 @@ async function readHead(file) {
  * (a face that uploads pictures, `read --files`): the digest is checked against the bytes read, so a
  * blob altered on disk is refused, never served.
  * @param {string} roomDirectory @param {string} roomId @param {{ id: string, digest: string }} attachment
- * @returns {Promise<{ path: string, bytes: Buffer, kind: 'image' | 'file', mimetype: string | null }>}
+ * @returns {Promise<{ path: string, bytes: Buffer, kind: 'image' | 'file', mimetype: string }>}
  */
 export async function readDurableBlob(roomDirectory, roomId, attachment) {
   if (attachment.id !== durableAttachmentId(roomId, attachment.digest)) throw refusal("attachment-unknown", "no attachment with that id and digest in this room");
@@ -497,5 +535,5 @@ export async function readDurableBlob(roomDirectory, roomId, attachment) {
   }
   const got = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
   if (got !== attachment.digest) throw refusal("attachment-digest-mismatch", `custody's bytes hash to ${got}, not ${attachment.digest}`);
-  return { path: file, bytes, ...detectAttachmentType(bytes.subarray(0, ATTACHMENT_SNIFF_BYTES)) };
+  return { path: file, bytes, ...(await custodyRecord(roomDirectory, attachment.digest, bytes.subarray(0, ATTACHMENT_SNIFF_BYTES))) };
 }

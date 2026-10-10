@@ -69,12 +69,16 @@ async function rig(t, o = {}) {
     };
     return { socket, sent, context, call, refusedWith, upload };
   };
-  /** What custody holds: installed blobs and temp files. */
-  const held = async () => {
-    try { return (await readdir(path.join(directory, "attachments"))).sort(); }
+  /** @param {(name: string) => boolean} keep */
+  const list = async (keep) => {
+    try { return (await readdir(path.join(directory, "attachments"))).filter(keep).sort(); }
     catch { return []; }
   };
-  return { root, directory, manifest, connection, held };
+  /** What custody holds: installed blobs and temp files. */
+  const held = () => list((n) => !n.endsWith(".type"));
+  /** The custody records beside the blobs. */
+  const records = () => list((n) => n.endsWith(".type"));
+  return { root, directory, manifest, connection, held, records };
 }
 
 test("kind is the bytes' word: a PNG named .vsdx is an image, a text file named .png is a file", async (t) => {
@@ -92,6 +96,8 @@ test("kind is the bytes' word: a PNG named .vsdx is an image, a text file named 
   assert.deepEqual(await r.held(), [digestOf(text), digestOf(PNG), digestOf(Buffer.from("a,b\n1,2\n"))].map((d) => `sha256-${d.slice(7)}`).sort(), "installed blobs only, no temp left");
   const blob = custodyPath(r.directory, digestOf(PNG));
   assert.deepEqual(await readFile(blob), PNG);
+  assert.deepEqual(await r.records(), (await r.held()).map((n) => `${n}.type`), "every installed blob has its custody record");
+  assert.deepEqual(JSON.parse(await readFile(`${custodyPath(r.directory, digestOf(Buffer.from("a,b\n1,2\n")))}.type`, "utf8")), { kind: "file", mimetype: "text/csv" });
   if (process.platform !== "win32") assert.equal((await stat(blob)).mode & 0o777, 0o600);
   for (const [bytes, kind, mime] of /** @type {const} */ ([
     [[0xff, 0xd8, 0xff, 0xe0], "image", "image/jpeg"], [[...Buffer.from("GIF89a")], "image", "image/gif"], [[...Buffer.from("GIF87a")], "image", "image/gif"],
@@ -101,13 +107,21 @@ test("kind is the bytes' word: a PNG named .vsdx is an image, a text file named 
 });
 
 test("identical bytes are one blob and cost the quota once", async (t) => {
-  const r = await rig(t, { manifest: { attachmentQuota: PNG.length } });
+  const r = await rig(t, { manifest: { attachmentQuota: PNG.length + 64 } });
   const c = r.connection();
   const a = await c.upload(PNG, { name: "one.png" });
   const b = await c.upload(PNG, { name: "two.png" });
   assert.equal(a.id, b.id);
   assert.equal(b.name, "two.png");
   assert.equal((await r.held()).length, 1);
+  // the record of the first install stands: a later upload of the same bytes cannot retype them
+  const pdf = Buffer.from("%PDF-1.7 a report");
+  assert.equal((await c.upload(pdf, { name: "r.pdf", mimetype: "application/pdf" })).mimetype, "application/pdf");
+  const r2 = await rig(t);
+  const d = r2.connection();
+  await d.upload(pdf, { name: "r.pdf", mimetype: "application/pdf" });
+  const again = await d.upload(pdf, { name: "r.txt", mimetype: "text/plain" });
+  assert.equal(again.mimetype, "application/pdf");
 });
 
 test("a digest mismatch, a short upload, a chunk past the size and a quota breach are refused and leave nothing installed", async (t) => {
@@ -196,6 +210,7 @@ test("a crash between the temp write and the rename installs nothing", async (t)
   const c = crash.connection();
   await assert.rejects(c.upload(PNG), /the process died here/);
   assert.deepEqual(await crash.held(), [], "no blob, and the temp file is removed");
+  assert.deepEqual(await crash.records(), [], "and no custody record without its blob");
   await assert.rejects(assertDurableAttachments(c.context, ROOM, [{ id: durableAttachmentId(ROOM, digestOf(PNG)), digest: digestOf(PNG), lifetime: "durable", name: "x", kind: "image", size: PNG.length, mimetype: "image/png" }]),
     (e) => /** @type {any} */ (e).code === "attachment-unknown");
 
@@ -249,6 +264,9 @@ test("an append naming a durable attachment is checked against custody", async (
   assert.equal(await code([{ ...image, size: image.size + 1 }]), "attachment-unknown", "a size the bytes do not have");
   assert.equal(await code([{ ...image, kind: "file", mimetype: "text/plain" }]), "attachment-unknown", "a kind the bytes do not have");
   assert.equal(await code([{ ...image, mimetype: "image/gif" }]), "attachment-unknown", "an image type the bytes do not have");
+  const pdf = await c.upload(Buffer.from("%PDF-1.7 a report"), { name: "r.pdf", mimetype: "application/pdf" });
+  assert.equal(await code([pdf]), "accepted");
+  assert.equal(await code([{ ...pdf, mimetype: "text/html" }]), "attachment-unknown", "a type custody did not record");
   assert.equal(await code(Array.from({ length: 11 }, () => image)), "attachment-quota", "ten per message");
   assert.equal(await code(Array.from({ length: 10 }, () => image)), "accepted");
   // metadata only (no lifetime) passes exactly as before, up to the store's own ceiling
@@ -267,6 +285,7 @@ test("a read returns the installed bytes in bounded chunks, and an id that does 
   for (let offset = 0, eof = false; !eof;) {
     const d = await c.call({ type: "attachment-read", roomId: ROOM, id: a.id, digest: a.digest, offset, length: 8 });
     assert.equal(d.size, 20);
+    assert.deepEqual([d.kind, d.mimetype], ["file", "application/octet-stream"], "every data frame carries the custody record");
     assert.equal(d.offset, offset);
     const got = Buffer.from(d.data, "base64");
     assert.ok(got.length <= 8);

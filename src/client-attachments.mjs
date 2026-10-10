@@ -52,6 +52,7 @@ const CHUNK_MAX = 262144;
 const DIGEST_RE = /^sha256:[a-f0-9]{64}$/;
 const ID_RE = /^[A-Za-z0-9_-]{16,128}$/;
 const WHERE = "this seat's service";
+const MIME_RE = /^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}$/;
 
 /** @param {unknown} e */
 const said = (e) => (e instanceof Error ? e.message : String(e));
@@ -81,7 +82,7 @@ export async function uploadAttachment(seam, room, request) {
   if (bytes.byteLength > MAX_BYTES) throw seam.refused("attachment-too-large", `${bytes.byteLength} bytes is over the ${MAX_BYTES}-byte limit for one attachment; nothing was sent`);
   if (typeof name !== "string" || !name || Buffer.byteLength(name, "utf8") > 255 || /[\u0000-\u001f\u007f-\u009f]/u.test(name))
     throw seam.refused("upload-invalid", "a name is 1-255 bytes with no control characters");
-  if (mimetype !== undefined && (typeof mimetype !== "string" || !/^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}$/.test(mimetype)))
+  if (mimetype !== undefined && (typeof mimetype !== "string" || !MIME_RE.test(mimetype)))
     throw seam.refused("upload-invalid", "a mimetype is type/subtype");
   for (const [field, v] of /** @type {const} */ ([["width", width], ["height", height]]))
     if (v !== undefined && (!Number.isSafeInteger(v) || /** @type {number} */ (v) < 1 || /** @type {number} */ (v) > 2147483647))
@@ -120,7 +121,8 @@ export async function uploadAttachment(seam, room, request) {
 
 /**
  * Read one installed attachment's bytes, verified against its digest. Local connections only. The
- * first chunk is read before this resolves (so `size` and the kind its bytes prove are known); the
+ * first chunk is read before this resolves, so `size` and the kind and type custody recorded (carried
+ * on the service's data frame, never a client's claim) are known; the
  * stream withholds its last chunk until every byte has hashed to the digest, and errors with
  * `attachment-digest-mismatch` instead of delivering it when they do not.
  * @param {AttachmentSeam} seam @param {unknown} room @param {AttachmentRef} ref
@@ -144,12 +146,18 @@ export async function readAttachment(seam, room, ref) {
     if (bytes.byteLength > CHUNK_MAX || offset + bytes.byteLength > data.size || data.eof !== (offset + bytes.byteLength === data.size)
       || (!data.eof && bytes.byteLength === 0))
       throw seam.refused("attachment-mismatch", `the service's data frame at ${offset} is inconsistent with its own size`);
-    return { bytes, size: /** @type {number} */ (data.size), eof: /** @type {boolean} */ (data.eof) };
+    if ((data.kind !== "image" && data.kind !== "file") || typeof data.mimetype !== "string" || !MIME_RE.test(data.mimetype))
+      throw seam.refused("attachment-mismatch", `the service's data frame at ${offset} carries no recorded kind and type`);
+    return { bytes, size: /** @type {number} */ (data.size), eof: /** @type {boolean} */ (data.eof),
+      kind: /** @type {'image' | 'file'} */ (data.kind), mimetype: /** @type {string} */ (data.mimetype) };
   };
   const first = await fetchChunk(0);
   const size = first.size;
   if (size > MAX_BYTES) throw seam.refused("attachment-mismatch", `the service reports ${size} bytes, over the one-attachment limit`);
+  // an image's record must be what its bytes prove; a file's type is custody's word
   const detected = detectAttachmentType(first.bytes.subarray(0, ATTACHMENT_SNIFF_BYTES));
+  if (detected.kind !== first.kind || (detected.kind === "image" && detected.mimetype !== first.mimetype))
+    throw seam.refused("attachment-mismatch", `custody records ${first.kind} ${first.mimetype} and the bytes are ${detected.kind}${detected.mimetype ? ` ${detected.mimetype}` : ""}`);
   const hash = createHash("sha256");
   /** @param {Uint8Array} bytes */
   const verified = (bytes) => {
@@ -181,5 +189,5 @@ export async function readAttachment(seam, room, ref) {
       }
     },
   });
-  return { stream, size, kind: detected.kind, mimetype: detected.mimetype ?? "application/octet-stream" };
+  return { stream, size, kind: first.kind, mimetype: first.mimetype };
 }

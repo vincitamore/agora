@@ -65,6 +65,24 @@ test("a 25 MiB image round trip: upload, append, read back, and the bytes verifi
   assert.equal(digestOf(back), a.digest);
 });
 
+test("a PDF and a PNG read back with the kind and type custody recorded", { timeout: 30_000 }, async (t) => {
+  offerCustody(t);
+  const s = await seat(t);
+  const app = await s.open();
+  const pdfBytes = Buffer.from("%PDF-1.7\n1 0 obj << /Type /Catalog >> endobj\n%%EOF\n");
+  const pngBytes = Buffer.concat([PNG_SIGNATURE, randomBytes(300 * 1024)]);
+  const pdf = await app.upload("house", { bytes: pdfBytes, name: "report.pdf", mimetype: "application/pdf" });
+  // a declared type is the client's claim; the PNG's recorded type is what its bytes prove
+  const png = await app.upload("house", { bytes: pngBytes, name: "photo.png", mimetype: "application/pdf" });
+  assert.deepEqual([pdf.kind, pdf.mimetype, png.kind, png.mimetype], ["file", "application/pdf", "image", "image/png"]);
+  await app.append("house", { text: "both", author: ADA, attachments: [pdf, png] });
+  for (const [ref, bytes, kind, mimetype] of /** @type {const} */ ([[pdf, pdfBytes, "file", "application/pdf"], [png, pngBytes, "image", "image/png"]])) {
+    const got = await app.attachment("house", { id: ref.id, digest: ref.digest });
+    assert.deepEqual([got.kind, got.mimetype, got.size], [kind, mimetype, bytes.length]);
+    assert.ok((await drain(got.stream)).equals(bytes));
+  }
+});
+
 test("an append naming bytes custody does not hold is refused and nothing is appended", { timeout: 30_000 }, async (t) => {
   offerCustody(t);
   const s = await seat(t);
