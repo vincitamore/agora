@@ -413,8 +413,9 @@ for (const host of HOSTS) {
     assert.equal(dark.body.error.code, "ROOM_DARK");
     assert.equal((await k.call("p-ada", "/chat/thread/main")).status, 503);
     await k.seat.agora(["service", "start"]);
-    const liveCount = main.of("state").filter((e) => e.data.state === "live").length;
-    await main.until(() => main.of("state").filter((e) => e.data.state === "live").length > liveCount, "live again", 30_000);
+    // the kit can be live again before the start command returns, so look for a live after the last dark
+    const states = () => main.of("state").map((e) => e.data.state);
+    await main.until(() => states().lastIndexOf("live") > states().lastIndexOf("dark"), "live again", 30_000);
     await k.agentSays("after the restart");
     const posted = await k.call("p-ada", "/chat/post", { json: { text: "the kit posts again" } });
     assert.equal(posted.status, 200, JSON.stringify(posted.body));
