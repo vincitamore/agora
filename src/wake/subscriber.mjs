@@ -152,6 +152,8 @@ export function nativeMessage(message) {
     ts: String(message.ts),
     cursor: String(message.cursor),
     ...(Array.isArray(message.attachments) && message.attachments.length ? { attachments: message.attachments } : {}),
+    ...(message.purged && typeof message.purged.at === "string" && typeof message.purged.purge === "string"
+      ? { purged: { at: message.purged.at, purge: message.purged.purge } } : {}),
   };
 }
 

@@ -84,6 +84,7 @@ export function wireAnnotation(a) {
     author: { id: String(author.id), name: String(author.name), kind: String(author.kind),
       ...(typeof author.ref === "string" ? { ref: author.ref } : {}) },
     ...(typeof a.via === "string" && a.via ? { via: a.via } : {}),
+    ...(a?.purged && typeof a.purged.at === "string" ? { purged: { at: a.purged.at, purge: String(a.purged.purge) } } : {}),
   };
 }
 
@@ -96,5 +97,7 @@ export function humanAnnotation(a) {
 
 /** @param {ReturnType<typeof decorate>} m */
 export function human(m) {
+  if (m.purged) return `${headerLine(m)}
+${trailerLine(m)}    (purged at ${m.purged.at} by ${m.purged.purge})${attachmentLines(m)}`;
   return `${headerLine(m)}\n${trailerLine(m)}${indent(m.text)}${attachmentLines(m)}`;
 }

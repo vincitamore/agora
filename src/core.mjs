@@ -48,6 +48,7 @@ const execFileAsync = promisify(execFile);
  * @property {string} cursor
  * @property {string} [url]
  * @property {Attachment[]} [attachments]
+ * @property {{ at: string, purge: string }} [purged] on a native message a purge took: when, and the purge's id
  * @property {unknown} [raw]
  */
 /**
