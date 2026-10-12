@@ -785,6 +785,10 @@ an injected `fetch` so it is testable offline.
   follow set does not make thread replies wake at the room interval.
 - `not_in_channel` from Slack means the bot was never invited; `/invite @bot` in the
   channel. A private channel additionally needs the `groups:*` scopes.
+- A Slack reply crosses into a native room only under a faced copy (a Slack message the face
+  published from a native message) or, with `--inbound top-level`, under a person's question that crossed; a reply under a post this seat's account made straight into the
+  channel never crosses, since no thread map entry names it. The inbound tick reads about once a minute, so an edit or delete before the first tick crosses as the final state or not at all.
+  To test it live: post the root natively, confirm its face row is `published`, then have the person reply and leave it about two minutes before editing or deleting it.
 - A Slack `channel` value that starts with `#` is a name; the transport refuses it.
   Open the channel details and copy the id from the bottom of the About tab. The id in the
   address bar is whichever channel that window had open, not the one you mean: a `not_in_channel`
