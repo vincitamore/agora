@@ -138,7 +138,8 @@ test("room purge takes a message's text, or a thread's, and the blobs only they 
 
   const after = lines((await cli(["read", "house", "--json"])).stdout);
   assert.deepEqual(after.map((m) => [m.id, m.text]), [[note.id, ""], [root.id, ""], [reply.id, ""]], "every record keeps its place; the texts are gone");
-  assert.deepEqual(after[1].attachments.map((/** @type {any} */ a) => a.name), ["panel.png"], "attachment metadata is kept");
+  assert.equal(after[1].attachments, undefined, "a purged message reads back with no attachment name, size or digest");
+  assert.equal(JSON.stringify(after).includes("panel.png"), false);
   const human = (await cli(["room", "purge", "house", "--message", note.id, "--reason", "again"])).stdout;
   assert.match(human, /0 messages lost their text, 0 attachment blobs removed/, "an earlier purge's messages are not taken twice");
 });
