@@ -112,3 +112,13 @@ them with the other native record verbs).
 
 An annotation is not a trailer. `--withdraws <id>` on `post` is a statement in a message that
 `carry` folds for its own author; `agora withdraw` is a record on the room that every reader folds.
+
+## Faces
+
+When the seat service runs faces, an `edit` reaches every published copy of its target on a face that
+can edit (Slack `chat.update`, the rider kept), and a `withdraw` deletes every copy (Slack
+`chat.delete`, and `files.delete` for each uploaded picture); `pin` and `unpin` cross nothing. Each is
+a mirror row in the seat's face record log beside the copy's own row, `refused` with `capability` on
+a face that cannot edit or delete (GitHub). An edit of a message whose copy is still in flight waits
+for it; one whose copy is unsettled is carried by the sweep once it settles. The native record is the
+outcome; a mirror's fate never changes it.

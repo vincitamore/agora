@@ -70,6 +70,8 @@ export const FACE_CAPABLE = new Set(["slack", "github"]);
  * @property {(raw: any) => string | undefined} textOf the wire text of a raw item, to digest against `payloadDigest`
  * @property {(raw: any) => string[]} fileIds the file ids a raw item shares, for a picture's echo
  * @property {(attachment: any, line: string) => string} pictureLine the `pictures` text form of one attachment when there is no ladder
+ * @property {boolean} [mirrors] whether a native edit, withdraw or purge can reach a copy already published (Slack: `chat.update`, `chat.delete`, `files.delete`); absent is false, and such a copy is out of reach
+ * @property {(target: Record<string, string>) => string} [where] the face's place in the transport's own words, for a copy listed out of reach
  */
 
 /** Is this raw Slack message from the seat's own bot account? @param {any} m @param {{ id: string, name: string, botId?: string }} who */
@@ -106,6 +108,8 @@ const slackFaceHalf = Object.freeze({
   textOf: (raw) => (typeof raw?.text === "string" ? raw.text : undefined),
   fileIds: (raw) => (Array.isArray(raw?.files) ? raw.files.map((/** @type {any} */ f) => String(f?.id)) : []),
   pictureLine: (_a, line) => line,
+  mirrors: true,
+  where: (target) => String(target.channel ?? "unknown"),
 });
 
 /** The face halves this build carries, by transport name. A transport with no half is `capability`-refused. */
@@ -131,7 +135,11 @@ export function faceHalf(transport) { return Object.prototype.hasOwnProperty.cal
  * @typedef {{ originId: string, transport: string, status: 'pending'|'published'|'refused'|'unknown', at: string,
  *   cursor?: string, selector?: string, attempt?: number, pendingAt?: string, thread?: string,
  *   id?: string, ids?: string[], reason?: string, code?: string, via?: string, quarantine?: string[],
- *   payloadDigest?: string, part?: 'attachment', attachmentId?: string, fileId?: string, name?: string, withdrawnNatively?: boolean }} FaceRecord
+ *   payloadDigest?: string, part?: 'attachment' | 'mirror', attachmentId?: string, fileId?: string, name?: string, withdrawnNatively?: boolean,
+ *   mirror?: string, act?: 'edit' | 'withdraw' | 'purge', target?: string }} FaceRecord
+ * A mirror row (`part: "mirror"`) carries a native edit, withdraw or purge (`act`, the native
+ * record's id in `mirror`) to one published copy (`target`: the transport's id of the copy, or the
+ * file id of a picture, whose `attachmentId` the row then names).
  */
 /** @typedef {{ transport: string, status: 'pending'|'published'|'refused'|'unknown', reason?: string, id?: string, attachmentId?: string }} FaceStatus */
 /** @typedef {{ id: string, name: string, kind: 'human'|'agent'|'system'|'unknown', account?: { transport: string, id: string } }} Member */
@@ -247,8 +255,12 @@ export async function writeFacePolicy(stateRoot, roomId, policy, { now = () => n
 // The face record log: <state>/native/rooms/<roomId>/faces.jsonl, append-only
 // ---------------------------------------------------------------------------------------------
 
-/** @param {string} originId @param {string} transport @param {string} [attachmentId] */
-export function faceKey(originId, transport, attachmentId) { return `${originId}\0${transport}\0${attachmentId ?? ""}`; }
+/**
+ * The fold key of a face record. A mirror row (a native edit, withdraw or purge carried to a copy)
+ * is keyed apart by the native act's id, so its fate never overwrites the copy's own state.
+ * @param {string} originId @param {string} transport @param {string} [attachmentId] @param {string} [mirror]
+ */
+export function faceKey(originId, transport, attachmentId, mirror) { return `${originId}\0${transport}\0${attachmentId ?? ""}${mirror ? `\0${mirror}` : ""}`; }
 
 /**
  * One O_APPEND write, ordered by the filesystem against every sibling's. A log rather than a map
@@ -268,7 +280,7 @@ export function foldFaceRecords(lines) {
   /** @type {Map<string, FaceRecord>} */
   const byKey = new Map();
   for (const line of lines) {
-    const key = faceKey(line.originId, line.transport, line.attachmentId);
+    const key = faceKey(line.originId, line.transport, line.attachmentId, line.mirror);
     const prev = byKey.get(key);
     /** @type {FaceRecord} */
     const next = { ...(prev ?? {}), ...line };
@@ -362,8 +374,14 @@ export function selectFaces(policy, message, ctx, opts = {}) {
   /** @type {{ transport: string, code: string, reason: string }[]} */
   const refusals = [];
   if (mode === "none") return { selected, refusals };
+  // a message that crossed IN from a face (stamped `via: <transport>-face` by the inbound side) is
+  // never faced back to that transport: the human's own words are already there, and a bot copy
+  // under them is the loop
+  /** @param {string} transport */
+  const arrivedFrom = (transport) => message?.via === `${transport}-face`;
   if (Array.isArray(mode)) {
     for (const transport of new Set(mode)) {
+      if (arrivedFrom(transport)) continue;
       const face = policy.faces.find((f) => f.transport === transport);
       const alias = opts.alias ?? policy.faces[0]?.alias ?? policy.roomId;
       if (!FACE_CAPABLE.has(transport)) refusals.push({ transport, code: "capability", reason: transport === "local"
@@ -376,7 +394,7 @@ export function selectFaces(policy, message, ctx, opts = {}) {
     return { selected, refusals };
   }
   for (const face of policy.faces) {
-    if (!face.enabled) continue;
+    if (!face.enabled || arrivedFrom(face.transport)) continue;
     const selector = selectorFor(message, face, ctx);
     if (selector) selected.push({ face, selector });
   }
@@ -482,6 +500,8 @@ export function toFacePublication(r, roomId, sourceRoom) {
  * @property {number} [settleMs]
  * @property {number} [lookbackMs]
  * @property {(line: string) => void} [warn] one bounded, redacted line per face outcome
+ * @property {(name: string) => string | undefined} [memberKind] the kind of a named member, for the `addressed` selector; when absent, read off `membership`
+ * @property {(id: string) => any} [lookupMessage] one native message by id, as it stands now: `text` the latest edit's, `withdrawn` and `purged` set when they are; undefined when the room holds none
  */
 
 export class FaceRunner {
@@ -502,12 +522,20 @@ export class FaceRunner {
     this.transports = new Map();
     /** @type {Map<string, { id: string, name: string, botId?: string }>} */
     this.identities = new Map();
+    this.memberKind = deps.memberKind;
+    this.lookupMessage = deps.lookupMessage ?? (() => undefined);
+    /** The publications this runner has in flight, by origin id: a sweep passes over them (a slow
+     * call is not a dead writer) and a mirror waits for them (an edit lands on the copy, not before it).
+     * @type {Map<string, Promise<unknown>>} */
+    this.inflight = new Map();
+    /** @type {Promise<{ held: boolean, outcomes: { key: string, outcome: string }[] }> | undefined} */
+    this.sweeping = undefined;
   }
 
   /** @returns {Parameters<typeof isAddressed>[2]} */
   #ctx() {
     return {
-      memberKind: (name) => this.membership.find((m) => m.name === name || m.id === name)?.kind,
+      memberKind: (name) => (this.memberKind ? this.memberKind(name) : this.membership.find((m) => m.name === name || m.id === name)?.kind),
       lookupCursor: (cursor) => this.lookupCursor(cursor),
     };
   }
@@ -616,6 +644,10 @@ export class FaceRunner {
       for (const { face, record } of pending) out.push(...(await this.#publish(face, message, record)));
       return out;
     })();
+    if (pending.length) {
+      const tracked = settled.catch(() => undefined).finally(() => { if (this.inflight.get(message.id) === tracked) this.inflight.delete(message.id); });
+      this.inflight.set(message.id, tracked);
+    }
     return { faces, settled };
   }
 
@@ -747,6 +779,177 @@ export class FaceRunner {
     return { transport: face.transport, status: "published", attachmentId: record.attachmentId };
   }
 
+  // -------------------------------------------------------------------------------------------
+  // Mirrors: a native edit, withdraw or purge carried to the copies a face already published
+  // -------------------------------------------------------------------------------------------
+
+  /**
+   * The copies of one native message the record log holds: the text copy in whatever state it is
+   * (a refused one is no copy and is left out), and each picture that was uploaded.
+   * @param {Map<string, FaceRecord>} records @param {FacePolicy} policy @param {string} originId
+   * @returns {{ face: Face | undefined, record: FaceRecord, kind: 'text' | 'picture' }[]}
+   */
+  #copies(records, policy, originId) {
+    /** @type {{ face: Face | undefined, record: FaceRecord, kind: 'text' | 'picture' }[]} */
+    const out = [];
+    for (const r of records.values()) {
+      if (r.originId !== originId || r.part === "mirror") continue;
+      const face = policy.faces.find((f) => f.transport === r.transport);
+      if (r.part === "attachment") { if (r.status === "published" && r.fileId) out.push({ face, record: r, kind: "picture" }); continue; }
+      if (r.status !== "refused") out.push({ face, record: r, kind: "text" });
+    }
+    return out;
+  }
+
+  /**
+   * Carry a native edit, withdraw or purge to every copy of its target message, in the order the
+   * property needs: wait for the target's own publication if this runner still has it in flight,
+   * then per copy a durable `pending` mirror row, the call, and one outcome row. An edit reaches
+   * the text copy (`chat.update`); a withdraw or a purge deletes the text copy and every uploaded
+   * picture (`chat.delete`, `files.delete`). A copy whose own publication is unsettled gets an
+   * `unknown` mirror row the sweep carries once it settles; a face that cannot reach a copy gets a
+   * `refused` one. Nothing here touches the native log.
+   * @param {{ act: 'edit' | 'withdraw' | 'purge', id: string, cursor?: string, target: string }} native the annotation or purge record (its id), and the message it names
+   * @returns {Promise<{ transport: string, kind: 'text' | 'picture', copy?: string, status: FaceRecord['status'], code?: string, reason?: string, where: string }[]>}
+   */
+  async mirror(native) {
+    const inflight = this.inflight.get(native.target);
+    if (inflight) await inflight;
+    const policy = await this.policy();
+    const records = await this.records();
+    const out = [];
+    for (const copy of this.#copies(records, policy, native.target)) {
+      if (copy.kind === "picture" && native.act === "edit") continue;
+      // a resent act (a purge's operation id sent again) does not carry twice what already landed
+      if (records.get(faceKey(native.target, copy.record.transport, copy.record.attachmentId, native.id))?.status === "published") continue;
+      out.push(await this.#mirrorCopy(native, copy.face, copy.record, copy.kind, 1));
+    }
+    return out;
+  }
+
+  /** @param {Face | undefined} face @param {string} transport */
+  #where(face, transport) {
+    if (!face) return "unknown";
+    const half = faceHalf(transport);
+    if (half?.where) return half.where(face.target);
+    return face.target.channel ?? (face.target.repo ? `${face.target.repo}#${face.target.issue}` : "unknown");
+  }
+
+  /**
+   * One copy, one act. @param {{ act: 'edit' | 'withdraw' | 'purge', id: string, cursor?: string, target: string }} native
+   * @param {Face | undefined} face @param {FaceRecord} base the copy's own record @param {'text' | 'picture'} kind @param {number} attempt
+   */
+  async #mirrorCopy(native, face, base, kind, attempt) {
+    const at = () => this.now().toISOString();
+    const where = this.#where(face, base.transport);
+    const row = { originId: base.originId, transport: base.transport, part: /** @type {'mirror'} */ ("mirror"), mirror: native.id, act: native.act,
+      ...(native.cursor ? { cursor: native.cursor } : {}), ...(kind === "picture" ? { attachmentId: base.attachmentId, name: base.name } : {}) };
+    const copyId = kind === "picture" ? base.fileId : base.id;
+    /** @param {FaceRecord['status']} status @param {string} code @param {string} reason */
+    const settle = async (status, code, reason) => {
+      await this.#append({ ...row, status, code, reason, attempt, at: at(), ...(copyId ? { target: copyId } : {}), ...(status === "unknown" ? { pendingAt: at() } : {}) });
+      return { transport: base.transport, kind, ...(copyId ? { copy: copyId } : {}), status, code, reason, where };
+    };
+    const half = faceHalf(base.transport);
+    if (!face) return settle("refused", "no-such-face", `out of reach: the ${base.transport} face was removed from the room's policy, so its copy stands as posted`);
+    if (!half?.mirrors) return settle("refused", "capability", `capability: the ${base.transport} face cannot ${native.act === "edit" ? "edit" : "delete"} a copy it posted; the copy stands as posted`);
+    if (kind === "text" && base.status !== "published")
+      return settle("unknown", "face-unsettled", `unknown: the copy's own publication is ${base.status}; the sweep carries the ${native.act} once it settles`);
+    let transport;
+    try { transport = await this.#transport(face); }
+    catch (e) { return settle("refused", "dark", `dark: ${bounded(e instanceof Error ? e.message : String(e))}`); }
+    /** @type {string | undefined} */
+    let text;
+    if (native.act === "edit") {
+      const now = this.lookupMessage(base.originId);
+      if (!now) return settle("refused", "no-source", "refused: the native message could not be read back for its edit");
+      if (now.withdrawn || now.purged) return settle("refused", "superseded", `refused: the message was ${now.purged ? "purged" : "withdrawn"} after this edit; the edit is not carried`);
+      const refusal = this.#precheck(face, { text: now.text, attachments: now.attachments });
+      if (refusal) return settle("refused", refusal.code, `${refusal.reason}; the copy keeps its earlier text`);
+      text = faceText({ text: now.text, attachments: now.attachments }, face.attachments, half);
+    }
+    await this.#append({ ...row, status: "pending", attempt, at: at(), pendingAt: at(), ...(copyId ? { target: copyId } : {}) });
+    try {
+      if (native.act === "edit") {
+        if (typeof transport.update !== "function") return settle("refused", "capability", `capability: the ${base.transport} face cannot edit a copy it posted`);
+        await transport.update({ ts: String(copyId), text: String(text), .../** @type {any} */ (half.postOptions(base.originId)) });
+      } else if (kind === "picture") {
+        if (typeof transport.removeFile !== "function") return settle("refused", "capability", `capability: the ${base.transport} face cannot delete a picture it uploaded`);
+        await transport.removeFile({ fileId: String(copyId) });
+      } else {
+        if (typeof transport.remove !== "function") return settle("refused", "capability", `capability: the ${base.transport} face cannot delete a copy it posted`);
+        await transport.remove({ ts: String(copyId) });
+      }
+    } catch (e) {
+      const c = classifyFaceFailure(e, base.transport);
+      return settle(c.status, c.code, c.reason);
+    }
+    await this.#append({ ...row, status: "published", attempt, at: at(), via: "response", ...(copyId ? { target: copyId } : {}) });
+    return { transport: base.transport, kind, ...(copyId ? { copy: copyId } : {}), status: /** @type {const} */ ("published"), where };
+  }
+
+  /**
+   * The sweep's turn on one stale mirror row: carried again when its copy is published (every act
+   * here is idempotent on the far side, and the copy's id is read afresh, so a copy reposted by a
+   * reconciliation is the one reached), refused when the copy never landed, left while it is unsettled.
+   * @param {Face} face @param {FaceRecord} r @param {Map<string, FaceRecord>} records
+   */
+  async #redriveMirror(face, r, records) {
+    const base = records.get(faceKey(r.originId, r.transport, r.attachmentId));
+    const kind = r.attachmentId ? "picture" : "text";
+    const attempt = (r.attempt ?? 1) + 1;
+    const at = this.now().toISOString();
+    const row = { originId: r.originId, transport: r.transport, part: /** @type {'mirror'} */ ("mirror"), mirror: r.mirror, act: r.act,
+      ...(r.cursor ? { cursor: r.cursor } : {}), ...(r.attachmentId ? { attachmentId: r.attachmentId, name: r.name } : {}) };
+    if (!base || base.status === "refused") {
+      await this.#append({ ...row, status: "refused", code: "no-copy", reason: "refused: the copy never landed, so there is nothing to carry this to", attempt: r.attempt, at });
+      return "no-copy";
+    }
+    if (base.status !== "published") return "waiting";
+    if (attempt > FACE_MAX_ATTEMPTS) {
+      await this.#append({ ...row, status: "refused", code: "exhausted", reason: `exhausted: ${FACE_MAX_ATTEMPTS} attempts and none confirmed on the face`, attempt: r.attempt, at });
+      return "exhausted";
+    }
+    const done = await this.#mirrorCopy({ act: /** @type {any} */ (r.act), id: String(r.mirror), cursor: r.cursor, target: r.originId }, face, base, kind, attempt);
+    return done.status === "published" ? "carried" : done.status;
+  }
+
+  /**
+   * A purge's reach: carry the deletion to every copy of every purged message, and answer within
+   * `deadlineMs` with the copies the purge could not delete (`facesOutOfReach`). A copy whose
+   * deletion did not confirm by then is listed, and its deletion goes on in `work`; a copy whose
+   * own publication is unsettled is listed, since it may yet land. Each entry is `{ transport,
+   * channel, ts }` for a text copy and `{ transport, channel, file }` for a picture, with the reason.
+   * @param {{ id: string, cursor?: string, purged: string[] }} purge @param {{ deadlineMs: number }} opts
+   * @returns {Promise<{ facesOutOfReach: Record<string, string>[], work: Promise<unknown> }>}
+   */
+  async purge(purge, { deadlineMs }) {
+    const work = (async () => {
+      for (const target of purge.purged) await this.mirror({ act: "purge", id: purge.id, cursor: purge.cursor, target });
+    })();
+    /** @type {NodeJS.Timeout | undefined} */
+    let timer;
+    const tracked = work.catch((e) => { this.warn(`face purge carry failed: ${bounded(e instanceof Error ? e.message : String(e))}`); });
+    await Promise.race([tracked, new Promise((resolve) => { timer = setTimeout(resolve, deadlineMs); })]);
+    clearTimeout(timer);
+    const policy = await this.policy();
+    const records = await this.records();
+    /** @type {Record<string, string>[]} */
+    const facesOutOfReach = [];
+    for (const target of purge.purged) {
+      for (const copy of this.#copies(records, policy, target)) {
+        const done = records.get(faceKey(target, copy.record.transport, copy.record.attachmentId, purge.id));
+        if (done?.status === "published") continue;
+        const where = this.#where(copy.face, copy.record.transport);
+        /** @type {Record<string, string>} */
+        const id = copy.kind === "picture" ? { file: String(copy.record.fileId) } : copy.record.id ? { ts: String(copy.record.id) } : {};
+        const reason = done?.reason ?? (done?.status === "pending" || !done ? "unconfirmed when the receipt was written; the deletion goes on and `agora faces --for` reads its outcome" : done.status);
+        facesOutOfReach.push({ transport: copy.record.transport, channel: where, ...id, message: target, reason: redact(String(reason)) });
+      }
+    }
+    return { facesOutOfReach, work: tracked };
+  }
+
   /** Is this raw Slack message from the seat's own bot account? (The Slack half's rule, kept here by name.) @param {any} m @param {{ id: string, name: string, botId?: string }} who */
   static ownAccount(m, who) { return slackOwnAccount(m, who); }
 
@@ -815,6 +1018,14 @@ export class FaceRunner {
         status: "refused", code: "exhausted", reason: `exhausted: ${FACE_MAX_ATTEMPTS} attempts and none confirmed on the channel`, attempt: record.attempt, at: at() });
       return { outcome: "exhausted", record: line };
     }
+    // a message withdrawn or purged since its face was attempted is never reposted: the repost
+    // would put back on the face what the room has taken back
+    const standing = this.lookupMessage(record.originId);
+    if (standing?.withdrawn || standing?.purged) {
+      const line = await this.#append({ originId: record.originId, transport: face.transport, ...(record.part ? { part: record.part, attachmentId: record.attachmentId } : {}),
+        status: "refused", code: "withdrawn", reason: `refused: the native message was ${standing.purged ? "purged" : "withdrawn"} before its copy was confirmed; no repost`, attempt: record.attempt, at: at() });
+      return { outcome: "refused", record: line };
+    }
     if (record.part === "attachment") {
       const pending = await this.#append({ ...record, status: "pending", attempt, at: at(), pendingAt: at() });
       const status = await this.#complete(face, transport, pending);
@@ -836,7 +1047,14 @@ export class FaceRunner {
    * that is not already quarantined is reconciled. Returns `held: true` when any reconciliation
    * read failed, and the caller holds ingestion of this room for the tick.
    */
-  async sweep() {
+  sweep() {
+    // one sweep at a time per runner: two concurrent sweeps would reconcile one face twice and
+    // could repost it twice; a caller that arrives mid-sweep shares the sweep in progress
+    if (!this.sweeping) this.sweeping = this.#sweep().finally(() => { this.sweeping = undefined; });
+    return this.sweeping;
+  }
+
+  async #sweep() {
     const policy = await this.policy();
     const records = await this.records();
     const nowMs = this.now().getTime();
@@ -846,7 +1064,16 @@ export class FaceRunner {
     for (const [key, r] of records) {
       const face = policy.faces.find((f) => f.transport === r.transport);
       if (!face) continue;
+      // a publication this runner still has in flight is a slow call, not a dead writer
+      if (this.inflight.has(r.originId)) continue;
       const age = nowMs - Date.parse(r.pendingAt ?? r.at);
+      if (r.part === "mirror") {
+        if ((r.status === "pending" || r.status === "unknown") && age > this.settleMs) {
+          const outcome = await this.#redriveMirror(face, r, records);
+          outcomes.push({ key, outcome });
+        }
+        continue;
+      }
       if (r.status === "pending" && age > this.settleMs) {
         await this.#append({ originId: r.originId, transport: r.transport, ...(r.part ? { part: r.part, attachmentId: r.attachmentId } : {}),
           status: "unknown", code: "stale-pending", reason: "unknown: a pending face outlived the settle window (its writer died); reconciling before any ingestion", attempt: r.attempt, at: this.now().toISOString(), pendingAt: r.pendingAt ?? r.at });

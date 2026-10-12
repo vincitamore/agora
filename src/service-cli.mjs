@@ -209,7 +209,7 @@ export async function serviceStatus(stateRoot) {
 
 /**
  * Run the service in this process until SIGTERM/SIGINT. Used by the supervisor child.
- * @param {{ root: string, accountId: string, seatLabel: string, authorityId?: string, build?: import("./harness.mjs").BuildIdentity }} options
+ * @param {{ root: string, accountId: string, seatLabel: string, authorityId?: string, build?: import("./harness.mjs").BuildIdentity, faces?: any }} options
  */
 export async function runService(options) {
   const service = new NativeRoomService(options);
@@ -261,7 +261,9 @@ async function unlinkDescriptor(stateRoot) {
 }
 
 /**
- * @param {{ root: string, entry: string, execPath: string, accountId: string, seatLabel: string, authorityId?: string }} options
+ * @param {{ root: string, entry: string, execPath: string, accountId: string, seatLabel: string, authorityId?: string, configPath?: string }} options
+ * `configPath` is the config the starter read; the service reads the same one (its faces borrow
+ * tokens named there) and never writes it.
  */
 export async function startService(options) {
   await mkdir(options.root, { recursive: true, mode: 0o700 });
@@ -280,6 +282,7 @@ export async function startService(options) {
       AGORA_SERVICE_ACCOUNT: options.accountId,
       AGORA_SERVICE_LABEL: options.seatLabel,
       AGORA_SERVICE_AUTHORITY: options.authorityId ?? '',
+      ...(options.configPath ? { AGORA_CONFIG: options.configPath } : {}),
     },
     detached: true,
     stdio: "ignore",

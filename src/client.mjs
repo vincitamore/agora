@@ -76,9 +76,11 @@ export * from "./client-attachments.mjs";
 /**
  * `purged` lists the messages this purge took, in log order (an earlier purge's are not listed again);
  * `blobsRemoved` counts the attachment blobs custody let go of; `facesOutOfReach` the copies a face
- * already published, which a purge cannot reach.
+ * already published that the purge could not delete (a face that cannot delete, or a deletion not
+ * confirmed when the receipt was written): `ts` for a text copy, `file` for a picture, `message` the
+ * purged message it copies, and the reason.
  * @typedef {{ id: string, cursor: string, duplicate: boolean, operationId: string, purged: string[], blobsRemoved: number,
- *   facesOutOfReach: Array<{ transport: string, channel: string, ts: string }> }} PurgeReceipt
+ *   facesOutOfReach: Array<{ transport: string, channel: string, ts?: string, file?: string, message: string, reason: string }> }} PurgeReceipt
  */
 /**
  * `message` sees each message once, in order. `annotation`, when given, sees each annotation once,

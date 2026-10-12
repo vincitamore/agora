@@ -635,6 +635,18 @@ picture row saying so, never a copy). A reconcile read truncated at the page cap
 no repost: "not found" is not known, the row stays `unknown`, and a later covered read is
 what may repost.
 
+**The seat service publishes the faces; the room's later acts follow the copy.** The daemon
+`service start` launches runs every face: a committed message's rows ride its ack and the calls
+run after it, so a dark face is a row, never a failed post. It borrows each face's token from the
+config room the face names, read and never written. An `edit` reaches a published Slack copy by
+`chat.update` (rider kept); a `withdraw` deletes it by `chat.delete`, and its uploaded pictures by
+`files.delete`; pin and unpin cross nothing. Each is a mirror row beside the copy's own in
+`faces --for` (`face slack edit on <ts> published`). A message that arrived from a face (`via
+slack-face`) is never faced back to it. At start, and on a slow tick, the service sweeps: a
+`pending` face whose writer died becomes `unknown` and is reconciled against the channel before any
+repost, a message withdrawn or purged meanwhile is never reposted, and a stale mirror is carried
+again. A GitHub face edits and deletes nothing: its mirror rows are `refused` by `capability`.
+
 **A native room keeps files, edits and removals as records.** `post <room> --attach <path>`
 (repeatable) uploads each file into the room's custody and posts carrying it; the kind is what the
 bytes prove, never the name. `attachment get <room> <attachment id> --out <path>` writes the bytes
@@ -647,7 +659,9 @@ on the CLI that is any session on this seat. A withdraw removes no bytes. `room 
 edits' texts) leave the log, custody drops the bytes no remaining message names, and every record
 keeps its place and cursor, so a purged message reads back with an empty text. Only this seat's own
 connections purge (`purge-refused-remote`); a room made before log version 2 refuses
-(`purge-unsupported-log-version`); a copy a face already published is out of reach. Only a message
+(`purge-unsupported-log-version`). The purge deletes the copies its faces published within a few
+seconds and its receipt lists, as `facesOutOfReach`, each copy it could not delete (a face that cannot
+delete, a refused delete, or one not confirmed in time, whose deletion goes on). Only a message
 carries attachments (`attachment-invalid` otherwise). `post --attach` sends an image's width and
 height from its header. A purge never collects bytes an upload or an append is about to reference.
 An app that shows messages subscribes with a `purge` handler (`purge-v1`) and strikes them with

@@ -15,6 +15,7 @@ import path from "node:path";
 import {
   AgoraError,
   EXIT,
+  configPath,
   cursorKey,
   fragilePath,
   loadConfig,
@@ -30,6 +31,7 @@ import {
   readCursorFile,
 } from "../src/core.mjs";
 import { TRANSPORTS, createTransport, tokenSource } from "../src/transports/index.mjs";
+import { configFaceTransports } from "../src/native-faces-wiring.mjs";
 import { asBoardSubject } from "../src/board-subject.mjs";
 import { watch } from "../src/watch.mjs";
 
@@ -566,7 +568,9 @@ const OPTIONS = /** @type {const} */ ({
  * @param {Record<string, any>} r
  */
 function faceRowText(r) {
-  const who = `${r.transport}${r.part === "attachment" ? ` picture ${r.name ?? r.attachmentId}` : ""}`;
+  const who = r.part === "mirror"
+    ? `${r.transport} ${r.act}${r.attachmentId ? ` of picture ${r.name ?? r.attachmentId}` : ""}${r.target ? ` on ${r.target}` : ""}`
+    : `${r.transport}${r.part === "attachment" ? ` picture ${r.name ?? r.attachmentId}` : ""}`;
   const tail = r.reason ? `: ${redact(String(r.reason))}` : r.id ? ` ${r.id}${Array.isArray(r.ids) && r.ids.length > 1 ? ` (+${r.ids.length - 1})` : ""}` : "";
   const quarantine = Array.isArray(r.quarantine) && r.quarantine.length ? `  quarantined ${r.quarantine.join(" ")}` : "";
   return `face ${who} ${r.status}${tail}${quarantine}`;
@@ -1320,14 +1324,18 @@ async function main(argv) {
     if (action === "daemon") {
       const accountId = process.env.AGORA_SERVICE_ACCOUNT || await seatAccountId(stateRoot);
       const label = process.env.AGORA_SERVICE_LABEL || seatLabel();
-      await runService({ root: stateRoot, accountId, seatLabel: label, build, authorityId: process.env.AGORA_SERVICE_AUTHORITY || undefined });
+      // the faces borrow tokens from the shared config the starter read, re-read per face transport
+      // and never written (src/native-faces-wiring.mjs)
+      const configFile = configPath(values.config);
+      await runService({ root: stateRoot, accountId, seatLabel: label, build, authorityId: process.env.AGORA_SERVICE_AUTHORITY || undefined,
+        faces: { transportFor: configFaceTransports({ loadConfig: () => loadConfig(configFile), createTransport }) } });
       await new Promise(() => {});
       return EXIT.ok;
     }
     if (action === "start") {
       const accountId = await seatAccountId(stateRoot);
       const label = seatLabel();
-      const started = await startService({ root: stateRoot, entry: entryFile, execPath: process.execPath, accountId, seatLabel: label, authorityId: values.authority });
+      const started = await startService({ root: stateRoot, entry: entryFile, execPath: process.execPath, accountId, seatLabel: label, authorityId: values.authority, configPath: configPath(values.config) });
       if (json) console.log(JSON.stringify({ type: "service", action: "start", ...started }));
       else console.log(`native service started pid ${started.pid ?? "unknown"} seat ${started.seatLabel} account ${started.accountId}`);
       return EXIT.ok;
