@@ -110,6 +110,8 @@ export class NativeFaceWiring {
     this.stores = new Map();
     /** Face work in flight (publications, mirrors, sweeps), awaited by `stop`. @type {Set<Promise<unknown>>} */
     this.work = new Set();
+    /** The same work, by the room it writes for, so a room's deletion can wait for its own. @type {Map<string, Set<Promise<unknown>>>} */
+    this.roomWork = new Map();
     /** @type {NodeJS.Timeout | undefined} */
     this.timer = undefined;
     this.stopped = false;
@@ -145,12 +147,39 @@ export class NativeFaceWiring {
     return runner;
   }
 
-  /** @param {Promise<unknown>} promise */
-  #track(promise) {
+  /** @param {Promise<unknown>} promise @param {string} [roomId] the room the work writes for */
+  #track(promise, roomId) {
     const tracked = promise.catch((e) => { this.warn(`agora: face work failed: ${e instanceof Error ? e.message : String(e)}`); });
     this.work.add(tracked);
-    void tracked.finally(() => this.work.delete(tracked));
+    const set = roomId ? this.roomWork.get(roomId) ?? new Set() : undefined;
+    if (roomId && set) { set.add(tracked); this.roomWork.set(roomId, set); }
+    void tracked.finally(() => {
+      this.work.delete(tracked);
+      if (roomId && set) { set.delete(tracked); if (!set.size && this.roomWork.get(roomId) === set) this.roomWork.delete(roomId); }
+    });
     return tracked;
+  }
+
+  /**
+   * A room is being deleted: stop facing it and wait, within `drainMs`, for the face work already
+   * running for it (publications, mirrors, its sweep and inbound tick), so no late face line lands
+   * in a directory about to be removed. Returns false when that work did not finish in time; the
+   * runner is then kept, and the caller refuses the deletion.
+   * @param {string} roomId @returns {Promise<boolean>}
+   */
+  async forget(roomId) {
+    const runner = this.runners.get(roomId);
+    const pending = [...(this.roomWork.get(roomId) ?? []), ...(runner ? [...runner.inflight.values()] : []), ...(runner?.sweeping ? [runner.sweeping] : [])];
+    if (pending.length) {
+      /** @type {NodeJS.Timeout | undefined} */
+      let timer;
+      const drained = await Promise.race([Promise.allSettled(pending).then(() => true), new Promise((resolve) => { timer = setTimeout(() => resolve(false), this.drainMs); })]);
+      clearTimeout(timer);
+      if (!drained) return false;
+    }
+    this.runners.delete(roomId);
+    this.stores.delete(roomId);
+    return true;
   }
 
   /**
@@ -164,7 +193,7 @@ export class NativeFaceWiring {
     try {
       const runner = this.runner(roomId, store);
       const { faces, settled } = await runner.face(message, { face: choice });
-      this.#track(settled);
+      this.#track(settled, roomId);
       return faces;
     } catch (e) {
       this.warn(`agora: faces for ${message?.cursor ?? "a message"} not run: ${e instanceof Error ? e.message : String(e)}`);
@@ -180,7 +209,7 @@ export class NativeFaceWiring {
   afterAnnotation(roomId, store, annotation) {
     if (this.stopped || (annotation?.act !== "edit" && annotation?.act !== "withdraw")) return;
     const runner = this.runner(roomId, store);
-    this.#track(runner.mirror({ act: annotation.act, id: String(annotation.id), cursor: annotation.cursor, target: String(annotation.target) }));
+    this.#track(runner.mirror({ act: annotation.act, id: String(annotation.id), cursor: annotation.cursor, target: String(annotation.target) }), roomId);
   }
 
   /**
@@ -194,7 +223,7 @@ export class NativeFaceWiring {
     try {
       const runner = this.runner(roomId, store);
       const { facesOutOfReach, work } = await runner.purge(purge, { deadlineMs: this.purgeDeadlineMs });
-      this.#track(work);
+      this.#track(work, roomId);
       return facesOutOfReach;
     } catch (e) {
       this.warn(`agora: the purge's face deletions not run: ${e instanceof Error ? e.message : String(e)}`);
@@ -226,14 +255,16 @@ export class NativeFaceWiring {
     for (const [roomId, runner] of this.runners) {
       if (this.stopped) return;
       const store = this.stores.get(roomId);
-      if (!store || store.closed) continue;
-      try { await runner.sweep(); }
-      catch (e) { this.warn(`agora: face sweep of ${roomId} failed: ${e instanceof Error ? e.message : String(e)}`); }
-      if (!this.onTick || this.stopped) continue;
-      try {
-        const faces = (await runner.policy()).faces.filter((f) => f.enabled);
-        if (faces.length) await this.onTick({ root: this.root, roomId, store, runner, faces });
-      } catch (e) { this.warn(`agora: face tick of ${roomId} failed: ${e instanceof Error ? e.message : String(e)}`); }
+      if (!store || store.closed || this.runners.get(roomId) !== runner) continue;
+      await this.#track((async () => {
+        try { await runner.sweep(); }
+        catch (e) { this.warn(`agora: face sweep of ${roomId} failed: ${e instanceof Error ? e.message : String(e)}`); }
+        if (!this.onTick || this.stopped) return;
+        try {
+          const faces = (await runner.policy()).faces.filter((f) => f.enabled);
+          if (faces.length) await this.onTick({ root: this.root, roomId, store, runner, faces });
+        } catch (e) { this.warn(`agora: face tick of ${roomId} failed: ${e instanceof Error ? e.message : String(e)}`); }
+      })(), roomId);
     }
   }
 

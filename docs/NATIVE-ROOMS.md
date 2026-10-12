@@ -148,7 +148,29 @@ On the CLI, `post`, `read`, `watch`, `join`, `cursor`, `who` and `export-record`
 reads nothing more on a native room, because the room stream already carries every reply; each says
 so, and no reply is delivered twice. A face cannot flatten a thread: a native reply faced to GitHub
 is refused `thread:`, and one faced to Slack lands in its root's Slack thread or, when the root was
-never published to that face, is refused `thread:` as well.
+never published to that face, is refused `thread:` as well. A root whose copy is still pending is not
+a root that was never published: the reply waits for that copy and lands under it, is refused
+`root-refused` when the root's copy ends refused, and stays `unknown` under `root-unknown` while the
+root's copy is unknown, published by the sweep once the root's copy reconciles. The waiting row makes
+no call, and the restart sweep picks it up, so the reply is posted once.
+
+## Deleting a room
+
+`agora service room delete <roomId|alias> --confirm <roomId> [--force]` closes a native room's
+lifecycle on this seat: the running service drops the room and deletes its directory under
+`native/rooms/<roomId>/`, which holds the log, the custody and the face records. The shared config
+is read, never written: a room a config row still names is refused `room-in-config`, and the operator
+removes the row first. A live member route or a live subscriber refuses `room-in-use` unless
+`--force`, which tears the routes down (their secrets removed, as a close removes them) and closes
+the subscribing connections. A `--confirm` that is not the exact room id refuses `confirm-required`
+or `confirm-mismatch`; a room still opening, or whose face work does not drain within the face drain
+bound, refuses `room-busy`; a room the seat does not hold refuses `room-unknown`. Only the seat's own
+connections may ask: a member session's request is refused by the member allowlist.
+
+Deleting a room deletes no copy on another transport. The copies its faces published on Slack or
+GitHub stay, and the verb lists every one the face records name, on a refusal as well as on success,
+so the operator purges those messages (`agora room purge`) first while the room still exists. A room
+id may be minted again after its deletion; nothing of the deleted room carries over.
 
 ## App clients and `via`
 

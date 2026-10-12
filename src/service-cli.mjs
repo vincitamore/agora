@@ -451,3 +451,26 @@ export async function createServiceRoom(stateRoot, roomId) {
     client.close();
   }
 }
+
+/**
+ * Remove a native room from the running service and delete its stored log, custody and face
+ * records. The caller has already refused a room the shared config names; this only asks the
+ * service, which refuses `room-unknown`, `room-in-use` (unless `force`) and `room-busy` by name.
+ * Never writes the shared config. Faced copies on other transports are not deleted.
+ * @param {string} stateRoot @param {string} roomId @param {{ force?: boolean }} [options]
+ */
+export async function deleteServiceRoom(stateRoot, roomId, { force = false } = {}) {
+  if (!ROOM_ID_RE.test(roomId)) throw new AgoraError("native room id must be 32 lowercase hexadecimal characters", EXIT.usage);
+  const { client } = await connectSeatService(stateRoot);
+  try {
+    const result = await client.request("delete-room", { roomId, ...(force ? { force: true } : {}) });
+    return { roomId: String(result.roomId), deleted: result.deleted === true, routesClosed: Number(result.routesClosed ?? 0), subscribersClosed: Number(result.subscribersClosed ?? 0) };
+  } catch (e) {
+    const code = /** @type {any} */ (e)?.code;
+    const message = e instanceof Error ? e.message : String(e);
+    if (typeof code === "string" && /^room-/.test(code)) throw Object.assign(new AgoraError(message.replace(/^request-refused: /, ""), EXIT.error), { code });
+    throw e;
+  } finally {
+    client.close();
+  }
+}

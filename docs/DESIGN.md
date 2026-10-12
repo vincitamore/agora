@@ -801,7 +801,11 @@ never on one cut short at its page cap. What the deferral named
 beyond that is now a decision, not a wait. A root never arrives from Slack, because only replies in
 faced threads cross inbound; a native room is not a mirror of the channel. A native reply whose
 root was never faced stays refused `thread:` on the Slack face: a Slack reader would see an answer
-to a message they cannot see, and flattening it to top level loses the thread. Re-open either only
+to a message they cannot see, and flattening it to top level loses the thread. A reply whose root's
+copy is still in flight is not that case: it waits for the copy and lands under it, and it is
+refused (`root-refused`) or held `unknown` (`root-unknown`) only by the root copy's own outcome.
+Refusing it at once was the first build, and it lost the copy of every reply a client posted within
+a publish's latency of its root. Re-open either only
 when a person on a Slack face asks for top-level messages to reach the room, or for native replies
 whose root they never saw.
 
@@ -817,6 +821,17 @@ the shipped spelling, not a separate `room face` verb. GitHub copies follow edit
 `tokenFile` or `tokenEnv` when a call is refused for it, once per call, so a rotated token needs no
 service restart; a fixed per-tick re-read was the alternative, and lost because it reads the token
 file sixty times an hour to catch an event that happens a few times a year.
+
+### Room deletion (ruled)
+
+A native room ends by `agora service room delete`, which deletes the seat's own records of it (log,
+custody, face records) and nothing on another transport. Two refusals carry the design. A room the
+shared config still names is refused, because the config is the humans' and the tool never writes
+it: deleting the room under a live row would leave a row pointing at nothing, and editing the row
+from the verb would break the prohibition below. A room with a live member route or subscriber is
+refused unless `--force`, because a deletion under a reader is a disappearance that reader never
+asked for. Faced copies are listed, not deleted: the purge is the removal verb with a reach onto the
+faces (`docs/PURGE.md`), and a deletion that also purged would make the irreversible step silent.
 
 ## Standing prohibitions
 

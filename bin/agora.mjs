@@ -97,7 +97,7 @@ import { closeServiceRoute, createServiceRoom, listServiceRoutes, openServiceRou
   seatAccountId, seatLabel, serviceStatus, startService, stopService,
   readAuthorityInput, writeAuthorityOutput, generateSeatAuthority, publicSeatAuthority, prepareSeatAuthorityEnrollment,
   signSeatAuthorityEnrollment, completeSeatAuthorityEnrollment, signSeatRouteAct,
-  challengeServiceRoute, statusServiceRouteAct } from "../src/service-cli.mjs";
+  challengeServiceRoute, statusServiceRouteAct, deleteServiceRoom } from "../src/service-cli.mjs";
 import { spawnFromFile } from "../src/spawn-cli.mjs";
 import { runUsage } from "../src/usage-cli.mjs";
 import { runUsageSessionsCli } from "../src/session-accounting.mjs";
@@ -105,7 +105,7 @@ import { readShadowArgs, runEconomyShadowCli, ShadowInputError } from "../src/ec
 import { clearStandDown, clearWatchStop, completeStandDownAck, declareStandDown, listStandDowns, standDownRequested } from "../src/stand-down.mjs";
 import { DEFAULT_DEAF_SECONDS, DEFAULT_IDLE_SECONDS, DEFAULT_MAX_CONTEXT, DEFAULT_MIN_CONTEXT, ROOM_MECHANICS_DOC, assertResidentSlug, configuredResidents, planCycle, readInheritMarker, removeInheritMarker, renderResidentPrompt, restartCommand, writeInheritMarker } from "../src/resident.mjs";
 import { nativeRecordArgumentRefusal, nativeRecordVerb, prepareAttachments, runNativeRecordVerb } from "../src/cli-native-records.mjs";
-import { FACE_ATTACHMENT_MODES, FACE_BUILT, FACE_SELECTORS, appendFaceRecord, facePolicyPath, listFaceRecords, normalizeSelectors, readFacePolicy, selectFaces, writeFacePolicy } from "../src/faces.mjs";
+import { FACE_ATTACHMENT_MODES, FACE_BUILT, FACE_SELECTORS, appendFaceRecord, faceCopies, facePolicyPath, listFaceRecords, normalizeSelectors, readFacePolicy, selectFaces, writeFacePolicy } from "../src/faces.mjs";
 
 /**
  * Post and record the id in this session's ledger: BEFORE the send where the transport can name
@@ -326,16 +326,18 @@ const SCHEMA = {
     share: { args: ["<room>", "[file ...]"], options: {"--to <account-id>": "authenticated recipient account; repeatable, maximum four", "--once": "consume each recipient route after verified receipt", "--expires-in <seconds>": "60 to 86400, default 3600", "--list": "local offers and measured liveness", "--prune": "remove expired offline offers owned by this session", "--stop <id>": "stop a local offer", "--resume <id>": "reconcile uncertain publication without duplicate posting", "--forget <id>": "explicitly release the operation guard after checking publication"}, does: "snapshot named files and publish a recipient-restricted native transfer offer after every route is ready" },
     fetch: { args: ["<room>","<offer-id>"], options: {"--into <directory>": "destination; existing files are never overwritten", "--pages <n>": "offer discovery depth"}, does: "explicitly receive, verify and commit files before acknowledging; receiving an offer never executes or fetches automatically" },
     service: {
-      args: ["start|stop|status|room create|route open/list/close/challenge/act-status"],
+      args: ["start|stop|status|room create|room delete|route open/list/close/challenge/act-status"],
       options: {
         "--room-id <id>": "with room create: use this 32-hex id instead of minting one",
+        "--confirm <roomId>": "with room delete: the exact 32-hex room id, typed again; anything else refuses confirm-mismatch",
+        "--force": "with room delete: also close the room's live member routes and subscribers (refused room-in-use without it)",
         "--allow-key <nodekey:64hex>": "with route open/close: the member's PUBLIC node key as enroll prints it; never a private key, a key file or a digest",
         "--out <path>": "with route open: also write the descriptor here for the operator to carry",
         "--authority <a-64hex>": "with start: load counter-seat authority and policy once; rotation requires restart, a cooperative pin, not OS isolation",
         "--proof-file <path>": "with route open/close: detached proof for a retained challenge; unsigned route effects refuse",
         "--act <room-enroll|room-revoke>": "with route challenge: prepare this act without effects; --out writes a new public challenge file",
       },
-      does: "the seat-local native room service: start writes native/service.json and binds the endpoint; stop is bounded; status reports the descriptor without the nonce; room create mints a 32-hex id on the running service and prints it; route open admits one enrolled key over Tailcat and route close revokes it, the service owning the route rather than the verb. Never writes the shared config",
+      does: "the seat-local native room service: start writes native/service.json and binds the endpoint; stop is bounded; status reports the descriptor without the nonce; room create mints a 32-hex id on the running service and prints it; room delete removes a native room the config no longer names and deletes its log, custody and face records, never its faced copies on other transports, which it lists; route open admits one enrolled key over Tailcat and route close revokes it, the service owning the route rather than the verb. Never writes the shared config",
     },
     authority: {
       args: ['keygen|public|enrollment-challenge|sign-enrollment|enroll|sign'],
@@ -506,6 +508,7 @@ const OPTIONS = /** @type {const} */ ({
   forget: { type: "boolean", default: false },
   inherit: { type: "string" },
   force: { type: "boolean", default: false },
+  confirm: { type: "string" },
   idle: { type: "string" },
   "min-context": { type: "string" },
   "max-context": { type: "string" },
@@ -573,7 +576,7 @@ function faceRowText(r) {
   const who = r.part === "mirror"
     ? `${r.transport} ${r.act}${r.attachmentId ? ` of picture ${r.name ?? r.attachmentId}` : ""}${r.target ? ` on ${r.target}` : ""}`
     : `${r.transport}${r.part === "attachment" ? ` picture ${r.name ?? r.attachmentId}` : ""}`;
-  const tail = r.reason ? `: ${redact(String(r.reason))}` : r.id ? ` ${r.id}${Array.isArray(r.ids) && r.ids.length > 1 ? ` (+${r.ids.length - 1})` : ""}` : "";
+  const tail = r.reason ? `: ${redact(String(r.reason))}` : r.awaitingRoot && r.status === "pending" ? `: awaiting its root's copy (${r.awaitingRoot.slice(0, 12)})` : r.id ?` ${r.id}${Array.isArray(r.ids) && r.ids.length > 1 ? ` (+${r.ids.length - 1})` : ""}` : "";
   const quarantine = Array.isArray(r.quarantine) && r.quarantine.length ? `  quarantined ${r.quarantine.join(" ")}` : "";
   return `face ${who} ${r.status}${tail}${quarantine}`;
 }
@@ -1365,7 +1368,44 @@ async function main(argv) {
         else console.log(minted);
         return EXIT.ok;
       }
-      throw new AgoraError(`agora service room needs create`, EXIT.usage);
+      if (sub === "delete") {
+        const target = rest[1] === undefined ? "" : String(rest[1]).trim();
+        if (!target) throw new AgoraError("agora service room delete needs <roomId|alias> and --confirm <roomId>", EXIT.usage);
+        // the shared config is read, never written: a room it still names is the operator's to
+        // remove from the config first, so the tool never deletes a room a row still points at
+        const rows = /** @type {Record<string, any>} */ (cfg.rooms ?? {});
+        let roomId = target;
+        if (!/^[a-f0-9]{32}$/.test(target)) {
+          const row = rows[target];
+          if (!row) throw new AgoraError(`${target} is neither a 32-hex native room id nor a room in the config`, EXIT.usage);
+          if (row.transport !== "native" || typeof row.roomId !== "string") throw new AgoraError(`room ${target} is a ${row.transport} room, not a native room this seat hosts`, EXIT.usage);
+          roomId = row.roomId;
+        }
+        const naming = Object.entries(rows).filter(([, row]) => row && row.transport === "native" && row.roomId === roomId).map(([alias]) => alias);
+        if (naming.length)
+          throw Object.assign(new AgoraError(`room-in-config: the shared config still names native room ${roomId} (${naming.map((a) => `rooms.${a}`).join(", ")}); remove the row by hand first, then delete; nothing was deleted`, EXIT.error), { code: "room-in-config" });
+        const copies = await faceCopies(stateRoot, roomId);
+        const copyLine = (/** @type {any} */ c) => `  ${c.transport} ${c.where} ${c.file ? `file ${c.file}${c.name ? ` (${c.name})` : ""}` : c.id ?? "(no id recorded)"} ${c.status} (message ${c.message.slice(0, 12)}${c.cursor ? `, cursor ${c.cursor}` : ""})`;
+        const copiesNote = copies.length
+          ? `deleting a room does not delete its faced copies: ${copies.length} cop${copies.length === 1 ? "y" : "ies"} its face records name stay on their transports (purge the messages first with agora room purge if they should go):`
+          : "deleting a room does not delete its faced copies; its face records name none";
+        const confirm = values.confirm === undefined ? undefined : String(values.confirm);
+        if (confirm !== roomId) {
+          if (!json) { console.error(copiesNote); for (const c of copies) console.error(copyLine(c)); }
+          const code = confirm === undefined ? "confirm-required" : "confirm-mismatch";
+          throw Object.assign(new AgoraError(`${code}: --confirm must be the exact room id ${roomId}${confirm === undefined ? "" : `, not ${JSON.stringify(confirm)}`}; nothing was deleted`, EXIT.usage), { code });
+        }
+        const deleted = await deleteServiceRoom(stateRoot, roomId, { force: values.force });
+        if (json) console.log(JSON.stringify({ type: "service", action: "room-delete", ...deleted, facesNotDeleted: copies,
+          note: "deleting a room does not delete its faced copies on slack or github; facesNotDeleted lists the ones its face records named" }));
+        else {
+          console.log(`deleted native room ${roomId}: its log, custody and face records are gone${deleted.routesClosed || deleted.subscribersClosed ? ` (--force closed ${deleted.routesClosed} member route${deleted.routesClosed === 1 ? "" : "s"} and ${deleted.subscribersClosed} subscriber${deleted.subscribersClosed === 1 ? "" : "s"})` : ""}`);
+          console.log(copiesNote);
+          for (const c of copies) console.log(copyLine(c));
+        }
+        return EXIT.ok;
+      }
+      throw new AgoraError(`agora service room needs create or delete`, EXIT.usage);
     }
     if (action === "route") {
       const sub = rest[0];
@@ -1402,7 +1442,7 @@ async function main(argv) {
       }
       throw new AgoraError(`agora service route needs open, list or close`, EXIT.usage);
     }
-    throw new AgoraError(`agora service needs start, stop, status, room create or route open/list/close`, EXIT.usage);
+    throw new AgoraError(`agora service needs start, stop, status, room create, room delete or route open/list/close`, EXIT.usage);
   }
 
   if (verb === "spawn") {

@@ -136,10 +136,14 @@ export function faceHalf(transport) { return Object.prototype.hasOwnProperty.cal
  *   cursor?: string, selector?: string, attempt?: number, pendingAt?: string, thread?: string,
  *   id?: string, ids?: string[], reason?: string, code?: string, via?: string, quarantine?: string[],
  *   payloadDigest?: string, part?: 'attachment' | 'mirror', attachmentId?: string, fileId?: string, name?: string, withdrawnNatively?: boolean,
- *   mirror?: string, act?: 'edit' | 'withdraw' | 'purge', target?: string }} FaceRecord
+ *   mirror?: string, act?: 'edit' | 'withdraw' | 'purge', target?: string, awaitingRoot?: string }} FaceRecord
  * A mirror row (`part: "mirror"`) carries a native edit, withdraw or purge (`act`, the native
  * record's id in `mirror`) to one published copy (`target`: the transport's id of the copy, or the
  * file id of a picture, whose `attachmentId` the row then names).
+ * A reply row carrying `awaitingRoot` (the root's native id) has made no call: its root's own copy
+ * was unsettled when the reply committed, so it waits (`pending`), or stays `unknown` under
+ * `root-unknown` while the root's copy is unknown, and is published under the root's copy once
+ * that copy is published. A line without the field clears it.
  */
 /** @typedef {{ transport: string, status: 'pending'|'published'|'refused'|'unknown', reason?: string, id?: string, attachmentId?: string }} FaceStatus */
 /** @typedef {{ id: string, name: string, kind: 'human'|'agent'|'system'|'unknown', account?: { transport: string, id: string } }} Member */
@@ -285,6 +289,7 @@ export function foldFaceRecords(lines) {
     /** @type {FaceRecord} */
     const next = { ...(prev ?? {}), ...line };
     if (line.status === "pending") { delete next.id; delete next.ids; delete next.reason; delete next.code; delete next.via; }
+    if (!line.awaitingRoot) delete next.awaitingRoot;
     if (prev?.quarantine || line.quarantine) next.quarantine = [...new Set([...(prev?.quarantine ?? []), ...(line.quarantine ?? [])])];
     byKey.set(key, next);
   }
@@ -314,6 +319,33 @@ export async function readFaceRecords(stateRoot, roomId) {
     catch { /* a torn last line from a killed writer is not a record; the next append lands after it */ }
   }
   return foldFaceRecords(lines);
+}
+
+/**
+ * Every copy on a face the room's records name: each text copy that is not refused (published,
+ * or unknown or pending and so possibly there) and each uploaded picture, with where it lives in
+ * the transport's own words. A read of the seat's own files; it calls no transport. Deleting a
+ * room deletes these records and none of these copies, so this is what the operator purges first.
+ * @param {string} stateRoot @param {string} roomId
+ * @returns {Promise<{ transport: string, where: string, status: FaceRecord['status'], message: string, cursor?: string, id?: string, file?: string, name?: string }[]>}
+ */
+export async function faceCopies(stateRoot, roomId) {
+  const policy = await readFacePolicy(stateRoot, roomId).catch(() => /** @type {FacePolicy} */ ({ version: POLICY_VERSION, roomId, updatedAt: null, faces: [] }));
+  const records = await readFaceRecords(stateRoot, roomId);
+  // a copy a native withdraw or purge already deleted on the face is gone: it is left off the list
+  const deleted = new Set([...records.values()].filter((r) => r.part === "mirror" && r.status === "published" && (r.act === "withdraw" || r.act === "purge"))
+    .map((r) => faceKey(r.originId, r.transport, r.attachmentId)));
+  const out = [];
+  for (const r of records.values()) {
+    if (r.part === "mirror" || r.status === "refused") continue;
+    if (r.part === "attachment" && !(r.status === "published" && r.fileId)) continue;
+    if (deleted.has(faceKey(r.originId, r.transport, r.attachmentId))) continue;
+    const face = policy.faces.find((f) => f.transport === r.transport);
+    const where = face ? (faceHalf(r.transport)?.where?.(face.target) ?? face.target.channel ?? "unknown") : "unknown";
+    out.push({ transport: r.transport, where, status: r.status, message: r.originId, ...(r.cursor ? { cursor: r.cursor } : {}),
+      ...(r.part === "attachment" ? { file: String(r.fileId), ...(r.name ? { name: r.name } : {}) } : r.id ? { id: r.id } : {}) });
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -621,27 +653,45 @@ export class FaceRunner {
         continue;
       }
       const half = /** @type {FaceHalf} */ (faceHalf(face.transport));
+      const text = faceText(message, face.attachments, half);
+      const payloadDigest = `sha256:${createHash("sha256").update(half.encode(text)).digest("hex")}`;
+      // A reply whose root's own copy on this face is still unsettled (pending, or unknown after a
+      // lost response) waits for that copy instead of being judged against it: a root whose publish
+      // is in flight is not a root that was never published. The waiting row makes no call; the
+      // settled half below publishes it under the root's copy, or says by name why it cannot.
+      const root = message.thread && half.threads ? records.get(faceKey(String(message.thread), face.transport)) : undefined;
+      if (root && (root.status === "pending" || root.status === "unknown")) {
+        const record = await this.#append({ originId: message.id, cursor: message.cursor, transport: face.transport, status: "pending", selector, attempt: 1, at, pendingAt: at,
+          awaitingRoot: String(message.thread), payloadDigest });
+        pending.push({ face, record });
+        faces.push({ transport: face.transport, status: "pending" });
+        continue;
+      }
       const thread = half.threads ? this.#faceThread(records, face, message) : undefined;
       // A native reply whose root has no thread on this face (the root was never published to it,
-      // and the reply names no faced message) has nowhere to land but top level, which would flatten
-      // the thread. It is refused in the face's own words instead; mapping a native thread onto a
-      // face thread it never had is a separate piece of work.
+      // or its copy was refused, and the reply names no faced message) has nowhere to land but top
+      // level, which would flatten the thread. It is refused in the face's own words instead.
       if (message.thread && thread === undefined) {
-        const reason = `thread: this reply's root has no thread on the ${face.transport} face (the root was not published there), and a reply is never flattened to top level`;
-        await this.#append({ originId: message.id, cursor: message.cursor, transport: face.transport, status: "refused", code: "thread", reason, selector, attempt: 0, at });
+        const { code, reason } = this.#noRootThread(face, root);
+        await this.#append({ originId: message.id, cursor: message.cursor, transport: face.transport, status: "refused", code, reason, selector, attempt: 0, at });
         faces.push({ transport: face.transport, status: "refused", reason });
         continue;
       }
-      const text = faceText(message, face.attachments, half);
       const record = await this.#append({ originId: message.id, cursor: message.cursor, transport: face.transport, status: "pending", selector, attempt: 1, at, pendingAt: at,
-        ...(thread ? { thread } : {}), payloadDigest: `sha256:${createHash("sha256").update(half.encode(text)).digest("hex")}` });
+        ...(thread ? { thread } : {}), payloadDigest });
       pending.push({ face, record });
       faces.push({ transport: face.transport, status: "pending" });
     }
     const settled = (async () => {
       /** @type {FaceStatus[]} */
       const out = [];
-      for (const { face, record } of pending) out.push(...(await this.#publish(face, message, record)));
+      for (const { face, record } of pending) {
+        if (!record.awaitingRoot) { out.push(...(await this.#publish(face, message, record))); continue; }
+        // the root's publication, if this runner has it in flight, settles first; then the reply follows it
+        const rootWork = this.inflight.get(record.awaitingRoot);
+        if (rootWork) await rootWork;
+        out.push(...(await this.#followRoot(face, message, record)));
+      }
       return out;
     })();
     if (pending.length) {
@@ -649,6 +699,53 @@ export class FaceRunner {
       this.inflight.set(message.id, tracked);
     }
     return { faces, settled };
+  }
+
+  /**
+   * Why a reply has no thread on the face, by name: its root's copy was refused (`root-refused`,
+   * naming the root's own code), or the root was never faced there at all (`thread`).
+   * @param {Face} face @param {FaceRecord | undefined} root
+   */
+  #noRootThread(face, root) {
+    if (root?.status === "refused")
+      return { code: "root-refused", reason: `thread: this reply's root was refused on the ${face.transport} face (${root.code ?? "refused"}), so it has no thread there, and a reply is never flattened to top level` };
+    return { code: "thread", reason: `thread: this reply's root has no thread on the ${face.transport} face (the root was not published there), and a reply is never flattened to top level` };
+  }
+
+  /**
+   * A waiting reply meets its root's copy as it stands now. Published: one durable `pending` line
+   * naming the root's thread, then the one call. Refused or never faced: refused by name. Still
+   * pending or unknown: the reply's row is `unknown` under `root-unknown`, keeps `awaitingRoot`,
+   * and the sweep brings it back here once the root's copy settles. Nothing is posted for a reply
+   * before its line names the thread, and the waiting row itself made no call, so a restart that
+   * finds it can never post it twice.
+   * @param {Face} face @param {any} message the reply (the standing message is preferred when the room can read it) @param {FaceRecord} record its waiting row
+   * @returns {Promise<FaceStatus[]>}
+   */
+  async #followRoot(face, message, record) {
+    const at = this.now().toISOString();
+    const records = await this.records();
+    const root = records.get(faceKey(String(record.awaitingRoot), face.transport));
+    const base = { originId: record.originId, ...(record.cursor ? { cursor: record.cursor } : {}), transport: face.transport, ...(record.selector ? { selector: record.selector } : {}), attempt: record.attempt ?? 1, at };
+    const standing = this.lookupMessage(record.originId);
+    if (standing?.withdrawn || standing?.purged) {
+      const reason = `refused: the native message was ${standing.purged ? "purged" : "withdrawn"} while it waited for its root's copy; nothing was posted`;
+      await this.#append({ ...base, status: "refused", code: "withdrawn", reason });
+      return [{ transport: face.transport, status: "refused", reason }];
+    }
+    if (root?.status === "published" && root.id) {
+      const next = await this.#append({ ...base, status: "pending", pendingAt: at, thread: root.id, ...(record.payloadDigest ? { payloadDigest: record.payloadDigest } : {}) });
+      return this.#publish(face, standing ?? message, next);
+    }
+    if (!root || root.status === "refused") {
+      const { code, reason } = this.#noRootThread(face, root);
+      await this.#append({ ...base, status: "refused", code, reason });
+      return [{ transport: face.transport, status: "refused", reason }];
+    }
+    const reason = `unknown: this reply's root has no settled copy on the ${face.transport} face (the root's copy is ${root.status}${root.code ? `, ${root.code}` : ""}); the reply waits, and the sweep publishes it under the root's copy once that copy is published`;
+    if (record.status === "unknown" && record.code === "root-unknown") return [{ transport: face.transport, status: "unknown", reason: record.reason ?? reason }];
+    await this.#append({ ...base, status: "unknown", code: "root-unknown", reason, pendingAt: record.pendingAt ?? at, awaitingRoot: String(record.awaitingRoot) });
+    return [{ transport: face.transport, status: "unknown", reason }];
   }
 
   /** The refusals decided before any call: capability, thread, redacted, route, too-long. @param {Face} face @param {any} message */
@@ -1067,6 +1164,24 @@ export class FaceRunner {
       // a publication this runner still has in flight is a slow call, not a dead writer
       if (this.inflight.has(r.originId)) continue;
       const age = nowMs - Date.parse(r.pendingAt ?? r.at);
+      if (r.awaitingRoot && !r.part && (r.status === "pending" || r.status === "unknown")) {
+        // a reply left waiting for its root's copy (its writer stopped, or the root's copy was
+        // unknown): it made no call, so it is never reconciled; it follows the root's copy as it
+        // stands now. A fresh wait on a still-unsettled root is left to its own writer.
+        const rootNow = (await this.records()).get(faceKey(r.awaitingRoot, r.transport));
+        const rootUnsettled = rootNow?.status === "pending" || rootNow?.status === "unknown";
+        if (rootUnsettled && r.status === "pending" && age <= this.settleMs) continue;
+        if (rootUnsettled && r.status === "unknown") continue;
+        const message = this.lookupMessage(r.originId) ?? this.lookupCursor(String(r.cursor));
+        if (!message) {
+          await this.#append({ originId: r.originId, transport: r.transport, status: "refused", code: "no-source", reason: `refused: the native message at ${r.cursor} could not be read back to publish under its root`, attempt: r.attempt, at: this.now().toISOString() });
+          outcomes.push({ key, outcome: "refused" });
+          continue;
+        }
+        const [status] = await this.#followRoot(face, message, r);
+        outcomes.push({ key, outcome: status.status === "published" ? "followed-root" : status.status === "unknown" ? "awaiting-root" : status.status });
+        continue;
+      }
       if (r.part === "mirror") {
         if ((r.status === "pending" || r.status === "unknown") && age > this.settleMs) {
           const outcome = await this.#redriveMirror(face, r, records);

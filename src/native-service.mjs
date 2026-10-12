@@ -541,6 +541,55 @@ export class NativeRoomService {
     return await this.#trackRoomActivity(activity);
   }
 
+  /**
+   * Remove a native room from this service and delete what the seat stores for it: the log, the
+   * custody and the face records (the whole room directory). The shared config is never read or
+   * written here; the CLI refuses a room the config still names before it asks. Refused by name:
+   * `room-unknown` (no valid room here), `room-in-use` (a live member route or a live subscriber,
+   * unless `force`), `room-busy` (the room is mid-open, or its face work did not drain in time).
+   * With `force`, every route admitted to the room is torn down and its secret removed, and every
+   * connection subscribed to it is closed (a watch there ends `service-dark`). Copies its faces
+   * published are not touched.
+   * @param {{ roomId: string, force?: boolean }} request
+   * @param {unknown} [requester] the connection asking, which is never counted as a subscriber
+   */
+  async deleteRoom(request, requester) {
+    if (!this.running) throw codedRefusal("service-dark", "native service is dark; start it explicitly before deleting a room");
+    const roomId = requiredString(request.roomId, "room id");
+    if (!/^[a-f0-9]{32}$/.test(roomId)) throw codedRefusal("room-unknown", "a native room id is 32 lowercase hexadecimal characters");
+    if (this.roomOpenings.has(roomId)) throw codedRefusal("room-busy", `native room ${roomId} is being opened; retry`);
+    let store;
+    try { store = await this.openRoom(roomId); }
+    catch (e) { throw codedRefusal("room-unknown", `native room ${roomId} is not a room on this seat (${e instanceof Error ? e.message : String(e)})`); }
+    const routes = [...this.routes.entries()].filter(([, r]) => r.binding.roomId === roomId);
+    const subscribers = [...this.subscriptions.entries()].filter(([socket, rooms]) => socket !== requester && rooms.has(roomId)).map(([socket]) => socket);
+    if (!request.force && (routes.length || subscribers.length)) {
+      const what = [routes.length ? `${routes.length} live member route${routes.length === 1 ? "" : "s"}` : "", subscribers.length ? `${subscribers.length} live subscriber${subscribers.length === 1 ? "" : "s"}` : ""].filter(Boolean).join(" and ");
+      throw codedRefusal("room-in-use", `native room ${roomId} has ${what}; close them first, or pass --force to drop them with the room`);
+    }
+    // face work for the room drains first, so no late face line recreates the directory
+    if (this.faces && !(await this.faces.forget(roomId)))
+      throw codedRefusal("room-busy", `face work for native room ${roomId} did not finish in time; retry the delete`);
+    for (const [key, route] of routes) {
+      route.activation.active = false;
+      try { await route.resource.stop(); } catch { /* the resource is fenced to this service; its teardown goes on */ }
+      this.routes.delete(key);
+      await removeRouteSecret(this.root, route.binding).catch(() => {});
+      await rm(route.descriptorPath, { force: true }).catch(() => {});
+    }
+    for (const socket of subscribers) {
+      this.subscriptions.get(socket)?.delete(roomId);
+      /** @type {any} */ (socket).destroy?.();
+    }
+    this.rooms.delete(roomId);
+    const directory = store.directory;
+    await store.close();
+    const requested = path.join(this.root, "native", "rooms", roomId);
+    await rm(directory, { recursive: true, force: true });
+    if (directory !== requested) await rm(requested, { recursive: false, force: true }).catch(() => {});
+    return { roomId, deleted: true, routesClosed: routes.length, subscribersClosed: subscribers.length };
+  }
+
   /** @param {string} roomId */
   async openRoom(roomId) {
     if (!this.running) throw codedRefusal("service-dark", "native service is dark; start it explicitly before opening a room");
@@ -686,6 +735,11 @@ export class NativeRoomService {
         roomId: status.roomId,
         epoch: status.epoch,
       });
+      return;
+    }
+    if (frame.type === "delete-room") {
+      const result = await this.deleteRoom({ roomId: requiredString(frame.roomId, "room id"), force: frame.force === true }, socket);
+      sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "delete-room-result", requestId: frame.requestId, ...result });
       return;
     }
     if (frame.type === "route-open") {
