@@ -360,6 +360,7 @@ State below the Agora root is seat-owned:
 
 ```text
 native/service.json                         advisory endpoint, service secret, pid, boot epoch, build
+native/service.log, .1, .2                  the daemon's warnings, one JSON line each (ts, level, room, message), 0600, rotated at 1 MiB
 native/keys/                                explicit Agora-owned Tailcat keys
 native/rooms/<room-id>/room.json            room identity, epoch, membership revision
 native/rooms/<room-id>/room.frames          host log or verified local replica (generation 0)

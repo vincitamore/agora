@@ -153,6 +153,16 @@ agora service route act-status <operation-id>
 agora service stop
 ```
 
+The daemon `service start` launches has no terminal: its stdio is closed, and so is a oneshot
+unit's. Every warning the faces raise (a sweep or tick that failed, a token a face refused, an
+inbound face not polled) is therefore also appended to `native/service.log` under the state root:
+one JSON object per line, `{ ts, level, room?, message }`, mode 0600, rotated at 1 MiB into
+`service.log.1` and `service.log.2`, so the log never holds more than three files. A line carries
+the service's own sentence, redacted of every token shape and bounded, never a message's text.
+`agora doctor` names the log under the service line and shows its last five warnings (`--json`:
+`log` and `lastWarningAt` on the `native-service` line, one `service-log` line each), and
+`agora service status --json` carries `log` and `lastWarningAt`.
+
 A native room becomes usable when a room row in the shared config names that `roomId` — a separate edit. Minting is `room create`, not the first post: `openRoom` refuses a missing manifest.
 
 `room delete` is the end of that lifecycle: it removes the room from the running service and deletes what the seat stores for it, the log, the custody and the face records (the room's directory under `native/rooms/`). `--confirm` must be the exact 32-hex room id, typed again (`confirm-required`, `confirm-mismatch`, exit 2). It refuses, exit 1 and nothing deleted, a room the shared config still names (`room-in-config`: the operator removes the row by hand first; the tool never writes the config), a room with a live member route or a live subscriber (`room-in-use`; `--force` tears the routes down and closes the subscribing connections, whose watches end `service-dark`), a room still opening or whose face work did not drain (`room-busy`), and a room the seat does not hold (`room-unknown`). Deleting a room does not delete the copies its faces published on Slack or GitHub. The verb says so and lists every copy the room's face records name (transport, channel or issue, ts or file id, message), on a refusal as well as on success, so the operator can `room purge` those messages first while the room still exists. A member session may not ask for a deletion.
@@ -361,7 +371,7 @@ agora authority sign-enrollment --file <challenge.json> --out <proof.json>
 agora authority enroll --file <proof.json> --fingerprint <sha256:64hex>
 agora authority sign --file <challenge.json> --out <proof.json>  # deliberate counter-seat route-act signature
 agora service start --authority <a-64hex>    # load one enrolled authority/policy snapshot at startup
-agora service status                         # descriptor without the nonce
+agora service status                         # descriptor without the nonce; --json adds the log path and lastWarningAt
 agora service room create                    # mint a 32-hex roomId; never writes agora.json
 agora service room delete <id|alias> --confirm <id> [--force]  # delete a room the config no longer names; lists the faced copies it leaves
 agora service route challenge <room> --allow-key <nodekey:64hex> --act room-enroll|room-revoke --out <challenge.json>

@@ -33,6 +33,7 @@ import {
 import { TRANSPORTS, createTransport, tokenSource } from "../src/transports/index.mjs";
 import { configFaceTransports } from "../src/native-faces-wiring.mjs";
 import { INBOUND_MODES, inboundModeOf, setInboundMode, slackInboundTick } from "../src/faces-inbound.mjs";
+import { createServiceLog, readServiceLog, serviceLogPath } from "../src/service-log.mjs";
 import { connect as connectClient } from "../src/client.mjs";
 import { asBoardSubject } from "../src/board-subject.mjs";
 import { watch } from "../src/watch.mjs";
@@ -1335,9 +1336,12 @@ async function main(argv) {
       // refused and never written (src/native-faces-wiring.mjs); the inbound half runs on the faces'
       // tick with each room's own runner and one client connected to this service as slack-face
       const configFile = configPath(values.config);
-      const inbound = slackInboundTick({ connect: (o) => connectClient(o) });
+      // a detached daemon's stderr reaches nobody (agora service start, a oneshot unit), so every
+      // face warning also lands in the bounded service log under the state root (src/service-log.mjs)
+      const log = createServiceLog(stateRoot, { echo: (line) => { process.stderr.write(`${line}\n`); } });
+      const inbound = slackInboundTick({ connect: (o) => connectClient(o), warn: log.warn });
       await runService({ root: stateRoot, accountId, seatLabel: label, build, authorityId: process.env.AGORA_SERVICE_AUTHORITY || undefined,
-        faces: { transportFor: configFaceTransports({ loadConfig: () => loadConfig(configFile), createTransport }), onTick: inbound.onTick, onStop: inbound.close } });
+        faces: { transportFor: configFaceTransports({ loadConfig: () => loadConfig(configFile), createTransport }), onTick: inbound.onTick, onStop: inbound.close, warn: log.warn } });
       await new Promise(() => {});
       return EXIT.ok;
     }
@@ -1357,7 +1361,8 @@ async function main(argv) {
     }
     if (action === "status") {
       const st = await serviceStatus(stateRoot);
-      if (json) console.log(JSON.stringify({ type: "service", action: "status", ...st }));
+      const lastWarning = readServiceLog(stateRoot, { last: 1 }).at(-1);
+      if (json) console.log(JSON.stringify({ type: "service", action: "status", ...st, log: serviceLogPath(stateRoot), lastWarningAt: lastWarning?.ts ?? null }));
       else console.log(st.present ? `native service pid ${st.pid ?? "unknown"} ${st.pidAlive ? "(answers)" : "(gone)"} seat ${st.seatLabel} account ${st.accountId}` : `native service absent (${st.error ?? "no descriptor"})`);
       return EXIT.ok;
     }
@@ -1661,14 +1666,18 @@ async function main(argv) {
     // left out of the poll arithmetic because the service pushes and it reads nothing on a cadence.
     const native = await serviceDescriptorStatus(stateRoot);
     const subscribersHere = armedHere.filter((a) => a.armed.subscriber);
+    const serviceLog = readServiceLog(stateRoot, { last: 5 });
     if (json) {
-      console.log(JSON.stringify({ type: "native-service", ...native }));
+      console.log(JSON.stringify({ type: "native-service", ...native, log: serviceLogPath(stateRoot), lastWarningAt: serviceLog.at(-1)?.ts ?? null }));
+      for (const l of serviceLog) console.log(JSON.stringify({ type: "service-log", ...l }));
       for (const a of subscribersHere)
         console.log(JSON.stringify({ type: "subscriber", session: a.slug, room: a.armed.room, key: a.key, pid: a.armed.pid, wake: a.armed.wake ?? "all", mode: a.armed.mode ?? null, build: a.armed.build ?? null, buildLabel: buildLabel(a.armed.build), since: a.armed.since ?? null, startedAt: a.armed.startedAt }));
     } else {
       console.log(`\nnative  service ${native.present ? `descriptor ${native.descriptor}  pid ${native.pid ?? "unknown"} ${native.pidAlive === undefined ? "" : native.pidAlive ? "(answers)" : "(gone)"}  seat ${native.seatLabel} account ${native.accountId} boot ${native.bootEpoch} build ${buildLabel(native.build)}` : `absent (${native.error})`}`);
       for (const a of subscribersHere)
         console.log(`        subscriber ${a.slug} ${a.armed.room} pid ${a.armed.pid} wake ${a.armed.wake ?? "all"} build ${buildLabel(a.armed.build)}`);
+      console.log(`        log ${serviceLogPath(stateRoot)}${serviceLog.length ? `, the last ${serviceLog.length}:` : " (no warnings)"}`);
+      for (const l of serviceLog) console.log(`          ${l.ts} ${l.level}${l.room ? ` ${l.room}` : ""} ${l.message}`);
     }
     if (native.present) {
       const older = buildPredates(native.build, build);
