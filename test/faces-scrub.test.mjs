@@ -102,6 +102,12 @@ async function filesHolding(dir, needle) {
   return hits.sort();
 }
 
+/** The ids of the messages whose rows in the face record log carry a payload digest. @param {string} root */
+async function digestCarriers(root) {
+  const text = await readFile(path.join(root, "native", "rooms", ROOM, "faces.jsonl"), "utf8");
+  return new Set(text.split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l)).filter((l) => "payloadDigest" in l).map((l) => l.originId));
+}
+
 /** A picture whose face copy and upload are published. @param {any} s @param {any} app @param {string} name @param {string} text */
 async function postPicture(s, app, name, text) {
   const ref = await app.upload("house", { bytes: Buffer.concat([PNG, randomBytes(8)]), name });
@@ -138,6 +144,11 @@ test("a purge takes a pictures face's file names out of every file under the roo
   assert.equal(text?.cursor, m.cursor);
   assert.deepEqual([...r.values()].filter((y) => y.mirror === receipt.id).map((y) => [y.act, y.target]).sort(), [["purge", "1790000000.000001"], ["purge", "F0PIC1"]]);
   assert.deepEqual(s.slack.calls.filter((c) => c.url.href.includes("files.delete")).map((c) => JSON.parse(String(c.init?.body))), [{ file: "F0PIC1" }]);
+  // the deletes settled, so no row of the purged message keeps the digest of its faced text
+  const carriers = await digestCarriers(s.root);
+  assert.equal(carriers.has(m.id), false, "the purged message's rows carry no payload digest");
+  assert.equal(carriers.has(kept.id), true, "a message nobody purged keeps its digest");
+  assert.deepEqual(await scrubFaceRecords(s.root, ROOM, [m.id]), { rewritten: [] }, "a second scrub has nothing to take");
 });
 
 test("after the scrub a purge's facesOutOfReach still names the copies it could not delete, and a later delete still lands", { timeout: 60_000 }, async (t) => {
@@ -154,6 +165,8 @@ test("after the scrub a purge's facesOutOfReach still names the copies it could 
   const out = receipt.facesOutOfReach.map((/** @type {any} */ f) => [f.message, f.transport, f.channel, f.ts ?? null, f.file ?? null]).sort();
   assert.deepEqual(out, [[m.id, "slack", CHANNEL, "1790000000.000001", null], [m.id, "slack", CHANNEL, null, "F0PIC1"]].sort());
   assert.deepEqual(await filesHolding(s.dir, name), [], "the refused copies' rows hold no name either");
+  assert.equal((await digestCarriers(s.root)).has(m.id), true, "a copy whose delete the face refused keeps its digest: a resent purge may still reach it");
+  assert.deepEqual(await scrubFaceRecords(s.root, ROOM, [m.id]), { rewritten: [] }, "and a scrub run again leaves it");
   // a resend of the purge (the operation id again) deletes what the face now allows, off the scrubbed rows
   refuse = false;
   const again = await app.purge("house", { targets: [m.id], reason: "remove", author: GRACE, operationId: receipt.operationId });
@@ -162,6 +175,11 @@ test("after the scrub a purge's facesOutOfReach still names the copies it could 
   const r = await s.records((x) => [...x.values()].filter((y) => y.mirror === receipt.id && y.status === "published").length === 2);
   assert.deepEqual([...r.values()].filter((y) => y.mirror === receipt.id && y.status === "published").map((y) => y.target).sort(), ["1790000000.000001", "F0PIC1"]);
   assert.deepEqual(await filesHolding(s.dir, name), []);
+  // the deletion that settled it may finish after the receipt; the scrub follows it
+  const deadline = Date.now() + 5000;
+  while ((await digestCarriers(s.root)).has(m.id) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal((await digestCarriers(s.root)).has(m.id), false, "once the resent purge settled the delete, the digest is gone");
+  assert.deepEqual(await scrubFaceRecords(s.root, ROOM, [m.id]), { rewritten: [] }, "and the scrub stays idempotent");
 });
 
 test("a crossing that came in from the face loses its file names, metadata lines and text digest when its message is purged", async (t) => {

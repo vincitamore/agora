@@ -4,6 +4,7 @@ import path from "node:path";
 import { AgoraError, redact } from "./core.mjs";
 import { FaceRunner, facePolicyPath } from "./faces.mjs";
 import { readDurableBlob } from "./native-attachments.mjs";
+import { scrubFaceRecords } from "./faces-scrub.mjs";
 
 /**
  * The seat service's side of the faces: one `FaceRunner` per native room, bound to the room's
@@ -223,7 +224,12 @@ export class NativeFaceWiring {
     try {
       const runner = this.runner(roomId, store);
       const { facesOutOfReach, work } = await runner.purge(purge, { deadlineMs: this.purgeDeadlineMs });
-      this.#track(work, roomId);
+      // a copy whose delete settled loses its payload digest (src/faces-scrub.mjs): the ones settled
+      // inside the wait now, the rest when the deletions that outlived the receipt finish
+      const scrub = () => scrubFaceRecords(this.root, roomId, store.purged.keys())
+        .catch((e) => this.warn(`agora: the purge's face record scrub did not run: ${e instanceof Error ? e.message : String(e)}`));
+      await scrub();
+      this.#track(work.then(scrub, scrub), roomId);
       return facesOutOfReach;
     } catch (e) {
       this.warn(`agora: the purge's face deletions not run: ${e instanceof Error ? e.message : String(e)}`);

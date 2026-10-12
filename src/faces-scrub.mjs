@@ -1,7 +1,7 @@
 // @ts-check
 import { readdir, readFile, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
-import { FACE_DESCRIPTIVE_FIELDS, faceRecordsPath, scrubFaceLine, withFaceLog } from "./faces.mjs";
+import { FACE_DESCRIPTIVE_FIELDS, faceRecordsPath, foldFaceRecords, scrubFaceLine, withFaceLog } from "./faces.mjs";
 import { faceInboundPath } from "./faces-inbound.mjs";
 import { writeDurableAtomic } from "./native-store.mjs";
 
@@ -35,10 +35,42 @@ const SCRUB_REREADS = 8;
  * @typedef {{ scrubStage?: (stage: 'temp-written' | 'installed', file: string) => void | Promise<void> }} ScrubHooks
  */
 
-/** @param {any} line @param {Set<string>} purged */
-function scrubOutboundLine(line, purged) {
+/**
+ * The refusal codes after which a purge's delete of a copy is never attempted again: the face was
+ * removed, cannot delete, the copy never landed, or the attempts ran out. A refusal the face
+ * answered (a `cant_delete_message`) is not among them: a resent purge may still reach that copy.
+ */
+const SETTLED_DELETE_REFUSALS = new Set(["no-such-face", "capability", "no-copy", "exhausted"]);
+
+/**
+ * The text copies of purged messages whose deletion has settled, by `originId\0transport`: the copy
+ * never landed (its own row refused), or a withdraw or purge deleted it (or found it already gone),
+ * or a purge's delete of it was recorded out of reach with no attempt left. While a copy is pending,
+ * unknown, or its delete is still to be attempted, its row keeps `payloadDigest`, by which a
+ * reconciliation finds a copy that landed without its response; once settled the digest goes.
+ * @param {any[]} lines @param {Set<string>} purged
+ */
+function settledCopies(lines, purged) {
+  /** @type {Set<string>} */
+  const settled = new Set();
+  for (const r of foldFaceRecords(lines.filter((l) => l && typeof l === "object" && purged.has(l.originId))).values()) {
+    if (r.attachmentId) continue;
+    const key = `${r.originId}\0${r.transport}`;
+    if (r.part !== "mirror") { if (r.status === "refused") settled.add(key); continue; }
+    if ((r.act === "purge" || r.act === "withdraw") && r.status === "published") settled.add(key);
+    else if (r.act === "purge" && r.status === "refused" && SETTLED_DELETE_REFUSALS.has(String(r.code))) settled.add(key);
+  }
+  return settled;
+}
+
+/** @param {any} line @param {Set<string>} purged @param {Set<string>} settled */
+function scrubOutboundLine(line, purged, settled) {
   if (!line || typeof line !== "object" || !purged.has(line.originId)) return line;
-  return FACE_DESCRIPTIVE_FIELDS.some((f) => f in line) ? scrubFaceLine(line) : line;
+  const digest = "payloadDigest" in line && !line.attachmentId && settled.has(`${line.originId}\0${line.transport}`);
+  if (!digest && !FACE_DESCRIPTIVE_FIELDS.some((f) => f in line)) return line;
+  const out = scrubFaceLine(line);
+  if (digest) delete out.payloadDigest;
+  return out;
 }
 
 /** @param {any} line @param {Set<string>} purged */
@@ -53,13 +85,17 @@ function scrubInboundLine(line, purged) {
  * The scrubbed text of one log, or undefined when it has nothing to take. A line that does not
  * parse (a torn last line a killed writer left) is not a record: it is kept unless it names a
  * purged message, in which case it goes.
- * @param {string} text @param {Set<string>} purged @param {(line: any, purged: Set<string>) => any} scrubLine
+ * @param {string} text @param {Set<string>} purged @param {(line: any, purged: Set<string>, settled: Set<string>) => any} scrubLine
  */
 function scrubText(text, purged, scrubLine) {
   let changed = false;
   const out = [];
   const parts = text.split("\n");
   const tail = parts.pop() ?? "";
+  /** @type {any[]} */
+  const parsed = [];
+  for (const raw of parts) { try { parsed.push(JSON.parse(raw)); } catch { /* not a record */ } }
+  const settled = settledCopies(parsed, purged);
   for (const raw of parts) {
     if (!raw.trim()) { out.push(raw); continue; }
     let line;
@@ -69,7 +105,7 @@ function scrubText(text, purged, scrubLine) {
       out.push(raw);
       continue;
     }
-    const next = scrubLine(line, purged);
+    const next = scrubLine(line, purged, settled);
     if (next === line) out.push(raw);
     else { changed = true; out.push(JSON.stringify(next)); }
   }
@@ -79,7 +115,7 @@ function scrubText(text, purged, scrubLine) {
 }
 
 /**
- * @param {string} file @param {Set<string>} purged @param {(line: any, purged: Set<string>) => any} scrubLine @param {ScrubHooks} hooks
+ * @param {string} file @param {Set<string>} purged @param {(line: any, purged: Set<string>, settled: Set<string>) => any} scrubLine @param {ScrubHooks} hooks
  * @returns {Promise<boolean>} whether the file was rewritten
  */
 async function scrubFile(file, purged, scrubLine, hooks) {

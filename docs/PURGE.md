@@ -141,7 +141,7 @@ crossing's ts and author. The deletions, `facesOutOfReach`, the sweep and a late
 all read those. After the purge, no file under the room's directory names a purged attachment (the
 `upgrade-v2-backup/` copy an upgrade keeps excepted; `--prune-backup` removes it). A row the faces
 write after the scrub, for a publication or deletion that was in flight, is written without those
-fields.
+fields. A text copy's row keeps its `payloadDigest` (the hash a reconciliation matches a copy by) only while the copy is unsettled: pending, unknown, or its delete still to be attempted (a delete the face refused may be retried by a resent purge); once the copy never landed, was deleted or found gone, or its delete was recorded out of reach for good (`no-such-face`, `capability`, `no-copy`, `exhausted`), the scrub drops it.
 
 The scrub runs inside the purge, after the log's rewrite and before custody collection, and again
 whenever the seat service opens a room a purge has touched. Each file is rewritten whole to a temp
