@@ -1128,7 +1128,7 @@ export function mountComposer(el, ctx, options = {}) {
       if (typeof id !== "string") continue;
       purged.set(id, { at: typeof p.ts === "string" ? p.ts : undefined, reason: typeof p.reason === "string" ? p.reason : undefined });
       const m = known.get(id);
-      if (m) known.set(id, { ...m, text: "", purged: { at: p.ts, purge: p.id } });
+      if (m) { const { attachments: _files, ...rest } = m; known.set(id, { ...rest, text: "", purged: { at: p.ts, purge: p.id } }); }
       if (editingMsg && editingMsg.id === id) stopEdit();
     }
     if (!actionsEl.hidden && p.purged.includes(actionsEl.getAttribute("data-id"))) closeActions();

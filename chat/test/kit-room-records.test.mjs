@@ -205,6 +205,7 @@ test("a kit thread, a PNG reply from the CLI, its edit and purge, and a pushed m
   const shown = afterRead.body.data.messages.find((/** @type {any} */ m) => m.id === reply.id);
   assert.equal(shown?.text, "", "the thread route reads the room, so the purged text is gone there");
   assert.ok(shown?.purged, "and the reply says it was purged");
+  assert.equal(shown?.attachments, undefined, "and carries no attachment name, size or digest");
   // the kit's own index is another matter
   const list = await call("p-ada", "/chat/threads");
   const summary = list.body.data.threads.find((/** @type {any} */ s) => s.root?.id === rootId);
@@ -215,6 +216,10 @@ test("a kit thread, a PNG reply from the CLI, its edit and purge, and a pushed m
   try {
     const fts = /** @type {any} */ (kitDb.query("select text from message_fts where id = ?").get(reply.id));
     assert.equal(fts, null, "the kit's search index forgot the purged reply's text when the purge arrived");
+    const files = /** @type {any[]} */ (kitDb.query("select name from message_files where message = ?").all(reply.id));
+    assert.deepEqual(files, [], "and its attachment entries");
+    const stored = JSON.parse(/** @type {any} */ (kitDb.query("select json from messages where id = ?").get(reply.id)).json);
+    assert.equal(stored.attachments, undefined, "the indexed message keeps no attachment entries");
   } finally { kitDb.close(); }
 
   // a mention in the thread is pushed to Grace under the host's thread URL

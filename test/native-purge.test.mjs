@@ -114,13 +114,41 @@ test("a thread purge takes the root and every reply; custody is released only fo
   const receipt = await purge(store, { targets: [], thread: root.id, reason: "the thread goes" });
   assert.deepEqual(receipt.purged, [root.id, r1.id, r2.id]);
   assert.deepEqual(store.view().messages.map((m) => [m.id, m.text]), [[root.id, undefined], [r1.id, undefined], [r2.id, undefined], [other.id, "elsewhere, the same bytes"]]);
-  assert.deepEqual(store.view().messages[1].attachments, [attachment(DIGEST_A, "a.txt")], "a purged record keeps its attachment metadata");
+  assert.equal("attachments" in store.view().messages[1], false, "a reader gets no name, size or digest of a purged message's attachments");
+  assert.deepEqual(store.records.find((r) => r.message?.id === r1.id).message.attachments, [attachment(DIGEST_A, "a.txt")],
+    "the log keeps the entries its record digest covers");
   const census = store.custodyCensus();
   assert.deepEqual([...census.released], [DIGEST_A], "B is still referenced by an unpurged message");
   assert.ok(census.referenced.has(DIGEST_B));
   // a reply after the purge is a new message with its text
   const late = await post(store, "a later reply", { thread: root.id });
   assert.equal(store.view().messages.find((m) => m.id === late.id)?.text, "a later reply");
+});
+
+test("a purged message is served without its attachments, by every read and across a reopen, while the log keeps what its digests cover and still verifies", async (t) => {
+  const { store, reopen } = await room(t);
+  const kept = await post(store, "kept", { attachments: [attachment(DIGEST_B, "keep.txt")] });
+  const gone = await post(store, "the private scan", { attachments: [attachment(DIGEST_A, "passport.pdf")] });
+  const reply = await post(store, "a reply with a file", { thread: kept.id, attachments: [attachment(DIGEST_A, "passport.pdf")] });
+  /** @param {NativeRoomStore} s */
+  const served = (s) => {
+    const all = [...s.view().messages, ...s.view({ thread: kept.id }).messages, ...s.view({ since: s.view().messages[0].cursor }).messages, ...s.read()];
+    return all.filter((m) => m.id === gone.id || m.id === reply.id);
+  };
+  await purge(store, { targets: [gone.id, reply.id], reason: "posted by mistake" });
+  const before = served(store);
+  await store.close();
+  for (const s of [{ shown: before, s: null }, { shown: null, s: await reopen() }]) {
+    const shown = s.shown ?? served(/** @type {NativeRoomStore} */ (s.s));
+    assert.ok(shown.length >= 4);
+    for (const m of shown) {
+      assert.equal("attachments" in m, false, `${m.id} carries no attachment entries`);
+      assert.equal("text" in m, false);
+      assert.match(m.purged?.purge ?? "", /\S/);
+      assert.doesNotMatch(JSON.stringify(m), /passport|sha256:a{8}/, "neither the name nor the digest leaks");
+    }
+    if (s.s) assert.deepEqual(s.s.view().messages.find((m) => m.id === kept.id)?.attachments, [attachment(DIGEST_B, "keep.txt")], "an unpurged message keeps its attachments");
+  }
 });
 
 test("a purge is refused by name: a version 1 room, an unknown target, a reply as a thread, no target, an unknown key, no reason", async (t) => {

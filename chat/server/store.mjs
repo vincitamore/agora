@@ -353,17 +353,19 @@ function makeStore(db, storeDir) {
       return putAnnotation(a);
     },
     /**
-     * Take messages out of the index's text: search forgets them and their stored text is removed
-     * (a purge). Their ids, positions and thread membership stay.
+     * Take messages out of the index's text: search forgets them and their stored text and
+     * attachment entries are removed (a purge). Their ids, positions and thread membership stay.
      * @param {string[]} ids
      */
     forgetText(ids) {
       db.transaction(() => {
         for (const id of ids) {
           db.run("delete from message_fts where id = ?", id);
+          // a purge takes the attachments' names, sizes and digests with the text: the bytes are gone
+          db.run("delete from message_files where message = ?", id);
           const m = messageJson(id);
           if (m) {
-            const { text: _text, ...rest } = m;
+            const { text: _text, attachments: _attachments, ...rest } = m;
             db.run("update messages set json = ? where id = ?", JSON.stringify({ ...rest, text: "", purged: true }), id);
           }
           db.run("update annotations set json = json_remove(json, '$.text') where target = ?", id);

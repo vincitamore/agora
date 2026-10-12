@@ -128,6 +128,22 @@ function withoutTextDigest(stored) {
   return rest;
 }
 
+/**
+ * A stored message as a reader receives it. One a purge took carries its `purged` marker and neither
+ * its text nor its attachments: the bytes are gone, and the names, sizes, kinds and digests go from
+ * every read too. The log keeps the attachment entries, because a version 2 record digest covers them
+ * (docs/PURGE.md); only the served shape drops them. `marker` is the purge that took it when the
+ * rewrite that strips the stored text has not run yet.
+ * @param {any} stored @param {{ at: string, purge: string } | undefined} marker
+ */
+function readerMessage(stored, marker) {
+  const m = withoutTextDigest(stored);
+  const purged = m.purged ?? marker;
+  if (!purged) return m;
+  const { text: _text, attachments: _attachments, ...rest } = m;
+  return { ...rest, purged: { ...purged } };
+}
+
 /** A refusal whose name is a property, so the service carries it on the wire as `code` and a caller
  * decides on the name, never on the prose. @param {string} code @param {string} detail */
 function refusal(code, detail) {
@@ -613,8 +629,8 @@ async function scan(handle, manifest, boundary) {
  *   record keeps its digest, sequence and cursor. On scan a record without its text must carry a
  *   marker naming a later purge that took it.
  *
- * Readers receive messages and annotations without `textDigest`; a purged one carries `purged` and
- * no text. The committed boundary
+ * Readers receive messages and annotations without `textDigest`; a purged message carries `purged`
+ * and neither its text nor its attachments (the log keeps the attachment entries its digest covers). The committed boundary
  * (`committed.json`) is `{ version: 1, roomId, epoch, sequence, end, digest, generation? }`; an
  * absent generation is 0, the file `room.frames`, and generation N is `room.frames.<N>`.
  */
@@ -1347,7 +1363,7 @@ export class NativeRoomStore {
     /** @param {any} m */
     const inView = (m) => thread === undefined || m.id === thread || m.thread === thread;
     /** @param {any[]} records */
-    const messages = (records) => records.filter((r) => r.message && inView(r.message)).map((r) => withoutTextDigest(r.message));
+    const messages = (records) => records.filter((r) => r.message && inView(r.message)).map((r) => readerMessage(r.message, this.purged.get(r.message.id)));
     /** An annotation is in a thread view when the message it names is. @param {any} a */
     const annotationInView = (a) => thread === undefined || inView(this.records[/** @type {number} */ (this.messageIndex.get(a.target))].message);
     /** @param {any[]} records */
@@ -1369,7 +1385,7 @@ export class NativeRoomStore {
       // the annotations on the window's messages, from the oldest message in it on
       const from = indices[0] ?? 0;
       const named = indices.flatMap((i) => this.annotationIndex.get(this.records[i].message.id) ?? []).filter((i) => i >= from).sort((a, b) => a - b);
-      return { messages: indices.map((i) => withoutTextDigest(this.records[i].message)),
+      return { messages: indices.map((i) => readerMessage(this.records[i].message, this.purged.get(this.records[i].message.id))),
         annotations: named.map((i) => withoutTextDigest(this.records[i].annotation)), purges: purges(this.records.slice(from)), through: this.records.length };
     }
     const cursor = parseNativeCursor(options.since);

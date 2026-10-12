@@ -43,6 +43,10 @@ test("a subscriber that asks for purges receives each in log order; a plain one 
   const struck = foldPurges(shown, purges);
   assert.deepEqual(struck.map((m) => [m.text, m.purged]), [["", { at: purges[0].ts, purge: receipt.id }], ["kept", undefined], ["after", undefined]]);
   assert.equal(shown[0].text, "a private note", "foldPurges is pure");
+  const withFile = { ...shown[0], attachments: [{ id: "att_x", name: "passport.pdf", kind: "file", size: 9, digest: `sha256:${"a".repeat(64)}`, lifetime: "durable" }] };
+  const [foldedFile] = foldPurges([withFile], purges);
+  assert.equal("attachments" in foldedFile, false, "a struck message loses its attachment entries with its text");
+  assert.equal(withFile.attachments.length, 1, "still pure");
 
   // a subscription made after the purge replays it in place, beside the message as it now reads
   /** @type {string[]} */

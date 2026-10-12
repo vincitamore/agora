@@ -112,7 +112,8 @@ words; `POST /chat/post` scans again and stays the authority.
 A **message**, as the browser receives it, is agora's wire message without `room` and `author.id`:
 `{ id, cursor, ts, text, author: { name, kind, ref? }, thread?, via?, to?, trailers?: [{ key, value }],
 attachments?, edited?, withdrawn?, pinned?, purged?, reactions? }`. It arrives folded: an edit's text
-replaces the original, and a withdrawal or a purge empties it.
+replaces the original, and a withdrawal or a purge empties it. A purged message carries no
+`attachments`: its files' names, sizes and digests leave with its text.
 
 `attachments[]` are the room's `WireAttachment`s, and the kit stamps `thumb: true` on an image
 attachment only when its store holds a thumbnail for those bytes (given by `X-Thumb-For` at

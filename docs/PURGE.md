@@ -31,10 +31,24 @@ digest rather than to the text itself.
 3. Install the committed boundary naming N+1 by one atomic rename.
 4. Remove generation N.
 
-A purged record keeps its digest, sequence, cursor, author, thread and attachment metadata, and
-gains `message.purged: { at, purge: "<purge record id>" }` outside the digested part. Readers'
-`(epoch, sequence, digest)` checkpoints stay valid. An edit annotation on a purged message loses
-its text the same way (`annotation.purged`).
+A purged record keeps its digest, sequence, cursor, author and thread, and gains `message.purged:
+{ at, purge: "<purge record id>" }` outside the digested part. Readers' `(epoch, sequence, digest)`
+checkpoints stay valid. An edit annotation on a purged message loses its text the same way
+(`annotation.purged`).
+
+**What a reader receives.** A purged message is served with its `purged` marker and neither its
+text nor its attachments: no `attachments` key at all, as on a message that never had any, so no
+name, size, kind, digest or id of a purged file reaches a read, a subscription's replay, a member
+route, `foldPurges`, or the chat kit (whose index drops the entries with the text). The marker is
+the redaction marker; the contract adds no other. This holds from the moment the purge record
+commits, before the rewrite has run.
+
+**What the log keeps.** A version 2 record digest covers `message.attachments` (only the text is
+committed by its digest), so the stored record keeps its attachment entries: removing them would
+leave a record whose digest no reader could recompute, and the room would refuse to open. The bytes
+go (custody below); the entries stay on the host's disk, in the seat's private state, and are never
+served. A log format that commits to attachments by digest, so a purge could drop the entries too,
+is a new log version.
 
 Recovery: a crash before the boundary rename opens on generation N (the half-written N+1 is
 discarded); a crash after it opens on N+1 and removes N. A reopen also finishes a purge whose texts
@@ -80,8 +94,8 @@ client.follow(room, opts, { message, annotation, purge, state })
 
 import { foldPurges } from "agora/client";
 foldPurges(messages, purges)
-  // -> messages a purge took get text "", purged, and lose what was read off the old text
-  //    (trailers, to, signature, offer)
+  // -> messages a purge took get text "", purged, no attachments, and lose what was read off
+  //    the old text (trailers, to, signature, offer)
 ```
 
 `client.purge` and a `purge` handler refuse `purge-unsupported` on a service without `purge-v1`.

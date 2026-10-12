@@ -47,11 +47,12 @@ test("a thread purge removes the replies' text and the blobs and custody records
   assert.equal(back.size, shared.size);
   await refusedAs(app.attachment("house", { id: onlyRoot.id, digest: onlyRoot.digest }), "attachment-unknown");
 
-  // the read: purged messages keep their place and metadata, with no text and the purge's marker
+  // the read: purged messages keep their place, with no text, no attachments and the purge's marker
   const after = await app.read("house");
   const marker = { at: /** @type {string} */ (after.messages[0].purged?.at), purge: receipt.id };
   assert.deepEqual(after.messages.map((m) => [m.id, m.text, m.purged]), [[root.id, "", marker], [reply.id, "", marker], [kept.id, "elsewhere", undefined]]);
-  assert.deepEqual(after.messages[0].attachments, [onlyRoot, shared], "attachment metadata is kept");
+  assert.equal(after.messages[0].attachments, undefined, "a purged message is served without its attachment entries");
+  assert.deepEqual(after.messages.find((/** @type {any} */ m) => m.id === kept.id)?.attachments, [shared], "an unpurged one keeps them");
   // a reader holding the cursor from before the purge reads on without refusal, and subscribes on
   const onward = await app.read("house", { since: through });
   assert.deepEqual(onward.messages, []);

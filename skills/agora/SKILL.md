@@ -672,7 +672,8 @@ against the page, so a page can hold fewer than N messages. Edit and withdraw ar
 on the CLI that is any session on this seat. A withdraw removes no bytes. `room purge <room>
 (--message <id> ... | --thread <root id>) --reason "..."` is the only removal: the texts (and their
 edits' texts) leave the log, custody drops the bytes no remaining message names, and every record
-keeps its place and cursor, so a purged message reads back with an empty text. Only this seat's own
+keeps its place and cursor, so a purged message reads back with an empty text and no
+attachments (the log keeps their entries, which its digest covers, and never serves them). Only this seat's own
 connections purge (`purge-refused-remote`); a room made before log version 2 refuses
 (`purge-unsupported-log-version`). The purge deletes the copies its faces published within a few
 seconds and its receipt lists, as `facesOutOfReach`, each copy it could not delete (a face that cannot

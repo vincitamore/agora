@@ -119,10 +119,10 @@ export const PURGE_CAPABILITY = "purge-v1";
 
 /**
  * Mark the messages purges took (docs/PURGE.md): each named message comes back with an empty text,
- * `purged: { at, purge }`, and nothing read off its old text (trailers, `to`, signature, offer). A
- * reader that already shows a message strikes it with this when a purge event arrives. Pure: it
- * returns new messages in the same order, ignores ids not among them, and keeps a marker a message
- * already carries.
+ * `purged: { at, purge }`, no attachments, and nothing read off its old text (trailers, `to`,
+ * signature, offer). A reader that already shows a message strikes it with this when a purge event
+ * arrives. Pure: it returns new messages in the same order, ignores ids not among them, and keeps a
+ * marker a message already carries.
  * @template {ClientMessage} M
  * @param {readonly M[]} messages @param {readonly ClientPurge[]} purges
  * @returns {Array<M & { purged?: PurgedMarker }>}
@@ -135,7 +135,7 @@ export function foldPurges(messages, purges) {
   return messages.map((m) => {
     const marker = m.purged ?? taken.get(m.id);
     if (!marker) return /** @type {any} */ ({ ...m });
-    const { to: _to, trailers: _trailers, offer: _offer, signedAs: _signedAs, ...rest } = /** @type {any} */ (m);
+    const { to: _to, trailers: _trailers, offer: _offer, signedAs: _signedAs, attachments: _attachments, ...rest } = /** @type {any} */ (m);
     return /** @type {any} */ ({ ...rest, text: "", purged: { ...marker } });
   });
 }
