@@ -3,6 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
+import { createServer } from "node:net";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -118,4 +119,68 @@ test("service stop does not kill a pid it has not verified is the service", asyn
   } catch (e) {
     assert.fail(`innocent pid ${innocent.pid} is gone: ${e instanceof Error ? e.message : e}`);
   }
+});
+
+test("service stop refuses an endpoint that holds the connection without a handshake, promptly, killing nothing", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "agora-service-mute-"));
+  const cfg = path.join(root, "agora.json");
+  await writeFile(cfg, JSON.stringify({ actor: { name: "seat", kind: "agent" }, rooms: { scratch: { transport: "local", path: path.join(root, "room.ndjson") } } }));
+  await mkdir(path.join(root, "native"), { recursive: true });
+  // Something accepts at the published endpoint and never says a word: a hung service, or a
+  // stranger. Neither is proof the descriptor is stale, and neither is proof it is ours.
+  const endpoint = process.platform === "win32"
+    ? `\\\\.\\pipe\\agora-test-mute-${process.pid}-${Date.now()}`
+    : path.join(root, "mute.sock");
+  /** @type {import("node:net").Socket[]} */
+  const held = [];
+  const mute = createServer((socket) => { held.push(socket); socket.on("error", () => {}); });
+  await new Promise((resolve) => mute.listen(endpoint, () => resolve(undefined)));
+  const innocent = spawn(process.execPath, ["-e", "setInterval(()=>{}, 1e9)"], { stdio: "ignore", windowsHide: true });
+  t.after(async () => {
+    try { innocent.kill("SIGKILL"); } catch { /* gone */ }
+    for (const socket of held) socket.destroy();
+    await new Promise((resolve) => mute.close(() => resolve(undefined)));
+    await rm(root, { recursive: true, force: true });
+  });
+  const descriptor = path.join(root, "native", "service.json");
+  await writeFile(descriptor, JSON.stringify({
+    protocol: 1, path: endpoint, nonce: "n".repeat(32), pid: innocent.pid, bootEpoch: "b".repeat(32),
+    accountId: "a".repeat(32), seatLabel: "mute", startedAt: new Date().toISOString(),
+  }));
+  const env = { AGORA_STATE: root, AGORA_CONFIG: cfg, AGORA_SESSION: "svc" };
+  const began = Date.now();
+  const stopped = await agora(["service", "stop", "--json"], env);
+  const took = Date.now() - began;
+  assert.equal(stopped.code, 1, `stop exit ${stopped.code} after ${took} ms: ${stopped.stdout}${stopped.stderr}`);
+  assert.match(stopped.stderr, /service-unresponsive/);
+  assert.ok(took < 8000, `stop took ${took} ms; one probe is bounded at a few seconds`);
+  assert.ok(held.length > 0, "the probe never reached the endpoint");
+  assert.equal(innocent.exitCode, null, "stop killed a pid it never handshook");
+  await readFile(descriptor, "utf8"); // kept: an unanswered endpoint is not a stale one
+});
+
+test("stopService holds every cause to its deadline and names the refusal", async (t) => {
+  const { stopService } = await import("../src/service-cli.mjs");
+  const root = await mkdtemp(path.join(tmpdir(), "agora-service-deadline-"));
+  await mkdir(path.join(root, "native"), { recursive: true });
+  const endpoint = process.platform === "win32"
+    ? `\\\\.\\pipe\\agora-test-deadline-${process.pid}-${Date.now()}`
+    : path.join(root, "mute.sock");
+  /** @type {import("node:net").Socket[]} */
+  const held = [];
+  const mute = createServer((socket) => { held.push(socket); socket.on("error", () => {}); });
+  await new Promise((resolve) => mute.listen(endpoint, () => resolve(undefined)));
+  t.after(async () => {
+    for (const socket of held) socket.destroy();
+    await new Promise((resolve) => mute.close(() => resolve(undefined)));
+    await rm(root, { recursive: true, force: true });
+  });
+  await writeFile(path.join(root, "native", "service.json"), JSON.stringify({
+    protocol: 1, path: endpoint, nonce: "n".repeat(32), pid: process.pid, bootEpoch: "b".repeat(32),
+    accountId: "a".repeat(32), seatLabel: "mute", startedAt: new Date().toISOString(),
+  }));
+  // A probe longer than the whole deadline stands in for a cause nobody has met yet.
+  const began = Date.now();
+  await assert.rejects(stopService(root, { deadlineMs: 300, probeMs: 5000 }), /service-stop-deadline/);
+  assert.ok(Date.now() - began < 2000, "the deadline did not bound the stop");
 });

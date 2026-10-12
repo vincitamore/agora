@@ -374,7 +374,7 @@ async function listenOwnedEndpoint(server, endpoint) {
 function readHandshakeFrame(socket, timeoutMs, label) {
   const decoder = new NativeFrameDecoder();
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => finish(undefined, new AgoraError(`native service ${label} timed out`)), timeoutMs);
+    const timer = setTimeout(() => finish(undefined, Object.assign(new AgoraError(`native service ${label} timed out`), { code: "handshake-timeout" })), timeoutMs);
     timer.unref?.();
     const cleanup = () => {
       clearTimeout(timer);
@@ -1435,11 +1435,20 @@ export class NativeServiceClient {
       throw codedRefusal("client-name-invalid", "a client name is a lowercase letter then 1-39 lowercase letters, digits or hyphens");
     const timeoutMs = endpoint.timeoutMs ?? REQUEST_TIMEOUT_MS;
     const socket = net.createConnection({ path: endpoint.path });
+    /** @type {NodeJS.Timeout | undefined} */
+    let connectTimer;
     try {
+      // A connect that never completes (a Windows pipe whose every instance is busy waits in the
+      // OS, not in this process) is bounded by the same timeout as each handshake frame.
       await Promise.race([
         once(socket, "connect"),
         once(socket, "error").then(([error]) => Promise.reject(error)),
+        new Promise((_, reject) => {
+          connectTimer = setTimeout(() => reject(Object.assign(new AgoraError("native service connect timed out"), { code: "connect-timeout" })), timeoutMs);
+          connectTimer.unref?.();
+        }),
       ]);
+      clearTimeout(connectTimer);
       const hello = /** @type {Record<string, any>} */ (await readHandshakeFrame(socket, timeoutMs, "server proof"));
       if (hello.type !== "server-hello" || hello.bootEpoch !== endpoint.bootEpoch
         || hello.accountId !== endpoint.accountId || hello.seatLabel !== endpoint.seatLabel)
@@ -1475,6 +1484,7 @@ export class NativeServiceClient {
       if (clientName !== undefined) client.clientName = clientName;
       return client;
     } catch (error) {
+      clearTimeout(connectTimer);
       socket.destroy();
       throw error;
     }

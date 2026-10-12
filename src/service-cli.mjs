@@ -10,9 +10,9 @@ import { hostname } from "node:os";
 import { mkdir, realpath, rm, open, link } from "node:fs/promises";
 import path from "node:path";
 import { AgoraError, EXIT } from "./core.mjs";
-import { NativeRoomService } from "./native-service.mjs";
+import { NativeRoomService, NativeServiceClient } from "./native-service.mjs";
 import { pidAlive } from "./session.mjs";
-import { connectSeatService, serviceDescriptorPath, serviceDescriptorStatus } from "./wake/subscriber.mjs";
+import { connectSeatService, readServiceDescriptor, serviceDescriptorPath, serviceDescriptorStatus } from "./wake/subscriber.mjs";
 import { localTransferIdentity, privateDirectory, assertPrivateAncestry } from './tailcat.mjs';
 import { AuthorityError, authorityIdForKey, validateAuthorityRecord, validateAuthorityRequest,
   validateAuthorityChallenge, assertAuthorityDelegation, createAuthorityEnrollmentChallenge,
@@ -223,19 +223,35 @@ export async function runService(options) {
   return descriptor;
 }
 
+/** How long one handshake probe of the published endpoint may take, connect included. */
+const PROBE_MS = 3000;
+/** The whole of `service stop`: two probes, the kill and its wait fit well inside it. */
+export const STOP_DEADLINE_MS = 15000;
+
 /**
- * Handshake the published endpoint. Success means this descriptor names OUR service.
- * Failure means the file is stale: a recycled pid is not identity.
+ * Handshake the published endpoint. Success means this descriptor names OUR service. A failure
+ * that says nothing is listening there, or that whoever answers cannot prove the descriptor's
+ * nonce, means the file is stale: a recycled pid is not identity. A probe that runs out of time
+ * proves neither: something holds the endpoint and did not answer, so it is `unresponsive`, never
+ * stale, and nothing acts on it.
  * @param {string} stateRoot
- * @returns {Promise<{ live: true, pid?: number } | { live: false }>}
+ * @param {number} [timeoutMs]
+ * @returns {Promise<{ live: true, pid?: number } | { live: false, unresponsive?: boolean, why?: string }>}
  */
-async function probeOwnService(stateRoot) {
+async function probeOwnService(stateRoot, timeoutMs = PROBE_MS) {
+  let descriptor;
+  try { descriptor = await readServiceDescriptor(stateRoot); }
+  catch { return { live: false }; }
   try {
-    const { client, descriptor } = await connectSeatService(stateRoot);
+    const client = await NativeServiceClient.connect({ ...descriptor, timeoutMs });
     client.close();
     return { live: true, pid: typeof descriptor.pid === "number" ? descriptor.pid : undefined };
-  } catch {
-    return { live: false };
+  } catch (e) {
+    const code = /** @type {any} */ (e)?.code;
+    const why = e instanceof Error ? e.message : String(e);
+    if (code === "connect-timeout" || code === "handshake-timeout")
+      return { live: false, unresponsive: true, why };
+    return { live: false, why };
   }
 }
 
@@ -252,6 +268,9 @@ export async function startService(options) {
   const probe = await probeOwnService(options.root);
   if (probe.live) {
     throw new AgoraError(`native service already running (pid ${probe.pid ?? "unknown"})`, EXIT.error);
+  }
+  if (probe.unresponsive) {
+    throw new AgoraError(`service-unresponsive: something holds the native service endpoint and did not complete the handshake (${probe.why}); nothing was started and the descriptor is kept`, EXIT.error);
   }
   await unlinkDescriptor(options.root);
   const child = spawn(options.execPath, [options.entry, "service", "--daemon"], {
@@ -276,10 +295,37 @@ export async function startService(options) {
   throw new AgoraError("native service did not publish a live descriptor", EXIT.error);
 }
 
-/** @param {string} stateRoot */
-export async function stopService(stateRoot) {
-  const probe = await probeOwnService(stateRoot);
+/**
+ * Stop this seat's service: identify it by handshake, never by pid alone; a stale descriptor is
+ * unlinked and kills nothing; an endpoint that holds the connection without answering is refused
+ * by name and left alone. Every step is bounded, and the whole is held to one deadline, so a cause
+ * nobody has met yet ends as `service-stop-deadline` rather than a stop that never returns.
+ * @param {string} stateRoot
+ * @param {{ deadlineMs?: number, probeMs?: number }} [options]
+ */
+export async function stopService(stateRoot, options = {}) {
+  const deadlineMs = options.deadlineMs ?? STOP_DEADLINE_MS;
+  /** @type {NodeJS.Timeout | undefined} */
+  let timer;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new AgoraError(
+      `service-stop-deadline: native service stop did not finish within ${Math.round(deadlineMs / 1000)} s; the descriptor at ${serviceDescriptorPath(stateRoot)} was left as it was found or after the last completed step`,
+      EXIT.error)), deadlineMs);
+  });
+  try {
+    return await Promise.race([stopWithin(stateRoot, Date.now() + deadlineMs, options.probeMs ?? PROBE_MS), deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** @param {string} stateRoot @param {number} until @param {number} probeMs */
+async function stopWithin(stateRoot, until, probeMs) {
+  const probe = await probeOwnService(stateRoot, probeMs);
   if (!probe.live) {
+    if (probe.unresponsive) {
+      throw new AgoraError(`service-unresponsive: something holds the native service endpoint and did not complete the handshake within ${Math.round(probeMs / 1000)} s (${probe.why}); nothing was killed and the descriptor is kept`, EXIT.error);
+    }
     await unlinkDescriptor(stateRoot);
     return serviceDescriptorStatus(stateRoot);
   }
@@ -288,14 +334,14 @@ export async function stopService(stateRoot) {
     throw new AgoraError("native service is live at the endpoint but the descriptor has no pid; not killing by guess", EXIT.error);
   }
   try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
-  const deadline = Date.now() + STOP_MS;
-  while (Date.now() < deadline && pidAlive(pid)) {
+  const waitUntil = Math.min(Date.now() + STOP_MS, until - probeMs);
+  while (Date.now() < waitUntil && pidAlive(pid)) {
     await new Promise((r) => setTimeout(r, 50));
   }
   if (pidAlive(pid)) {
     try { process.kill(pid, "SIGKILL"); } catch { /* gone */ }
   }
-  const still = await probeOwnService(stateRoot);
+  const still = await probeOwnService(stateRoot, probeMs);
   if (still.live) throw new AgoraError(`native service still running (pid ${still.pid})`, EXIT.error);
   await unlinkDescriptor(stateRoot);
   return serviceDescriptorStatus(stateRoot);

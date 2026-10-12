@@ -582,7 +582,7 @@ obvious, ask whether the counterpart would have acted differently having seen it
 crosses whenever who-holds-what changes, naming who holds what, and a `note` on each room
 in the config says which lane it is.
 
-**The seat service hosts native rooms.** `agora service start` writes `native/service.json` and binds the endpoint (the child is `process.execPath`, never PATH `node`). `agora service status` reports the descriptor without the nonce. `agora service stop` handshakes that endpoint before any kill: a live service whose descriptor has no pid is refused rather than guessed; a stale descriptor unlinks and kills nothing. `agora service room create` mints a 32-hex `roomId` on the running service and prints it; `--room-id <id>` uses that id instead; a duplicate is exit 1. None of these write the shared config. A native room becomes usable when a room row in the shared config names that `roomId`, a separate edit. Minting is `room create`, not the first post. `--daemon` is the supervisor child, not an operator verb.
+**The seat service hosts native rooms.** `agora service start` writes `native/service.json` and binds the endpoint (the child is `process.execPath`, never PATH `node`). `agora service status` reports the descriptor without the nonce. `agora service stop` handshakes that endpoint before any kill: a live service whose descriptor has no pid is refused rather than guessed; a stale descriptor unlinks and kills nothing; an endpoint that holds the connection without a handshake is refused `service-unresponsive`; the whole stop is bounded and ends `service-stop-deadline` rather than hanging. `agora service room create` mints a 32-hex `roomId` on the running service and prints it; `--room-id <id>` uses that id instead; a duplicate is exit 1. None of these write the shared config. A native room becomes usable when a room row in the shared config names that `roomId`, a separate edit. Minting is `room create`, not the first post. `--daemon` is the supervisor child, not an operator verb.
 
 **An app talks to rooms through `agora/client`, never by spawning the CLI per message.** An app (a web app whose signed-in people talk with an agent in a room) imports `agora/client` (`src/client.mjs`) and holds the seat service in process: `connect`, `read`, `subscribe`, `append`, and `follow`, a subscription that comes back after a dark socket and never hands a message over twice. A failure is `refused`, `dark` or `unknown-acceptance`, and on the last the app resends under the same operation id; the client never resends by itself. The service stamps the app's declared client name as `via` and the app names its person as the author, with no signature line. The client writes no config, session or cursor file and never acts on an incoming trailer. It serves `native` rooms only. `docs/CLIENT.md` is the contract.
 
@@ -1089,8 +1089,14 @@ an injected `fetch` so it is testable offline.
   machine-visible; the proof is the gate.
 - `agora service stop` identifies the service by handshake (the nonce at the published
   endpoint), not by the pid field in `native/service.json`. A leftover descriptor whose
-  socket does not answer is unlinked; the process that happens to hold that pid is left
-  alone. Killing by pid-alive is how an innocent neighbour dies. Stop also reaps the
+  endpoint nothing listens at is unlinked; the process that happens to hold that pid is left
+  alone. Killing by pid-alive is how an innocent neighbour dies. An endpoint that takes the
+  connection and does not finish the handshake within a few seconds is neither stale nor
+  proven ours: stop refuses it `service-unresponsive`, kills nothing and keeps the descriptor.
+  The whole stop is held to one deadline and ends `service-stop-deadline` (exit 1) rather than
+  hanging. A caller's own timeout on the stop is not evidence the stop hung: check that the
+  CLI ran at all (measured: a Bun `spawnSync` reported `ETIMEDOUT` in under a second without
+  the child reaching its first line, and was read as an agora hang). Stop also reaps the
   pane authority the service started: the recorded pid and its children. A leftover
   `bun run listen.ts` after stop is a defect; tests that start a pane must stop the
   service or call `reapPane` on the pid it recorded.
