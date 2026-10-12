@@ -62,7 +62,8 @@ holds them until `--prune-backup`.
 
 Recovery: a crash before the boundary rename opens on generation N (the half-written N+1 is
 discarded); a crash after it opens on N+1 and removes N. A reopen also finishes a purge whose texts
-still stand, and a resend of the purge's operation id does the same.
+still stand, and a resend of the purge's operation id does the same. A crash between the rewrite and
+the face records' scrub (§ Faces) is finished the same way.
 
 Custody collection reads the room's references under the custody lock every install takes, and
 passes over held digests: an upload holds its digest until an append names it or an hour passes. A
@@ -127,6 +128,29 @@ contract (ruled at integration: kept as widened from `{ transport, channel, ts }
 listed when its face's policy no longer names it, when the face refused the delete, when its own publication is still unsettled, or when its deletion was not
 confirmed by the receipt; that deletion goes on, and `agora faces <room> --for <id>` reads its
 outcome. A message no face carried lists nothing. A resent purge does not delete twice what landed.
+
+**The face records are scrubbed.** The seat keeps what its faces did with each message beside the
+room: `faces.jsonl` (one row per copy and per act on it) and `face-inbound.jsonl` (what crossed in
+from a face). A purge takes off every row of every purged message each field that names or describes
+its attachments or fingerprints its text: a picture row's `name` (and any `title`, `size`, `kind`,
+`mimetype` or `text`), and on a crossing that came in from the face, its files' names and reasons,
+its metadata lines (`fileLines`, which carry name, kind and size) and its `textDigest`. Each row
+keeps what the face needs to stay correct: transport, channel, status, the copy's `ts` (`id`) or
+`fileId`, the `attachmentId`, the message id and cursor, a mirror row's act and target, and a
+crossing's ts and author. The deletions, `facesOutOfReach`, the sweep and a later resend of the purge
+all read those. After the purge, no file under the room's directory names a purged attachment (the
+`upgrade-v2-backup/` copy an upgrade keeps excepted; `--prune-backup` removes it). A row the faces
+write after the scrub, for a publication or deletion that was in flight, is written without those
+fields.
+
+The scrub runs inside the purge, after the log's rewrite and before custody collection, and again
+whenever the seat service opens a room a purge has touched. Each file is rewritten whole to a temp
+file, synced, and installed by one rename, the way the log's generations are: a crash leaves either
+the old file, which the next purge or open scrubs again, or the scrubbed one, and the next run
+removes a temp copy a crash left (it never holds more than the scrubbed text). A file with nothing to
+take is not rewritten, so the scrub is idempotent. The service's own appends to these files queue
+behind the scrub, and a file that grew during the rewrite (an append from the CLI) is read again
+before the rename.
 
 ## CLI
 

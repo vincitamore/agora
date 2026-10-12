@@ -24,6 +24,7 @@ import { startMemberRoute } from "./tailcat-routes.mjs";
 import { parseSpawnRequest } from "./spawn/request.mjs";
 import { ensurePaneAuthority, mintSpawnId, openPane, reapPane } from "./spawn-pane.mjs";
 import { NativeFaceWiring, faceChoiceOf } from "./native-faces-wiring.mjs";
+import { scrubFaceRecords } from "./faces-scrub.mjs";
 
 /** A refusal carries one stable code inward and one editable message outward. Keeping the
  * code beside the error at the mint prevents a later wire encoder from recovering control flow
@@ -604,10 +605,14 @@ export class NativeRoomService {
           await store.close();
           throw new AgoraError("native service stopped while opening the room; the room was not retained");
         }
-        // a purged room's custody lets go of what its purges released; a collection a crash
-        // interrupted is finished here (docs/PURGE.md)
+        // a purged room's face records lose what named its purged attachments, and its custody
+        // lets go of what its purges released; a scrub or a collection a crash interrupted is
+        // finished here (docs/PURGE.md)
         if (store.purged.size) {
-          try { await collectReleasedCustody(store.directory, () => store.custodyCensus().released); }
+          try {
+            await scrubFaceRecords(this.root, roomId, store.purged.keys());
+            await collectReleasedCustody(store.directory, () => store.custodyCensus().released);
+          }
           catch (error) { await store.close(); throw error; }
         }
         this.rooms.set(roomId, store);
@@ -972,6 +977,9 @@ export class NativeRoomService {
         // custody lets go of what this purge released; what any unpurged message names is kept.
         // The copies a face already published are deleted where the face can reach them, within a
         // bounded wait; the receipt lists the ones the purge could not delete (docs/PURGE.md).
+        // First the room's face records lose every field that names or describes a purged
+        // message's attachments (src/faces-scrub.mjs), after the log's rewrite and before custody.
+        await scrubFaceRecords(this.root, roomId, store.purged.keys());
         const { blobsRemoved } = await collectReleasedCustody(store.directory, () => store.custodyCensus().released,
           { requested: () => this.testHooks?.collectionRequested?.(roomId) });
         const facesOutOfReach = this.faces ? await this.faces.afterPurge(roomId, store, { id: receipt.id, cursor: receipt.cursor, purged: receipt.purged ?? [] }) : [];

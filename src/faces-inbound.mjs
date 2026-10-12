@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { AgoraError, redact } from "./core.mjs";
-import { attachmentLine, readFaceRecords, slackTs } from "./faces.mjs";
+import { attachmentLine, readFaceRecords, slackTs, withFaceLog } from "./faces.mjs";
 import { AUTHOR_REF_PATTERN } from "./protocol/common.mjs";
 import { detectAttachmentType } from "./protocol/attachment.mjs";
 import { parseTrailers } from "./trailers.mjs";
@@ -134,7 +134,7 @@ const lineKey = (transport, channel, ts) => `${transport}\0${channel}\0${ts}`;
 export async function appendInboundLine(stateRoot, roomId, line) {
   const file = faceInboundPath(stateRoot, roomId);
   await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-  await appendFile(file, JSON.stringify(line) + "\n", { encoding: "utf8", mode: 0o600 });
+  await withFaceLog(file, () => appendFile(file, JSON.stringify(line) + "\n", { encoding: "utf8", mode: 0o600 }));
   return line;
 }
 

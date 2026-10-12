@@ -688,7 +688,11 @@ and earlier checkpoint kept. The upgrade keeps the version 2 copy, names include
 `--prune-backup`; a purge does not reach that copy, so prune it before relying on one. The purge deletes the copies its faces published within a few
 seconds and its receipt lists, as `facesOutOfReach`, each copy it could not delete (a face that cannot
 delete, a refused delete, or one not confirmed in time, whose deletion goes on), each
-`{ transport, channel, ts?, file?, message, reason }`. Only a message
+`{ transport, channel, ts?, file?, message, reason }`. The purge also scrubs the room's face records
+(`faces.jsonl`, `face-inbound.jsonl`) of every field naming or describing a purged message's
+attachments or fingerprinting its text, keeping transport, status, ts or file id and cursor, so the
+deletions and a resent purge still work; the rewrite is a temp file and one rename, and a scrub a
+crash cut short finishes on the next purge or the next open of the room. Only a message
 carries attachments (`attachment-invalid` otherwise). `post --attach` sends an image's width and
 height from its header. A purge never collects bytes an upload or an append is about to reference.
 An app that shows messages subscribes with a `purge` handler (`purge-v1`) and strikes them with

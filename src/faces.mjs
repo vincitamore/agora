@@ -256,7 +256,8 @@ export async function writeFacePolicy(stateRoot, roomId, policy, { now = () => n
 }
 
 // ---------------------------------------------------------------------------------------------
-// The face record log: <state>/native/rooms/<roomId>/faces.jsonl, append-only
+// The face record log: <state>/native/rooms/<roomId>/faces.jsonl, append-only; a purge rewrites it
+// once to take off what names its purged attachments (src/faces-scrub.mjs)
 // ---------------------------------------------------------------------------------------------
 
 /**
@@ -275,8 +276,42 @@ export function faceKey(originId, transport, attachmentId, mirror) { return `${o
 export async function appendFaceRecord(stateRoot, roomId, line) {
   const file = faceRecordsPath(stateRoot, roomId);
   await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-  await appendFile(file, JSON.stringify(line) + "\n", { encoding: "utf8", mode: 0o600 });
+  await withFaceLog(file, () => appendFile(file, JSON.stringify(line) + "\n", { encoding: "utf8", mode: 0o600 }));
   return line;
+}
+
+/** The writes queued on each face log file in this process. @type {Map<string, Promise<unknown>>} */
+const faceLogQueues = new Map();
+
+/**
+ * Run `fn` alone among this process's writes to one face log file (`faces.jsonl`,
+ * `face-inbound.jsonl`): every append and a purge's scrub (src/faces-scrub.mjs) queue here, so the
+ * scrub's read, rewrite and rename never lose a line the seat service appended meanwhile.
+ * @template T @param {string} file @param {() => Promise<T>} fn @returns {Promise<T>}
+ */
+export function withFaceLog(file, fn) {
+  const key = path.resolve(file);
+  const run = (faceLogQueues.get(key) ?? Promise.resolve()).then(fn);
+  const tail = run.then(() => {}, () => {});
+  faceLogQueues.set(key, tail);
+  tail.then(() => { if (faceLogQueues.get(key) === tail) faceLogQueues.delete(key); });
+  return run;
+}
+
+/**
+ * The fields of a face record that name or describe a message's attachments or copy its text. A
+ * purge takes them off every row of a purged message (src/faces-scrub.mjs); the rest of the row
+ * (transport, status, ts or file id, attachment id, cursor, the mirror's act) is what keeps the
+ * face correct after it: the deletions, `facesOutOfReach` and the sweep.
+ */
+export const FACE_DESCRIPTIVE_FIELDS = Object.freeze(["name", "title", "size", "kind", "mimetype", "text"]);
+
+/** @template {Record<string, any>} L @param {L} line @returns {L} */
+export function scrubFaceLine(line) {
+  /** @type {Record<string, any>} */
+  const out = { ...line };
+  for (const f of FACE_DESCRIPTIVE_FIELDS) delete out[f];
+  return /** @type {L} */ (out);
 }
 
 /** @param {FaceRecord[]} lines @returns {Map<string, FaceRecord>} */
@@ -592,8 +627,11 @@ export class FaceRunner {
 
   /** @param {FaceRecord} line */
   async #append(line) {
+    // a row written after its message was purged (a publication or a deletion in flight when the
+    // purge's scrub ran) keeps nothing that names or describes the purged attachments (docs/PURGE.md)
+    if (FACE_DESCRIPTIVE_FIELDS.some((f) => f in line) && this.lookupMessage(line.originId)?.purged) line = scrubFaceLine(line);
     await appendFaceRecord(this.stateRoot, this.roomId, line);
-    if (line.status !== "pending") this.warn(`face ${line.transport}${line.attachmentId ? ` picture ${line.name ?? line.attachmentId}` : ""} ${line.status}${line.reason ? `: ${bounded(line.reason)}` : line.id ? ` ${line.id}` : ""}`);
+    if (line.status !== "pending") this.warn(`face ${line.transport}${line.attachmentId ? ` picture ${line.attachmentId}` : ""} ${line.status}${line.reason ? `: ${bounded(line.reason)}` : line.id ? ` ${line.id}` : ""}`);
     return line;
   }
 
