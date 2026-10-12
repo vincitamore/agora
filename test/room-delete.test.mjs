@@ -169,7 +169,7 @@ test("agora service room delete: refuses a room the config names, a missing or w
   assert.equal(missing.code, 2);
   assert.match(missing.stderr, /confirm-required/);
   assert.match(missing.stderr, /slack C0DELETE1 1790000200\.000100 published/, "the refusal lists the copies the operator may purge first");
-  const wrong = await agora(["service", "room", "delete", roomId, "--confirm", roomId.slice(0, 31) + "0"], env);
+  const wrong = await agora(["service", "room", "delete", roomId, "--confirm", roomId.slice(0, 31) + (roomId.endsWith("0") ? "1" : "0")], env);
   assert.equal(wrong.code, 2);
   assert.match(wrong.stderr, /confirm-mismatch: --confirm must be the exact room id/);
   assert.ok(await exists(dir), "no refusal deleted anything");
