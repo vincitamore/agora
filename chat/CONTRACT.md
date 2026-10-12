@@ -183,6 +183,13 @@ const view = mountChat(el, {
 routes back into `open` cannot loop); `back()` returns to the list on a phone; `refresh()` reloads the
 list.
 
+A linked `thread` is opened by its root, never through the list: the kit asks for
+`GET /chat/thread/:root` at mount beside `GET /chat/state`, and draws the thread as soon as both
+answer (and `people`, when the host gives it), however long `GET /chat/threads` takes. The thread's
+stream opens after that read, as for any `open`, so a record the read already holds is drawn once and
+a purge in the stream's history still reaches the composer. A thread the person opens before the link
+is drawn stays open; the link does not take it back.
+
 A card renderer marks its controls and its state with attributes and classes the kit owns:
 
 - `data-chat-action="<name>"` on a button runs that card's `actions[name]`;

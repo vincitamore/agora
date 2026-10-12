@@ -35,8 +35,10 @@ export { registerBlock } from "./blocks.js";
  * }} ChatContext
  */
 /**
- * `thread` opens that thread at mount; `now` is the clock the ledger reads (a fixed one renders the
- * same page twice); both are optional and change nothing else.
+ * `thread` opens that thread at mount: its `GET <base>/thread/:root` is asked for at once, beside
+ * `GET <base>/state`, and it opens once both answer, never waiting on the thread list. `now` is the
+ * clock the ledger reads (a fixed one renders the same page twice); both are optional and change
+ * nothing else.
  * @typedef {{
  *   base: string,
  *   context?: () => Array<[string, string]>,
@@ -305,8 +307,11 @@ export function mountChat(el, options) {
     meta.textContent = [...ctxValues, people.join(", ")].filter(Boolean).join(" · ");
   };
 
-  /** @param {string} root */
-  const open = async (root) => {
+  /**
+   * @param {string} root
+   * @param {Promise<{ status: number, body: any }>} [asked] the thread's read, already asked for
+   */
+  const open = async (root, asked) => {
     if (gone) return;
     // a host whose onOpenThread routes back into open() lands here a second time: show, do not reload
     if (root === active && threadStream) { shell.setAttribute("data-view", "thread"); return; }
@@ -322,7 +327,7 @@ export function mountChat(el, options) {
     view = renderThread(ledger, [], ctxFor(root), { base, me, name: nameOf });
     if (options.onOpenThread) options.onOpenThread(root);
     try {
-      const data = dataOf(await call(base, `/thread/${encodeURIComponent(root)}`));
+      const data = dataOf(await (asked ?? call(base, `/thread/${encodeURIComponent(root)}`)));
       if (active !== root) return;
       const messages = Array.isArray(data?.messages) ? data.messages : [];
       view = renderThread(ledger, messages, ctxFor(root), { base, me, name: nameOf });
@@ -384,7 +389,13 @@ export function mountChat(el, options) {
 
   drawFilters();
   drawState();
-  (async () => {
+  // A linked thread is read by its root at once: the list can be slow or long, and a deep link must
+  // not show an empty pane while it loads. Its stream still opens after this read, as for any open,
+  // so a record the read already holds is not drawn twice and a purge still reaches the composer.
+  const linked = options.thread
+    ? call(base, `/thread/${encodeURIComponent(options.thread)}`).catch((e) => ({ status: 0, body: { ok: false, error: { code: e instanceof Error ? e.message : String(e) } } }))
+    : null;
+  const ready = (async () => {
     try {
       const state = dataOf(await call(base, "/state"));
       me = state?.me ?? null;
@@ -396,9 +407,14 @@ export function mountChat(el, options) {
     if (options.people) {
       try { for (const p of await options.people()) names.set(p.id, p.name); } catch { /* names fall back to ids */ }
     }
-    await loadList();
-    if (options.thread) await open(options.thread);
   })();
+  void ready.then(loadList);
+  // opened once the person is known (the ledger and composer read who "me" is), never after the
+  // list; a thread the person opened in the meantime is theirs, and the link does not take it back
+  if (options.thread && linked) {
+    const root = options.thread;
+    void ready.then(() => { if (active === null) return open(root, linked); });
+  }
 
   return {
     unmount() {
