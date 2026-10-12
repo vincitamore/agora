@@ -798,16 +798,41 @@ native reply in it lands in the Slack thread through the root's face. An edit or
 crossed reply on Slack follows it in as an `edit` or `withdraw` annotation under the same author
 stamp; a delete is inferred from an absence only on a read that reached the end of the thread,
 never on one cut short at its page cap. What the deferral named
-beyond that is now a decision, not a wait. A root never arrives from Slack, because only replies in
-faced threads cross inbound; a native room is not a mirror of the channel. A native reply whose
-root was never faced stays refused `thread:` on the Slack face: a Slack reader would see an answer
-to a message they cannot see, and flattening it to top level loses the thread. A reply whose root's
-copy is still in flight is not that case: it waits for the copy and lands under it, and it is
-refused (`root-refused`) or held `unknown` (`root-unknown`) only by the root copy's own outcome.
-Refusing it at once was the first build, and it lost the copy of every reply a client posted within
-a publish's latency of its root. Re-open either only
-when a person on a Slack face asks for top-level messages to reach the room, or for native replies
-whose root they never saw.
+beyond that is now a decision, not a wait. A native reply whose root was never faced stays refused
+`thread:` on the Slack face: a Slack reader would see an answer to a message they cannot see, and
+flattening it to top level loses the thread. A reply whose root's copy is still in flight is not
+that case: it waits for the copy and lands under it, and it is refused (`root-refused`) or held
+`unknown` (`root-unknown`) only by the root copy's own outcome. Refusing it at once was the first
+build, and it lost the copy of every reply a client posted within a publish's latency of its root.
+Re-open the refusal only when a person on a Slack face asks for native replies whose root they
+never saw.
+
+### Top-level crossing for a faced Slack channel (closed)
+
+The decision above also held that a root never arrives from Slack: only replies in faced threads
+crossed, because a native room is not a mirror of the channel, to be re-opened when a person on a
+Slack face asked for top-level messages to reach the room. That trigger fired: a team wanted one
+native room as its only room, with its Slack channel as its face, so a person's new question at the
+channel's top level has to reach the room or its resident never sees it.
+
+It ships as an opt-in per face, `agora room faces <room> --inbound top-level` (`threads`, the
+default, is the old behaviour). With it set, a top-level message in the face's channel from any
+author but this seat's own account crosses as a native top-level post, stamped and loop-checked
+exactly as a thread reply is (`via: slack-face`, author kind `human` or `agent`, the Slack user id
+as `author.ref`; the runner's rider, published ts, quarantine and pending-account checks, and on top
+of them every message this seat's own account wrote there). Its Slack thread joins the thread map
+under the new native root, so the replies under it cross into that native thread, and an edit or a
+delete of the question follows it in as an annotation, as a reply's does. The channel is read from
+the position the opt-in recorded and never back-filled; that position persists in
+`face-inbound.jsonl` beside the mode line, a read cut short at the page cap is a gap that moves
+nothing, and every operation id derives from the Slack ts. A message also sent to the channel from
+a thread (`thread_broadcast`) crosses only through its thread. The mode is the inbound half's own
+record, not a field of the face policy, so the outbound policy's shape is unchanged.
+
+Not yet joined: a native reply under a root that crossed in from the top level is refused `thread:`
+on the Slack face, because the outbound runner resolves a reply's Slack thread only from the face
+record of a root it published or a `re:` it can place. The thread map already pairs the two
+(`faceThreadOf`); the outbound side reading it is the remaining seam.
 
 ### Face contracts (ruled)
 

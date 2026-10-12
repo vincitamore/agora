@@ -611,8 +611,8 @@ a copy of a native message on a transport where a reader lives (the Slack channe
 humans read from a phone; the GitHub issue a collaborator watches). `agora room faces <room>`
 prints the policy; with `--add slack --channel <id>`, `--add github --via <issue room>`
 (one comment per faced post on that room's issue), `--remove`, `--enable`, `--disable`, `--human`, `--agent`, `--system`
-(a `+`-joined list from `always`, `never`, `addressed`, `landing`), `--attachments` or
-`--pictures` it writes the record under the seat's state, never the shared config, and
+(a `+`-joined list from `always`, `never`, `addressed`, `landing`), `--attachments`,
+`--pictures` or `--inbound` it writes the record under the seat's state, never the shared config, and
 refuses an unknown transport, selector or mode by name with exit 1 and nothing written.
 Every selector reads the poster's own outbound trailers and never the body: `addressed` is
 your own `to:` or `re:` reaching a human, `landing` is your own `verdict:` with a sha
@@ -635,8 +635,12 @@ picture row saying so, never a copy). A reconcile read truncated at the page cap
 no repost: "not found" is not known, the row stays `unknown`, and a later covered read is
 what may repost. The Slack face answers back: a person's reply in a thread whose root the seat
 faced becomes a native reply under that root, stamped `via: slack-face` by the service, author
-kind `human` (a foreign bot, `agent`) with the Slack user id as `author.ref`. Only replies in
-faced threads cross, never the channel's top level. The loop check is the outbound runner's
+kind `human` (a foreign bot, `agent`) with the Slack user id as `author.ref`. By default only
+replies in faced threads cross. `room faces <room> --inbound top-level` (back with `--inbound
+threads`) also takes a person's new top-level message in the face's channel, from anyone but this
+seat's own account, as a native top-level post whose Slack thread then crosses as its replies; it
+reads from the moment it is set, never back-filling, and a read cut short at the page cap crosses
+nothing. A native reply under such a root is still refused `thread:` on the face. The loop check is the outbound runner's
 (rider, published ts or file id, quarantine, own account while pending), so a faced copy never
 comes back in; the thread map, each thread's position and every crossing live in
 `native/rooms/<roomId>/face-inbound.jsonl`, and the operation id derives from the Slack ts, so a

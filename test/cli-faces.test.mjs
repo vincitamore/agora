@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { NativeRoomService } from "../src/native-service.mjs";
 import { appendFaceRecord, faceRecordsPath, readFaceRecords, readFacePolicy } from "../src/faces.mjs";
+import { faceInboundPath, readInbound } from "../src/faces-inbound.mjs";
 import { nativeTransport } from "../src/transports/native.mjs";
 
 const run = promisify(execFile);
@@ -106,7 +107,7 @@ test("fixture 01: room faces reads an absent record as a room with no faces, and
   const out = JSON.parse(r.stdout);
   assert.equal(out.written, true);
   assert.equal(out.updatedAt, updatedAt);
-  assert.deepEqual(out.faces, rest.faces);
+  assert.deepEqual(out.faces, rest.faces.map((/** @type {any} */ f) => ({ ...f, inbound: "threads" })), "the output adds a slack face's inbound mode, kept apart from the policy record");
   await configUnchanged();
 
   // --show prints the same record and writes nothing
@@ -185,6 +186,37 @@ test("fixture 01: the selector and attachment edits write exactly the field name
   assert.match(r.stderr, /room nat has no face to edit/);
   await configUnchanged();
   assert.doesNotMatch(await readFile(policyFile, "utf8"), /xox[bp]-|AGORA_TEST_UNSET_TOKEN/, "the record names the token room, never the token or its source");
+});
+
+test("room faces --inbound top-level opts a slack face into the channel's top level, from now, in the inbound log and never the policy or the shared config; a github face and an unknown mode refuse with nothing written", async (t) => {
+  const { env, root, policyFile, configUnchanged } = await fixture(t, { githubRoom: true });
+  let r = await agora(["room", "faces", "nat", "--add", "slack", "--channel", "C0123ABC", "--inbound", "top-level", "--json"], env);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(JSON.parse(r.stdout).faces[0].inbound, "top-level");
+  assert.equal(JSON.parse(await readFile(policyFile, "utf8")).faces[0].inbound, undefined, "the policy record keeps its shape");
+  const { modes, cursors } = await readInbound(root, ROOM);
+  assert.equal(modes.get("slack\0C0123ABC"), "top-level");
+  const position = Number(cursors.get("slack\0C0123ABC\0"));
+  assert.ok(Math.abs(position - Date.now() / 1000) < 120, "the channel is read from the opt-in, not from its start");
+  r = await agora(["room", "faces", "nat"], env);
+  assert.match(r.stdout, /attachments: metadata {2}inbound: top-level/);
+  const before = await readFile(faceInboundPath(root, ROOM), "utf8");
+  r = await agora(["room", "faces", "nat", "--inbound", "everything"], env);
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /--inbound "everything" is not a mode \(have: threads, top-level\)/);
+  r = await agora(["room", "faces", "nat", "--add", "github", "--inbound", "top-level"], env);
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /the github face has no inbound half/);
+  assert.equal(JSON.parse(await readFile(policyFile, "utf8")).faces.length, 1, "the refused add wrote nothing");
+  assert.equal(await readFile(faceInboundPath(root, ROOM), "utf8"), before, "and no mode");
+  // back to threads, and a removed face does not keep its opt-in for a later one on the same channel
+  r = await agora(["room", "faces", "nat", "--inbound", "threads", "--json"], env);
+  assert.equal(JSON.parse(r.stdout).faces[0].inbound, "threads");
+  await agora(["room", "faces", "nat", "--inbound", "top-level"], env);
+  await agora(["room", "faces", "nat", "--remove", "slack"], env);
+  r = await agora(["room", "faces", "nat", "--add", "slack", "--channel", "C0123ABC", "--json"], env);
+  assert.equal(JSON.parse(r.stdout).faces[0].inbound, "threads");
+  await configUnchanged();
 });
 
 test("room faces: the verb shape is generic (transport as a value), a non-native room is a usage error, and two token rooms need --via", async (t) => {

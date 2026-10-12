@@ -58,6 +58,8 @@ export function failedBeforeSend(e) {
   return NEVER_CONNECTED.test(e.message);
 }
 
+/** One message of a thread as the inbound face's edit and delete survey sees it. @typedef {{ ts: string, text: string, subtype?: string, hidden?: boolean, editedTs?: string }} InboundSurveyItem */
+
 /**
  * The face half of the transport (P5): what `src/faces.mjs` calls beyond the shared Transport
  * contract. Every member here is reachable only through a face; the CLI's verbs never call them.
@@ -74,7 +76,9 @@ export function failedBeforeSend(e) {
  * @property {(opts: { thread: string, since?: string, limit?: number, pages?: number }) => Promise<import('../core.mjs').ReadResult>} inbound
  *   the replies of one thread for the inbound face (src/faces-inbound.mjs): riders included, so the
  *   loop check sees this seat's own copies, and every attachment carrying a non-enumerable `download`
- * @property {(opts: { thread: string, pages?: number }) => Promise<{ messages: { ts: string, text: string, subtype?: string, hidden?: boolean, editedTs?: string }[], complete: boolean }>} inboundThread
+ * @property {(opts: { since: string, limit?: number, pages?: number }) => Promise<import('../core.mjs').ReadResult>} inboundChannel
+ *   the channel's top level after `since`, for a face whose inbound mode is `top-level`; replies excluded
+ * @property {(opts: { thread: string, pages?: number }) => Promise<{ messages: InboundSurveyItem[], complete: boolean, root?: InboundSurveyItem, missing?: boolean }>} inboundThread
  *   one whole thread for the inbound face's edit and delete check; `complete` only when the walk reached the end
  */
 
@@ -572,15 +576,37 @@ export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep
     async inbound(opts) {
       const bad = validateThread(opts?.thread);
       if (bad !== undefined) throw new AgoraError(`inbound read: ${bad}`);
-      return readMessages(opts, true);
+      try { return await readMessages(opts, true); }
+      catch (e) {
+        // the parent was deleted and the thread with it: there is nothing more to read in it, and a
+        // throw here would hold every other thread of the face; the edit/delete survey says it is gone
+        if (e instanceof SlackApiError && e.error === "thread_not_found") return /** @type {import('../core.mjs').ReadResult} */ ([]);
+        throw e;
+      }
+    },
+    /**
+     * The inbound face's read of the channel's top level, for a face that opted into it
+     * (`--inbound top-level`): `conversations.history` after `since` with every message's metadata
+     * and attachments unmaterialized, as `inbound` reads a thread. Replies are not in it, a reply
+     * also sent to the channel (`thread_broadcast`) included: they cross through their thread. A
+     * walk that cannot reach `since` inside the page cap returns a `gap` and nothing else.
+     * @param {{ since: string, limit?: number, pages?: number }} opts
+     */
+    async inboundChannel(opts) {
+      const bad = validateThread(opts?.since);
+      if (bad !== undefined) throw new AgoraError(`inbound channel read: since ${bad}`);
+      return readMessages(opts, true, { topOnly: true });
     },
     /**
      * The inbound face's survey of one whole thread, for edits and deletes of replies that already
      * crossed: every reply's ts, text, subtype, `hidden` and `edited.ts`, oldest first, and
      * `complete`, true only when the walk reached the end of the thread inside the page cap. An
-     * absence means a delete only on a complete read. Throws on a failed first page.
+     * absence means a delete only on a complete read. Throws on a failed first page, except Slack's
+     * `thread_not_found`, which is a complete read of nothing with `missing` set. The parent itself
+     * rides beside the replies as `root` when the read returned it (a top-level message that
+     * crossed in is that parent).
      * @param {{ thread: string, pages?: number }} opts
-     * @returns {Promise<{ messages: { ts: string, text: string, subtype?: string, hidden?: boolean, editedTs?: string }[], complete: boolean }>}
+     * @returns {Promise<{ messages: InboundSurveyItem[], complete: boolean, root?: InboundSurveyItem, missing?: boolean }>}
      */
     async inboundThread({ thread, pages = SLACK_READ_PAGES }) {
       const bad = validateThread(thread);
@@ -595,21 +621,29 @@ export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep
         /** @type {any} */
         let body;
         try { body = await call("conversations.replies", cursor ? { ...base, cursor } : base); }
-        catch (e) { if (!page) throw e; break; }
+        catch (e) {
+          // Slack's answer that the parent and its thread no longer exist: a complete read of nothing
+          if (!page && e instanceof SlackApiError && e.error === "thread_not_found") return { messages: [], complete: true, missing: true };
+          if (!page) throw e;
+          break;
+        }
         raw.push(...(body.messages ?? []));
         cursor = body.response_metadata?.next_cursor || undefined;
         if (!(cursor && body.has_more)) { complete = true; break; }
       }
+      /** @param {any} m */
+      const shape = (m) => ({
+        ts: String(m.ts), text: decodeSlackText(String(m.text ?? "")),
+        ...(typeof m.subtype === "string" ? { subtype: m.subtype } : {}),
+        ...(m.hidden === true ? { hidden: true } : {}),
+        ...(typeof m.edited?.ts === "string" ? { editedTs: m.edited.ts } : {}),
+      });
       const messages = raw
         .filter((m) => String(m.ts) !== thread)
         .sort((a, b) => Number(a.ts) - Number(b.ts))
-        .map((m) => ({
-          ts: String(m.ts), text: decodeSlackText(String(m.text ?? "")),
-          ...(typeof m.subtype === "string" ? { subtype: m.subtype } : {}),
-          ...(m.hidden === true ? { hidden: true } : {}),
-          ...(typeof m.edited?.ts === "string" ? { editedTs: m.edited.ts } : {}),
-        }));
-      return { messages, complete };
+        .map(shape);
+      const parent = raw.find((m) => String(m.ts) === thread);
+      return { messages, complete, ...(parent ? { root: shape(parent) } : {}) };
     },
     /**
      * `metadata` is Slack's per-message structured rider (an optional machine-readable rider, never
@@ -635,7 +669,7 @@ export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep
    * metadata and leaves attachments unmaterialized.
    * @param {import('../core.mjs').ReadOptions} opts @param {boolean} inbound
    */
-  async function readMessages({ thread, since, limit = 200, pages = SLACK_READ_PAGES } = {}, inbound) {
+  async function readMessages({ thread, since, limit = 200, pages = SLACK_READ_PAGES } = {}, inbound, { topOnly = false } = {}) {
     /** @type {Record<string, string>} */
     const base = { channel, limit: "200" };
     if (inbound) base.include_all_metadata = "true";
@@ -674,7 +708,7 @@ export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep
         if (thread && m.ts === thread) continue; // the parent is not a reply
         if (since && Number(m.ts) <= Number(since)) continue;
         if (SKIP_SUBTYPES.has(m.subtype)) continue;
-        if (!thread && m.thread_ts && m.thread_ts !== m.ts && m.subtype !== "thread_broadcast") continue; // replies live in their thread
+        if (!thread && m.thread_ts && m.thread_ts !== m.ts && (topOnly || m.subtype !== "thread_broadcast")) continue; // replies live in their thread
         raw.push(m);
       }
       cursor = body.response_metadata?.next_cursor || undefined;

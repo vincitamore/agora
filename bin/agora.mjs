@@ -32,7 +32,7 @@ import {
 } from "../src/core.mjs";
 import { TRANSPORTS, createTransport, tokenSource } from "../src/transports/index.mjs";
 import { configFaceTransports } from "../src/native-faces-wiring.mjs";
-import { slackInboundTick } from "../src/faces-inbound.mjs";
+import { INBOUND_MODES, inboundModeOf, setInboundMode, slackInboundTick } from "../src/faces-inbound.mjs";
 import { connect as connectClient } from "../src/client.mjs";
 import { asBoardSubject } from "../src/board-subject.mjs";
 import { watch } from "../src/watch.mjs";
@@ -218,6 +218,7 @@ const SCHEMA = {
         "--system <selectors>": "the same for system posts (default never)",
         "--attachments <mode>": `what the face carries of an attachment: ${FACE_ATTACHMENT_MODES.join(", ")} (default metadata: one line per attachment, never a path)`,
         "--pictures": "shorthand for --attachments pictures: image attachments are uploaded to the face from the seat's verified copy",
+        "--inbound <mode>": `what a slack face takes in: ${INBOUND_MODES.join(" or ")} (default threads: replies in the threads of messages the face carried). top-level also takes a person's new top-level message in the face's channel, from anyone but this seat's own account, as a native top-level post whose Slack thread crosses as its replies; it reads from the moment it is set, never back-filling the channel`,
         "--face <transport>": "which face an edit applies to, when the room has more than one",
         "--show": "print the record and change nothing (the default with no edit option)",
         "--message <id>": "with purge: a message whose text is removed, repeatable",
@@ -532,6 +533,7 @@ const OPTIONS = /** @type {const} */ ({
   system: { type: "string" },
   attachments: { type: "string" },
   pictures: { type: "boolean", default: false },
+  inbound: { type: "string" },
   show: { type: "boolean", default: false },
   help: { type: "boolean", short: "h", default: false },
   daemon: { type: "boolean", default: false },
@@ -1868,7 +1870,11 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
     const policy = await readFacePolicy(stateRoot, roomId);
     const file = facePolicyPath(stateRoot, roomId);
     const given = /** @type {Record<string, unknown>} */ (values);
-    const edits = ["add", "remove", "enable", "disable", "human", "agent", "system", "attachments"].filter((k) => given[k] !== undefined).concat(values.pictures ? ["pictures"] : []);
+    const edits = ["add", "remove", "enable", "disable", "human", "agent", "system", "attachments", "inbound"].filter((k) => given[k] !== undefined).concat(values.pictures ? ["pictures"] : []);
+    /** @type {{ face: any, mode: string } | undefined} the inbound mode to record once the policy holds the face */
+    let inboundEdit;
+    /** @type {any} a removed face whose inbound mode goes back to threads */
+    let removedFace;
     if (values.add === undefined && (values.channel !== undefined || values.via !== undefined)) throw new AgoraError(`--via and --channel go with --add`, EXIT.usage);
     if (edits.length) {
       /** @param {string} transport @param {string} flag */
@@ -1906,10 +1912,11 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       if (values.remove !== undefined) {
         const f = faceOf(String(values.remove).trim(), "--remove");
         policy.faces = policy.faces.filter((x) => x !== f);
+        removedFace = f;
       }
       if (values.enable !== undefined) faceOf(String(values.enable).trim(), "--enable").enabled = true;
       if (values.disable !== undefined) faceOf(String(values.disable).trim(), "--disable").enabled = false;
-      const perFace = ["human", "agent", "system", "attachments"].filter((k) => given[k] !== undefined).concat(values.pictures ? ["pictures"] : []);
+      const perFace = ["human", "agent", "system", "attachments", "inbound"].filter((k) => given[k] !== undefined).concat(values.pictures ? ["pictures"] : []);
       if (perFace.length) {
         const named = /** @type {string[]} */ (values.face ?? []);
         if (named.length > 1) throw new AgoraError(`--face names one face here (the one the edit applies to)`, EXIT.usage);
@@ -1923,18 +1930,30 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
           if (!FACE_ATTACHMENT_MODES.includes(/** @type {any} */ (mode))) throw new AgoraError(`--attachments ${JSON.stringify(mode)} is not a mode (have: ${FACE_ATTACHMENT_MODES.join(", ")})`);
           target.attachments = /** @type {any} */ (mode);
         }
+        if (values.inbound !== undefined) {
+          const inbound = String(values.inbound).trim();
+          if (!INBOUND_MODES.includes(/** @type {any} */ (inbound))) throw new AgoraError(`--inbound ${JSON.stringify(inbound)} is not a mode (have: ${INBOUND_MODES.join(", ")})`);
+          if (target.transport !== "slack" && inbound !== "threads") throw new AgoraError(`--inbound ${inbound}: the ${target.transport} face has no inbound half; only a slack face takes the channel's top level`);
+          inboundEdit = { face: target, mode: inbound };
+        }
       }
       await writeFacePolicy(stateRoot, roomId, policy);
+      // the inbound mode is the inbound half's own record (face-inbound.jsonl), written once the face it names is in the policy
+      if (removedFace && removedFace.transport === "slack") await setInboundMode(stateRoot, roomId, removedFace, "threads");
+      if (inboundEdit) await setInboundMode(stateRoot, roomId, inboundEdit.face, inboundEdit.mode);
     }
     const written = await readFacePolicy(stateRoot, roomId);
-    if (json) console.log(JSON.stringify({ type: "face-policy", alias, room: roomId, path: file, updatedAt: written.updatedAt, written: edits.length > 0, faces: written.faces }));
+    const inboundOf = new Map();
+    for (const f of written.faces) if (f.transport === "slack") inboundOf.set(f, await inboundModeOf(stateRoot, roomId, f));
+    if (json) console.log(JSON.stringify({ type: "face-policy", alias, room: roomId, path: file, updatedAt: written.updatedAt, written: edits.length > 0,
+      faces: written.faces.map((f) => (inboundOf.has(f) ? { ...f, inbound: inboundOf.get(f) } : f)) }));
     else {
       console.log(`faces of ${alias} (native room ${roomId})`);
       console.log(`  record ${file}${written.updatedAt ? `  written ${written.updatedAt}` : "  (absent: every post is native only and nothing refuses)"}${edits.length ? "  (written now)" : ""}`);
       for (const f of written.faces) {
         const where = Object.entries(f.target).map(([k, v]) => `${k} ${v}`).join(" ") || "no target";
         console.log(`  ${f.transport.padEnd(8)} via ${f.alias}  ${where}  ${f.enabled ? "enabled" : "DISABLED"}`);
-        console.log(`  ${"".padEnd(8)} human: ${f.post.human.join("+")}  agent: ${f.post.agent.join("+")}  system: ${f.post.system.join("+")}  attachments: ${f.attachments}`);
+        console.log(`  ${"".padEnd(8)} human: ${f.post.human.join("+")}  agent: ${f.post.agent.join("+")}  system: ${f.post.system.join("+")}  attachments: ${f.attachments}${inboundOf.has(f) ? `  inbound: ${inboundOf.get(f)}` : ""}`);
       }
       if (!written.faces.length) console.log(`  no faces; add one: agora room faces ${alias} --add slack --via <slack room> [--channel <id>], or --add github --via <github room>`);
     }
