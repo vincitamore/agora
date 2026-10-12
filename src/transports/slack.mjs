@@ -68,6 +68,9 @@ export function failedBeforeSend(e) {
  * @property {(file: { name: string, length: number }) => Promise<{ uploadUrl: string, fileId: string }>} uploadUrl
  * @property {(file: { uploadUrl: string, bytes: Buffer, mimetype: string, digest: string }) => Promise<void>} putUpload
  * @property {(file: { fileId: string, title: string, thread?: string }) => Promise<{ fileId: string }>} completeUpload
+ * @property {(copy: { ts: string, text: string, metadata?: { event_type: string, event_payload: Record<string, string> } }) => Promise<{ id: string }>} [update]
+ * @property {(copy: { ts: string }) => Promise<{ removed: true, already: boolean }>} [remove]
+ * @property {(file: { fileId: string }) => Promise<{ removed: true, already: boolean }>} [removeFile]
  */
 
 /** @param {any} file */
@@ -456,6 +459,50 @@ export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep
       const body = await call("files.completeUploadExternal", params, { post: true });
       const shared = Array.isArray(body.files) ? body.files.find((/** @type {any} */ x) => x?.id === fileId) ?? body.files[0] : undefined;
       return { fileId: String(shared?.id ?? fileId) };
+    },
+    /**
+     * The face half's mirror of a native edit: replace the text of a copy this seat posted
+     * (`chat.update`, chat:write; a bot may edit only its own messages). The rider goes again so
+     * the edited copy still names its origin. Idempotent: the same text twice is the same copy.
+     * @param {{ ts: string, text: string, metadata?: { event_type: string, event_payload: Record<string, string> } }} copy
+     */
+    async update({ ts, text, metadata }) {
+      const payload = encodeSlackText(text);
+      if (payload.length > SLACK_TEXT_MAX) {
+        throw new AgoraError(`slack edit is ${payload.length} rendered characters (trailers and signature included); the limit is ${SLACK_TEXT_MAX}`, EXIT.usage);
+      }
+      /** @type {Record<string, unknown>} */
+      const params = { channel, ts, text: payload };
+      if (metadata) params.metadata = metadata;
+      const body = await call("chat.update", params, { post: true });
+      return { id: String(body.ts ?? ts) };
+    },
+    /**
+     * The face half's mirror of a native withdraw or purge: delete a copy this seat posted
+     * (`chat.delete`, chat:write). A copy already gone (`message_not_found`) is gone: the call is
+     * idempotent, so a re-run after a lost response cannot do harm.
+     * @param {{ ts: string }} copy
+     * @returns {Promise<{ removed: true, already: boolean }>}
+     */
+    async remove({ ts }) {
+      try { await call("chat.delete", { channel, ts }, { post: true }); return { removed: true, already: false }; }
+      catch (e) {
+        if (e instanceof SlackApiError && e.error === "message_not_found") return { removed: true, already: true };
+        throw e;
+      }
+    },
+    /**
+     * Delete a picture this seat uploaded to the face (`files.delete`, files:write). A file already
+     * gone (`file_not_found`, `file_deleted`) is gone.
+     * @param {{ fileId: string }} file
+     * @returns {Promise<{ removed: true, already: boolean }>}
+     */
+    async removeFile({ fileId }) {
+      try { await call("files.delete", { file: fileId }, { post: true }); return { removed: true, already: false }; }
+      catch (e) {
+        if (e instanceof SlackApiError && (e.error === "file_not_found" || e.error === "file_deleted")) return { removed: true, already: true };
+        throw e;
+      }
     },
     async read({ thread, since, limit = 200, pages = SLACK_READ_PAGES } = {}) {
       /** @type {Record<string, string>} */

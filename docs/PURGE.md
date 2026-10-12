@@ -73,7 +73,8 @@ result carries no purges; its messages carry the markers.
 
 ```js
 client.purge(room, { targets, thread, reason, author, operationId })
-  // -> { id, cursor, duplicate, operationId, purged: [ids], blobsRemoved, facesOutOfReach: [] }
+  // -> { id, cursor, duplicate, operationId, purged: [ids], blobsRemoved,
+  //      facesOutOfReach: [{ transport, channel, ts? , file?, message, reason }] }
 client.subscribe(room, opts, { message, annotation, purge /* optional */, dark, refused })
 client.follow(room, opts, { message, annotation, purge, state })
 
@@ -84,9 +85,19 @@ foldPurges(messages, purges)
 ```
 
 `client.purge` and a `purge` handler refuse `purge-unsupported` on a service without `purge-v1`.
-`follow` hands each purge over once across a dark period. `facesOutOfReach` is `[]` until the seat's
-face record log is read; it will list the copies of the purged messages a face already published
-that the purge cannot reach.
+`follow` hands each purge over once across a dark period.
+
+## Faces
+
+When the seat service runs faces, a committed purge deletes the copies of its messages that a face
+already published (Slack: `chat.delete` for the text copy, `files.delete` for each uploaded picture),
+one mirror row per copy in the seat's face record log, and waits for them a bounded few seconds
+before its receipt. `facesOutOfReach` lists every copy it could not delete: `{ transport, channel,
+ts }` for a text copy or `{ transport, channel, file }` for a picture, with `message` (the purged
+message it copies) and `reason`. A copy is listed when its face cannot delete (GitHub), when the
+face refused the delete, when its own publication is still unsettled, or when its deletion was not
+confirmed by the receipt; that deletion goes on, and `agora faces <room> --for <id>` reads its
+outcome. A message no face carried lists nothing. A resent purge does not delete twice what landed.
 
 ## CLI
 

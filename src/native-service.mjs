@@ -23,6 +23,7 @@ import { AuthorityJournal } from "./authority-journal.mjs";
 import { startMemberRoute } from "./tailcat-routes.mjs";
 import { parseSpawnRequest } from "./spawn/request.mjs";
 import { ensurePaneAuthority, mintSpawnId, openPane, reapPane } from "./spawn-pane.mjs";
+import { NativeFaceWiring, faceChoiceOf } from "./native-faces-wiring.mjs";
 
 /** A refusal carries one stable code inward and one editable message outward. Keeping the
  * code beside the error at the mint prevents a later wire encoder from recovering control flow
@@ -399,7 +400,9 @@ function readHandshakeFrame(socket, timeoutMs, label) {
 }
 
 export class NativeRoomService {
-  /** @param {{ root: string, accountId: string, seatLabel: string, now?: () => Date, nonce?: string, build?: import("./harness.mjs").BuildIdentity, routeOptions?: Record<string, unknown>, authorityId?: string, readLocalIdentity?: (root: string) => Promise<{nodeKey: string}> }} options */
+  /** @param {{ root: string, accountId: string, seatLabel: string, now?: () => Date, nonce?: string, build?: import("./harness.mjs").BuildIdentity, routeOptions?: Record<string, unknown>, authorityId?: string, readLocalIdentity?: (root: string) => Promise<{nodeKey: string}>, faces?: Omit<ConstructorParameters<typeof NativeFaceWiring>[0], "root" | "attestor"> }} options
+   * `faces`, when given, runs the room faces (src/native-faces-wiring.mjs): the daemon passes a
+   * `transportFor` built on the shared config; absent, the service publishes no face. */
   constructor(options) {
     validateNativeId(options.accountId, "service account id");
     if (!options.seatLabel?.trim() || options.seatLabel.length > 120) throw new AgoraError("native service needs a bounded seat label");
@@ -470,6 +473,9 @@ export class NativeRoomService {
      * @type {AbortController | undefined} */
     this.routeOwner = undefined;
     this.running = false;
+    this.faceOptions = options.faces;
+    /** @type {NativeFaceWiring | undefined} */
+    this.faces = undefined;
   }
 
   async start() {
@@ -496,6 +502,11 @@ export class NativeRoomService {
       await listenOwnedEndpoint(this.server, this.endpointPath);
       await writeAtomic(this.descriptorPath, this.descriptor());
       this.running = true;
+      if (this.faceOptions) {
+        // the restart sweep: a face whose writer died is reconciled before anything else faces it
+        this.faces = new NativeFaceWiring({ ...this.faceOptions, root: this.root, attestor: { serviceId: this.accountId, serviceBootId: this.bootEpoch } });
+        this.faces.start({ openRoom: (id) => this.openRoom(id) });
+      }
       return this.descriptor();
     } catch (e) {
       await this.#releaseFiles();
@@ -877,6 +888,9 @@ export class NativeRoomService {
       // A purge removes text from this seat's own record; a remote member's route never reaches it
       if (member && kind === "purge")
         throw codedRefusal("purge-refused-remote", "a purge is appended on this seat's own connections; a member route may not purge");
+      // The poster's face choice (`--face`, `--no-face`), read before the commit so a malformed one
+      // is refused with nothing committed; a member frame never carries one (refused above)
+      const faceChoice = this.faces ? faceChoiceOf(frame.face) : "auto";
       // The store stamps author.id and derives the message id from this account id, so a member's
       // posts carry its own minted principal rather than the host's. A local connection that
       // declared a client name has its messages stamped `via` that name; a member declares none.
@@ -901,22 +915,29 @@ export class NativeRoomService {
         });
       if (receipt.kind === "purge") {
         // custody lets go of what this purge released; what any unpurged message names is kept.
-        // The copies a face already published are out of a purge's reach; the face record log that
-        // lists them is the faces' to read, so the list is empty until that reading lands.
+        // The copies a face already published are deleted where the face can reach them, within a
+        // bounded wait; the receipt lists the ones the purge could not delete (docs/PURGE.md).
         const { blobsRemoved } = await collectReleasedCustody(store.directory, () => store.custodyCensus().released,
           { requested: () => this.testHooks?.collectionRequested?.(roomId) });
+        const facesOutOfReach = this.faces ? await this.faces.afterPurge(roomId, store, { id: receipt.id, cursor: receipt.cursor, purged: receipt.purged ?? [] }) : [];
         sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "append-ack", requestId: frame.requestId, roomId, ...receipt,
-          blobsRemoved, facesOutOfReach: [] });
+          blobsRemoved, facesOutOfReach });
         if (!receipt.duplicate) {
           const purge = store.view({ since: `${store.manifest.epoch}:${parseNativeCursor(receipt.cursor).sequence - 1}`, limit: 1 }).purges[0];
           if (purge) this.#broadcastPurge(roomId, purge, store);
         }
         return;
       }
-      sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "append-ack", requestId: frame.requestId, roomId, ...receipt });
+      // A committed message's faces run after the commit and never fail it: the rows ride the ack
+      // (each pending or refused before any call), and the calls run after (src/native-faces-wiring.mjs)
+      const faced = this.faces && (receipt.kind === undefined || receipt.kind === "message") && !receipt.duplicate
+        ? await this.faces.afterAppend(roomId, store, store.read({ since: `${store.manifest.epoch}:${parseNativeCursor(receipt.cursor).sequence - 1}`, limit: 1 })[0], faceChoice)
+        : undefined;
+      sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "append-ack", requestId: frame.requestId, roomId, ...receipt, ...(faced ? { faces: faced } : {}) });
       if (receipt.kind === "annotation" && !receipt.duplicate) {
         const annotation = store.view({ since: `${store.manifest.epoch}:${parseNativeCursor(receipt.cursor).sequence - 1}`, limit: 1 }).annotations[0];
         if (annotation) this.#broadcastAnnotation(roomId, annotation, store);
+        if (annotation) this.faces?.afterAnnotation(roomId, store, annotation);
       } else if (receipt.kind !== "board" && receipt.kind !== "annotation") {
         const message = store.read({ since: `${store.manifest.epoch}:${parseNativeCursor(receipt.cursor).sequence - 1}`, limit: 1 })[0];
         if (message) this.#broadcast(roomId, message);
@@ -1345,6 +1366,8 @@ export class NativeRoomService {
   async stop() {
     if (!this.server) return;
     this.draining = true;
+    // face work drains (bounded) while the rooms are still open; what it leaves is swept at the next start
+    await this.faces?.stop();
     await Promise.allSettled([...this.admissions.values()]);
     this.running = false;
     this.routeChallenges.clear();
