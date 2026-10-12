@@ -25,7 +25,7 @@
  */
 
 import * as pushServer from "../push/server.mjs";
-import { handleAnnotate, handlePurge, handleReact, withReactions } from "./annotate.mjs";
+import { handleAnnotate, handlePurge, handleReact, served } from "./annotate.mjs";
 import { createPosting, fail, json, MESSAGE_ID, personRef } from "./post.mjs";
 import { asFault, openRoom } from "./room.mjs";
 import { handleScan } from "./scan.mjs";
@@ -440,7 +440,7 @@ export async function createChat(options) {
   /** The newest message of a thread, folded, for the line under its title. @param {string} id */
   function lastMessage(id) {
     const got = store.message(id);
-    return got ? withReactions(store, [toBrowser(room.fold([/** @type {any} */ (got.message)], /** @type {any} */ (got.annotations))[0])])[0] : null;
+    return got ? served(store, [toBrowser(room.fold([/** @type {any} */ (got.message)], /** @type {any} */ (got.annotations))[0])])[0] : null;
   }
 
   /** @param {URL} url @param {Person} person */
@@ -487,7 +487,7 @@ export async function createChat(options) {
         unread = !pos || !at || pos.epoch !== at.epoch || at.seq > pos.seq;
       }
       return {
-        root: withReactions(store, [toBrowser(room.fold([/** @type {any} */ (r.root)], /** @type {any} */ (r.rootAnnotations))[0])])[0],
+        root: served(store, [toBrowser(room.fold([/** @type {any} */ (r.root)], /** @type {any} */ (r.rootAnnotations))[0])])[0],
         lastAt: last.ts,
         lastBy: { name: last.author.name, kind: last.author.kind, ...(last.author.ref ? { ref: last.author.ref } : {}) },
         lastCursor: last.cursor,
@@ -507,7 +507,7 @@ export async function createChat(options) {
     try {
       const got = await room.read({ limit: THREAD_LIMIT, ...(root ? { thread: root } : {}), ...(since ? { since } : {}) });
       const shown = new Set(got.messages.map((m) => m.id));
-      const messages = withReactions(store, room.fold(got.messages, got.annotations ?? []).map(toBrowser));
+      const messages = served(store, room.fold(got.messages, got.annotations ?? []).map(toBrowser));
       // an annotation on a message this page does not carry (an edit after `since`) is given on its own
       const annotations = (got.annotations ?? []).filter((a) => !shown.has(a.target)).map(toBrowser);
       return json(200, { ok: true, data: { messages, annotations, through: got.through } });

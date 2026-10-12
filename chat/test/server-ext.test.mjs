@@ -245,6 +245,18 @@ test("upload, file and thumbnail: scans, caps, headers, and who may fetch", SLOW
   assert.equal(thumb.headers.get("content-type"), "image/png");
   assert.deepEqual(new Uint8Array(await thumb.arrayBuffer()), new Uint8Array(thumbBytes));
 
+  // the served message says which images have a thumbnail; one without (as a file posted from
+  // outside the kit) carries no `thumb`, so no client asks /chat/thumb for it
+  const plain = await k.upload("p-ada", png(), { "x-file-name": "plain.png", "content-type": "image/png" });
+  assert.equal(plain.status, 200, JSON.stringify(plain.body));
+  const bare = await k.call("p-ada", "/chat/post", { text: "no thumbnail", attachments: [plain.body.data.attachment] });
+  assert.equal(bare.status, 200, JSON.stringify(bare.body));
+  await k.indexed(bare.body.data.receipt.id);
+  const served = async (/** @type {string} */ id) => (await k.call("p-grace", `/chat/thread/${id}`)).body.data.messages.find((/** @type {any} */ m) => m.id === id).attachments[0];
+  assert.equal((await served(post.body.data.receipt.id)).thumb, true, "the kit holds its thumbnail");
+  assert.equal((await served(bare.body.data.receipt.id)).thumb, undefined, "no thumbnail held, none claimed");
+  assert.equal((await k.call("p-grace", `/chat/thumb/${encodeURIComponent(plain.body.data.attachment.digest)}`)).status, 404);
+
   // an SVG is a download, never rendered
   const svg = await k.upload("p-ada", SVG, { "x-file-name": "drawing.svg", "content-type": "image/svg+xml" });
   assert.equal(svg.status, 200, JSON.stringify(svg.body));

@@ -75,7 +75,7 @@ The host's cross-site checks and session sit in front of every route.
 | `POST /chat/scan` | `{ text }` | `{ warn? }`; 422 `TEXT_REFUSED { reason }` |
 | `POST /chat/upload` | raw body, `X-File-Name` (percent-encoded), `Content-Type`, optional `X-Image-Width`/`X-Image-Height`; or `X-Thumb-For: <digest>` with a thumbnail's bytes | `{ attachment, thumb? }`, or `{ thumb }` for a thumbnail; 413 `TOO_LARGE`; 422 `UPLOAD_REFUSED { reason }`; 409 `ROOM_REFUSED { refusal }`; 503 `ROOM_DARK` |
 | `GET /chat/file/:id` | `digest` | the bytes, only while a message with its words carries it and the reader may read its thread (404 otherwise); `X-Content-Type-Options: nosniff`; non-images as `application/octet-stream` with `Content-Disposition: attachment`; `Cache-Control: private` |
-| `GET /chat/thumb/:digest` | | the kit's thumbnail, or 404 |
+| `GET /chat/thumb/:digest` | | the kit's thumbnail, or 404; asked only for an attachment served with `thumb: true` |
 | `POST /chat/annotate` | `{ act, target, text?, operationId? }` | `{ receipt, warn? }`; edit and withdraw are the author's own (by ref), 403 otherwise |
 | `POST /chat/react` | `{ target, name: "<short word>", on: bool }` | `{ names: [personId], reactions }`: the people who chose that name, and the message's reactions as now folded (kit store, names only); 409 `WITHDRAWN` for a new reaction on a withdrawn message (taking one back still answers) |
 | `POST /chat/purge` | `{ targets?, thread?, reason, operationId? }` | `{ purged, facesOutOfReach, blobsRemoved, receipt }` (authorize `purge`); 202/409/503 as post |
@@ -113,6 +113,14 @@ A **message**, as the browser receives it, is agora's wire message without `room
 `{ id, cursor, ts, text, author: { name, kind, ref? }, thread?, via?, to?, trailers?: [{ key, value }],
 attachments?, edited?, withdrawn?, pinned?, purged?, reactions? }`. It arrives folded: an edit's text
 replaces the original, and a withdrawal or a purge empties it.
+
+`attachments[]` are the room's `WireAttachment`s, and the kit stamps `thumb: true` on an image
+attachment only when its store holds a thumbnail for those bytes (given by `X-Thumb-For` at
+upload), on every message it serves, the same set of routes and events as `reactions`. No `thumb`,
+no thumbnail: an image posted from outside the kit (`agora post --attach`) has none. The client
+asks `/chat/thumb/:digest` only for an attachment carrying `thumb`; otherwise it draws a raster
+image (PNG, JPEG, GIF, WebP) from its file at the tile's size when it is at most 2 MiB and no
+stated edge passes 2560, and shows any other image as a file (name and size, a link to the file).
 
 `reactions: [{ name, people: [personId] }]` is folded in from the kit's store on every message the
 kit serves (the thread and room routes, the thread list's `root` and `last`, search hits, the

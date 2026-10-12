@@ -146,6 +146,27 @@ export function once(db, sql, fn) {
   try { return fn(st); } finally { st.finalize(); }
 }
 
+/**
+ * Messages with each image attachment's `thumb: true` stamped from the kit's store: present exactly
+ * when the kit holds a thumbnail for those bytes, so a client asks `/chat/thumb/:digest` only for
+ * one that exists (a file posted from outside the kit, `agora post --attach` say, has none). A
+ * `thumb` the room's record carried is dropped: only the kit's store says it.
+ * @template {Record<string, any>} M
+ * @param {import("./store.mjs").KitStore} store @param {M[]} messages
+ * @returns {M[]}
+ */
+export function withThumbs(store, messages) {
+  return messages.map((m) => {
+    if (!m || !Array.isArray(m.attachments) || !m.attachments.length) return m;
+    const attachments = m.attachments.map((/** @type {Record<string, any>} */ a) => {
+      if (!a || typeof a !== "object") return a;
+      const { thumb: _claimed, ...rest } = a;
+      return a.kind === "image" && typeof a.digest === "string" && DIGEST.test(a.digest) && store.thumb(a.digest) ? { ...rest, thumb: true } : rest;
+    });
+    return { ...m, attachments };
+  });
+}
+
 /** The URL a thumbnail is served at. @param {string} digest */
 export const thumbUrl = (digest) => `/chat/thumb/${encodeURIComponent(digest)}`;
 

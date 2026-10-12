@@ -34,7 +34,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { faultOf, asFault } from "./room.mjs";
 import { MESSAGE_ID, NAME_MAX, TEXT_MAX_BYTES, postFault } from "./post.mjs";
 import { forgetPurge } from "./search.mjs";
-import { once } from "./uploads.mjs";
+import { once, withThumbs } from "./uploads.mjs";
 
 const ACTS = new Set(["edit", "withdraw", "pin", "unpin"]);
 const DRAFT_ID = /^[A-Za-z0-9_-]{8,128}$/;
@@ -204,6 +204,17 @@ export function reactionsOf(store, ids) {
     }
   }
   return out;
+}
+
+/**
+ * A message as the kit serves it: its reactions folded in and each image attachment's `thumb`
+ * stamped from the kit's store. Every route and stream event that carries a message goes through it.
+ * @template {Record<string, any>} M
+ * @param {import("./store.mjs").KitStore} store @param {M[]} messages
+ * @returns {Array<M & { reactions?: Reaction[] }>}
+ */
+export function served(store, messages) {
+  return withThumbs(store, withReactions(store, messages));
 }
 
 /**

@@ -307,3 +307,37 @@ test("a body with snake_case names is not mangled; _word_ at a boundary is still
   assert.equal(all(box, "strong").length, 0);
   assert.deepEqual(parseInline("__bold__ and **also**").filter((n) => n.type === "strong").length, 2);
 });
+
+// ---- attachments: a thumbnail is asked for only when the kit holds one ----
+
+/** @param {N} el @returns {string[]} every image source the row would fetch */
+const sources = (el) => all(el, "img").map((/** @type {N} */ i) => i.getAttribute("src"));
+const DIGEST_A = `sha256:${"a".repeat(64)}`;
+const DIGEST_B = `sha256:${"b".repeat(64)}`;
+/** @param {Partial<any>} a */
+const pic = (a) => ({ id: "att_aaaaaaaaaaaaaaaa", digest: DIGEST_A, name: "view.png", kind: "image", size: 48_000, mimetype: "image/png", width: 1200, height: 800, ...a });
+
+test("an image with no thumbnail is drawn from its file, and /thumb is never asked for", () => {
+  const el = doc.createElement("div");
+  renderThread(el, [msg({ id: "a", attachments: [pic({})] })], ctx, { base: "/chat" });
+  const src = sources(el);
+  assert.equal(src.filter((s) => s.includes("/thumb/")).length, 0);
+  assert.deepEqual(src, [`/chat/file/att_aaaaaaaaaaaaaaaa?digest=${encodeURIComponent(DIGEST_A)}`]);
+});
+
+test("an image with a thumbnail uses it", () => {
+  const el = doc.createElement("div");
+  renderThread(el, [msg({ id: "a", attachments: [pic({ digest: DIGEST_B, thumb: true })] })], ctx, { base: "/chat" });
+  assert.deepEqual(sources(el), [`/chat/thumb/${encodeURIComponent(DIGEST_B)}`]);
+});
+
+test("an image with no thumbnail past the drawing caps, or not a raster type, is a file tile", () => {
+  const el = doc.createElement("div");
+  renderThread(el, [msg({ id: "a", attachments: [
+    pic({ size: 30 * 1024 * 1024 }),
+    pic({ width: 6000, height: 4000 }),
+    pic({ mimetype: undefined }),
+  ] })], ctx, { base: "/chat" });
+  assert.equal(all(el, "img").length, 0);
+  assert.equal(all(el, ".chat-file-size").length, 3);
+});

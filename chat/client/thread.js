@@ -29,7 +29,7 @@ const SIGNATURE_RE = /^(?:--|—|–)\s?(.{1,80}?)\s*$/;
  *   id: string, cursor?: string, ts: string, text: string, thread?: string, via?: string,
  *   author: { id?: string, name: string, kind: "human" | "agent" | "system", ref?: string },
  *   trailers?: Array<{ key: string, value: string }>, to?: string[], signedAs?: string,
- *   attachments?: Array<{ id: string, digest: string, name: string, kind: "image" | "file", size: number, mimetype?: string, width?: number, height?: number }>,
+ *   attachments?: Array<{ id: string, digest: string, name: string, kind: "image" | "file", size: number, mimetype?: string, width?: number, height?: number, thumb?: boolean }>,
  *   edited?: { at: string, text: string }, withdrawn?: { at: string }, pinned?: boolean,
  * }} ChatMessage
  */
@@ -281,24 +281,49 @@ export function messageRow(m, ctx, opts = {}) {
   return row;
 }
 
+/** The raster types the file route serves as an image; any other file is a download. */
+const RASTER = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+/** An image with no thumbnail is drawn from its file only at or under this many bytes. */
+export const DRAW_MAX_BYTES = 2 * 1024 * 1024;
+/** ... and only when no edge it states is longer than the kit's own uploads keep. */
+export const DRAW_MAX_EDGE = 2560;
+
 /**
- * The files a message carries: images as thumbnails, other files as a name and a size, each a
- * link to the kit's file route. Nothing here is fetched as anything but an image or a download.
+ * The source a small image is drawn from: the kit's thumbnail when the attachment carries
+ * `thumb` (the server stamps it only when the kit holds one), else the file itself when it is a
+ * raster image within the drawing caps, else nothing and the attachment is a file tile.
+ * @param {NonNullable<ChatMessage["attachments"]>[number]} a @param {string} base @param {string} href
+ * @returns {string | null}
+ */
+function pictureOf(a, base, href) {
+  if (a.thumb === true) return `${base}/thumb/${encodeURIComponent(a.digest)}`;
+  if (!RASTER.has(a.mimetype ?? "")) return null;
+  if (!(typeof a.size === "number" && a.size >= 0 && a.size <= DRAW_MAX_BYTES)) return null;
+  if ((a.width ?? 0) > DRAW_MAX_EDGE || (a.height ?? 0) > DRAW_MAX_EDGE) return null;
+  return href;
+}
+
+/**
+ * The files a message carries: an image as a small picture (its thumbnail when the kit holds one,
+ * else its file within the drawing caps), every other file, and an image past those caps, as a
+ * name and a size, each a link to the kit's file route. Nothing here is fetched as anything but an
+ * image or a download, and no thumbnail is asked for that the attachment does not carry.
  * @param {ChatMessage} m @param {string} base
  */
 function attachmentsBlock(m, base) {
   const wrap = h("div", { class: "chat-files" });
   for (const a of m.attachments ?? []) {
     const href = `${base}/file/${encodeURIComponent(a.id)}?digest=${encodeURIComponent(a.digest)}`;
-    if (a.kind === "image") {
-      const img = h("img", { src: `${base}/thumb/${encodeURIComponent(a.digest)}`, alt: a.name, loading: "lazy", decoding: "async" });
+    const src = a.kind === "image" ? pictureOf(a, base, href) : null;
+    if (src) {
+      const img = h("img", { src, alt: a.name, loading: "lazy", decoding: "async" });
       img.addEventListener("error", () => { img.remove(); });
       wrap.appendChild(h("a", { class: "chat-file chat-file--image", href, target: "_blank", rel: "noopener" }, [
         h("span", { class: "chat-thumb" }, [img]),
         h("span", { class: "chat-file-name" }, [a.name]),
       ]));
     } else {
-      wrap.appendChild(h("a", { class: "chat-file", href, download: a.name }, [
+      wrap.appendChild(h("a", { class: "chat-file", href, ...(a.kind === "image" ? { target: "_blank", rel: "noopener" } : { download: a.name }) }, [
         h("span", { class: "chat-file-name" }, [a.name]),
         h("span", { class: "chat-file-size" }, [bytes(a.size)]),
       ]));

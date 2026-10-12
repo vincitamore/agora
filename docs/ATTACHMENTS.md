@@ -113,6 +113,12 @@ invalid one is `refused`, `attachment-invalid`.
 message read back carries `attachments[]` as before. A reader on the host seat that asks with
 `--files` also gets `attachments[].path`: the verified custody file, read-only.
 
+The record carries no thumbnail, and its field set is closed: a `WireAttachment` with any other
+key is refused. A consumer that shows small pictures keeps its own beside the room and says per
+message which images have one; the chat kit stamps `thumb: true` on an image attachment only when
+its store holds one (`chat/CONTRACT.md` § Shapes), so an image posted with `agora post --attach`
+is drawn from its file or shown as a file, never asked of a thumbnail route that has nothing.
+
 ## Removal
 
 An attachment has no removal of its own. It is removed when the message or thread that references
