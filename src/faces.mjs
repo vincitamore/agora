@@ -601,16 +601,24 @@ export class FaceRunner {
   policy() { return readFacePolicy(this.stateRoot, this.roomId); }
 
   /**
-   * Where on the face a reply lands: through the face record of its native parent, or through the
-   * poster's own `re:` when the cursor it names is a message that arrived FROM this face (its
-   * origin id is the thread) or one that was faced (its published id is). Never through text. A
-   * parent with no face on this transport leaves the reply top-level.
+   * Where on the face a reply lands: through the face record of its native parent; through the
+   * inbound thread map when the parent has no record here because it crossed IN from this face (a
+   * person's top-level message, whose own ts is its thread); or through the poster's own `re:` when
+   * the cursor it names is a message that arrived FROM this face (its origin id is the thread) or
+   * one that was faced (its published id is). Never through text. A parent with no face on this
+   * transport leaves the reply top-level.
    * @param {Map<string, FaceRecord>} records @param {Face} face @param {any} message
    */
-  #faceThread(records, face, message) {
+  async #faceThread(records, face, message) {
     if (message.thread) {
       const parent = records.get(faceKey(message.thread, face.transport));
       if (parent?.status === "published" && parent.id) return parent.id;
+      if (!parent) {
+        // faces-inbound.mjs imports this module, so the map is reached lazily, at call time
+        const { faceThreadOf } = await import("./faces-inbound.mjs");
+        const mapped = await faceThreadOf(this.stateRoot, this.roomId, face, String(message.thread));
+        if (mapped) return mapped;
+      }
     }
     for (const t of parseTrailers(String(message.text ?? "")).trailers) {
       if (t.key !== "re") continue;
@@ -667,9 +675,9 @@ export class FaceRunner {
         faces.push({ transport: face.transport, status: "pending" });
         continue;
       }
-      const thread = half.threads ? this.#faceThread(records, face, message) : undefined;
-      // A native reply whose root has no thread on this face (the root was never published to it,
-      // or its copy was refused, and the reply names no faced message) has nowhere to land but top
+      const thread = half.threads ? await this.#faceThread(records, face, message) : undefined;
+      // A native reply whose root has no thread on this face (the root was never published to it
+      // nor crossed in from it, or its copy was refused, and the reply names no faced message) has nowhere to land but top
       // level, which would flatten the thread. It is refused in the face's own words instead.
       if (message.thread && thread === undefined) {
         const { code, reason } = this.#noRootThread(face, root);
@@ -709,7 +717,7 @@ export class FaceRunner {
   #noRootThread(face, root) {
     if (root?.status === "refused")
       return { code: "root-refused", reason: `thread: this reply's root was refused on the ${face.transport} face (${root.code ?? "refused"}), so it has no thread there, and a reply is never flattened to top level` };
-    return { code: "thread", reason: `thread: this reply's root has no thread on the ${face.transport} face (the root was not published there), and a reply is never flattened to top level` };
+    return { code: "thread", reason: `thread: this reply's root has no thread on the ${face.transport} face (the root was neither published there nor crossed in from it), and a reply is never flattened to top level` };
   }
 
   /**

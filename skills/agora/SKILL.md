@@ -625,8 +625,9 @@ the face's fate with `agora faces <room> --for <cursor>` rather than branching o
 code, and `agora faces <room> --unknown` for what a human should look at. A row the seat's
 service has not written is absent, not `pending`: the tool never reports a publish it did
 not read. `--split` is a Slack post's; on a native room it is a usage error. A native reply
-faced to Slack lands in its root's Slack thread, and is refused with `thread:` when that root was
-never published to the Slack face: a thread is never flattened to top level. A reply posted while its root's copy is still pending waits for that copy and lands under it; a root copy that ends refused refuses the reply `root-refused`, one that ends unknown leaves it `unknown` under `root-unknown` until the sweep publishes it under the reconciled root, and the restart sweep picks up a reply left waiting; nothing posts twice. A GitHub face
+faced to Slack lands in its root's Slack thread (a root that crossed in from the face answers in
+the Slack thread it came from), and is refused with `thread:` when that root was neither published
+to nor crossed in from the Slack face: a thread is never flattened to top level. A reply posted while its root's copy is still pending waits for that copy and lands under it; a root copy that ends refused refuses the reply `root-refused`, one that ends unknown leaves it `unknown` under `root-unknown` until the sweep publishes it under the reconciled root, and the restart sweep picks up a reply left waiting; nothing posts twice. A GitHub face
 takes no thread (a post made in a native thread refuses it with `thread:`; answer top-level
 or with `re:`), carries no rider (a lost response reconciles by the seat's account and the
 body's digest, so two byte-identical bodies in one window stay `unknown` for a human), and
@@ -640,7 +641,7 @@ replies in faced threads cross. `room faces <room> --inbound top-level` (back wi
 threads`) also takes a person's new top-level message in the face's channel, from anyone but this
 seat's own account, as a native top-level post whose Slack thread then crosses as its replies; it
 reads from the moment it is set, never back-filling, and a read cut short at the page cap crosses
-nothing. A native reply under such a root is still refused `thread:` on the face. The loop check is the outbound runner's
+nothing. A native reply under such a root is published into that Slack thread, so the answer goes out where the question was asked. The loop check is the outbound runner's
 (rider, published ts or file id, quarantine, own account while pending), so a faced copy never
 comes back in; the thread map, each thread's position and every crossing live in
 `native/rooms/<roomId>/face-inbound.jsonl`, and the operation id derives from the Slack ts, so a

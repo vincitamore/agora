@@ -829,10 +829,15 @@ nothing, and every operation id derives from the Slack ts. A message also sent t
 a thread (`thread_broadcast`) crosses only through its thread. The mode is the inbound half's own
 record, not a field of the face policy, so the outbound policy's shape is unchanged.
 
-Not yet joined: a native reply under a root that crossed in from the top level is refused `thread:`
-on the Slack face, because the outbound runner resolves a reply's Slack thread only from the face
-record of a root it published or a `re:` it can place. The thread map already pairs the two
-(`faceThreadOf`); the outbound side reading it is the remaining seam.
+The answer goes back out the same way. A native reply under a root that crossed in has no face
+record for its root, because a crossed message is never faced back; the outbound runner then reads
+the thread map (`faceThreadOf`) and publishes the reply into the Slack thread the question started.
+The order is the face record of a root this seat published, then the thread map, then a `re:` it
+can place, so a reply lands under its own root before anything its trailers name. The map is
+reached by a lazy import, because `faces-inbound.mjs` imports `faces.mjs`. Every other guarantee
+stands: a reply that arrived from Slack is never faced back, the published copy carries the rider
+the inbound loop check reads, a root whose own copy is pending is waited for, and a reply under a
+root with neither a copy nor a map entry is still refused `thread:`.
 
 ### Face contracts (ruled)
 

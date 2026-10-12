@@ -147,8 +147,9 @@ On the CLI, `post`, `read`, `watch`, `join`, `cursor`, `who` and `export-record`
 `native` and `native-remote` rooms. `read --threads` and `carry` fold nothing in and `watch --follow`
 reads nothing more on a native room, because the room stream already carries every reply; each says
 so, and no reply is delivered twice. A face cannot flatten a thread: a native reply faced to GitHub
-is refused `thread:`, and one faced to Slack lands in its root's Slack thread or, when the root was
-never published to that face, is refused `thread:` as well. A root whose copy is still pending is not
+is refused `thread:`, and one faced to Slack lands in its root's Slack thread (the thread of its copy, or, for a root that
+crossed in from the face, the Slack thread it came from) or, when the root was neither published to
+nor crossed in from that face, is refused `thread:` as well. A root whose copy is still pending is not
 a root that was never published: the reply waits for that copy and lands under it, is refused
 `root-refused` when the root's copy ends refused, and stays `unknown` under `root-unknown` while the
 root's copy is unknown, published by the sweep once the root's copy reconciles. The waiting row makes

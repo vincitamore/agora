@@ -31,10 +31,14 @@ function clock(iso) {
 function fakeSlack(o) {
   /** @type {URL[]} */
   const calls = [];
+  /** @type {{ method: string | undefined, body: any }[]} */
+  const bodies = [];
+  let posted = 0;
   /** @type {typeof globalThis.fetch} */
-  const fetchFake = async (input) => {
+  const fetchFake = async (input, init) => {
     const url = new URL(String(input));
     calls.push(url);
+    if (init?.body) bodies.push({ method: url.pathname.split("/").pop(), body: JSON.parse(String(init.body)) });
     const json = (/** @type {unknown} */ body) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
     const method = url.pathname.split("/").pop();
     if (method === "auth.test") return json({ ok: true, user_id: "UBOT", user: "seat-bot", bot_id: "BSEAT" });
@@ -51,9 +55,10 @@ function fakeSlack(o) {
       if (r === undefined) return json({ ok: false, error: "thread_not_found" });
       return json(Array.isArray(r) ? { ok: true, has_more: false, messages: r } : { ok: true, ...r });
     }
+    if (method === "chat.postMessage") return json({ ok: true, channel: CHANNEL, ts: `1757074000.${String(++posted).padStart(6, "0")}` });
     return json({ ok: false, error: "no route" });
   };
-  return { fetch: fetchFake, calls, callsTo: (/** @type {string} */ m) => calls.filter((u) => u.pathname.endsWith(`/${m}`)) };
+  return { fetch: fetchFake, calls, bodies, callsTo: (/** @type {string} */ m) => calls.filter((u) => u.pathname.endsWith(`/${m}`)) };
 }
 
 /** @param {string} ts @param {string} user @param {string} text @param {Record<string, unknown>} [extra] */
@@ -84,7 +89,8 @@ async function rig(t, o) {
     return new FaceInbound({ stateRoot: s.root, roomId: ROOM, runner, client: app, room: "house", now: c.now, warn: (l) => warned.push(l) });
   };
   const messages = async () => (await agent.read("house")).messages;
-  return { s, c, slack, face, agent, make, messages, warned };
+  const runner = () => new FaceRunner({ stateRoot: s.root, roomId: ROOM, attestor: ATTESTOR, now: c.now, warn: (l) => warned.push(l), transportFor: async () => transport });
+  return { s, c, slack, face, agent, make, runner, messages, warned };
 }
 
 test("a person's new top-level message crosses as a native top-level post, and the Slack replies under it cross into that native thread", { timeout: 30_000 }, async (t) => {
@@ -221,4 +227,48 @@ test("a Slack edit of a crossed question is a native edit, and its deletion a wi
   assert.deepEqual((annotations ?? []).map((/** @type {any} */ a) => a.act), ["edit", "withdraw"]);
   await r.make().poll(r.face);
   assert.equal(((await r.agent.read("house")).annotations ?? []).length, 2, "a withdrawn question is not withdrawn again");
+});
+
+test("a native answer under a crossed top-level question publishes into that question's Slack thread, and its copy never crosses back", { timeout: 30_000 }, async (t) => {
+  const Q = "1757073660.000100";
+  /** @type {any[]} */
+  let thread = [top(Q, "U2", "is the north pump on its schedule?")];
+  const r = await rig(t, { history: () => [top(Q, "U2", "is the north pump on its schedule?")], replies: { [Q]: () => thread } });
+  await r.make().poll(r.face);
+  const [q] = await r.messages();
+  assert.equal(q.via, "slack-face");
+  await r.agent.append("house", { text: "yes, it ran at six", author: { kind: "agent", name: "Grace/watch" }, thread: q.id });
+  const answer = (await r.messages()).find((m) => m.thread === q.id);
+  assert.ok(answer);
+  const { faces, settled } = await r.runner().face(answer, { face: ["slack"] });
+  assert.deepEqual(faces.map((f) => f.status), ["pending"], "the answer is not refused thread:");
+  const done = await settled;
+  assert.deepEqual(done.map((f) => f.status), ["published"]);
+  const posts = r.slack.bodies.filter((b) => b.method === "chat.postMessage");
+  assert.equal(posts.length, 1, "one post, never two");
+  assert.equal(posts[0].body.thread_ts, Q, "into the question's own Slack thread");
+  assert.equal(posts[0].body.metadata?.event_payload?.origin, answer.id, "carrying the rider the loop check reads");
+  // the restart sweep, past the settle window, finds the published copy and posts nothing more
+  r.c.advance(120_000);
+  await r.runner().sweep();
+  assert.equal(r.slack.bodies.filter((b) => b.method === "chat.postMessage").length, 1, "no double post");
+  // the published copy now sits in the Slack thread; the next inbound tick does not bring it back in
+  thread = [...thread, reply(Q, "1757074000.000001", "UBOT", "yes, it ran at six", { bot_id: "BSEAT", subtype: "bot_message", metadata: posts[0].body.metadata })];
+  await r.make().poll(r.face);
+  assert.deepEqual((await r.messages()).map((m) => [m.text, m.via ?? null]), [["is the north pump on its schedule?", "slack-face"], ["yes, it ran at six", null]], "the copy did not cross back");
+});
+
+test("a native reply under a root with neither a published copy nor a thread map entry is still refused thread:, while a mapped question beside it answers out", { timeout: 30_000 }, async (t) => {
+  const Q = "1757073660.000100";
+  const r = await rig(t, { history: () => [top(Q, "U2", "a mapped question")], replies: { [Q]: () => [top(Q, "U2", "a mapped question")] } });
+  await r.make().poll(r.face);
+  const native = await r.agent.append("house", { text: "a native-only root", author: { kind: "agent", name: "Grace/watch" } });
+  await r.agent.append("house", { text: "a reply under it", author: { kind: "agent", name: "Grace/watch" }, thread: native.id });
+  const orphan = (await r.messages()).find((m) => m.thread === native.id);
+  assert.ok(orphan);
+  const { faces, settled } = await r.runner().face(orphan, { face: ["slack"] });
+  assert.equal(faces[0].status, "refused");
+  assert.match(String(faces[0].reason), /^thread: this reply's root has no thread on the slack face/);
+  await settled;
+  assert.equal(r.slack.bodies.filter((b) => b.method === "chat.postMessage").length, 0, "nothing posted, nothing flattened");
 });
