@@ -187,6 +187,18 @@ const KEEP_TOKEN = /<@U[A-Z0-9]+(?:\|[^>]*)?>|<#C[A-Z0-9]+(?:\|[^>]*)?>|<https?:
 const THREAD_TS = /^\d{10}\.\d{6}$/;
 
 /**
+ * The wait a 429 asks for, in seconds: Slack sends a whole number. Absent is 2; a value that is not
+ * a finite number (a date, a word, empty) or is below 1 waits 1, never 0 and never NaN, which a
+ * timer reads as no wait at all and so retries at once into the same limit.
+ * @param {string | null} header
+ */
+export function retryAfterSeconds(header) {
+  if (header === null) return 2;
+  const n = header.trim() === "" ? NaN : Number(header);
+  return Number.isFinite(n) ? Math.max(1, n) : 1;
+}
+
+/**
  * Why `id` is not a Slack thread id (the parent message's ts: 10 digits, a dot, 6 digits), or
  * nothing when it is one. The Transport hook contract: a reason string names the malformation so
  * the caller boundary (`--thread`, `--re`) can refuse with it, and a follow set or a carry fold
@@ -273,8 +285,7 @@ export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep
       if (res.status === 429) {
         // every rate-limited watcher is handed the same retry-after, so the wait is jittered:
         // without it a loose herd comes back as a tight one and limits itself again
-        const wait = Number(res.headers.get("retry-after") ?? "2");
-        await sleep(jitter(Math.max(1, wait) * 1000, random));
+        await sleep(jitter(retryAfterSeconds(res.headers.get("retry-after")) * 1000, random));
         continue;
       }
       if (!res.ok) {

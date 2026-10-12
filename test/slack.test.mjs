@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { slackTransport, decodeSlackText, encodeSlackText, SLACK_TEXT_MAX, chunkAtLines, validateThread } from "../src/transports/slack.mjs";
+import { slackTransport, decodeSlackText, encodeSlackText, SLACK_TEXT_MAX, chunkAtLines, validateThread, retryAfterSeconds } from "../src/transports/slack.mjs";
 import { fakeFetch, tmp } from "./helpers.mjs";
 
 const history = [
@@ -282,6 +282,25 @@ test("slack 429 waits retry-after and retries, jittered so limited callers do no
   const high = make({ rateLimitOnce: true, random: () => 1 });
   await high.t.read();
   assert.deepEqual(high.slept, [1100]);
+});
+
+test("slack retry-after that is not a number waits one second, never NaN and so never at once", async () => {
+  assert.equal(retryAfterSeconds(null), 2);
+  assert.equal(retryAfterSeconds("3"), 3);
+  assert.equal(retryAfterSeconds("0"), 1);
+  assert.equal(retryAfterSeconds("-5"), 1);
+  for (const bad of ["", " ", "soon", "Wed, 21 Oct 2026 07:28:00 GMT", "NaN", "Infinity", "1e999"]) assert.equal(retryAfterSeconds(bad), 1, JSON.stringify(bad));
+  // end to end: a 429 whose retry-after is a date sleeps a second (jitter pinned), then retries
+  let limited = true;
+  /** @type {number[]} */
+  const slept = [];
+  const { fetch } = fakeFetch([["conversations.history", () => {
+    if (limited) { limited = false; return { status: 429, body: { ok: false, error: "ratelimited" }, headers: { "retry-after": "Wed, 21 Oct 2026 07:28:00 GMT" } }; }
+    return { body: { ok: true, messages: [], has_more: false } };
+  }]]);
+  const t = slackTransport({ transport: "slack", channel: "C0123ABC" }, { token: "xoxb-1", fetch, random: () => 0.5, sleep: async (ms) => { slept.push(ms); } });
+  await t.read();
+  assert.deepEqual(slept, [1000]);
 });
 
 test("slack whoami and api errors", async () => {
