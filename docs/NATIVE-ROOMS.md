@@ -195,10 +195,13 @@ and the TUI declare no client name. An app declares one through `agora/client` (
 
 ## Attachments, annotations and purge
 
-A room the service makes is log version 2: a message's record commits to its text by
-`textDigest`, and the text itself sits outside the record digest. That is what lets a text leave the
-room later without breaking the chain. A room made before keeps version 1 and the records it always
-had; it carries neither annotations nor purges.
+A room the service makes is log version 3: a message's record commits to its text by `textDigest`
+and to its attachment list by `attachmentsDigest`, and the text and the list themselves sit outside
+the record digest. That is what lets both leave the room later without breaking the chain. A room
+made at version 2 commits to its text that way and to its attachment list inside the digest, so a
+purge there takes the text and leaves the entries (file name, size, kind) in the log, never served;
+`agora room upgrade` rewrites it as version 3 (below). A room made before version 2 keeps version 1
+and the records it always had; it carries neither annotations nor purges.
 
 **Attachments** (docs/ATTACHMENTS.md). A local connection uploads a file into the room's custody
 (`attachment-begin`, `-chunk`, `-commit`, offered as `attachments-v1`), then appends a message that
@@ -217,9 +220,11 @@ messages. A withdraw removes no bytes: the withdrawn text stays in the log until
 and lists the messages it takes: its targets, and with a thread the root and every reply before it,
 less any an earlier purge took. After it commits the host writes the log's next generation
 (`room.frames.<N+1>`) in which each message it took has lost `message.text` and gained
-`message.purged: { at, purge }`, and each edit annotation on one has lost its text the same way;
-both fields are outside the digest, so every record keeps its digest, sequence and cursor and a
-reader's `(epoch, sequence, digest)` checkpoint stays valid. The committed boundary names the new
+`message.purged: { at, purge }`, and each edit annotation on one has lost its text the same way; at
+version 3 the message loses `message.attachments` too, and the purge record gains `released`, the
+custody digests those entries named, so the collection below still knows them. All of these fields
+are outside the digest, so every record keeps its digest, sequence and cursor and a reader's
+`(epoch, sequence, digest)` checkpoint stays valid. The committed boundary names the new
 generation by one atomic rename, then the old generation is removed, then custody removes the blobs
 and `.type` records no unpurged message references. Bytes any unpurged message names stay.
 
@@ -240,7 +245,50 @@ removed: a half-written next generation (a crash before the rename) or the old o
 it). A purge record whose texts still stand in the named generation is finished then, and the
 service runs custody's collection again when it opens a purged room, so a crash between the
 rewrite and the collection loses nothing it owed. On scan, a version 2 record without its text must
-carry a marker naming a later purge that took it; anything else is a damaged room and refuses.
+carry a marker naming a later purge that took it; anything else is a damaged room and refuses. On
+a version 3 scan, a list must hash to its `attachmentsDigest`, a digest stands without its list only
+on a message a purge took, and a message a purge took keeps no list.
+
+### Upgrading a version 2 room
+
+`agora room upgrade <room> --confirm <roomId>` rewrites a version 2 room as version 3. It runs
+offline from writers: it takes the room's writer lock for the whole rewrite, so a room the seat
+service holds open (or another upgrade) is refused `room-in-use` and nothing changes; stop the
+service, upgrade, start it. A version 1 room is refused `upgrade-unsupported-log-version` and a
+version 3 room `upgrade-not-needed`. In order:
+
+1. The live generation, `committed.json` and `room.json` are copied to `upgrade-v2-backup/`.
+2. Every record is rewritten at version 3: the same sequence, cursor, ids, payload digest and
+   epoch; a message with attachments gains `attachmentsDigest`; each record's digest is recomputed
+   under version 3 rules and chains the new digests; and each carries `v2Digest`, the digest it had,
+   inside its new digest. A message a purge took at version 2 loses its attachment entries now, and
+   the purge record names their custody digests in `released`.
+3. The records are written as the next generation beside the live one and synced, then re-read
+   from disk by the scan an open runs, under version 3 rules, and compared with the version 2 log
+   record by record: place, identity, payload digest, `v2Digest`, and what a reader is served. A
+   mismatch removes the new generation and refuses `upgrade-failed`; the room is what it was.
+4. One rename of `committed.json` installs it: the boundary names the new generation and
+   `logVersion: 3`. That is the commit point, the one a purge's rewrite uses.
+5. `room.json` is rewritten to say version 3, and the version 2 generation (kept in the backup) is
+   removed from the room's directory.
+
+A crash before step 4 opens as the version 2 room it was (the half-written generation is a file no
+boundary names, removed on open, and the backup is replaced by the next upgrade); a crash after it
+opens as version 3, and the open finishes step 5. The room's version is the boundary's when it names
+one, so the manifest can lag the boundary and never lead it.
+
+Readers: the epoch, every sequence and every cursor are unchanged, so a saved cursor reads on. A
+checkpoint `(roomId, epoch, sequence, digest)` taken before the upgrade names its record by the
+version 2 digest; the store accepts it because the version 3 record carries that digest inside its
+own, and answers with the current checkpoint, which is the re-anchor: a reader that compares
+digests replaces its saved one with the answer. A record appended after the upgrade carries no
+`v2Digest`.
+
+The backup holds the version 2 log, attachment names included, until `agora room upgrade <room>
+--confirm <roomId> --prune-backup` removes it. A purge after the upgrade takes names out of the
+live log, not out of the backup: prune it before relying on a purge. Restoring the backup is a hand
+step with the service stopped: copy its three files back over the room's and delete the version 3
+generation file.
 
 A purge is appended on the seat's own connections only: a member route is refused
 `purge-refused-remote`, and a version 1 room `purge-unsupported-log-version`. A purged message is
@@ -365,7 +413,8 @@ native/service.log, .1, .2                  the daemon's warnings, one JSON line
 native/keys/                                explicit Agora-owned Tailcat keys
 native/rooms/<room-id>/room.json            room identity, epoch, membership revision
 native/rooms/<room-id>/room.frames          host log or verified local replica (generation 0)
-native/rooms/<room-id>/room.frames.<N>      the log's generation N, written by a purge; committed.json names the live one
+native/rooms/<room-id>/room.frames.<N>      the log's generation N, written by a purge or an upgrade; committed.json names the live one
+native/rooms/<room-id>/upgrade-v2-backup/   the version 2 room an upgrade replaced (log, boundary, manifest), until --prune-backup
 native/rooms/<room-id>/members/             public enrollment and route records
 native/rooms/<room-id>/attachments/         inert host/replica bytes by digest, each with its .type custody record
 native/outgoing/<room-id>/<operation-id>     explicit/uncertain retry record, never silent success
@@ -385,6 +434,8 @@ native/outgoing/<room-id>/<operation-id>     explicit/uncertain retry record, ne
 | checksum failure in a complete frame | stop room; preserve evidence |
 | attachment digest/size/path failure | preserve destination; keep retryable attachment pending |
 | crash during a purge's rewrite | open on the generation the boundary names, remove the other, finish the purge |
+| crash during an upgrade | before the boundary's rename: open at version 2; after it: open at version 3 and finish the manifest |
+| upgrade of a room the service holds | `room-in-use`; nothing changed |
 | text-less record no later purge names | stop room; preserve evidence |
 | revoked member on an existing connection | close its route and reject every operation |
 | service process exists but readiness fails | report dark; process existence is not liveness |

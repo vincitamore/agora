@@ -1,0 +1,5 @@
+{
+  "case": "v3-boundary-names-none",
+  "opens": false,
+  "refusal": "manifest says log version 3 and its committed boundary names none"
+}

@@ -1,7 +1,7 @@
 // @ts-check
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, open, readdir, readFile, realpath, rename, rm, stat } from "node:fs/promises";
+import { copyFile, mkdir, open, readdir, readFile, realpath, rename, rm, stat } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
 import { AgoraError } from "./core.mjs";
@@ -16,11 +16,19 @@ import { validateBoardPayload } from "./protocol/operation.mjs";
  * Log version 1 commits to a message's text inside its record digest. Log version 2
  * (docs/ANNOTATIONS.md) commits to the text by `message.textDigest` and keeps `message.text`
  * outside the digest, so a later purge can remove the text without breaking the chain; it is also
- * the only version that carries `annotation` records. A room's version is `room.json`'s
- * `logVersion` (absent is 1) and every record in its log carries that version.
+ * the first version that carries `annotation` and `purge` records. Log version 3 (docs/PURGE.md)
+ * commits to a message's attachment list the same way, by `message.attachmentsDigest`, and keeps
+ * `message.attachments` outside the digest, so a purge removes the attachment entries from disk too.
+ * A room's version is its committed boundary's `logVersion` when the boundary carries one (version 3
+ * does: the boundary's one rename is what installs an upgrade), else `room.json`'s `logVersion`
+ * (absent is 1); every record in its log carries that version.
  */
 const LOG_VERSION = 1;
 const LOG_VERSION_2 = 2;
+const LOG_VERSION_3 = 3;
+/** Where an upgrade keeps the version 2 room it replaced, until `--prune-backup` (docs/NATIVE-ROOMS.md). */
+export const UPGRADE_BACKUP = "upgrade-v2-backup";
+const DIGEST_RE = /^sha256:[a-f0-9]{64}$/;
 const MANIFEST_VERSION = 1;
 export const ANNOTATION_ACTS = Object.freeze(["edit", "withdraw", "pin", "unpin"]);
 const TEXT_DIGEST_RE = /^sha256:[a-f0-9]{64}$/;
@@ -50,14 +58,22 @@ export const textDigest = (text) => `sha256:${createHash("sha256").update(text, 
  * The part of a record its `recordDigest` covers. Version 1: everything but the digest itself.
  * Version 2: also without `message.text` and `annotation.text`, which their `textDigest` commits to,
  * and without the `purged` marker a purge sets beside a removed text (docs/PURGE.md), so removing a
- * text leaves every digest, and so every reader's checkpoint, standing.
+ * text leaves every digest, and so every reader's checkpoint, standing. Version 3: also without
+ * `message.attachments`, which `message.attachmentsDigest` commits to, and without a purge record's
+ * `released`, the custody digests its rewrite let go of; so a purge removes the entries as well.
  * @param {any} unsigned the record without `recordDigest`
  */
 function signedPart(unsigned) {
-  if (unsigned.version !== LOG_VERSION_2) return unsigned;
-  if (unsigned.message && ("text" in unsigned.message || "purged" in unsigned.message)) {
+  if (unsigned.version !== LOG_VERSION_2 && unsigned.version !== LOG_VERSION_3) return unsigned;
+  const v3 = unsigned.version === LOG_VERSION_3;
+  if (unsigned.message && ("text" in unsigned.message || "purged" in unsigned.message || (v3 && "attachments" in unsigned.message))) {
     const { text: _text, purged: _purged, ...message } = unsigned.message;
+    if (v3) delete message.attachments;
     return { ...unsigned, message };
+  }
+  if (v3 && unsigned.purge && "released" in unsigned.purge) {
+    const { released: _released, ...purge } = unsigned.purge;
+    return { ...unsigned, purge };
   }
   if (unsigned.annotation && ("text" in unsigned.annotation || "purged" in unsigned.annotation)) {
     const { text: _text, purged: _purged, ...annotation } = unsigned.annotation;
@@ -92,6 +108,38 @@ function validPurgedMarker(value) {
 /** @param {any} unsigned */
 const recordDigestOf = (unsigned) => nativeDigest(signedPart(unsigned));
 
+/**
+ * The `recordDigest` a record carries under its own version's rules (the record without
+ * `recordDigest`). Exported for the bad-bytes corpus generator, which re-seals a chain after a
+ * field edit so the check behind the digest is what refuses. @param {any} unsigned
+ */
+export const nativeRecordDigest = recordDigestOf;
+
+/** The digest a version 3 message carries for its attachment list. @param {unknown[]} attachments */
+export const attachmentsDigest = (attachments) => nativeDigest(attachments);
+
+/**
+ * The digest a version 3 record that an upgrade wrote had as a version 2 record: the same record
+ * with version 2, the version 2 chain (its predecessor's `v2Digest`), its attachments in place of
+ * their digest, and without the fields version 3 adds. Undefined when the record no longer holds
+ * what version 2 committed to (a purge took its attachment list), so the `v2Digest` the version 3
+ * digest commits to is then the only witness.
+ * @param {any} record a version 3 record carrying `v2Digest` @param {string | null} previousV2
+ */
+function v2DigestOf(record, previousV2) {
+  const { recordDigest: _d, v2Digest: _v, ...unsigned } = record;
+  const v2 = { ...unsigned, version: LOG_VERSION_2, previousDigest: previousV2 };
+  if (v2.message) {
+    const { attachmentsDigest: digest, ...message } = v2.message;
+    if (digest !== undefined) {
+      if (!Array.isArray(message.attachments)) return undefined;
+    } else if (message.attachments !== undefined) return undefined;
+    v2.message = message;
+  }
+  if (v2.purge && "released" in v2.purge) { const { released: _r, ...purge } = v2.purge; v2.purge = purge; }
+  return recordDigestOf(v2);
+}
+
 /** The log file of a generation: 0 is `room.frames`, N is `room.frames.<N>`. @param {number} generation */
 export const generationFile = (generation) => generation === 0 ? "room.frames" : `room.frames.${generation}`;
 
@@ -116,8 +164,19 @@ async function removeOtherGenerations(directory, keep) {
  * Where a test may stop a purge's rewrite, as a crash would: after the next generation is written
  * and synced but before the boundary names it, or after the boundary names it but before the old
  * generation is removed. A hook that throws leaves the files exactly as they are at that stage.
- * @typedef {{ purgeStage?: (stage: 'generation-written' | 'boundary-installed') => void | Promise<void> }} PurgeHooks
+ * `upgradeStage` does the same for an upgrade (`NativeRoomStore.upgrade`): after each frame of the
+ * version 3 generation is written (`frame-written`, with how many), after the generation is written,
+ * synced and verified, and after the boundary installs it and before the manifest says version 3.
+ * @typedef {{ purgeStage?: (stage: 'generation-written' | 'boundary-installed') => void | Promise<void>,
+ *   upgradeStage?: (stage: 'frame-written' | 'generation-written' | 'boundary-installed', frames?: number) => void | Promise<void> }} PurgeHooks
  */
+
+/** Copy a file and sync the copy. @param {string} from @param {string} to */
+async function copyDurable(from, to) {
+  await copyFile(from, to);
+  const handle = await open(to, "r+");
+  try { await handle.sync(); } finally { await handle.close(); }
+}
 
 /**
  * A stored message or annotation as a reader receives it: without its `textDigest`, which is the
@@ -129,15 +188,16 @@ function withoutTextDigest(stored) {
 }
 
 /**
- * A stored message as a reader receives it. One a purge took carries its `purged` marker and neither
- * its text nor its attachments: the bytes are gone, and the names, sizes, kinds and digests go from
- * every read too. The log keeps the attachment entries, because a version 2 record digest covers them
- * (docs/PURGE.md); only the served shape drops them. `marker` is the purge that took it when the
- * rewrite that strips the stored text has not run yet.
+ * A stored message as a reader receives it, without the record's own commitments (`textDigest`,
+ * `attachmentsDigest`). One a purge took carries its `purged` marker and neither its text nor its
+ * attachments: the bytes are gone, and the names, sizes, kinds and digests go from every read too.
+ * A version 2 log keeps the attachment entries, because its record digest covers them; a version 3
+ * log drops them with the text (docs/PURGE.md). `marker` is the purge that took it when the rewrite
+ * that strips the stored record has not run yet.
  * @param {any} stored @param {{ at: string, purge: string } | undefined} marker
  */
 function readerMessage(stored, marker) {
-  const m = withoutTextDigest(stored);
+  const { attachmentsDigest: _attachmentsDigest, ...m } = withoutTextDigest(stored);
   const purged = m.purged ?? marker;
   if (!purged) return m;
   const { text: _text, attachments: _attachments, ...rest } = m;
@@ -304,7 +364,7 @@ async function acquireWriter(directory, identity) {
       const port = typeof recorded.port === "number" && Number.isInteger(recorded.port) ? recorded.port : 0;
       if (!host || !port) throw new AgoraError(`native room writer lock ${lockPath} is unusable`);
       if (await probeWriter({ host, port }) === "live")
-        throw new AgoraError(`native room already has a live writer or its OS-owned endpoint ${host}:${port} is unavailable`);
+        throw Object.assign(new AgoraError(`native room already has a live writer or its OS-owned endpoint ${host}:${port} is unavailable`), { code: "writer-live" });
       await rm(lockPath, { force: true });
     }
   }
@@ -378,21 +438,43 @@ function validateAttachment(value) {
     ...(Number.isSafeInteger(a.height) && Number(a.height) > 0 ? { height: a.height } : {}) };
 }
 
-/** A manifest's log version: absent is 1 (a room made before the field existed). @param {any} manifest @returns {1 | 2} */
+/** A manifest's log version: absent is 1 (a room made before the field existed). @param {any} manifest @returns {1 | 2 | 3} */
 function manifestLogVersion(manifest) {
-  return manifest?.logVersion === LOG_VERSION_2 ? LOG_VERSION_2 : LOG_VERSION;
+  return manifest?.logVersion === LOG_VERSION_3 ? LOG_VERSION_3 : manifest?.logVersion === LOG_VERSION_2 ? LOG_VERSION_2 : LOG_VERSION;
 }
 
 /**
- * What a scan carries from record to record: the messages so far (an annotation's target and a
- * purge's scope are among them), each thread's replies, the purge records by id, which message each
- * purge took, and the text-less records still waiting for the later purge that names them.
- * @typedef {{ messages: Map<string, any>, threads: Map<string, string[]>, purges: Map<string, { sequence: number, ts: string, purged: Set<string> }>,
- *   purgedBy: Map<string, string>, pending: Array<{ sequence: number, covers: string, purge: string, at: string, what: string }> }} ScanContext
+ * A room's log version: the committed boundary's when it names one, else the manifest's. Only
+ * version 3 is named on a boundary, and only beside a manifest at 2 or 3: a boundary at 3 over a
+ * manifest at 2 is an upgrade whose install landed and whose manifest rewrite did not, which the
+ * open finishes; a manifest at 3 under a boundary that names no version is damage.
+ * @param {any} manifest @param {any} boundary @returns {1 | 2 | 3}
+ */
+function roomLogVersion(manifest, boundary) {
+  const named = boundary?.logVersion;
+  const declared = manifestLogVersion(manifest);
+  if (named === undefined) {
+    if (declared === LOG_VERSION_3)
+      throw new AgoraError("native room manifest says log version 3 and its committed boundary names none; do not advance or truncate the log");
+    return declared;
+  }
+  if (named !== LOG_VERSION_3 || declared === LOG_VERSION)
+    throw new AgoraError("native room committed boundary names an invalid log version; do not advance or truncate the log");
+  return LOG_VERSION_3;
+}
+
+/**
+ * What a scan carries from record to record: the room's log version, the messages so far (an
+ * annotation's target and a purge's scope are among them), each thread's replies, the purge records
+ * by id, which message each purge took, the text-less records still waiting for the later purge that
+ * names them, and, in a room an upgrade rewrote, the version 2 digest of the record before.
+ * @typedef {{ logVersion: 1 | 2 | 3, messages: Map<string, any>, threads: Map<string, string[]>, purges: Map<string, { sequence: number, ts: string, purged: Set<string> }>,
+ *   purgedBy: Map<string, string>, pending: Array<{ sequence: number, covers: string, purge: string, at: string, what: string }>,
+ *   previousV2: string | null | undefined }} ScanContext
  */
 
-/** @returns {ScanContext} */
-const scanContext = () => ({ messages: new Map(), threads: new Map(), purges: new Map(), purgedBy: new Map(), pending: [] });
+/** @param {1 | 2 | 3} logVersion @returns {ScanContext} */
+const scanContext = (logVersion) => ({ logVersion, messages: new Map(), threads: new Map(), purges: new Map(), purgedBy: new Map(), pending: [], previousV2: null });
 
 /**
  * An annotation record read back: its identity is its committed position, it names a message the
@@ -441,7 +523,7 @@ function boundaryGeneration(boundary, manifest) {
   const generation = boundary?.generation ?? 0;
   if (!Number.isSafeInteger(generation) || generation < 0)
     throw new AgoraError("native room committed boundary names an invalid generation; do not advance or truncate the log");
-  if (generation > 0 && manifestLogVersion(manifest) !== LOG_VERSION_2)
+  if (generation > 0 && roomLogVersion(manifest, boundary) === LOG_VERSION)
     throw new AgoraError("native room committed boundary names a generation above 0 in a version 1 room; do not advance or truncate the log");
   return generation;
 }
@@ -465,6 +547,10 @@ function validatePurgeRecord(record, manifest, sequence, ctx) {
       (p.by.ref !== undefined && (typeof p.by.ref !== "string" || !AUTHOR_REF_PATTERN.test(p.by.ref) || p.via === undefined)) ||
       (p.via !== undefined && (typeof p.via !== "string" || !CLIENT_NAME_PATTERN.test(p.via))) || !Array.isArray(p.purged))
     throw new AgoraError(`${at} is not a purge; do not advance or truncate it`);
+  // version 3: the custody digests its rewrite released, outside the digest; never in an older log
+  if (p.released !== undefined && (ctx.logVersion !== LOG_VERSION_3 || !Array.isArray(p.released) ||
+      !p.released.every((/** @type {unknown} */ d) => typeof d === "string" && DIGEST_RE.test(d)) || new Set(p.released).size !== p.released.length))
+    throw new AgoraError(`${at} carries an invalid released list; do not advance or truncate it`);
   if (!p.targets.every((/** @type {string} */ id) => ctx.messages.has(id)) ||
       (p.thread !== undefined && (!ctx.messages.has(p.thread) || ctx.messages.get(p.thread).thread !== undefined)))
     throw new AgoraError(`${at} names a message the log did not hold before it; do not advance or truncate it`);
@@ -480,8 +566,9 @@ function validatePurgeRecord(record, manifest, sequence, ctx) {
  * @param {any} record @param {any} manifest @param {number} expectedSequence @param {string | null} expectedPreviousDigest
  * @param {ScanContext} [ctx] what the scan has read so far: an annotation's target and a purge's scope must be in it
  */
-function validateRecord(record, manifest, expectedSequence, expectedPreviousDigest, ctx = scanContext()) {
-  const logVersion = manifestLogVersion(manifest);
+function validateRecord(record, manifest, expectedSequence, expectedPreviousDigest, ctx = scanContext(manifestLogVersion(manifest))) {
+  const logVersion = ctx.logVersion;
+  const textual = logVersion === LOG_VERSION_2 || logVersion === LOG_VERSION_3;
   if (!record || typeof record !== "object" || record.version !== logVersion || record.roomId !== manifest.roomId || record.epoch !== manifest.epoch)
     throw new AgoraError("native room log contains a record for another room or protocol version");
   if (record.sequence !== expectedSequence) throw new AgoraError(`native room log sequence gap: expected ${expectedSequence}, got ${record.sequence}`);
@@ -499,13 +586,13 @@ function validateRecord(record, manifest, expectedSequence, expectedPreviousDige
     if (record.boardId !== messageId(manifest.roomId, record.accountId, record.operationId) ||
         record.cursor !== nativeCursor(manifest.epoch, expectedSequence))
       throw new AgoraError("native room board identity does not match its committed position");
-  } else if (logVersion === LOG_VERSION_2 && record.kind === "annotation") {
+  } else if (textual && record.kind === "annotation") {
     validateAnnotationRecord(record, manifest, expectedSequence, ctx);
-  } else if (logVersion === LOG_VERSION_2 && record.kind === "purge") {
+  } else if (textual && record.kind === "purge") {
     validatePurgeRecord(record, manifest, expectedSequence, ctx);
   } else {
-    // version 1 reads exactly as before; version 2 knows its kinds
-    if (logVersion === LOG_VERSION_2 && record.kind !== undefined)
+    // version 1 reads exactly as before; versions 2 and 3 know their kinds
+    if (textual && record.kind !== undefined)
       throw new AgoraError(`native room log record at sequence ${expectedSequence} has an unknown kind; do not advance or truncate it`);
     if (!record.message || record.message.id !== messageId(manifest.roomId, record.accountId, record.operationId) ||
         record.message.author?.id !== record.accountId || record.message.room !== manifest.roomId ||
@@ -519,7 +606,7 @@ function validateRecord(record, manifest, expectedSequence, expectedPreviousDige
       throw new AgoraError(`native room log message at sequence ${expectedSequence} carries an invalid author ref; do not advance or truncate it`);
     if (author.ref !== undefined && via === undefined)
       throw new AgoraError(`native room log message at sequence ${expectedSequence} carries an author ref without a via; do not advance or truncate it`);
-    if (logVersion === LOG_VERSION_2) {
+    if (textual) {
       const m = record.message;
       if (!TEXT_DIGEST_RE.test(m.textDigest ?? ""))
         throw new AgoraError(`native room log message at sequence ${expectedSequence} carries no text digest; do not advance or truncate it`);
@@ -537,12 +624,56 @@ function validateRecord(record, manifest, expectedSequence, expectedPreviousDige
         if (typeof m.text !== "string" || textDigest(m.text) !== m.textDigest)
           throw new AgoraError(`native room log message at sequence ${expectedSequence} carries a text that does not match its text digest; do not advance or truncate it`);
       }
+      if (logVersion === LOG_VERSION_3) validateAttachmentCommitment(m, expectedSequence);
+      else if ("attachmentsDigest" in m)
+        throw new AgoraError(`native room log message at sequence ${expectedSequence} carries an attachments digest in a version ${logVersion} log; do not advance or truncate it`);
     }
   }
   const { recordDigest, ...unsigned } = record;
   if (!/^sha256:[a-f0-9]{64}$/.test(recordDigest ?? "") || recordDigestOf(unsigned) !== recordDigest)
     throw new AgoraError(`native room log record digest mismatch at sequence ${expectedSequence}; do not advance or truncate it`);
+  validateUpgradeWitness(record, expectedSequence, ctx);
   return record;
+}
+
+/**
+ * A version 3 message's attachments, as its digest commits to them (docs/PURGE.md): a list is held
+ * only beside the digest of exactly that list, and a digest stands without its list only on a message
+ * a purge took, whose text went with it. A purged message keeps no list: the names leave the disk.
+ * @param {any} m @param {number} sequence
+ */
+function validateAttachmentCommitment(m, sequence) {
+  const at = `native room log message at sequence ${sequence}`;
+  if (m.attachmentsDigest !== undefined && !DIGEST_RE.test(m.attachmentsDigest))
+    throw new AgoraError(`${at} carries an invalid attachments digest; do not advance or truncate it`);
+  if ("attachments" in m) {
+    if (m.attachmentsDigest === undefined)
+      throw new AgoraError(`${at} carries attachments without an attachments digest; do not advance or truncate it`);
+    if (!Array.isArray(m.attachments) || !m.attachments.length || attachmentsDigest(m.attachments) !== m.attachmentsDigest)
+      throw new AgoraError(`${at} carries attachments that do not match their attachments digest; do not advance or truncate it`);
+    if ("purged" in m)
+      throw new AgoraError(`${at} keeps its attachments after a purge took it; do not advance or truncate it`);
+  } else if (m.attachmentsDigest !== undefined && !("purged" in m)) {
+    throw new AgoraError(`${at} has an attachments digest and no attachments, and no purge took it; do not advance or truncate it`);
+  }
+}
+
+/**
+ * A version 3 record an upgrade wrote carries `v2Digest`, the digest it had as a version 2 record,
+ * inside its own digest: so a reader's checkpoint taken before the upgrade still names the record
+ * (docs/NATIVE-ROOMS.md). Upgraded records are a prefix of the log, and while a record still holds
+ * what version 2 committed to, its `v2Digest` is recomputed here and must match.
+ * @param {any} record @param {number} sequence @param {ScanContext} ctx
+ */
+function validateUpgradeWitness(record, sequence, ctx) {
+  const at = `native room log record at sequence ${sequence}`;
+  if (record.v2Digest === undefined) { ctx.previousV2 = undefined; return; }
+  if (ctx.logVersion !== LOG_VERSION_3 || typeof record.v2Digest !== "string" || !DIGEST_RE.test(record.v2Digest) || ctx.previousV2 === undefined)
+    throw new AgoraError(`${at} carries an invalid version 2 digest; do not advance or truncate it`);
+  const recomputed = v2DigestOf(record, ctx.previousV2);
+  if (recomputed !== undefined && recomputed !== record.v2Digest)
+    throw new AgoraError(`${at} carries a version 2 digest its version 2 form does not have; do not advance or truncate it`);
+  ctx.previousV2 = record.v2Digest;
 }
 
 /** @param {import('node:fs/promises').FileHandle} handle @param {any} manifest @param {any} boundary */
@@ -558,7 +689,7 @@ async function scan(handle, manifest, boundary) {
   /** @type {any[]} */
   const records = [];
   /** what the scan has read so far, for the annotations and purges that name it */
-  const ctx = scanContext();
+  const ctx = scanContext(roomLogVersion(manifest, boundary));
   while (position < boundary.end) {
     const header = Buffer.alloc(4);
     if (boundary.end - position < 4) throw new AgoraError(`native room committed boundary ends inside a header at offset ${position}`);
@@ -614,32 +745,39 @@ async function scan(handle, manifest, boundary) {
  *   cursor, attachments? } }`. Version 2 adds `message.textDigest` (sha256 of the UTF-8 text) inside
  *   the digested part and keeps `message.text` outside it: `recordDigest` is computed over the record
  *   with `message.text` removed, and `payloadDigest` names `textDigest` where version 1 names `text`.
- *   On scan a present text must hash to its `textDigest`.
+ *   On scan a present text must hash to its `textDigest`. Version 3 also adds
+ *   `message.attachmentsDigest` (the digest of the attachment list) inside the digested part and keeps
+ *   `message.attachments` outside it; on scan a present list must hash to it.
  * - board: `{ kind: "board", board, boardId, cursor, expiresAt?, leaseMs?, broken?, actor? }`.
- * - annotation (version 2 only): `{ kind: "annotation", annotation: { id, act, target,
+ * - annotation (version 2 and 3): `{ kind: "annotation", annotation: { id, act, target,
  *   author: { id, name, kind, ref? }, via?, textDigest?, text?, ts, cursor } }`; `act` is edit,
  *   withdraw, pin or unpin, `target` a message the log already holds, and only an edit carries a
  *   text, held as a message's is (`annotation.text` outside the digest).
- * - purge (version 2 only, docs/PURGE.md): `{ kind: "purge", purge: { id, targets, thread?, reason,
- *   by: { name, ref? }, via?, purged, ts, cursor } }`; `purged` lists, in log order, the messages it
+ * - purge (version 2 and 3, docs/PURGE.md): `{ kind: "purge", purge: { id, targets, thread?, reason,
+ *   by: { name, ref? }, via?, purged, ts, cursor, released? } }`; `purged` lists, in log order, the messages it
  *   took (its targets, and with a thread the root and every reply before it, less any an earlier
  *   purge took). After it commits the log is rewritten as its next generation: each message it took
  *   loses `message.text` and gains `message.purged: { at, purge }`, and each edit annotation on one
  *   loses `annotation.text` and gains the same marker; both fields are outside the digest, so every
- *   record keeps its digest, sequence and cursor. On scan a record without its text must carry a
- *   marker naming a later purge that took it.
+ *   record keeps its digest, sequence and cursor. At version 3 the message loses `message.attachments`
+ *   as well, and the purge record gains `released` (outside its digest): the custody digests those
+ *   entries named. On scan a record without its text must carry a marker naming a later purge that took it.
+ * - any record an upgrade wrote (version 3, `NativeRoomStore.upgrade`) carries `v2Digest`, the digest
+ *   it had at version 2, inside its own digest; upgraded records are a prefix of the log.
  *
- * Readers receive messages and annotations without `textDigest`; a purged message carries `purged`
- * and neither its text nor its attachments (the log keeps the attachment entries its digest covers). The committed boundary
- * (`committed.json`) is `{ version: 1, roomId, epoch, sequence, end, digest, generation? }`; an
- * absent generation is 0, the file `room.frames`, and generation N is `room.frames.<N>`.
+ * Readers receive messages and annotations without `textDigest` or `attachmentsDigest`; a purged
+ * message carries `purged` and neither its text nor its attachments (a version 2 log keeps the
+ * attachment entries its digest covers; a version 3 log drops them). The committed boundary
+ * (`committed.json`) is `{ version: 1, roomId, epoch, sequence, end, digest, generation?, logVersion? }`;
+ * an absent generation is 0, the file `room.frames`, and generation N is `room.frames.<N>`;
+ * `logVersion` is present at version 3 and is the room's version.
  */
 export class NativeRoomStore {
   /** @param {string} directory @param {any} manifest @param {any} boundary @param {import('node:fs/promises').FileHandle} handle @param {{server: net.Server, endpoint: {host:string,port:number}, identity:string}} writer @param {any[]} records @param {number} end @param {number} recoveredTailBytes @param {() => Date} now @param {PurgeHooks} [hooks] */
   constructor(directory, manifest, boundary, handle, writer, records, end, recoveredTailBytes, now, hooks) {
     this.directory = directory;
-    /** `room.json`'s `logVersion`, absent read as 1. @type {1 | 2} */
-    this.logVersion = manifestLogVersion(manifest);
+    /** The room's log version: the boundary's when it names one, else `room.json`'s, absent read as 1. @type {1 | 2 | 3} */
+    this.logVersion = roomLogVersion(manifest, boundary);
     /** The log generation the committed boundary names (absent is 0). A purge (docs/PURGE.md) is the
      * one writer of a generation above 0: it writes the next one and moves the boundary to it. */
     this.generation = boundaryGeneration(boundary, manifest);
@@ -684,13 +822,15 @@ export class NativeRoomStore {
 
   /**
    * `logVersion` 2 makes a room whose records commit to text by digest and which carries
-   * annotations (docs/ANNOTATIONS.md); the default stays 1, the format every room had before, so a
-   * caller that names nothing writes exactly what it always wrote. The seat service makes version 2.
-   * @param {{ root: string, roomId?: string, epoch?: string, hostAccountId: string, recordLimit?: number, logVersion?: 1 | 2, now?: () => Date }} options
+   * annotations (docs/ANNOTATIONS.md); 3 also commits to attachment lists by digest, so a purge takes
+   * the entries off the disk (docs/PURGE.md). The default stays 1, the format every room had before,
+   * so a caller that names nothing writes exactly what it always wrote. The seat service makes version 3.
+   * @param {{ root: string, roomId?: string, epoch?: string, hostAccountId: string, recordLimit?: number, logVersion?: 1 | 2 | 3, now?: () => Date }} options
    */
   static async create(options) {
     const logVersion = options.logVersion ?? LOG_VERSION;
-    if (logVersion !== LOG_VERSION && logVersion !== LOG_VERSION_2) throw new AgoraError("native room log version must be 1 or 2");
+    if (logVersion !== LOG_VERSION && logVersion !== LOG_VERSION_2 && logVersion !== LOG_VERSION_3)
+      throw new AgoraError("native room log version must be 1, 2 or 3");
     const roomId = options.roomId ?? randomUUID().replaceAll("-", "");
     const epoch = options.epoch ?? randomUUID().replaceAll("-", "");
     validateNativeEpoch(epoch);
@@ -721,13 +861,13 @@ export class NativeRoomStore {
         claimLeaseMs: DEFAULT_CLAIM_LEASE_MS, claimLeaseCapMs: CLAIM_LEASE_CAP_MS,
         createdAt: (options.now ?? (() => new Date()))().toISOString(),
         // a version 1 room's manifest stays the bytes it always was: absent reads as 1
-        ...(logVersion === LOG_VERSION_2 ? { logVersion } : {}) };
+        ...(logVersion !== LOG_VERSION ? { logVersion } : {}) };
       await writeDurableAtomic(path.join(directory, "room.json"), JSON.stringify(manifest, null, 2) + "\n");
       log = await open(path.join(directory, "room.frames"), "wx+", 0o600);
       await log.sync();
       await syncDirectory(directory);
       const boundary = { version: 1, roomId, epoch, sequence: 0, end: 0, digest: null,
-        ...(logVersion === LOG_VERSION_2 ? { generation: 0 } : {}) };
+        ...(logVersion !== LOG_VERSION ? { generation: 0 } : {}), ...(logVersion === LOG_VERSION_3 ? { logVersion } : {}) };
       boundaryPublicationStarted = true;
       await writeDurableAtomic(path.join(directory, "committed.json"), JSON.stringify(boundary, null, 2) + "\n");
       return new NativeRoomStore(directory, manifest, boundary, log, writer, [], 0, 0,
@@ -768,7 +908,7 @@ export class NativeRoomStore {
       if (manifest?.version !== MANIFEST_VERSION || manifest.roomId !== options.roomId || !ROOM_RE.test(manifest.roomId ?? "") ||
           !/^[A-Za-z0-9_-]{16,128}$/.test(manifest.hostAccountId ?? "") || !Number.isSafeInteger(manifest.recordLimit) ||
           manifest.recordLimit < 1 || manifest.recordLimit > 10_000_000 ||
-          (manifest.logVersion !== undefined && manifest.logVersion !== LOG_VERSION && manifest.logVersion !== LOG_VERSION_2))
+          (manifest.logVersion !== undefined && manifest.logVersion !== LOG_VERSION && manifest.logVersion !== LOG_VERSION_2 && manifest.logVersion !== LOG_VERSION_3))
         throw new AgoraError(`native room ${options.roomId} manifest is invalid`);
       validateNativeEpoch(manifest.epoch);
       // the boundary names the generation, so it is read before the log it points at is opened
@@ -776,6 +916,12 @@ export class NativeRoomStore {
       try { boundary = JSON.parse(await readFile(path.join(directory, "committed.json"), "utf8")); }
       catch { throw new AgoraError(`native room ${options.roomId} has no valid committed boundary`); }
       const generation = boundaryGeneration(boundary, manifest);
+      // An upgrade installs by the boundary's rename and then rewrites the manifest; a crash between
+      // the two leaves a boundary at version 3 over a manifest at 2, which this finishes
+      if (roomLogVersion(manifest, boundary) === LOG_VERSION_3 && manifestLogVersion(manifest) !== LOG_VERSION_3) {
+        manifest = { ...manifest, logVersion: LOG_VERSION_3 };
+        await writeDurableAtomic(path.join(directory, "room.json"), JSON.stringify(manifest, null, 2) + "\n");
+      }
       // The boundary is the one truth about which generation is the log (docs/PURGE.md). Any other
       // generation file is what a purge interrupted left: a half-written next generation when the
       // crash came before the boundary's rename, or the previous one when it came after. Neither
@@ -797,6 +943,207 @@ export class NativeRoomStore {
       await releaseWriter(writer);
       throw e;
     }
+  }
+
+  /**
+   * Rewrite a version 2 room as version 3 (docs/NATIVE-ROOMS.md), offline from writers: it holds the
+   * room's writer lock for the whole rewrite, so a room the seat service (or anything else) holds open
+   * is refused `room-in-use`. The room keeps its epoch, and every record its sequence, cursor, id and
+   * payload digest; each record's digest is recomputed under version 3 rules (the attachment list
+   * committed by its digest, outside the digested part) and carries `v2Digest`, the digest it had, so
+   * a reader's checkpoint from before still names it. A message a purge already took loses its
+   * attachment entries here, and the purge record that took them names their custody digests.
+   *
+   * The current generation, boundary and manifest are copied to `upgrade-v2-backup/` first; the
+   * version 3 generation is written beside the live one, synced, re-read by the same scan an open
+   * runs and compared record by record with the version 2 log before anything names it; then one
+   * rename of the committed boundary installs it, as a purge's rewrite installs its generation. A
+   * crash before that rename opens as the version 2 room it was; after it, as version 3. The backup
+   * stays until `pruneUpgradeBackup`.
+   * @param {{ root: string, roomId: string, now?: () => Date, hooks?: PurgeHooks }} options
+   * @returns {Promise<{ roomId: string, from: 2, to: 3, records: number, generation: number, epoch: string,
+   *   digest: string | null, v2Digest: string | null, attachmentEntriesDropped: number, backup: string }>}
+   */
+  static async upgrade(options) {
+    let store;
+    try { store = await NativeRoomStore.open({ root: options.root, roomId: options.roomId, ...(options.now ? { now: options.now } : {}) }); }
+    catch (e) {
+      if (/** @type {any} */ (e)?.code === "writer-live")
+        throw refusal("room-in-use", `native room ${options.roomId} has a live writer (the seat service holds it open, or another upgrade runs); stop the service and upgrade offline; nothing was changed`);
+      throw e;
+    }
+    store.hooks = options.hooks;
+    try { return await store.#upgrade(); }
+    finally { await store.close(); }
+  }
+
+  async #upgrade() {
+    if (this.logVersion === LOG_VERSION_3)
+      throw refusal("upgrade-not-needed", `native room ${this.manifest.roomId} is already a version 3 room; nothing was changed`);
+    if (this.logVersion !== LOG_VERSION_2)
+      throw refusal("upgrade-unsupported-log-version", `native room ${this.manifest.roomId} is a version 1 room, whose records commit to their text; upgrade takes a version 2 room; nothing was changed`);
+    const directory = this.directory;
+    const manifestPath = path.join(directory, "room.json");
+    // 1. The backup: what this room is now, exactly. One an earlier upgrade left without installing
+    // is a copy of this same version 2 room, and is replaced.
+    const backup = path.join(directory, UPGRADE_BACKUP);
+    await rm(backup, { recursive: true, force: true });
+    await mkdir(backup, { mode: 0o700 });
+    await copyDurable(this.logPath, path.join(backup, generationFile(this.generation)));
+    await copyDurable(this.boundaryPath, path.join(backup, "committed.json"));
+    await copyDurable(manifestPath, path.join(backup, "room.json"));
+    await syncDirectory(backup);
+    await syncDirectory(directory);
+    // 2. The version 3 records. A message a purge took already lost its text at version 2; here it
+    // loses its attachment entries too, and their custody digests move onto the purge record.
+    /** @type {Map<string, Set<string>>} */
+    const released = new Map();
+    let dropped = 0;
+    for (const r of this.records) {
+      if (!r.message?.attachments || !this.purged.has(r.message.id)) continue;
+      const by = /** @type {{ purge: string }} */ (this.purged.get(r.message.id)).purge;
+      const into = released.get(by) ?? new Set();
+      for (const a of r.message.attachments) if (typeof a.digest === "string") into.add(a.digest);
+      released.set(by, into);
+      dropped += r.message.attachments.length;
+    }
+    /** @type {any[]} */
+    const records = [];
+    /** @type {string | null} */
+    let previous = null;
+    for (const r of this.records) {
+      const { recordDigest, ...unsigned } = r;
+      /** @type {any} */
+      const next = { ...unsigned, version: LOG_VERSION_3, previousDigest: previous, v2Digest: recordDigest };
+      if (r.message?.attachments) {
+        const message = { ...r.message, attachmentsDigest: attachmentsDigest(r.message.attachments) };
+        if (this.purged.has(r.message.id)) delete message.attachments;
+        next.message = message;
+      }
+      const more = r.kind === "purge" ? released.get(r.purge.id) : undefined;
+      if (more?.size) next.purge = { ...r.purge, released: [...more].sort() };
+      const record = { ...next, recordDigest: recordDigestOf(next) };
+      records.push(record);
+      previous = record.recordDigest;
+    }
+    // 3. The next generation, beside the live one; nothing names it yet.
+    const nextGeneration = this.generation + 1;
+    const file = path.join(directory, generationFile(nextGeneration));
+    const handle = await open(file, "w+", 0o600);
+    let end = 0;
+    try {
+      for (let i = 0; i < records.length; i++) {
+        const frame = storedFrame(records[i]);
+        await writeAll(handle, frame, end);
+        end += frame.length;
+        await this.hooks?.upgradeStage?.("frame-written", i + 1);
+      }
+      await handle.sync();
+      await syncDirectory(directory);
+      // 4. Verify before installing: the bytes on disk are re-read by the scan an open runs, under
+      // version 3 rules, and every record must be the version 2 record it replaces: the same place,
+      // identity and payload, the version 2 digest it carries, and what a reader is served unchanged.
+      const manifest = { ...this.manifest, logVersion: LOG_VERSION_3 };
+      const boundary = { ...this.boundary, end, generation: nextGeneration, logVersion: LOG_VERSION_3,
+        sequence: records.length, digest: records.at(-1)?.recordDigest ?? null };
+      const scanned = await scan(handle, manifest, boundary);
+      if (scanned.records.length !== this.records.length)
+        throw new AgoraError(`the version 3 generation holds ${scanned.records.length} records and the room ${this.records.length}`);
+      /** @param {any} r */
+      const identity = (r) => nativeDigest({ sequence: r.sequence, accountId: r.accountId, operationId: r.operationId, kind: r.kind ?? null,
+        payloadDigest: r.payloadDigest, id: r.message?.id ?? r.annotation?.id ?? r.purge?.id ?? r.boardId,
+        cursor: r.message?.cursor ?? r.annotation?.cursor ?? r.purge?.cursor ?? r.cursor });
+      /** @param {any} r */
+      const served = (r) => r.message ? nativeDigest(readerMessage(r.message, this.purged.get(r.message.id)))
+        : r.annotation ? nativeDigest(withoutTextDigest(r.annotation))
+        : r.purge ? nativeDigest({ ...r.purge, released: null }) : nativeDigest(r.board);
+      for (let i = 0; i < records.length; i++) {
+        const before = this.records[i], after = scanned.records[i];
+        if (after.v2Digest !== before.recordDigest || identity(after) !== identity(before) || served(after) !== served(before))
+          throw new AgoraError(`the version 3 record at sequence ${i + 1} is not the version 2 record it replaces`);
+      }
+    } catch (error) {
+      await handle.close().catch(() => {});
+      await rm(file, { force: true }).catch(() => {});
+      throw Object.assign(new AgoraError(`upgrade-failed: the version 3 generation did not verify and was removed; the room is the version 2 room it was (${error instanceof Error ? error.message : String(error)})`), { code: "upgrade-failed" });
+    }
+    try { await this.hooks?.upgradeStage?.("generation-written"); }
+    catch (error) { await handle.close().catch(() => {}); this.closed = true; throw error; }
+    // 5. Install: one rename of the committed boundary, which names the generation and the version.
+    const boundary = { ...this.boundary, end, generation: nextGeneration, logVersion: LOG_VERSION_3,
+      sequence: records.length, digest: records.at(-1)?.recordDigest ?? null };
+    try {
+      await writeDurableAtomic(this.boundaryPath, JSON.stringify(boundary, null, 2) + "\n");
+    } catch (error) {
+      await handle.close().catch(() => {});
+      this.closed = true;
+      const code = /** @type {NodeJS.ErrnoException} */ (error)?.code;
+      throw Object.assign(new AgoraError(`upgrade-failed: the committed-boundary publication failed; whether the room is version 2 or 3 is unknown until it is opened, and either opens${typeof code === "string" ? ` (${code})` : ""}`), { code: "upgrade-failed" });
+    }
+    const old = this.handle;
+    const oldPath = this.logPath;
+    this.handle = handle;
+    this.end = end;
+    this.records = records;
+    this.boundary = boundary;
+    this.generation = nextGeneration;
+    this.logPath = file;
+    this.logVersion = LOG_VERSION_3;
+    this.operations = new Map(records.map((r) => [`${r.accountId}\0${r.operationId}`, r]));
+    await old.close().catch(() => {});
+    await this.hooks?.upgradeStage?.("boundary-installed");
+    // 6. The manifest says what the boundary already decided (an open finishes this if it is lost),
+    // and the version 2 generation, kept in the backup, leaves the room's own directory.
+    this.manifest = { ...this.manifest, logVersion: LOG_VERSION_3 };
+    await writeDurableAtomic(manifestPath, JSON.stringify(this.manifest, null, 2) + "\n");
+    await rm(oldPath, { force: true });
+    await syncDirectory(directory);
+    const last = records.at(-1);
+    return { roomId: this.manifest.roomId, from: /** @type {2} */ (LOG_VERSION_2), to: /** @type {3} */ (LOG_VERSION_3), records: records.length, generation: nextGeneration,
+      epoch: this.manifest.epoch, digest: last?.recordDigest ?? null, v2Digest: last?.v2Digest ?? null,
+      attachmentEntriesDropped: dropped, backup };
+  }
+
+  /**
+   * Remove the version 2 room an upgrade kept (`upgrade-v2-backup/`). On a version 3 room nothing
+   * else writes there, so no lock is taken and the seat service may hold the room. On a version 2
+   * room the backup is what an upgrade that did not install left, and it is removed under the
+   * writer lock, so an upgrade running now is never cut short (`room-in-use`).
+   * @param {{ root: string, roomId: string }} options
+   * @returns {Promise<{ roomId: string, removed: boolean, backup: string, logVersion: 1 | 2 | 3 }>}
+   */
+  static async pruneUpgradeBackup(options) {
+    const requested = roomDirectory(options.root, options.roomId);
+    let physical;
+    try { physical = await physicalRoom(requested); }
+    catch { throw new AgoraError(`native room ${options.roomId} has no valid manifest`); }
+    const directory = physical.directory;
+    let manifest, boundary;
+    try {
+      manifest = JSON.parse(await readFile(path.join(directory, "room.json"), "utf8"));
+      boundary = JSON.parse(await readFile(path.join(directory, "committed.json"), "utf8"));
+    } catch { throw new AgoraError(`native room ${options.roomId} has no valid manifest or committed boundary`); }
+    const logVersion = roomLogVersion(manifest, boundary);
+    const backup = path.join(directory, UPGRADE_BACKUP);
+    const present = await stat(backup).then(() => true, () => false);
+    if (!present) return { roomId: options.roomId, removed: false, backup, logVersion };
+    if (logVersion === LOG_VERSION_3) {
+      await rm(backup, { recursive: true, force: true });
+      await syncDirectory(directory);
+      return { roomId: options.roomId, removed: true, backup, logVersion };
+    }
+    let writer;
+    try { writer = await acquireWriter(directory, physical.identity); }
+    catch (e) {
+      if (/** @type {any} */ (e)?.code === "writer-live")
+        throw refusal("room-in-use", `native room ${options.roomId} has a live writer and its backup belongs to no installed upgrade; nothing was removed`);
+      throw e;
+    }
+    try {
+      await rm(backup, { recursive: true, force: true });
+      await syncDirectory(directory);
+      return { roomId: options.roomId, removed: true, backup, logVersion };
+    } finally { await releaseWriter(writer); }
   }
 
   /**
@@ -848,10 +1195,13 @@ export class NativeRoomStore {
     if (input.thread !== undefined) validateNativeId(input.thread, "thread id");
     if (input.attachments && (!Array.isArray(input.attachments) || input.attachments.length > ATTACHMENT_MAX)) throw new AgoraError(`native post carries more than ${ATTACHMENT_MAX} attachments`);
     const attachments = input.attachments?.map(validateAttachment);
-    const v2 = this.logVersion === LOG_VERSION_2;
+    const v2 = this.logVersion !== LOG_VERSION;
     // version 2 commits to the text by its digest everywhere a digest covers it, the payload's
-    // included, so removing the text later leaves every digest standing
+    // included, so removing the text later leaves every digest standing; version 3 commits to the
+    // attachment list the same way inside the record, while the payload keeps the list as version 2
+    // has it, so the payload digest an upgrade carries over is still the one a resend computes
     const digestOfText = v2 ? textDigest(input.text) : undefined;
+    const digestOfAttachments = this.logVersion === LOG_VERSION_3 && attachments?.length ? attachmentsDigest(attachments) : undefined;
     const payload = { accountId: authenticated.accountId, authorName: input.authorName.trim(), authorKind: input.authorKind ?? "agent",
       ...(v2 ? { textDigest: digestOfText } : { text: input.text }),
       ...(input.thread ? { thread: input.thread } : {}), ...(attachments?.length ? { attachments } : {}),
@@ -875,6 +1225,7 @@ export class NativeRoomStore {
         ...(input.authorRef !== undefined ? { ref: input.authorRef } : {}) },
       ...(via !== undefined ? { via } : {}),
       ...(v2 ? { textDigest: digestOfText } : {}),
+      ...(digestOfAttachments ? { attachmentsDigest: digestOfAttachments } : {}),
       text: input.text, ts: this.now().toISOString(), cursor: nativeCursor(this.manifest.epoch, sequence),
       ...(attachments?.length ? { attachments } : {}) };
     const unsigned = { version: this.logVersion, roomId: this.manifest.roomId, epoch: this.manifest.epoch, sequence,
@@ -1011,7 +1362,7 @@ export class NativeRoomStore {
    * @param {{ accountId: string, via?: string }} authenticated
    */
   async #appendAnnotation(input, authenticated) {
-    if (this.logVersion !== LOG_VERSION_2)
+    if (this.logVersion === LOG_VERSION)
       throw refusal("annotation-unsupported-log-version", `native room ${this.manifest.roomId} is a version 1 room; annotations need a version 2 room`);
     validateNativeId(input.operationId, "operation id");
     validateNativeId(authenticated.accountId, "account id");
@@ -1100,7 +1451,7 @@ export class NativeRoomStore {
    * @param {{ accountId: string, via?: string }} authenticated
    */
   async #appendPurge(input, authenticated) {
-    if (this.logVersion !== LOG_VERSION_2)
+    if (this.logVersion === LOG_VERSION)
       throw refusal("purge-unsupported-log-version", `native room ${this.manifest.roomId} is a version 1 room, whose records commit to their text; purge needs a version 2 room`);
     validateNativeId(input.operationId, "operation id");
     validateNativeId(authenticated.accountId, "account id");
@@ -1178,10 +1529,16 @@ export class NativeRoomStore {
     return run;
   }
 
-  /** @param {any} record the record with the texts a purge took removed and marked, or itself */
+  /**
+   * The record with what a purge took removed and marked, or itself: the text, and in a version 3
+   * log the attachment list with it (its digest stays, inside the record digest).
+   * @param {any} record
+   */
   #stripped(record) {
-    if (record.message && "text" in record.message && this.purged.has(record.message.id)) {
+    const v3 = record.version === LOG_VERSION_3;
+    if (record.message && ("text" in record.message || (v3 && "attachments" in record.message)) && this.purged.has(record.message.id)) {
       const { text: _text, ...message } = record.message;
+      if (v3) delete message.attachments;
       return { ...record, message: { ...message, purged: { ...this.purged.get(record.message.id) } } };
     }
     if (record.kind === "annotation" && "text" in record.annotation && this.purged.has(record.annotation.target)) {
@@ -1196,7 +1553,24 @@ export class NativeRoomStore {
     if (!this.purged.size || this.records.every((r) => this.#stripped(r) === r)) return { rewritten: false };
     const next = this.generation + 1;
     const file = path.join(this.directory, generationFile(next));
-    const records = this.records.map((r) => this.#stripped(r));
+    // A version 3 rewrite drops the attachment lists, so the custody digests they named are written
+    // on the purge record that took them (`released`, outside its digest) in the same generation:
+    // custody collection reads them there, and a crash before the collection loses none of them.
+    /** @type {Map<string, Set<string>>} */
+    const released = new Map();
+    for (const r of this.records) {
+      if (r.version !== LOG_VERSION_3 || !r.message?.attachments || !this.purged.has(r.message.id)) continue;
+      const by = /** @type {{ purge: string }} */ (this.purged.get(r.message.id)).purge;
+      const into = released.get(by) ?? new Set();
+      for (const a of r.message.attachments) if (typeof a.digest === "string") into.add(a.digest);
+      released.set(by, into);
+    }
+    const records = this.records.map((r) => {
+      const stripped = this.#stripped(r);
+      const more = r.kind === "purge" ? released.get(r.purge.id) : undefined;
+      if (!more?.size) return stripped;
+      return { ...stripped, purge: { ...stripped.purge, released: [...new Set([...(stripped.purge.released ?? []), ...more])].sort() } };
+    });
     // A leftover file of this name is a half-written generation no boundary ever named; "w+"
     // truncates it. Nothing reads it until the boundary below names it.
     const handle = await open(file, "w+", 0o600);
@@ -1255,6 +1629,8 @@ export class NativeRoomStore {
     /** @type {Set<string>} */
     const onPurged = new Set();
     for (const r of this.records) {
+      // a version 3 rewrite moved what a purge took onto the purge record (`released`)
+      if (r.kind === "purge" && Array.isArray(r.purge.released)) for (const d of r.purge.released) onPurged.add(d);
       if (!r.message?.attachments) continue;
       const into = this.purged.has(r.message.id) ? onPurged : referenced;
       for (const a of r.message.attachments) if (typeof a.digest === "string") into.add(a.digest);
@@ -1313,7 +1689,8 @@ export class NativeRoomStore {
     const boundary = { version: 1, roomId: this.manifest.roomId, epoch: this.manifest.epoch, sequence: record.sequence,
       end: start + frame.length, digest: record.recordDigest,
       // the generation is kept as the boundary carried it; a version 1 boundary never names one
-      ...(this.boundary.generation !== undefined ? { generation: this.generation } : {}) };
+      ...(this.boundary.generation !== undefined ? { generation: this.generation } : {}),
+      ...(this.boundary.logVersion !== undefined ? { logVersion: this.boundary.logVersion } : {}) };
     try {
       await writeDurableAtomic(this.boundaryPath, JSON.stringify(boundary, null, 2) + "\n");
     } catch (error) {
@@ -1371,7 +1748,7 @@ export class NativeRoomStore {
     /** A purge as a reader receives it; in a thread view, narrowed to the thread's messages and
      * present only when it took one of them. @param {any[]} records */
     const purges = (records) => records.filter((r) => r.kind === "purge").map((r) => {
-      const p = structuredClone(r.purge);
+      const { released: _released, ...p } = structuredClone(r.purge);
       if (thread !== undefined) p.purged = p.purged.filter((/** @type {string} */ id) => inView(this.records[/** @type {number} */ (this.messageIndex.get(id))].message));
       return p;
     }).filter((p) => p.purged.length);
@@ -1474,8 +1851,10 @@ export class NativeRoomStore {
     if (checkpoint.epoch !== this.manifest.epoch) throw new AgoraError("native room checkpoint belongs to another epoch");
     if (!Number.isSafeInteger(checkpoint.sequence) || Number(checkpoint.sequence) < 0 || Number(checkpoint.sequence) > this.records.length)
       throw new AgoraError("native room checkpoint sequence is unavailable; recover explicitly without advancing");
-    const expected = Number(checkpoint.sequence) === 0 ? null : this.records[Number(checkpoint.sequence) - 1].recordDigest;
-    if (checkpoint.digest !== expected) throw new AgoraError("native room checkpoint digest does not match the retained prefix; recover explicitly without advancing");
+    const record = Number(checkpoint.sequence) === 0 ? undefined : this.records[Number(checkpoint.sequence) - 1];
+    // a checkpoint taken before an upgrade names the record by the digest it had at version 2, which
+    // the version 3 record carries inside its own digest; it is answered with the current checkpoint
+    if (checkpoint.digest !== (record?.recordDigest ?? null) && (record?.v2Digest === undefined || checkpoint.digest !== record.v2Digest)) throw new AgoraError("native room checkpoint digest does not match the retained prefix; recover explicitly without advancing");
     return this.checkpoint(Number(checkpoint.sequence));
   }
 
@@ -1483,7 +1862,7 @@ export class NativeRoomStore {
     return { roomId: this.manifest.roomId, epoch: this.manifest.epoch, hostAccountId: this.manifest.hostAccountId,
       committed: this.records.length, latestCursor: nativeCursor(this.manifest.epoch, this.records.length), latestDigest: this.records.at(-1)?.recordDigest ?? null,
       recordLimit: this.manifest.recordLimit, recoveredTailBytes: this.recoveredTailBytes, logVersion: this.logVersion,
-      ...(this.logVersion === LOG_VERSION_2 ? { generation: this.generation } : {}) };
+      ...(this.logVersion !== LOG_VERSION ? { generation: this.generation } : {}) };
   }
 
   async close() {

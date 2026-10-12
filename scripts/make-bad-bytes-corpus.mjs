@@ -6,7 +6,8 @@
 // a boundary that ends inside a frame or names a foreign epoch or disagrees with the log, a
 // writer lock naming a dead endpoint or unparseable; and, behind a re-sealed frame, one edit per
 // field the scan validates: record, message, board and boundary fields, a reply's via and
-// author ref among them). Every case carries an EXPECT.json naming
+// author ref among them; a version 2 room a purge rewrote; and a version 3 room an upgrade wrote,
+// whose attachment lists ride outside the digest). Every case carries an EXPECT.json naming
 // what `NativeRoomStore.open` must say, so the test opens the committed bytes offline and the
 // bytes stay traceable to the edit that made them.
 //
@@ -23,7 +24,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { NativeRoomStore } from "../src/native-store.mjs";
+import { NativeRoomStore, nativeRecordDigest } from "../src/native-store.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const OUT = join(ROOT, "test", "fixtures", "native-store-bad");
@@ -79,6 +80,30 @@ function editRecord({ frames, boundary }, index, f) {
   editJson(boundary, (o) => { o.end = o.end + (next.length - bytes.length); });
 }
 
+/**
+ * Edit the record inside frame `index` and re-seal the chain from there: its `recordDigest` under its
+ * version's rules, every later record's `previousDigest` and `recordDigest`, and the boundary's
+ * digest. So the record digest passes and the check behind it (a version 2 witness, say) is what refuses.
+ * @param {Paths} p @param {number} index @param {(record: any) => void} f
+ */
+function editAndRechain(p, index, f) {
+  const bytes = readFileSync(p.frames);
+  /** @type {any[]} */
+  const records = [];
+  let pos = 0;
+  while (pos + 4 <= bytes.length) { const len = bytes.readUInt32BE(pos); records.push(JSON.parse(bytes.subarray(pos + 4, pos + 4 + len).toString("utf8"))); pos += 4 + len + 32; }
+  f(records[index]);
+  for (let i = index; i < records.length; i++) {
+    const { recordDigest: _old, ...unsigned } = records[i];
+    if (i > index) unsigned.previousDigest = records[i - 1].recordDigest;
+    records[i] = { ...unsigned, recordDigest: nativeRecordDigest(unsigned) };
+  }
+  const frames = records.map((r) => { const payload = Buffer.from(JSON.stringify(r), "utf8"); const header = Buffer.alloc(4); header.writeUInt32BE(payload.length, 0); return Buffer.concat([header, payload, createHash("sha256").update(payload).digest()]); });
+  const next = Buffer.concat(frames);
+  writeFileSync(p.frames, next);
+  editJson(p.boundary, (o) => { o.end = next.length; o.digest = records.at(-1).recordDigest; });
+}
+
 /** The record inside frame `index` (0-based), as JSON. @param {Paths} p @param {number} index */
 function readRecord({ frames }, index) {
   const bytes = readFileSync(frames);
@@ -91,7 +116,7 @@ function readRecord({ frames }, index) {
  * each case: a named edit of a good room and what open must say (null: opens); `base` names the
  * room it edits, the version 1 room when absent
  * @typedef {{ dir: string, frames: string, manifest: string, boundary: string, lock: string }} Paths
- * @typedef {{ base?: "purge", expect: string | null, edit: (p: Paths) => void }} Case
+ * @typedef {{ base?: "purge" | "v3", expect: string | null, edit: (p: Paths) => void }} Case
  * @type {Record<string, Case>}
  */
 export const CASES = {
@@ -200,7 +225,34 @@ export const CASES = {
   "marker-wrong-time": { base: "purge", expect: "has no text and no purge names it", edit: (p) => editRecord(p, 0, (r) => { r.message.purged.at = "2000-01-01T00:00:00.000Z"; }) },
   "annotation-carries-board": { base: "purge", expect: "carries a message, a board act or a purge", edit: (p) => editRecord(p, 4, (r) => { r.board = { action: "claim", subject: "work:x" }; }) },
   "pin-carries-marker": { base: "purge", expect: "carries a text on a pin", edit: (p) => { const purge = readRecord(p, 6).purge; editRecord(p, 4, (r) => { r.annotation.purged = { at: purge.ts, purge: purge.id }; }); } },
+  "v2-carries-attachments-digest": { base: "purge", expect: "carries an attachments digest in a version 2 log", edit: (p) => editRecord(p, 1, (r) => { r.message.attachmentsDigest = `sha256:${"1".repeat(64)}`; }) },
+  "boundary-v3-over-v1": { expect: "committed boundary names an invalid log version", edit: ({ boundary }) => editJson(boundary, (o) => { o.logVersion = 3; }) },
+  // wave 4: a version 3 room an upgrade wrote (base "v3"; v3Room writes it). Frame 0 is a message
+  // with attachment A, 1 a message with attachment B that a purge took before the upgrade, 2 that
+  // purge, 3 a message with attachment C posted after the upgrade, 4 the purge that took it. Frames
+  // 0-2 carry v2Digest; 1 and 3 carry their attachments digest and no list; 2 and 4 name the
+  // custody digests their rewrite released.
+  "good-v3": { base: "v3", expect: null, edit: () => {} },
+  "v3-manifest-says-2": { base: "v3", expect: null, edit: ({ manifest }) => editJson(manifest, (o) => { o.logVersion = 2; }) },
+  "v3-boundary-names-none": { base: "v3", expect: "manifest says log version 3 and its committed boundary names none", edit: ({ boundary }) => editJson(boundary, (o) => { delete o.logVersion; }) },
+  "v3-boundary-names-four": { base: "v3", expect: "committed boundary names an invalid log version", edit: ({ boundary }) => editJson(boundary, (o) => { o.logVersion = 4; }) },
+  "v3-attachment-renamed": { base: "v3", expect: "carries attachments that do not match their attachments digest", edit: (p) => editRecord(p, 0, (r) => { r.message.attachments[0].name = "renamed.txt"; }) },
+  "v3-attachments-empty": { base: "v3", expect: "carries attachments that do not match their attachments digest", edit: (p) => editRecord(p, 0, (r) => { r.message.attachments = []; }) },
+  "v3-attachments-without-digest": { base: "v3", expect: "carries attachments without an attachments digest", edit: (p) => editRecord(p, 0, (r) => { delete r.message.attachmentsDigest; }) },
+  "v3-digest-without-attachments": { base: "v3", expect: "has an attachments digest and no attachments, and no purge took it", edit: (p) => editRecord(p, 0, (r) => { delete r.message.attachments; }) },
+  "v3-attachments-digest-malformed": { base: "v3", expect: "carries an invalid attachments digest", edit: (p) => editRecord(p, 3, (r) => { r.message.attachmentsDigest = "sha256:short"; }) },
+  "v3-purged-keeps-attachments": { base: "v3", expect: "keeps its attachments after a purge took it", edit: (p) => editRecord(p, 3, (r) => { r.message.attachments = [ATTACHMENT_C]; }) },
+  "v3-released-malformed": { base: "v3", expect: "carries an invalid released list", edit: (p) => editRecord(p, 4, (r) => { r.purge.released = ["sha256:short"]; }) },
+  "v3-released-twice": { base: "v3", expect: "carries an invalid released list", edit: (p) => editRecord(p, 4, (r) => { r.purge.released = [r.purge.released[0], r.purge.released[0]]; }) },
+  "v2-released": { base: "purge", expect: "carries an invalid released list", edit: (p) => editRecord(p, 6, (r) => { r.purge.released = [`sha256:${"1".repeat(64)}`]; }) },
+  "v3-v2-digest-wrong": { base: "v3", expect: "carries a version 2 digest its version 2 form does not have", edit: (p) => editAndRechain(p, 0, (r) => { r.v2Digest = `sha256:${"1".repeat(64)}`; }) },
+  "v3-v2-digest-after-native": { base: "v3", expect: "carries an invalid version 2 digest", edit: (p) => editAndRechain(p, 4, (r) => { r.v2Digest = `sha256:${"1".repeat(64)}`; }) },
+  "v3-v2-digest-malformed": { base: "v3", expect: "carries an invalid version 2 digest", edit: (p) => editAndRechain(p, 0, (r) => { r.v2Digest = "sha256:short"; }) },
 };
+
+/** The attachments the version 3 room carries: metadata only, so no custody is needed to write it. */
+const attachmentOf = (/** @type {string} */ c, /** @type {string} */ name) => ({ id: `corpus_attachment_${c}`, name, kind: "file", size: 10, digest: `sha256:${c.repeat(64)}` });
+const ATTACHMENT_A = attachmentOf("a", "kept-file.txt"), ATTACHMENT_B = attachmentOf("b", "purged-before-upgrade.txt"), ATTACHMENT_C = attachmentOf("c", "purged-after-upgrade.txt");
 
 /** write the good room under a fixed clock and return its directory */
 async function goodRoom() {
@@ -239,9 +291,29 @@ async function purgeRoom() {
   return { root, dir: join(root, "native", "rooms", ROOM) };
 }
 
+/** write the version 3 room an upgrade wrote, under a fixed clock; its frames are listed above CASES' wave 4 */
+async function v3Room() {
+  const root = await mkdtemp(join(tmpdir(), "agora-corpus-v3-"));
+  let tick = Date.UTC(2026, 8, 18, 12, 0, 0);
+  const now = () => new Date((tick += 1000));
+  const store = await NativeRoomStore.create({ root, roomId: ROOM, hostAccountId: HOST, epoch: "9f97cbaedb3b45d5a9807816a2c6fa5a", logVersion: 2, now });
+  const local = { accountId: HOST };
+  await store.append({ operationId: "v3_room_op_000001", authorName: "Peer", authorKind: "human", text: "message 1", attachments: [ATTACHMENT_A] }, local);
+  const before = await store.append({ operationId: "v3_room_op_000002", authorName: "Peer", authorKind: "human", text: "message 2", attachments: [ATTACHMENT_B] }, local);
+  await store.append(/** @type {any} */ ({ kind: "purge", operationId: "v3_room_purge_0001", authorName: "Peer", authorKind: "human", purge: { targets: [before.id], reason: "before the upgrade" } }), local);
+  await store.close();
+  await NativeRoomStore.upgrade({ root, roomId: ROOM, now });
+  await NativeRoomStore.pruneUpgradeBackup({ root, roomId: ROOM });
+  const v3 = await NativeRoomStore.open({ root, roomId: ROOM, now });
+  const after = await v3.append({ operationId: "v3_room_op_000004", authorName: "Peer", authorKind: "human", text: "message 4", attachments: [ATTACHMENT_C] }, local);
+  await v3.append(/** @type {any} */ ({ kind: "purge", operationId: "v3_room_purge_0002", authorName: "Peer", authorKind: "human", purge: { targets: [after.id], reason: "after the upgrade" } }), local);
+  await v3.close();
+  return { root, dir: join(root, "native", "rooms", ROOM) };
+}
+
 /** @param {string} into */
 async function build(into) {
-  const bases = { v1: await goodRoom(), purge: await purgeRoom() };
+  const bases = { v1: await goodRoom(), purge: await purgeRoom(), v3: await v3Room() };
   rmSync(into, { recursive: true, force: true });
   mkdirSync(into, { recursive: true });
   for (const [name, c] of /** @type {Array<[string, Case]>} */ ([["good", { expect: null, edit: () => {} }], ...Object.entries(CASES)])) {

@@ -25,7 +25,7 @@ function cliEnv(s) {
 test("read prints annotation lines among the messages, in log order, as JSON and for a person", { timeout: 60_000 }, async (t) => {
   const s = await seat(t);
   const manifest = JSON.parse(await readFile(path.join(s.root, "native", "rooms", ROOM, "room.json"), "utf8"));
-  assert.equal(manifest.logVersion, 2);
+  assert.equal(manifest.logVersion, 3);
   const env = cliEnv(s);
   /** @param {string[]} args */
   const cli = (args) => run(process.execPath, [BIN, ...args], { env, windowsHide: true });

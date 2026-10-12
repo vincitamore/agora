@@ -1,0 +1,5 @@
+{
+  "case": "boundary-v3-over-v1",
+  "opens": false,
+  "refusal": "committed boundary names an invalid log version"
+}

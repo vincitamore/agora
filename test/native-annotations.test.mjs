@@ -209,9 +209,9 @@ const mark = (c, annotation) => /** @type {Promise<any>} */ (c.request("append",
 /** @param {() => boolean} predicate */
 const until = async (predicate) => { for (let i = 0; i < 200 && !predicate(); i++) await new Promise((r) => setTimeout(r, 10)); assert.ok(predicate()); };
 
-test("the service makes version 2 rooms; a reader that asks for annotations gets them, one that does not is carried past them", async (t) => {
+test("the service makes version 3 rooms; a reader that asks for annotations gets them, one that does not is carried past them", async (t) => {
   const { svc, connect } = await service(t);
-  assert.equal((await svc.openRoom(ROOM)).logVersion, 2);
+  assert.equal((await svc.openRoom(ROOM)).logVersion, 3);
   const c = await connect();
   const m1 = await say(c, "one");
   const edit = await mark(c, { act: "edit", target: m1.id, text: "one, edited" });

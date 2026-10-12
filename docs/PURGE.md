@@ -5,8 +5,9 @@ messages (or of a whole thread) out of the room, and the attachment bytes no rem
 references, while every record keeps its place in the chain. A reader that holds a checkpoint past
 a purged record continues without refusal.
 
-Purge needs a version 2 room (`docs/ANNOTATIONS.md`), whose record digest commits to the text by its
-digest rather than to the text itself.
+Purge needs a version 2 or 3 room (`docs/ANNOTATIONS.md`), whose record digest commits to the text by
+its digest rather than to the text itself. A version 3 room commits to each message's attachment list
+the same way, so a purge there takes the attachment entries off the disk with the text.
 
 ## The purge record
 
@@ -16,7 +17,8 @@ digest rather than to the text itself.
 
 - `thread` purges the root and every reply in it.
 - The stored record is `{ purge: { id, targets, thread?, reason, by: { name, ref? }, via?, purged:
-  [ids], ts, cursor } }`. `purged` is the resolved list in log order, less what an earlier purge
+  [ids], ts, cursor, released? } }`. `released` (version 3 only, outside the digest, never served) is
+  written by the rewrite: the custody digests of the attachment entries it dropped. `purged` is the resolved list in log order, less what an earlier purge
   took; scan recomputes it from `targets` and `thread` over the log before the record and refuses a
   mismatch.
 - Appended on **local** connections only. A member session (a remote seat over a route) is refused
@@ -26,8 +28,9 @@ digest rather than to the text itself.
 ## What the host does
 
 1. Commit the purge record, like any other.
-2. Write generation N+1 of the log without the targets' text, and without the attachment blobs that
-   no unpurged record references.
+2. Write generation N+1 of the log without the targets' text (at version 3, without their attachment
+   entries either, whose custody digests go on the purge record as `released`), and without the
+   attachment blobs that no unpurged record references.
 3. Install the committed boundary naming N+1 by one atomic rename.
 4. Remove generation N.
 
@@ -43,12 +46,19 @@ route, `foldPurges`, or the chat kit (whose index drops the entries with the tex
 the redaction marker; the contract adds no other. This holds from the moment the purge record
 commits, before the rewrite has run.
 
-**What the log keeps.** A version 2 record digest covers `message.attachments` (only the text is
-committed by its digest), so the stored record keeps its attachment entries: removing them would
-leave a record whose digest no reader could recompute, and the room would refuse to open. The bytes
-go (custody below); the entries stay on the host's disk, in the seat's private state, and are never
-served. A log format that commits to attachments by digest, so a purge could drop the entries too,
-is a new log version.
+**What the log keeps.** A version 3 record digest covers `message.attachmentsDigest`, the digest of
+the attachment list, and the list rides outside it, as the text does. The rewrite drops the list
+with the text: no file name, size or kind of a purged attachment stays in the log. The digest stays
+inside the record digest, and the custody digests go on the purge record as `released`, so the
+collection below knows what to let go of after a crash.
+
+A version 2 record digest covers `message.attachments` itself (only the text is committed by its
+digest), so a version 2 room's stored record keeps its attachment entries: removing them would leave
+a record whose digest no reader could recompute, and the room would refuse to open. The bytes go
+(custody below); the entries stay on the host's disk, in the seat's private state, and are never
+served. `agora room upgrade` rewrites a version 2 room as version 3 (`docs/NATIVE-ROOMS.md`), and
+drops the entries of every message an earlier purge took as it does; the version 2 copy it keeps
+holds them until `--prune-backup`.
 
 Recovery: a crash before the boundary rename opens on generation N (the half-written N+1 is
 discarded); a crash after it opens on N+1 and removes N. A reopen also finishes a purge whose texts
@@ -58,8 +68,10 @@ Custody collection reads the room's references under the custody lock every inst
 passes over held digests: an upload holds its digest until an append names it or an hour passes. A
 later collection (the next purge, or the next open of the room) takes what stays unreferenced.
 
-On scan, every version 2 record without text must be named by a later purge record; a text-less
-record no purge names is a damaged room, and it refuses to open.
+On scan, every version 2 or 3 record without text must be named by a later purge record; a text-less
+record no purge names is a damaged room, and it refuses to open. At version 3 a message's list must
+hash to its `attachmentsDigest`, a digest without its list stands only on a message a purge took,
+and a message a purge took keeps no list.
 
 ## Refusals
 
@@ -129,6 +141,9 @@ agora pin <room> <message id>
 agora unpin <room> <message id>
 agora room purge <room> (--message <id> ... | --thread <root id>) --reason "..."
 ```
+
+`agora room upgrade <room> --confirm <roomId> [--prune-backup]` is the offline rewrite of a version 2
+room as version 3, and is described in `docs/NATIVE-ROOMS.md`.
 
 ## Retention
 

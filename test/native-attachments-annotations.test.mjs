@@ -24,10 +24,10 @@ async function drain(stream) {
   return Buffer.concat(parts);
 }
 
-test("a version 2 room's message with durable attachments: upload, append, read with annotations, edit, and the bytes read back", { timeout: 60_000 }, async (t) => {
+test("a version 3 room's message with durable attachments: upload, append, read with annotations, edit, and the bytes read back", { timeout: 60_000 }, async (t) => {
   const s = await seat(t);
   const manifest = JSON.parse(await readFile(path.join(s.root, "native", "rooms", ROOM, "room.json"), "utf8"));
-  assert.equal(manifest.logVersion, 2, "the seat service makes version 2 rooms");
+  assert.equal(manifest.logVersion, 3, "the seat service makes version 3 rooms");
   const app = await s.open({ clientName: "example-app" });
   assert.ok(app.capabilities.has("attachments-v1") && app.capabilities.has("annotations-v1"));
 

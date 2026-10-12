@@ -1,0 +1,5 @@
+{
+  "case": "v3-v2-digest-wrong",
+  "opens": false,
+  "refusal": "carries a version 2 digest its version 2 form does not have"
+}

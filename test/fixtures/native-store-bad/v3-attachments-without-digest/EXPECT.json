@@ -1,0 +1,5 @@
+{
+  "case": "v3-attachments-without-digest",
+  "opens": false,
+  "refusal": "carries attachments without an attachments digest"
+}

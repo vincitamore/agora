@@ -1,0 +1,5 @@
+{
+  "case": "v2-carries-attachments-digest",
+  "opens": false,
+  "refusal": "carries an attachments digest in a version 2 log"
+}

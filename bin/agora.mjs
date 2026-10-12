@@ -106,6 +106,7 @@ import { readShadowArgs, runEconomyShadowCli, ShadowInputError } from "../src/ec
 import { clearStandDown, clearWatchStop, completeStandDownAck, declareStandDown, listStandDowns, standDownRequested } from "../src/stand-down.mjs";
 import { DEFAULT_DEAF_SECONDS, DEFAULT_IDLE_SECONDS, DEFAULT_MAX_CONTEXT, DEFAULT_MIN_CONTEXT, ROOM_MECHANICS_DOC, assertResidentSlug, configuredResidents, planCycle, readInheritMarker, removeInheritMarker, renderResidentPrompt, restartCommand, writeInheritMarker } from "../src/resident.mjs";
 import { nativeRecordArgumentRefusal, nativeRecordVerb, prepareAttachments, runNativeRecordVerb } from "../src/cli-native-records.mjs";
+import { NativeRoomStore } from "../src/native-store.mjs";
 import { FACE_ATTACHMENT_MODES, FACE_BUILT, FACE_SELECTORS, appendFaceRecord, faceCopies, facePolicyPath, listFaceRecords, normalizeSelectors, readFacePolicy, selectFaces, writeFacePolicy } from "../src/faces.mjs";
 
 /**
@@ -206,7 +207,7 @@ const SCHEMA = {
       does: "force-drop a native board holder. The human label is cooperative (the caller supplies authorKind; the store refuses an agent label; the event records session and bearer). Slack and other transports have no board",
     },
     room: {
-      args: ["faces <room> | add-remote <alias> <descriptor-path> | purge <room>"],
+      args: ["faces <room> | add-remote <alias> <descriptor-path> | upgrade <room> | purge <room>"],
       options: {
         "--add <transport>": `give the native room a face on this transport (${FACE_BUILT.join(", ")}); the token is borrowed from a configured room of that transport. A github face is the --via room's issue: one comment per faced post, no threads, no upload (an image faces as its link or its digest)`,
         "--via <room>": "with --add: the configured room whose token and target the face borrows (default: the one configured room of that transport); a github face takes its repo and issue from here",
@@ -224,8 +225,10 @@ const SCHEMA = {
         "--show": "print the record and change nothing (the default with no edit option)",
         "--message <id>": "with purge: a message whose text is removed, repeatable",
         "--reason <text>": "with purge: why, recorded on the purge record (required)",
+        "--confirm <roomId>": "with upgrade: the exact 32-hex room id, typed again; anything else refuses confirm-mismatch",
+        "--prune-backup": "with upgrade: remove the version 2 copy an upgrade kept (upgrade-v2-backup/) instead of upgrading",
       },
-      does: "faces: the face policy of a native room — which transports carry a copy of which of its posts, per author kind, read from and written to the seat's own state (never the shared config), with where the record lives and when it was last written; an unknown transport, selector or mode is refused by name and nothing is written. add-remote: verify a route descriptor the operator carried from another seat's host and PRINT the native-remote room row to paste; it never writes the shared config, and the row carries no roomId because the descriptor's binding is the one source. purge: remove the text of the named messages (--message, repeatable) or of a whole thread (--thread <root id>) from a version 2 native room, with the attachment bytes no remaining message references; every record keeps its place in the chain (docs/PURGE.md)",
+      does: "faces: the face policy of a native room — which transports carry a copy of which of its posts, per author kind, read from and written to the seat's own state (never the shared config), with where the record lives and when it was last written; an unknown transport, selector or mode is refused by name and nothing is written. add-remote: verify a route descriptor the operator carried from another seat's host and PRINT the native-remote room row to paste; it never writes the shared config, and the row carries no roomId because the descriptor's binding is the one source. upgrade: rewrite a version 2 native room of this seat as log version 3, offline (it takes the room's writer lock and refuses room-in-use while the service holds the room), verified record by record before one rename installs it; sequences, cursors and the epoch stay, a reader's earlier checkpoint stays valid, and the version 2 copy is kept until --prune-backup (docs/NATIVE-ROOMS.md). purge: remove the text of the named messages (--message, repeatable) or of a whole thread (--thread <root id>) from a version 2 or 3 native room, with the attachment bytes no remaining message references, and at version 3 their attachment entries; every record keeps its place in the chain (docs/PURGE.md)",
     },
     attachment: {
       args: ["get <room> <attachment id>"],
@@ -506,6 +509,7 @@ const OPTIONS = /** @type {const} */ ({
   label: { type: "string" },
   list: { type: "boolean", default: false },
   prune: { type: "boolean", default: false },
+  "prune-backup": { type: "boolean", default: false },
   "dry-run": { type: "boolean", default: false },
   forget: { type: "boolean", default: false },
   inherit: { type: "string" },
@@ -954,6 +958,12 @@ export const ARGUMENT_PREFLIGHTS = Object.freeze([
     matches: ({ verb, roomAlias }) => verb === 'service' && roomAlias === 'start',
     refusal: ({ values }) => values.authority !== undefined && !/^a-[a-f0-9]{64}$/.test(String(values.authority))
       ? 'service start --authority takes a- followed by 64 lowercase hexadecimal characters' : undefined,
+  },
+  {
+    name: "room-upgrade",
+    matches: ({ verb, roomAlias }) => verb === "room" && roomAlias === "upgrade",
+    refusal: ({ rest }) => rest.length !== 1 || !String(rest[0]).trim()
+      ? "agora room upgrade takes one native room (an alias or its 32-hex id): agora room upgrade <room> --confirm <roomId> [--prune-backup]" : undefined,
   },
   {
     name: "room-add-remote",
@@ -1867,9 +1877,41 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       }
       return EXIT.ok;
     }
+    // `agora room upgrade <room> --confirm <roomId>`: log version 2 to 3, offline (docs/NATIVE-ROOMS.md).
+    // The store holds the room's writer lock for the whole rewrite; a room the service holds is
+    // refused room-in-use. The shared config is read to resolve an alias and never written.
+    if (roomAlias === "upgrade") {
+      const target = String(rest[0]).trim();
+      let roomId = target;
+      if (!/^[a-f0-9]{32}$/.test(target)) {
+        const row = /** @type {Record<string, any>} */ (cfg.rooms ?? {})[target];
+        if (!row) throw new AgoraError(`${target} is neither a 32-hex native room id nor a room in the config`, EXIT.usage);
+        if (row.transport !== "native" || typeof row.roomId !== "string") throw new AgoraError(`room ${target} is a ${row.transport} room, not a native room this seat hosts`, EXIT.usage);
+        roomId = row.roomId;
+      }
+      const confirm = values.confirm === undefined ? undefined : String(values.confirm);
+      if (confirm !== roomId) {
+        const code = confirm === undefined ? "confirm-required" : "confirm-mismatch";
+        throw Object.assign(new AgoraError(`${code}: --confirm must be the exact room id ${roomId}${confirm === undefined ? "" : `, not ${JSON.stringify(confirm)}`}; nothing was changed`, EXIT.usage), { code });
+      }
+      if (values["prune-backup"]) {
+        const pruned = await NativeRoomStore.pruneUpgradeBackup({ root: stateRoot, roomId });
+        if (json) console.log(JSON.stringify({ type: "room", action: "upgrade-prune-backup", ...pruned }));
+        else console.log(pruned.removed ? `removed the version 2 backup of native room ${roomId} (${pruned.backup})` : `native room ${roomId} keeps no upgrade backup`);
+        return EXIT.ok;
+      }
+      const upgraded = await NativeRoomStore.upgrade({ root: stateRoot, roomId });
+      if (json) console.log(JSON.stringify({ type: "room", action: "upgrade", ...upgraded }));
+      else {
+        console.log(`upgraded native room ${roomId} from log version 2 to 3: ${upgraded.records} records verified and installed as generation ${upgraded.generation}; sequences, cursors and epoch unchanged`);
+        if (upgraded.attachmentEntriesDropped) console.log(`${upgraded.attachmentEntriesDropped} attachment entr${upgraded.attachmentEntriesDropped === 1 ? "y" : "ies"} of already purged messages left the log`);
+        console.log(`the version 2 room is kept at ${upgraded.backup}, attachment names included, until: agora room upgrade ${target} --confirm ${roomId} --prune-backup`);
+      }
+      return EXIT.ok;
+    }
     // `agora room faces <room>`: the one admin verb of the face policy. The record is the seat's
     // own state under native/rooms/<roomId>/faces.json; the shared config is read and never written.
-    if (roomAlias !== "faces") throw new AgoraError(`room takes "faces" (agora room faces <room> ...)${roomAlias ? `, not "${roomAlias}"` : ""}`, EXIT.usage);
+    if (roomAlias !== "faces") throw new AgoraError(`room takes "faces", "add-remote", "upgrade" or "purge" (agora room faces <room> ...)${roomAlias ? `, not "${roomAlias}"` : ""}`, EXIT.usage);
     const alias = rest[0];
     if (!alias) throw new AgoraError(`room faces needs a native room (one of: ${Object.entries(cfg.rooms).filter(([, r]) => r.transport === "native").map(([a]) => a).join(", ") || "none configured"})`, EXIT.usage);
     const native = cfg.rooms[alias];

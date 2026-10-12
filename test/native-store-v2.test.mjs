@@ -197,14 +197,14 @@ test("the boundary's generation names the log file: absent is room.frames, N is 
   await assert.rejects(NativeRoomStore.open({ root: v1root, roomId: ROOM }), /generation above 0 in a version 1 room/);
 });
 
-test("a manifest's log version is 1, 2 or absent; create refuses any other", async (t) => {
+test("a manifest's log version is 1, 2, 3 or absent; create refuses any other", async (t) => {
   const root = await tempRoot(t);
-  await assert.rejects(NativeRoomStore.create({ root, roomId: ROOM, epoch: EPOCH, hostAccountId: ACCOUNT, logVersion: /** @type {any} */ (3) }), /log version must be 1 or 2/);
+  await assert.rejects(NativeRoomStore.create({ root, roomId: ROOM, epoch: EPOCH, hostAccountId: ACCOUNT, logVersion: /** @type {any} */ (4) }), /log version must be 1, 2 or 3/);
   const store = await NativeRoomStore.create({ root, roomId: ROOM, epoch: EPOCH, hostAccountId: ACCOUNT, logVersion: 2 });
   await store.close();
   const manifestPath = path.join(roomDir(root), "room.json");
   const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-  await writeFile(manifestPath, JSON.stringify({ ...manifest, logVersion: 3 }, null, 2) + "\n");
+  await writeFile(manifestPath, JSON.stringify({ ...manifest, logVersion: 4 }, null, 2) + "\n");
   await assert.rejects(NativeRoomStore.open({ root, roomId: ROOM }), /manifest is invalid/);
 });
 

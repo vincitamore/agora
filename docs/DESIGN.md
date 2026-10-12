@@ -863,6 +863,34 @@ refused unless `--force`, because a deletion under a reader is a disappearance t
 asked for. Faced copies are listed, not deleted: the purge is the removal verb with a reach onto the
 faces (`docs/PURGE.md`), and a deletion that also purged would make the irreversible step silent.
 
+### Log version 3 and the upgrade (ruled)
+
+A purge is the house's way to remove what was said, and at log version 2 it left each purged
+attachment's entry (file name, size, kind) in the log, because the version 2 record digest covers
+the list. Version 3 commits to the list by `attachmentsDigest` and carries the list outside the
+digested part, as version 2 does the text, so the purge's rewrite drops it and every digest,
+sequence and cursor stands. New rooms are version 3; a version 2 room keeps working and keeps its
+served-shape purge until `agora room upgrade` rewrites it (`docs/NATIVE-ROOMS.md`).
+
+Four choices carry the shape. The payload digest keeps the attachment list as version 2 computed it,
+so an operation committed before an upgrade is still recognised when it is resent; it is a digest
+and names nothing. The custody digests a version 3 rewrite drops go on the purge record (`released`,
+outside its digest) in the same generation, because the collection runs after the rewrite and a
+crash between them would otherwise leave bytes no record names; a separate pending file was the
+alternative, and lost because it is a second thing to install atomically beside the generation. The
+upgrade's commit point is the committed boundary's one rename, which therefore names the log version
+(`logVersion: 3`); installing by the manifest lost because the manifest and the boundary are two
+files and the version must change in the same rename as the generation, or a crash between the two
+leaves a log the room's version cannot read. Each upgraded record carries `v2Digest`, the digest it
+had, inside its new digest, so a checkpoint taken before the upgrade still verifies and is answered
+with the current one; recomputing every digest with nothing kept lost because it would leave a
+reader that compares digests no way to tell an upgrade from a replaced log.
+
+The upgrade's backup holds the version 2 log, names included, until `--prune-backup`. Flip
+condition: if a purge must take names off the disk the moment it runs on a freshly upgraded room,
+the backup prune becomes part of the upgrade (an option, then the default), at the cost of the one
+way back that needs no rebuild.
+
 ## Standing prohibitions
 
 Constraints on future contributions, not descriptions of the present. Each is the kind of

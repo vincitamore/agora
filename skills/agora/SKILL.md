@@ -678,9 +678,14 @@ on the CLI that is any session on this seat. A withdraw removes no bytes. `room 
 (--message <id> ... | --thread <root id>) --reason "..."` is the only removal: the texts (and their
 edits' texts) leave the log, custody drops the bytes no remaining message names, and every record
 keeps its place and cursor, so a purged message reads back with an empty text and no
-attachments (the log keeps their entries, which its digest covers, and never serves them). Only this seat's own
+attachments. Only this seat's own
 connections purge (`purge-refused-remote`); a room made before log version 2 refuses
-(`purge-unsupported-log-version`). The purge deletes the copies its faces published within a few
+(`purge-unsupported-log-version`). The service makes log version 3 rooms, whose purge also takes the
+attachment entries (name, size, kind) out of the log; a version 2 room keeps them, unserved, until
+`agora room upgrade <room> --confirm <roomId>` rewrites it as version 3: offline (the service must
+not hold the room, `room-in-use`), verified record by record, installed by one rename, every cursor
+and earlier checkpoint kept. The upgrade keeps the version 2 copy, names included, until
+`--prune-backup`; a purge does not reach that copy, so prune it before relying on one. The purge deletes the copies its faces published within a few
 seconds and its receipt lists, as `facesOutOfReach`, each copy it could not delete (a face that cannot
 delete, a refused delete, or one not confirmed in time, whose deletion goes on), each
 `{ transport, channel, ts?, file?, message, reason }`. Only a message

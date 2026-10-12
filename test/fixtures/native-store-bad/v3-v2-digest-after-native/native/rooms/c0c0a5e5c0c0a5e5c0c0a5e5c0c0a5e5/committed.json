@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "roomId": "c0c0a5e5c0c0a5e5c0c0a5e5c0c0a5e5",
+  "epoch": "9f97cbaedb3b45d5a9807816a2c6fa5a",
+  "sequence": 5,
+  "end": 5537,
+  "digest": "sha256:d44f0255e6ab48d97d2af96b7a6754d61739d89c578ccba3c671c77bb04250e3",
+  "generation": 3,
+  "logVersion": 3
+}

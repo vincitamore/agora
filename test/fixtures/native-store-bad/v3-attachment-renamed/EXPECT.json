@@ -1,0 +1,5 @@
+{
+  "case": "v3-attachment-renamed",
+  "opens": false,
+  "refusal": "carries attachments that do not match their attachments digest"
+}

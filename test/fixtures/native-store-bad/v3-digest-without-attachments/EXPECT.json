@@ -1,0 +1,5 @@
+{
+  "case": "v3-digest-without-attachments",
+  "opens": false,
+  "refusal": "has an attachments digest and no attachments, and no purge took it"
+}

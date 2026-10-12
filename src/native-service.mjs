@@ -527,10 +527,11 @@ export class NativeRoomService {
     if (options.roomId && (this.rooms.has(options.roomId) || this.roomOpenings.has(options.roomId)))
       throw new AgoraError(`native room ${options.roomId} is already open on this service`);
     const activity = (async () => {
-      // a room this service makes is log version 2 (docs/ANNOTATIONS.md): text held by digest,
-      // annotations carried; a room made before keeps the version it was made with
+      // a room this service makes is log version 3 (docs/PURGE.md): text and attachment lists held
+      // by digest, annotations carried; a room made before keeps the version it was made with until
+      // `agora room upgrade` rewrites it
       const store = await NativeRoomStore.create({ root: this.root, roomId: options.roomId, epoch: options.epoch,
-        hostAccountId: this.accountId, now: this.now, logVersion: 2 });
+        hostAccountId: this.accountId, now: this.now, logVersion: 3 });
       if (!this.running) {
         await store.close();
         throw new AgoraError("native service stopped while creating the room; the room was not opened by this service");
