@@ -787,7 +787,20 @@ than re-deriving the argument.
 | A `type` discriminator on message objects in `--json` | A consumer needs to tell a message from the final summary line without inspecting fields. |
 | A name lease | Own-post detection ever again depends on the signature. |
 | `agora/client` on a `native-remote` room, refused `room-transport-unsupported` | An app needs a room hosted on another seat, and the member route can carry what an app's post needs: a non-agent author and a client name stamped as `via`. Until then a member channel would post the app's people as agents with no `via`, so the client refuses by name. |
-| A native-to-Slack thread map (a native thread whose root was never faced, or arrived from Slack, landing in a Slack thread) | The face runner is wired to the seat service, or a person on a Slack face asks for native replies they cannot see because their root was not faced there. Until then such a reply is refused `thread:`, never flattened. |
+
+### The face thread map (closed)
+
+The thread map ships with the inbound Slack face (`src/faces-inbound.mjs`): a Slack thread ts maps
+to the native root it answers, from the face record of the root the seat published and from
+`native/rooms/<roomId>/face-inbound.jsonl`, which keeps the pairing once a reply has crossed, with
+each thread's read position. A person's reply in a faced thread lands in that native thread, and a
+native reply in it lands in the Slack thread through the root's face. What the deferral named
+beyond that is now a decision, not a wait. A root never arrives from Slack, because only replies in
+faced threads cross inbound; a native room is not a mirror of the channel. A native reply whose
+root was never faced stays refused `thread:` on the Slack face: a Slack reader would see an answer
+to a message they cannot see, and flattening it to top level loses the thread. Re-open either only
+when a person on a Slack face asks for top-level messages to reach the room, or for native replies
+whose root they never saw.
 
 ## Standing prohibitions
 

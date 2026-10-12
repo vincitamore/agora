@@ -68,6 +68,15 @@ export function failedBeforeSend(e) {
  * @property {(file: { name: string, length: number }) => Promise<{ uploadUrl: string, fileId: string }>} uploadUrl
  * @property {(file: { uploadUrl: string, bytes: Buffer, mimetype: string, digest: string }) => Promise<void>} putUpload
  * @property {(file: { fileId: string, title: string, thread?: string }) => Promise<{ fileId: string }>} completeUpload
+ * @property {(opts: { thread: string, since?: string, limit?: number, pages?: number }) => Promise<import('../core.mjs').ReadResult>} inbound
+ *   the replies of one thread for the inbound face (src/faces-inbound.mjs): riders included, so the
+ *   loop check sees this seat's own copies, and every attachment carrying a non-enumerable `download`
+ */
+
+/**
+ * What one inbound attachment's `download` resolves with: the bytes, bounded, from Slack's own
+ * file host with the token, never written to disk here. The caller decides what crosses.
+ * @typedef {(max: number) => Promise<Buffer>} SlackDownload
  */
 
 /** @param {any} file */
@@ -343,8 +352,36 @@ export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep
     }
   }
 
-  /** @param {any} m @param {string | undefined} thread */
-  async function toMessage(m, thread) {
+  /**
+   * The bytes of one shared file, for the inbound face: the private URL must be https on slack.com
+   * (the token never goes anywhere else), the declared size and the body are both held to `max`,
+   * and an image Slack names is refused when the response says it is not one. A failure never
+   * echoes the URL, which is credential-gated.
+   * @param {any} file @param {number} max
+   */
+  async function download(file, max) {
+    const href = typeof file.url_private_download === "string" ? file.url_private_download : typeof file.url_private === "string" ? file.url_private : undefined;
+    if (!href) throw new AgoraError("Slack supplied no private download URL");
+    let u;
+    try { u = new URL(href); } catch { throw new AgoraError("the private download URL is not a URL"); }
+    if (u.protocol !== "https:" || !(u.hostname === "slack.com" || u.hostname.endsWith(".slack.com")))
+      throw new AgoraError("the private download URL is not a slack.com origin; the token is not sent there");
+    const size = Number(file.size);
+    if (Number.isFinite(size) && size > max) throw new AgoraError(`the file exceeds the ${max}-byte limit`);
+    let res;
+    try { res = await f(u.href, { headers: { authorization: `Bearer ${token}` } }); }
+    catch { throw new AgoraError("authenticated download failed"); }
+    if (!res.ok) throw new AgoraError(`Slack file download returned HTTP ${res.status}${res.status === 403 ? "; reinstall the Slack app with files:read" : ""}`);
+    const contentType = res.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+    if (String(file.mimetype ?? "").startsWith("image/") && contentType && !contentType.startsWith("image/"))
+      throw new AgoraError(`Slack returned ${contentType} for an image`);
+    const bytes = await boundedBody(res, max);
+    if (!bytes.length) throw new AgoraError("Slack returned an empty file");
+    return bytes;
+  }
+
+  /** @param {any} m @param {string | undefined} thread @param {boolean} [inbound] */
+  async function toMessage(m, thread, inbound = false) {
     const subtype = typeof m.subtype === "string" ? m.subtype : undefined;
     const isBot = Boolean(m.bot_id) || subtype === "bot_message";
     const isSystem = Boolean(subtype) && !SPEECH_SUBTYPES.has(subtype);
@@ -356,6 +393,14 @@ export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep
     let imageIndex = 0;
     const attachments = [];
     for (const file of files) {
+      if (inbound) {
+        // nothing is materialized on an inbound read: the face decides what crosses into custody,
+        // and the download rides the attachment unenumerated, so no JSON ever carries it
+        const meta = attachmentMeta(file);
+        Object.defineProperty(meta, "download", { value: /** @type {SlackDownload} */ ((max) => download(file, max)), enumerable: false });
+        attachments.push(meta);
+        continue;
+      }
       const isImage = String(file?.mimetype ?? "").startsWith("image/");
       attachments.push(await attachment(file, isImage ? imageIndex++ : -1));
     }
@@ -457,73 +502,17 @@ export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep
       const shared = Array.isArray(body.files) ? body.files.find((/** @type {any} */ x) => x?.id === fileId) ?? body.files[0] : undefined;
       return { fileId: String(shared?.id ?? fileId) };
     },
-    async read({ thread, since, limit = 200, pages = SLACK_READ_PAGES } = {}) {
-      /** @type {Record<string, string>} */
-      const base = { channel, limit: "200" };
-      if (since) {
-        base.oldest = since;
-        base.inclusive = "false";
-      }
-      const method = thread ? "conversations.replies" : "conversations.history";
-      if (thread) base.ts = thread;
-      /** @type {any[]} */
-      const raw = [];
-      let cursor;
-      /** the deepest position the walk reached: the oldest message of the last page it took */
-      let oldestFetched;
-      /** true while Slack still has older messages beyond the page just taken */
-      let deeper = false;
-      /** why the walk stopped before the cursor, when something other than the cap stopped it */
-      let stopped;
-      let walked = 0;
-      for (let page = 0; page < pages; page++) {
-        /** @type {any} */
-        let body;
-        try {
-          body = await call(method, cursor ? { ...base, cursor } : base);
-        } catch (e) {
-          // nothing collected yet is a failed read and stays a thrown error; a walk cut short after
-          // real pages is the same fact as the cap -- an unreached cursor, reported as a gap
-          if (!walked) throw e;
-          stopped = e instanceof Error ? e.message : String(e);
-          break;
-        }
-        walked++;
-        const pageMessages = body.messages ?? [];
-        if (pageMessages.length) oldestFetched = String(pageMessages[pageMessages.length - 1].ts);
-        for (const m of pageMessages) {
-          if (thread && m.ts === thread) continue; // the parent is not a reply
-          if (since && Number(m.ts) <= Number(since)) continue;
-          if (SKIP_SUBTYPES.has(m.subtype)) continue;
-          if (!thread && m.thread_ts && m.thread_ts !== m.ts && m.subtype !== "thread_broadcast") continue; // replies live in their thread
-          raw.push(m);
-        }
-        cursor = body.response_metadata?.next_cursor || undefined;
-        deeper = Boolean(cursor && body.has_more);
-        if (!deeper) break;
-      }
-      // A read after a cursor pages until it reaches that cursor. When it cannot -- the page cap, or
-      // a walk cut short -- the oldest `limit` of what it did collect is NOT the oldest unseen: it is
-      // a window from the middle of the backlog that looks exactly like a complete one, and the
-      // watcher that saves its last cursor steps over everything below it, permanently and silently.
-      // So the read returns nothing and says why. Never a silent jump.
-      if (since && (deeper || stopped)) {
-        const out = /** @type {import('../core.mjs').ReadResult} */ ([]);
-        out.gap = {
-          reason: stopped ? `the walk stopped after ${walked} of ${pages} pages: ${stopped}` : `backlog deeper than ${pages} pages`,
-          ...(oldestFetched ? { oldestFetched } : {}),
-          pages,
-        };
-        return out;
-      }
-      raw.sort((a, b) => Number(a.ts) - Number(b.ts));
-      // After a cursor, the oldest `limit` come first so a watcher advances in order and the next
-      // poll continues. Without one, the newest `limit`: a read to orient, or `cursor --now`,
-      // wants the latest messages, not the oldest of the paged window.
-      const window = since ? raw.slice(0, limit) : raw.slice(-limit);
-      const out = /** @type {import('../core.mjs').ReadResult} */ ([]);
-      for (const m of window) out.push(await toMessage(m, thread));
-      return out;
+    async read(opts = {}) { return readMessages(opts, false); },
+    /**
+     * The inbound face's read of one thread: `conversations.replies` with every message's metadata,
+     * so a copy this seat faced carries its rider back for the loop check, and attachments left
+     * unmaterialized, each with its `download`.
+     * @param {{ thread: string, since?: string, limit?: number, pages?: number }} opts
+     */
+    async inbound(opts) {
+      const bad = validateThread(opts?.thread);
+      if (bad !== undefined) throw new AgoraError(`inbound read: ${bad}`);
+      return readMessages(opts, true);
     },
     /**
      * `metadata` is Slack's per-message structured rider (an optional machine-readable rider, never
@@ -543,4 +532,79 @@ export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep
       return { id: String(body.ts), cursor: String(body.ts) };
     },
   });
+
+  /**
+   * One read: a channel's history, or one thread's replies. `inbound` asks for every message's
+   * metadata and leaves attachments unmaterialized.
+   * @param {import('../core.mjs').ReadOptions} opts @param {boolean} inbound
+   */
+  async function readMessages({ thread, since, limit = 200, pages = SLACK_READ_PAGES } = {}, inbound) {
+    /** @type {Record<string, string>} */
+    const base = { channel, limit: "200" };
+    if (inbound) base.include_all_metadata = "true";
+    if (since) {
+      base.oldest = since;
+      base.inclusive = "false";
+    }
+    const method = thread ? "conversations.replies" : "conversations.history";
+    if (thread) base.ts = thread;
+    /** @type {any[]} */
+    const raw = [];
+    let cursor;
+    /** the deepest position the walk reached: the oldest message of the last page it took */
+    let oldestFetched;
+    /** true while Slack still has older messages beyond the page just taken */
+    let deeper = false;
+    /** why the walk stopped before the cursor, when something other than the cap stopped it */
+    let stopped;
+    let walked = 0;
+    for (let page = 0; page < pages; page++) {
+      /** @type {any} */
+      let body;
+      try {
+        body = await call(method, cursor ? { ...base, cursor } : base);
+      } catch (e) {
+        // nothing collected yet is a failed read and stays a thrown error; a walk cut short after
+        // real pages is the same fact as the cap -- an unreached cursor, reported as a gap
+        if (!walked) throw e;
+        stopped = e instanceof Error ? e.message : String(e);
+        break;
+      }
+      walked++;
+      const pageMessages = body.messages ?? [];
+      if (pageMessages.length) oldestFetched = String(pageMessages[pageMessages.length - 1].ts);
+      for (const m of pageMessages) {
+        if (thread && m.ts === thread) continue; // the parent is not a reply
+        if (since && Number(m.ts) <= Number(since)) continue;
+        if (SKIP_SUBTYPES.has(m.subtype)) continue;
+        if (!thread && m.thread_ts && m.thread_ts !== m.ts && m.subtype !== "thread_broadcast") continue; // replies live in their thread
+        raw.push(m);
+      }
+      cursor = body.response_metadata?.next_cursor || undefined;
+      deeper = Boolean(cursor && body.has_more);
+      if (!deeper) break;
+    }
+    // A read after a cursor pages until it reaches that cursor. When it cannot -- the page cap, or
+    // a walk cut short -- the oldest `limit` of what it did collect is NOT the oldest unseen: it is
+    // a window from the middle of the backlog that looks exactly like a complete one, and the
+    // watcher that saves its last cursor steps over everything below it, permanently and silently.
+    // So the read returns nothing and says why. Never a silent jump.
+    if (since && (deeper || stopped)) {
+      const out = /** @type {import('../core.mjs').ReadResult} */ ([]);
+      out.gap = {
+        reason: stopped ? `the walk stopped after ${walked} of ${pages} pages: ${stopped}` : `backlog deeper than ${pages} pages`,
+        ...(oldestFetched ? { oldestFetched } : {}),
+        pages,
+      };
+      return out;
+    }
+    raw.sort((a, b) => Number(a.ts) - Number(b.ts));
+    // After a cursor, the oldest `limit` come first so a watcher advances in order and the next
+    // poll continues. Without one, the newest `limit`: a read to orient, or `cursor --now`,
+    // wants the latest messages, not the oldest of the paged window.
+    const window = since ? raw.slice(0, limit) : raw.slice(-limit);
+    const out = /** @type {import('../core.mjs').ReadResult} */ ([]);
+    for (const m of window) out.push(await toMessage(m, thread, inbound));
+    return out;
+  }
 }

@@ -633,7 +633,15 @@ body's digest, so two byte-identical bodies in one window stay `unknown` for a h
 takes no upload (`--pictures` there is each image's link or digest as text, with a refused
 picture row saying so, never a copy). A reconcile read truncated at the page cap licenses
 no repost: "not found" is not known, the row stays `unknown`, and a later covered read is
-what may repost.
+what may repost. The Slack face answers back: a person's reply in a thread whose root the seat
+faced becomes a native reply under that root, stamped `via: slack-face` by the service, author
+kind `human` (a foreign bot, `agent`) with the Slack user id as `author.ref`. Only replies in
+faced threads cross, never the channel's top level. The loop check is the outbound runner's
+(rider, published ts or file id, quarantine, own account while pending), so a faced copy never
+comes back in; the thread map, each thread's position and every crossing live in
+`native/rooms/<roomId>/face-inbound.jsonl`, and the operation id derives from the Slack ts, so a
+replay is the host's duplicate. Files cross into custody under `--files` caps (eight, 20 MiB
+each), an image only when its bytes prove it; the rest keep a metadata line with the reason.
 
 **A native room keeps files, edits and removals as records.** `post <room> --attach <path>`
 (repeatable) uploads each file into the room's custody and posts carrying it; the kind is what the
