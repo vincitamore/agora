@@ -71,6 +71,8 @@ export function failedBeforeSend(e) {
  * @property {(opts: { thread: string, since?: string, limit?: number, pages?: number }) => Promise<import('../core.mjs').ReadResult>} inbound
  *   the replies of one thread for the inbound face (src/faces-inbound.mjs): riders included, so the
  *   loop check sees this seat's own copies, and every attachment carrying a non-enumerable `download`
+ * @property {(opts: { thread: string, pages?: number }) => Promise<{ messages: { ts: string, text: string, subtype?: string, hidden?: boolean, editedTs?: string }[], complete: boolean }>} inboundThread
+ *   one whole thread for the inbound face's edit and delete check; `complete` only when the walk reached the end
  */
 
 /**
@@ -513,6 +515,43 @@ export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep
       const bad = validateThread(opts?.thread);
       if (bad !== undefined) throw new AgoraError(`inbound read: ${bad}`);
       return readMessages(opts, true);
+    },
+    /**
+     * The inbound face's survey of one whole thread, for edits and deletes of replies that already
+     * crossed: every reply's ts, text, subtype, `hidden` and `edited.ts`, oldest first, and
+     * `complete`, true only when the walk reached the end of the thread inside the page cap. An
+     * absence means a delete only on a complete read. Throws on a failed first page.
+     * @param {{ thread: string, pages?: number }} opts
+     * @returns {Promise<{ messages: { ts: string, text: string, subtype?: string, hidden?: boolean, editedTs?: string }[], complete: boolean }>}
+     */
+    async inboundThread({ thread, pages = SLACK_READ_PAGES }) {
+      const bad = validateThread(thread);
+      if (bad !== undefined) throw new AgoraError(`inbound read: ${bad}`);
+      /** @type {Record<string, string>} */
+      const base = { channel, ts: thread, limit: "200", include_all_metadata: "true" };
+      /** @type {any[]} */
+      const raw = [];
+      let cursor;
+      let complete = false;
+      for (let page = 0; page < pages; page++) {
+        /** @type {any} */
+        let body;
+        try { body = await call("conversations.replies", cursor ? { ...base, cursor } : base); }
+        catch (e) { if (!page) throw e; break; }
+        raw.push(...(body.messages ?? []));
+        cursor = body.response_metadata?.next_cursor || undefined;
+        if (!(cursor && body.has_more)) { complete = true; break; }
+      }
+      const messages = raw
+        .filter((m) => String(m.ts) !== thread)
+        .sort((a, b) => Number(a.ts) - Number(b.ts))
+        .map((m) => ({
+          ts: String(m.ts), text: decodeSlackText(String(m.text ?? "")),
+          ...(typeof m.subtype === "string" ? { subtype: m.subtype } : {}),
+          ...(m.hidden === true ? { hidden: true } : {}),
+          ...(typeof m.edited?.ts === "string" ? { editedTs: m.edited.ts } : {}),
+        }));
+      return { messages, complete };
     },
     /**
      * `metadata` is Slack's per-message structured rider (an optional machine-readable rider, never

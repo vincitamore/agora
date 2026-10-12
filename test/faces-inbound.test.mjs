@@ -6,6 +6,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFile, rm, stat, writeFile } from "node:fs/promises";
+import { foldAnnotations } from "../src/client.mjs";
 import { FaceRunner, appendFaceRecord, faceRecordsPath, readFacePolicy, writeFacePolicy } from "../src/faces.mjs";
 import {
   FaceInbound, INBOUND_FILES_PER_MESSAGE, INBOUND_FILE_MAX_BYTES, arrivedFromFace, faceInboundPath, faceThreadOf, inboundOperationId, inboundVia, readInbound, readThreadMap,
@@ -30,7 +31,7 @@ function clock(iso) {
 
 /**
  * A fake Slack: Web API methods by name, file bytes by path on files.slack.com, every call recorded.
- * @param {{ replies: () => any[], files?: Record<string, { bytes: Buffer, type: string }>, own?: { user: string, bot: string } }} o
+ * @param {{ replies: () => any[] | { messages: any[], has_more?: boolean, response_metadata?: { next_cursor: string } }, files?: Record<string, { bytes: Buffer, type: string }>, own?: { user: string, bot: string } }} o
  */
 function fakeSlack(o) {
   /** @type {URL[]} */
@@ -48,7 +49,10 @@ function fakeSlack(o) {
     const method = url.pathname.split("/").pop();
     if (method === "auth.test") return json({ ok: true, user_id: o.own?.user ?? "UBOT", user: "seat-bot", bot_id: o.own?.bot ?? "BSEAT" });
     if (method === "users.info") return json({ ok: true, user: { id: url.searchParams.get("user"), real_name: url.searchParams.get("user") === "U2" ? "operator" : "someone" } });
-    if (method === "conversations.replies") return json({ ok: true, has_more: false, messages: o.replies() });
+    if (method === "conversations.replies") {
+      const r = o.replies();
+      return json(Array.isArray(r) ? { ok: true, has_more: false, messages: r } : { ok: true, ...r });
+    }
     if (method === "conversations.history") return json({ ok: true, has_more: false, messages: [] });
     return json({ ok: false, error: "no route" });
   };
@@ -64,7 +68,7 @@ const slackFile = (id, name, mimetype, size, host = "files.slack.com") => ({ id,
  * A seat with one native room, one Slack face, one faced root, and the inbound half wired to a
  * client that declared `slack-face`.
  * @param {import('node:test').TestContext} t
- * @param {{ replies: () => any[], files?: Record<string, { bytes: Buffer, type: string }>, rootAt?: string, records?: any[], clock?: ReturnType<typeof clock>, inbound?: Record<string, number> }} o
+ * @param {{ replies: () => any[] | { messages: any[], has_more?: boolean, response_metadata?: { next_cursor: string } }, files?: Record<string, { bytes: Buffer, type: string }>, rootAt?: string, records?: any[], clock?: ReturnType<typeof clock>, inbound?: Record<string, number> }} o
  */
 async function rig(t, o) {
   const s = await seat(t);
@@ -236,4 +240,80 @@ test("the inbound read leaves attachments unmaterialized and serializes no downl
   assert.deepEqual(await a.download(1024), PNG);
   await assert.rejects(a.download(4), /exceeds the 4-byte limit/);
   await assert.rejects(transport.inbound({ thread: "1756900050.65" }), /inbound read: a Slack thread id/);
+});
+
+/** The room's annotations and its messages folded with them. @param {Awaited<ReturnType<typeof rig>>} r */
+async function annotated(r) {
+  const { messages, annotations } = await r.agent.read("house");
+  return { annotations: /** @type {any[]} */ (annotations ?? []), folded: foldAnnotations(messages, annotations ?? []) };
+}
+
+test("a Slack edit of a crossed reply is a native edit, signed by the same author stamp, once", { timeout: 30_000 }, async (t) => {
+  /** @type {any[]} */
+  let thread = [reply("1756900060.000000", "U2", "first draft")];
+  const r = await rig(t, { replies: () => thread });
+  await r.make().poll(r.face);
+  const [crossed] = await r.replies();
+  thread = [reply("1756900060.000000", "U2", "second draft", { edited: { user: "U2", ts: "1756900061.000000" } })];
+  const second = await r.make().poll(r.face);
+  assert.deepEqual(second.threads[0].edited, ["1756900060.000000"]);
+  const { annotations, folded } = await annotated(r);
+  assert.equal(annotations.length, 1);
+  const [a] = annotations;
+  assert.deepEqual([a.act, a.target, a.text], ["edit", crossed.id, "second draft"]);
+  assert.deepEqual([a.author.kind, a.author.name, a.author.ref, a.via], ["human", "operator", "U2", "slack-face"], "the same author, through the face's client");
+  assert.equal(folded.find((m) => m.id === crossed.id)?.text, "second draft");
+  // seen again unchanged: nothing more
+  await r.make().poll(r.face);
+  assert.equal((await annotated(r)).annotations.length, 1);
+});
+
+test("a Slack delete of a crossed reply is a native withdraw: a tombstone, or a ts gone from a covered read", { timeout: 30_000 }, async (t) => {
+  /** @type {any[]} */
+  let thread = [reply("1756900070.000000", "U2", "keep me?"), reply("1756900071.000000", "U2", "and me?"), reply("1756900072.000000", "U2", "I stay")];
+  const r = await rig(t, { replies: () => thread });
+  await r.make().poll(r.face);
+  const crossed = await r.replies();
+  thread = [reply("1756900070.000000", "U2", "This message was deleted.", { subtype: "tombstone", hidden: true }), reply("1756900072.000000", "U2", "I stay")];
+  const result = await r.make().poll(r.face);
+  assert.deepEqual(result.threads[0].withdrawn, ["1756900070.000000", "1756900071.000000"]);
+  assert.equal(result.threads[0].covered, true);
+  const { annotations } = await annotated(r);
+  assert.deepEqual(annotations.map((a) => [a.act, a.target, a.author.ref, a.via]), [["withdraw", crossed[0].id, "U2", "slack-face"], ["withdraw", crossed[1].id, "U2", "slack-face"]]);
+  await r.make().poll(r.face);
+  assert.equal((await annotated(r)).annotations.length, 2, "a withdrawn copy is not withdrawn again");
+});
+
+test("an edit and a withdraw replayed after a restart that lost their log lines are the host's duplicates, never a second annotation", { timeout: 30_000 }, async (t) => {
+  /** @type {any[]} */
+  let thread = [reply("1756900080.000000", "U2", "v1"), reply("1756900081.000000", "U2", "doomed")];
+  const r = await rig(t, { replies: () => thread });
+  await r.make().poll(r.face);
+  thread = [reply("1756900080.000000", "U2", "v2", { edited: { user: "U2", ts: "1756900082.000000" } })];
+  await r.make().poll(r.face);
+  assert.equal((await annotated(r)).annotations.length, 2);
+  // the crash: the annotations committed, the log lines that record them did not
+  const file = faceInboundPath(r.s.root, ROOM);
+  const kept = (await readFile(file, "utf8")).split("\n").filter((l) => l && !["edited", "withdrawn"].includes(JSON.parse(l).kind));
+  await writeFile(file, kept.join("\n") + "\n");
+  const replay = await r.make().poll(r.face);
+  assert.deepEqual([replay.threads[0].edited, replay.threads[0].withdrawn], [["1756900080.000000"], ["1756900081.000000"]], "both were seen again");
+  assert.equal((await annotated(r)).annotations.length, 2, "and the host answered both with the originals");
+  const lines = (await readFile(file, "utf8")).split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((l) => l.kind === "edited" || l.kind === "withdrawn");
+  assert.deepEqual(lines.map((l) => [l.kind, l.duplicate]), [["edited", true], ["withdrawn", true]]);
+});
+
+test("a read cut short at its page cap deletes nothing", { timeout: 30_000 }, async (t) => {
+  /** @type {() => any} */
+  let replies = () => [reply("1756900090.000000", "U2", "still here, beyond the cap")];
+  const r = await rig(t, { replies: () => replies() });
+  await r.make().poll(r.face);
+  // every page says there is more, and none of them holds the crossed reply
+  replies = () => ({ messages: [reply("1756900099.000000", "U3", "noise")], has_more: true, response_metadata: { next_cursor: "more" } });
+  const result = await r.make().poll(r.face);
+  assert.equal(result.threads[0].covered, false);
+  assert.deepEqual(result.threads[0].withdrawn, []);
+  assert.equal((await annotated(r)).annotations.length, 0);
+  const { crossed } = await readInbound(r.s.root, ROOM);
+  assert.equal([...crossed.values()][0].withdrawn, false);
 });

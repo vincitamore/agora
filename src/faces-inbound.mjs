@@ -30,6 +30,14 @@ import { SLACK_IMAGE_MAX_BYTES, SLACK_IMAGE_MAX_PER_MESSAGE, validateThread } fr
  *   restarted seat resumes where it stopped and nothing is appended twice: the operation id of
  *   every append derives from the room, the transport, the channel and the message's ts, so a
  *   replay after a crash is the host's duplicate, never a second message.
+ * - A reply that crossed and is then edited on the transport becomes an `edit` annotation on its
+ *   native copy, and one deleted there becomes a `withdraw`, both signed by the same author stamp
+ *   (the face's client acting for that person). Each tick reads the whole of a thread that has
+ *   crossed replies: a changed text (against the digest kept per crossing) is an edit; a
+ *   `tombstone` subtype, a hidden message, or a ts missing from a read that reached the end of the
+ *   thread is a delete. An absence from a read cut short at its page cap deletes nothing. Every
+ *   annotation's operation id derives from the room, the channel, the ts and the edit, so a replay
+ *   after a restart is the host's duplicate.
  * - Files are downloaded into the room's custody under the caps a reader's `--files` keeps: at most
  *   eight per message, 20 MiB each. An image is what its bytes prove: a file the transport calls an
  *   image whose bytes are not one is not copied. A file that is not copied keeps a metadata line in
@@ -79,6 +87,20 @@ export function inboundOperationId(roomId, transport, channel, id) {
 }
 
 /**
+ * The operation id of an edit or a withdraw of a crossed reply: fixed by the room, the channel,
+ * the ts, the act and, for an edit, the transport's edit stamp (its `edited.ts`, else the digest
+ * of the new text), so the same edit seen again is the host's duplicate and a later edit is new.
+ * @param {string} roomId @param {string} transport @param {string} channel @param {string} id @param {'edit' | 'withdraw'} act @param {string} [edit]
+ */
+export function inboundAnnotationId(roomId, transport, channel, id, act, edit = "") {
+  return createHash("sha256").update("agora-face-inbound-annotation\0").update(roomId).update("\0").update(transport).update("\0").update(channel).update("\0").update(id)
+    .update("\0").update(act).update("\0").update(edit).digest("hex");
+}
+
+/** @param {string} text */
+const textDigest = (text) => `sha256:${createHash("sha256").update(text).digest("hex")}`;
+
+/**
  * One line of `face-inbound.jsonl`.
  * - `thread`: the map, a transport thread ts to the native root id.
  * - `cursor`: how far one thread has been read.
@@ -86,7 +108,10 @@ export function inboundOperationId(roomId, transport, channel, id) {
  * @typedef {{ kind: 'thread', transport: string, channel: string, ts: string, root: string, at: string }
  *   | { kind: 'cursor', transport: string, channel: string, thread: string, cursor: string, at: string }
  *   | { kind: 'ingested', transport: string, channel: string, ts: string, thread: string, at: string, id?: string, cursor?: string,
- *       duplicate?: boolean, skipped?: string, files?: { name: string, copied: boolean, attachmentId?: string, reason?: string }[] }} InboundLine
+ *       duplicate?: boolean, skipped?: string, files?: { name: string, copied: boolean, attachmentId?: string, reason?: string }[],
+ *       textDigest?: string, fileLines?: string[], author?: { kind: 'human' | 'agent', name: string, ref?: string } }
+ *   | { kind: 'edited', transport: string, channel: string, ts: string, textDigest: string, editedTs?: string, annotation: string, duplicate?: boolean, at: string }
+ *   | { kind: 'withdrawn', transport: string, channel: string, ts: string, why: string, annotation?: string, duplicate?: boolean, at: string }} InboundLine
  */
 
 /** @param {string} transport @param {string} channel @param {string} ts */
@@ -117,6 +142,8 @@ export async function readInbound(stateRoot, roomId) {
   const active = new Map();
   /** @type {Map<string, InboundLine & { kind: 'ingested' }>} */
   const ingested = new Map();
+  /** The current state of each crossed reply: its native id, the digest of its last text, withdrawn. @type {Map<string, { ts: string, thread: string, id: string, textDigest?: string, fileLines: string[], author?: { kind: 'human' | 'agent', name: string, ref?: string }, withdrawn: boolean }>} */
+  const crossed = new Map();
   for (const raw of text.split("\n")) {
     if (!raw.trim()) continue;
     /** @type {InboundLine} */
@@ -125,9 +152,16 @@ export async function readInbound(stateRoot, roomId) {
     catch { continue; /* a torn last line from a killed writer is not a record */ }
     if (line.kind === "thread") { if (!threads.has(lineKey(line.transport, line.channel, line.ts))) threads.set(lineKey(line.transport, line.channel, line.ts), { root: line.root, at: line.at }); }
     else if (line.kind === "cursor") { cursors.set(lineKey(line.transport, line.channel, line.thread), line.cursor); active.set(lineKey(line.transport, line.channel, line.thread), line.at); }
-    else if (line.kind === "ingested") { ingested.set(lineKey(line.transport, line.channel, line.ts), line); active.set(lineKey(line.transport, line.channel, line.thread), line.at); }
+    else if (line.kind === "ingested") {
+      const key = lineKey(line.transport, line.channel, line.ts);
+      ingested.set(key, line);
+      active.set(lineKey(line.transport, line.channel, line.thread), line.at);
+      if (line.id) crossed.set(key, { ts: line.ts, thread: line.thread, id: line.id, textDigest: line.textDigest, fileLines: line.fileLines ?? [], author: line.author, withdrawn: false });
+    }
+    else if (line.kind === "edited") { const c = crossed.get(lineKey(line.transport, line.channel, line.ts)); if (c) c.textDigest = line.textDigest; }
+    else if (line.kind === "withdrawn") { const c = crossed.get(lineKey(line.transport, line.channel, line.ts)); if (c) c.withdrawn = true; }
   }
-  return { threads, cursors, active, ingested };
+  return { threads, cursors, active, ingested, crossed };
 }
 
 /**
@@ -190,7 +224,7 @@ function withLines(text, lines) {
  * @property {string} stateRoot
  * @property {string} roomId
  * @property {import('./faces.mjs').FaceRunner} runner the room's outbound runner: its loop check, its sweep and its `transportFor`
- * @property {Pick<import('./client.mjs').Client, 'append' | 'upload'> & { clientName?: string }} client connected with `clientName: inboundVia(transport)`
+ * @property {Pick<import('./client.mjs').Client, 'append' | 'upload' | 'annotate'> & { clientName?: string }} client connected with `clientName: inboundVia(transport)`
  * @property {import('./client.mjs').RoomRef} [room] how the client names the room; `{ roomId }` when absent
  * @property {() => Date} [now]
  * @property {number} [activeMs]
@@ -251,7 +285,7 @@ export class FaceInbound {
     const channel = String(face.target.channel ?? "");
     const transport = /** @type {any} */ (await this.runner.transportFor(face));
     if (typeof transport.inbound !== "function") throw new AgoraError(`the ${face.transport} face transport has no inbound read`);
-    /** @type {{ ts: string, root: string, held: boolean, reason?: string, ingested: number, notIngested: { id: string, why: string }[] }[]} */
+    /** @type {{ ts: string, root: string, held: boolean, reason?: string, ingested: number, notIngested: { id: string, why: string }[], edited: string[], withdrawn: string[], covered?: boolean }[]} */
     const out = [];
     for (const t of await this.threads(face)) {
       const result = await this.runner.poll(face, {
@@ -260,9 +294,13 @@ export class FaceInbound {
       });
       if (result.cursor && result.cursor !== t.since)
         await appendInboundLine(this.stateRoot, this.roomId, { kind: "cursor", transport: face.transport, channel, thread: t.ts, cursor: result.cursor, at: this.now().toISOString() });
-      out.push({ ts: t.ts, root: t.root, held: result.held, ...(result.reason ? { reason: result.reason } : {}), ingested: result.ingested.length, notIngested: result.notIngested });
       // a sweep that could not read the channel holds every thread of this face for the tick
-      if (result.held && result.reason === "reconciliation-read-failed") break;
+      if (result.held && result.reason === "reconciliation-read-failed") {
+        out.push({ ts: t.ts, root: t.root, held: true, reason: result.reason, ingested: 0, notIngested: result.notIngested, edited: [], withdrawn: [] });
+        break;
+      }
+      const mirrored = await this.#mirror(face, channel, transport, t);
+      out.push({ ts: t.ts, root: t.root, held: result.held, ...(result.reason ? { reason: result.reason } : {}), ingested: result.ingested.length, notIngested: result.notIngested, ...mirrored });
     }
     return { threads: out };
   }
@@ -284,10 +322,11 @@ export class FaceInbound {
       return;
     }
     const { refs, files, lines } = await this.#files(Array.isArray(native.attachments) ? native.attachments : []);
+    const slackText = String(native.text ?? "");
     const name = String(native.author?.name ?? "").trim().slice(0, AUTHOR_NAME_MAX) || String(native.author?.id ?? "unknown");
     const ref = typeof native.author?.id === "string" && AUTHOR_REF_PATTERN.test(native.author.id) ? native.author.id : undefined;
     const request = {
-      text: withLines(String(native.text ?? ""), lines),
+      text: withLines(slackText, lines),
       author: { kind: /** @type {'human'|'agent'} */ (native.author?.kind === "human" ? "human" : "agent"), name, ...(ref ? { ref } : {}) },
       thread: t.root,
       operationId: inboundOperationId(this.roomId, face.transport, channel, ts),
@@ -301,7 +340,74 @@ export class FaceInbound {
       if (/** @type {any} */ (e)?.outcome !== "unknown-acceptance") throw e;
       receipt = await this.client.append(this.room, request);
     }
-    await appendInboundLine(this.stateRoot, this.roomId, { ...base, at: at(), id: receipt.id, cursor: receipt.cursor, ...(receipt.duplicate ? { duplicate: true } : {}), ...(files.length ? { files } : {}) });
+    await appendInboundLine(this.stateRoot, this.roomId, { ...base, at: at(), id: receipt.id, cursor: receipt.cursor, ...(receipt.duplicate ? { duplicate: true } : {}), ...(files.length ? { files } : {}),
+      textDigest: textDigest(slackText), fileLines: lines, author: request.author });
+  }
+
+  /**
+   * Edits and deletes of this thread's crossed replies, onto their native copies. Reads the whole
+   * thread only when a reply in it has crossed. A changed text is an `edit`; a tombstone, a hidden
+   * message, or a ts missing from a complete read is a `withdraw`; a missing ts on a read cut short
+   * at its page cap is nothing.
+   * @param {import('./faces.mjs').Face} face @param {string} channel @param {any} transport @param {{ ts: string }} t
+   * @returns {Promise<{ edited: string[], withdrawn: string[], covered?: boolean }>}
+   */
+  async #mirror(face, channel, transport, t) {
+    const { crossed } = await readInbound(this.stateRoot, this.roomId);
+    const mine = [...crossed.values()].filter((c) => c.thread === t.ts && !c.withdrawn && c.author);
+    if (!mine.length || typeof transport.inboundThread !== "function") return { edited: [], withdrawn: [] };
+    const survey = await transport.inboundThread({ thread: t.ts });
+    /** @type {Map<string, { ts: string, text: string, subtype?: string, hidden?: boolean, editedTs?: string }>} */
+    const byTs = new Map(survey.messages.map((/** @type {any} */ m) => [m.ts, m]));
+    /** @type {string[]} */
+    const edited = [];
+    /** @type {string[]} */
+    const withdrawn = [];
+    for (const c of mine) {
+      const m = byTs.get(c.ts);
+      const author = /** @type {{ kind: 'human' | 'agent', name: string, ref?: string }} */ (c.author);
+      const base = { transport: face.transport, channel, ts: c.ts };
+      const gone = m ? (m.subtype === "tombstone" || m.hidden === true ? "deleted on the transport" : undefined) : survey.complete ? "missing from a read that reached the end of the thread" : undefined;
+      if (gone) {
+        const receipt = await this.#annotate({ act: "withdraw", target: c.id, author, operationId: inboundAnnotationId(this.roomId, face.transport, channel, c.ts, "withdraw") });
+        await appendInboundLine(this.stateRoot, this.roomId, { kind: "withdrawn", ...base, why: receipt.refused ? `${gone}; ${receipt.refused}` : gone, ...(receipt.id ? { annotation: receipt.id } : {}), ...(receipt.duplicate ? { duplicate: true } : {}), at: this.now().toISOString() });
+        withdrawn.push(c.ts);
+        continue;
+      }
+      if (!m) continue; // absent from a read cut short: not known to be gone
+      const digest = textDigest(m.text);
+      if (digest === c.textDigest) continue;
+      const receipt = await this.#annotate({ act: "edit", target: c.id, text: withLines(m.text, c.fileLines), author,
+        operationId: inboundAnnotationId(this.roomId, face.transport, channel, c.ts, "edit", m.editedTs ?? digest) });
+      if (receipt.refused) {
+        // the native copy was withdrawn or purged meanwhile: nothing more is annotated on it
+        await appendInboundLine(this.stateRoot, this.roomId, { kind: "withdrawn", ...base, why: receipt.refused, at: this.now().toISOString() });
+        continue;
+      }
+      await appendInboundLine(this.stateRoot, this.roomId, { kind: "edited", ...base, textDigest: digest, ...(m.editedTs ? { editedTs: m.editedTs } : {}), annotation: String(receipt.id), ...(receipt.duplicate ? { duplicate: true } : {}), at: this.now().toISOString() });
+      edited.push(c.ts);
+    }
+    return { edited, withdrawn, covered: survey.complete };
+  }
+
+  /**
+   * One annotation through the face's client, resent once under the same id when its acceptance
+   * is unknown. A target already withdrawn or purged is reported, not thrown.
+   * @param {import('./client.mjs').AnnotateRequest} request
+   * @returns {Promise<{ id?: string, duplicate?: boolean, refused?: string }>}
+   */
+  async #annotate(request) {
+    const annotate = /** @type {any} */ (this.client).annotate;
+    if (typeof annotate !== "function") throw new AgoraError("the inbound client cannot annotate");
+    const once = () => annotate.call(this.client, this.room, request);
+    try {
+      try { return await once(); }
+      catch (e) { if (/** @type {any} */ (e)?.outcome !== "unknown-acceptance") throw e; return await once(); }
+    } catch (e) {
+      const code = /** @type {any} */ (e)?.code;
+      if (code === "annotation-target-withdrawn" || code === "annotation-target-purged") return { refused: `the native copy is ${code === "annotation-target-withdrawn" ? "withdrawn" : "purged"}` };
+      throw e;
+    }
   }
 
   /**

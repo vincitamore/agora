@@ -794,7 +794,10 @@ The thread map ships with the inbound Slack face (`src/faces-inbound.mjs`): a Sl
 to the native root it answers, from the face record of the root the seat published and from
 `native/rooms/<roomId>/face-inbound.jsonl`, which keeps the pairing once a reply has crossed, with
 each thread's read position. A person's reply in a faced thread lands in that native thread, and a
-native reply in it lands in the Slack thread through the root's face. What the deferral named
+native reply in it lands in the Slack thread through the root's face. An edit or a delete of a
+crossed reply on Slack follows it in as an `edit` or `withdraw` annotation under the same author
+stamp; a delete is inferred from an absence only on a read that reached the end of the thread,
+never on one cut short at its page cap. What the deferral named
 beyond that is now a decision, not a wait. A root never arrives from Slack, because only replies in
 faced threads cross inbound; a native room is not a mirror of the channel. A native reply whose
 root was never faced stays refused `thread:` on the Slack face: a Slack reader would see an answer

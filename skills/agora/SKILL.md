@@ -640,7 +640,9 @@ faced threads cross, never the channel's top level. The loop check is the outbou
 (rider, published ts or file id, quarantine, own account while pending), so a faced copy never
 comes back in; the thread map, each thread's position and every crossing live in
 `native/rooms/<roomId>/face-inbound.jsonl`, and the operation id derives from the Slack ts, so a
-replay is the host's duplicate. Files cross into custody under `--files` caps (eight, 20 MiB
+replay is the host's duplicate. A Slack edit of a crossed reply becomes a native `edit`, a
+Slack delete a `withdraw`, same author stamp, ids from the ts and the edit; only a read that
+reached the end of the thread may call a missing ts deleted. Files cross into custody under `--files` caps (eight, 20 MiB
 each), an image only when its bytes prove it; the rest keep a metadata line with the reason.
 
 **A native room keeps files, edits and removals as records.** `post <room> --attach <path>`
