@@ -13,6 +13,35 @@ import { NativeRoomService } from '../src/native-service.mjs';
 import { appendCarryEvent, beginCarryPost, captureCarryPost, carryRefKey, checkCarryBoundary, inheritCarryEvidence, mandateDigest, readCarryEvidence, readMandate, recordCarryCursorMove, requireCarrySuccessor, sealCarryBoundary, validateCarryEvent, validateMandate } from '../src/carry-check.mjs';
 import { tmp } from './helpers.mjs';
 
+const BIN = fileURLToPath(new URL('../bin/agora.mjs', import.meta.url));
+
+/**
+ * The real CLI, run to its own exit. No wall-clock kill: a child that starts in 0.4 s alone takes
+ * 1 to 2 s under the parallel suite on a loaded box, and a fixed 10 s timeout once killed the green
+ * `--check` mid-run, which read as the check itself failing. The exit is the signal; a hang is
+ * caught by the cell's own `timeout`, and every result carries what a failure message needs.
+ * @param {string[]} args @param {NodeJS.ProcessEnv} env
+ * @returns {Promise<{ code: number | string | null, signal: string | null, stdout: string, stderr: string, ms: number, args: string[] }>}
+ */
+function cli(args, env) {
+  const started = performance.now();
+  return new Promise((resolve) => {
+    const child = execFile(process.execPath, [BIN, ...args], { env, windowsHide: true }, (error, stdout, stderr) => {
+      const e = /** @type {(Error & { code?: number | string, signal?: string }) | null} */ (error);
+      resolve({ code: e ? (e.code ?? null) : 0, signal: e?.signal ?? child.signalCode ?? null,
+        stdout: String(stdout), stderr: String(stderr), ms: Math.round(performance.now() - started), args });
+    });
+    child.stdin?.end();
+  });
+}
+
+/** What a failing assertion on a CLI result says. @param {Awaited<ReturnType<typeof cli>>} r */
+const exitOf = (r) => `agora ${r.args.join(' ')}: exit ${r.code}, signal ${r.signal}, ${r.ms} ms\nstderr: ${r.stderr}\nstdout: ${r.stdout}`;
+
+/** A hang guard for a cell that runs the CLI, never a pass condition: the slowest child measured
+ * under the loaded suite took about 2 s, and a hung one would otherwise hold the run forever. */
+const CLI_CELL = { timeout: 120_000 };
+
 const mandate = { version: 1, id: 'campaign-c1', bearer: 'Bruno/uber-wizard', role: 'builder',
   units: [{ id: 'C1-BUILD', exhibit: 'backroom:1788832779.357259' }],
   issuedBy: 'Grace/orchestration', issuedAt: '2026-09-08T02:00:00.000Z' };
@@ -162,7 +191,7 @@ test('carry gate distinguishes delivered then forgotten from never acknowledged,
   assert.deepEqual(checkCarryBoundary(boundary, { ...actual, evidenceIssues: ['store absent'] }).issues.map(i => i.code), ['delivery-coverage-unknown']);
 });
 
-test('carry --check exits nonzero for a forgotten named obligation and zero only after its durable answer', async () => {
+test('carry --check exits nonzero for a forgotten named obligation and zero only after its durable answer', CLI_CELL, async () => {
   const t = await tmp();
   try {
     const { boundary, actual, event } = fixture();
@@ -180,20 +209,18 @@ test('carry --check exits nonzero for a forgotten named obligation and zero only
     await writeFile(config, JSON.stringify({ actor: { name: 'test', kind: 'agent' },
       rooms: { backroom: { transport: 'local', path: path.join(t.dir, 'room.jsonl') } } }));
     for (const e of actual.evidence.filter(e => e.kind !== 'answer')) await appendCarryEvent(sdir, e);
-    const run = promisify(execFile);
-    const bin = fileURLToPath(new URL('../bin/agora.mjs', import.meta.url));
     const env = { ...process.env, AGORA_STATE: t.dir, AGORA_CONFIG: config, AGORA_SESSION: 's1', AGORA_ACTOR: mandate.bearer };
-    const args = [bin, 'carry', 'backroom', '--check', '--boundary', boundaryFile, '--account', accountFile, '--json'];
-    let red;
-    try { await run(process.execPath, args, { env, timeout: 10000, windowsHide: true }); assert.fail('check accepted forgotten delivery'); }
-    catch (error) { red = /** @type {Error & {code:number,stdout:string}} */ (error); }
-    assert.equal(red.code, 1);
+    const args = ['carry', 'backroom', '--check', '--boundary', boundaryFile, '--account', accountFile, '--json'];
+    const red = await cli(args, env);
+    assert.equal(red.code, 1, exitOf(red));
     assert.deepEqual(JSON.parse(red.stdout).issues, [{ code: 'delivery-unanswered', item: 'd1' }]);
     await appendCarryEvent(sdir, event('reply1', 'answer', ['d1']));
-    const green = await run(process.execPath, args, { env, timeout: 10000, windowsHide: true });
+    const green = await cli(args, env);
+    assert.equal(green.code, 0, exitOf(green));
     assert.equal(JSON.parse(green.stdout).ok, true);
     // The ordinary report is still allowed to report an empty room and exit zero.
-    const report = await run(process.execPath, [bin, 'carry', 'backroom', '--json'], { env, timeout: 10000, windowsHide: true });
+    const report = await cli(['carry', 'backroom', '--json'], env);
+    assert.equal(report.code, 0, exitOf(report));
     assert.equal(JSON.parse(report.stdout).type, 'carry');
   } finally { await t.cleanup(); }
 });
@@ -246,7 +273,7 @@ test('real addressed watch delivery is prepared before the callback and acknowle
 
 for (const phase of ['prepare', 'prepare-later', 'accept', 'cursor', 'clear', 'clean',
   'registration-missing', 'registration-malformed', 'registration-shape', 'registration-changed', 'registration-unreadable']) for (const coalesceSeconds of [0, 1])
-test(`capture ${phase} failure preserves delivery and fresh-process coverage, coalesce ${coalesceSeconds}`, async () => {
+test(`capture ${phase} failure preserves delivery and fresh-process coverage, coalesce ${coalesceSeconds}`, CLI_CELL, async () => {
   const t = await tmp();
   try {
     const { boundary, actual } = fixture();
@@ -309,14 +336,10 @@ test(`capture ${phase} failure preserves delivery and fresh-process coverage, co
     const config = path.join(t.dir, 'agora.json');
     await writeFile(config, JSON.stringify({ actor: { name: 'test', kind: 'agent' }, rooms: {
       backroom: { transport: 'local', path: path.join(t.dir, 'room.jsonl') } } }));
-    const bin = fileURLToPath(new URL('../bin/agora.mjs', import.meta.url));
     const env = { ...process.env, AGORA_STATE: t.dir, AGORA_CONFIG: config, AGORA_SESSION: 's1' };
-    let stdout, code = 0;
-    try { ({ stdout } = await promisify(execFile)(process.execPath, [bin, 'carry', 'backroom', '--check', '--boundary', boundaryFile,
-      '--account', accountFile, '--json'], { env, timeout: 10000, windowsHide: true })); }
-    catch (error) { ({ stdout, code } = /** @type {Error & {stdout:string,code:number}} */ (error)); }
-    const result = JSON.parse(stdout);
-    assert.equal(code, phase === 'clean' || phase === 'clear' ? 0 : 1);
+    const r = await cli(['carry', 'backroom', '--check', '--boundary', boundaryFile, '--account', accountFile, '--json'], env);
+    assert.equal(r.code, phase === 'clean' || phase === 'clear' ? 0 : 1, exitOf(r));
+    const result = JSON.parse(r.stdout);
     assert.equal(result.issues.some((/** @type {{code:string}} */ i) => i.code === 'delivery-coverage-unknown'),
       phase.startsWith('prepare') || phase.startsWith('registration-') || phase === 'accept' || phase === 'cursor');
   } finally { await t.cleanup(); }
@@ -491,21 +514,15 @@ test('session inheritance copies durable evidence, not registration, and dry-run
   } finally { await t.cleanup(); }
 });
 
-test('carry CLI enforces registered successor arrival before predecessor handoff', async () => {
+test('carry CLI enforces registered successor arrival before predecessor handoff', CLI_CELL, async () => {
   const t = await tmp();
   try {
     const config = path.join(t.dir, 'agora.json'), source = path.join(t.dir, 'mandate.json'), boundaryFile = path.join(t.dir, 'boundary.json');
     await writeFile(config, JSON.stringify({ actor: { name: 'test', kind: 'agent' },
       rooms: { backroom: { transport: 'local', path: path.join(t.dir, 'room.jsonl') } } }));
     await writeFile(source, JSON.stringify(mandate));
-    const exec = promisify(execFile), bin = fileURLToPath(new URL('../bin/agora.mjs', import.meta.url));
-    const call = async (/** @type {string} */ session, /** @type {string[]} */ args) => {
-      try {
-        const r = await exec(process.execPath, [bin, ...args], { windowsHide: true, timeout: 10000,
-          env: { ...process.env, AGORA_STATE: t.dir, AGORA_CONFIG: config, AGORA_SESSION: session, AGORA_ACTOR: mandate.bearer } });
-        return { code: 0, ...r };
-      } catch (err) { const e = /** @type {{code:number,stdout:string,stderr:string}} */ (err); return e; }
-    };
+    const call = (/** @type {string} */ session, /** @type {string[]} */ args) =>
+      cli(args, { ...process.env, AGORA_STATE: t.dir, AGORA_CONFIG: config, AGORA_SESSION: session, AGORA_ACTOR: mandate.bearer });
     assert.equal((await call('s1', ['session', '--as', mandate.bearer])).code, 0);
     assert.equal((await call('s1', ['post', 'backroom', 'Starting', '--claim', 'C1-BUILD'])).code, 0);
     const posted = await readCarryEvidence(path.join(t.dir, 'sessions', 's1'));
@@ -578,7 +595,7 @@ test('a post crash between send and capture cannot erase its commitment behind a
   } finally { await t.cleanup(); }
 });
 
-test('native claim has durable unknown outcome before the board commits, cleared only after post capture', async () => {
+test('native claim has durable unknown outcome before the board commits, cleared only after post capture', CLI_CELL, async () => {
   const t = await tmp();
   const service = new NativeRoomService({ root: t.dir, accountId: 'seat_account_0003', seatLabel: 'test' });
   try {
@@ -597,10 +614,9 @@ test('native claim has durable unknown outcome before the board commits, cleared
     };
     const config = path.join(t.dir, 'agora.json');
     await writeFile(config, JSON.stringify({ actor: { name: 'test', kind: 'agent' }, rooms: { nat: { transport: 'native', roomId } } }));
-    const bin = fileURLToPath(new URL('../bin/agora.mjs', import.meta.url));
-    await promisify(execFile)(process.execPath, [bin, 'post', 'nat', 'Taking', '--claim', 'C1'], {
-      timeout: 10000, windowsHide: true,
-      env: { ...process.env, AGORA_STATE: t.dir, AGORA_CONFIG: config, AGORA_SESSION: 's1', AGORA_ACTOR: mandate.bearer } });
+    const env = { ...process.env, AGORA_STATE: t.dir, AGORA_CONFIG: config, AGORA_SESSION: 's1', AGORA_ACTOR: mandate.bearer };
+    const first = await cli(['post', 'nat', 'Taking', '--claim', 'C1'], env);
+    assert.equal(first.code, 0, exitOf(first));
     assert.deepEqual(pendingAtEffect, [1, 2], 'board and message effects both enter inside durable unknown-outcome windows');
     const evidence = (await readCarryEvidence(dir)).events;
     assert.equal(evidence.filter(e => e.kind === 'claim').length, 1);
@@ -612,10 +628,9 @@ test('native claim has durable unknown outcome before the board commits, cleared
       if (++calls === 2) throw new Error('test refuses message after board commit');
       return append(...args);
     };
-    await assert.rejects(() => promisify(execFile)(process.execPath, [bin, 'post', 'nat', 'Taking another', '--claim', 'C2'], {
-      timeout: 10000, windowsHide: true,
-      env: { ...process.env, AGORA_STATE: t.dir, AGORA_CONFIG: config, AGORA_SESSION: 's1', AGORA_ACTOR: mandate.bearer } }),
-      (/** @type {any} */ err) => err.code === 1 && err.stderr.includes('test refuses message after board commit'));
+    const refused = await cli(['post', 'nat', 'Taking another', '--claim', 'C2'], env);
+    assert.equal(refused.code, 1, exitOf(refused));
+    assert.ok(refused.stderr.includes('test refuses message after board commit'), exitOf(refused));
     const failed = (await readCarryEvidence(dir)).events;
     assert.equal(failed.filter(e => e.kind === 'gap' && !failed.some(c => c.kind === 'coverage' && c.targets.includes(e.id))).length, 2,
       'committed board with failed message retains whole-operation and per-send uncertainty');

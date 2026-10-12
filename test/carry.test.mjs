@@ -565,7 +565,7 @@ test("cli: carry survives a rate-limited thread read, names it, and still emits 
     for (const id of slack.ids) await appendPosted(sdir, id);
 
     const r = await agora(["carry", "busy", "--json"], env);
-    assert.equal(r.code, 0, "one unreadable thread is not a failed handover");
+    assert.equal(r.code, 0, `one unreadable thread is not a failed handover\nstderr: ${r.stderr}`);
     const c = JSON.parse(r.stdout.trim());
     assert.equal(c.type, "carry");
     assert.deepEqual(c.threadsUnread, [{ id: "1788459640.000200", reason: "slack conversations.replies: rate limited" }]);
@@ -576,9 +576,9 @@ test("cli: carry survives a rate-limited thread read, names it, and still emits 
     assert.deepEqual(c.releases.map((/** @type {any} */ x) => x.subject), ["a", "c"]);
     assert.equal(c.horizon.messages, 5);
 
-    const human = await agora(["carry", "busy"], env);
-    assert.equal(human.code, 0);
-    assert.match(human.stdout, /unread {6}1788459640\.000200: slack conversations\.replies: rate limited/);
+    // the human form is `renderCarry` over this same envelope (bin/agora.mjs prints one or the other);
+    // rendering it here asserts the line without a second child paying the backoff ladder again
+    assert.match(renderCarry(c), /unread {6}1788459640\.000200: slack conversations\.replies: rate limited/);
   } finally {
     await slack.close();
     await cleanup();
