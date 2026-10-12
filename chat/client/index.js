@@ -17,8 +17,8 @@
  */
 
 import { h } from "./markdown.js";
-import { renderThreadList, rootId, titleText } from "./list.js";
-import { renderThread, bodyOf, contextOf, clock, dayLabel } from "./thread.js";
+import { PURGED_THREAD_TITLE, renderThreadList, rootId, threadTitle } from "./list.js";
+import { renderThread, contextOf, clock, dayLabel } from "./thread.js";
 import { mountComposer, composerIn } from "./composer.js";
 
 export { registerCard } from "./cards.js";
@@ -299,8 +299,7 @@ export function mountChat(el, options) {
     const summary = threads.find((t) => rootId(t) === root);
     const fromList = summary && typeof summary.root !== "string" ? summary.root : undefined;
     const r = rootMsg ?? fromList;
-    const line = r ? titleText(bodyOf(r).split("\n").find((l) => l.trim()) ?? "") : "";
-    title.textContent = line || root;
+    title.textContent = threadTitle(r) || root;
     cap.textContent = r ? `thread · opened ${dayLabel(r.ts, now())} ${clock(r.ts)} by ${r.author?.name ?? ""}` : "thread";
     const people = [...new Set(messages.filter((m) => m.author?.kind === "human").map((m) => m.author.name))];
     const ctxValues = r ? contextOf(r).map(([, v]) => v) : [];
@@ -365,7 +364,12 @@ export function mountChat(el, options) {
       // someone reacted: the composer draws the reactions line under each row
       reaction: (r) => { if (active === root && r && typeof r === "object") composerIn(composer)?.reaction(r); },
       // a purge, whoever made it: the composer strikes the rows it took, which it draws on
-      purge: (p) => { if (active === root && p && typeof p === "object") composerIn(composer)?.purge(p); },
+      purge: (p) => {
+        if (active !== root || !p || typeof p !== "object") return;
+        composerIn(composer)?.purge(p);
+        // the root's words are gone: the heading says so rather than falling back to the root's id
+        if (Array.isArray(p.purged) && p.purged.includes(root)) title.textContent = PURGED_THREAD_TITLE;
+      },
       state: onState,
       presence: (p) => { presence = p; drawPresence(); },
     }, (s) => { if (s === "reconnecting") { roomState = "reconnecting"; drawState(); } });

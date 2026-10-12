@@ -92,7 +92,7 @@ const { parseMarkdown, parseInline, plainInline, renderMarkdown, safeHref } = aw
 const { registerBlock } = await import("../client/blocks.js");
 const { registerCard } = await import("../client/cards.js");
 const { renderThread, splitMessage, COLLAPSE_AT, dayLabel } = await import("../client/thread.js");
-const { renderThreadList, firstLine, titleText } = await import("../client/list.js");
+const { renderThreadList, firstLine, titleText, threadTitle } = await import("../client/list.js");
 
 const NOW = new Date(2026, 9, 9, 14, 16);
 /** @type {any} */
@@ -287,6 +287,19 @@ test("the list: activity order, unread dot, waiting marker, card chips, context 
   assert.match(items[1].textContent, /bare-id/);
   items[2].click();
   assert.deepEqual(opened, ["old"]);
+});
+
+test("a thread whose root a purge took is titled \"purged thread\", never by its hex id or a reply's words", () => {
+  const el = doc.createElement("nav");
+  const id = "a".repeat(64);
+  const purgedRoot = msg({ id, text: "", purged: { at: new Date(2026, 9, 9, 9, 0).toISOString(), purge: "p".repeat(64) }, author: { name: "pat", kind: "human" } });
+  renderThreadList(el, [{ root: purgedRoot, last: msg({ id: "r1", text: "a surviving reply", thread: id }), lastAt: new Date(2026, 9, 9, 10, 0).toISOString() }], ctx, {});
+  const [item] = all(el, ".chat-ti");
+  assert.equal(all(item, ".chat-ti-title")[0].textContent, "purged thread");
+  assert.doesNotMatch(item.textContent, new RegExp(id));
+  assert.equal(threadTitle(purgedRoot), "purged thread");
+  assert.equal(firstLine(purgedRoot), "purged", "a purged message as a thread's last line");
+  assert.equal(threadTitle(msg({ id: "x", text: "Still here\nmore" })), "Still here");
 });
 
 test("a title keeps a literal underscore; emphasis keeps its words and drops its marks", () => {

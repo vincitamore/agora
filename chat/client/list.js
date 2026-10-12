@@ -38,12 +38,26 @@ export function rootId(t) {
   return typeof t.root === "string" ? t.root : t.root?.id ?? "";
 }
 
+/** What a thread whose root a purge took is called: its words are gone, and its id is not a title. */
+export const PURGED_THREAD_TITLE = "purged thread";
+
 /** The first line of a message's body, plain. @param {import("./thread.js").ChatMessage | undefined} m */
 export function firstLine(m) {
   if (!m) return "";
+  if (/** @type {any} */ (m).purged) return "purged";
   if (m.withdrawn) return "withdrawn";
   const line = bodyOf(m).split("\n").find((l) => l.trim()) ?? "";
   return titleText(line);
+}
+
+/**
+ * A thread's title: its root's first line, or "purged thread" when a purge took the root's text.
+ * The kit never titles a thread with a reply's words: the root is what the thread was opened about.
+ * @param {import("./thread.js").ChatMessage | undefined} root
+ */
+export function threadTitle(root) {
+  if (root && /** @type {any} */ (root).purged) return PURGED_THREAD_TITLE;
+  return firstLine(root);
 }
 
 /**
@@ -74,7 +88,7 @@ export function renderThreadList(el, threads, ctx, opts = {}) {
   for (const t of sorted) {
     const root = rootId(t);
     const rootMsg = typeof t.root === "string" ? undefined : t.root;
-    const title = firstLine(rootMsg) || root;
+    const title = threadTitle(rootMsg) || root;
     const waiting = t.waiting ?? [];
     const forMe = meId !== null && waiting.includes(meId);
     const others = waiting.filter((id) => id !== meId);

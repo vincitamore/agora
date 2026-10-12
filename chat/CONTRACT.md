@@ -296,7 +296,10 @@ Subscription endpoints are limited to the browsers' push services.
   `https:` and the same origin. Never an image from text, never raw HTML, never a `javascript:`
   link. `_` and `__` open and close emphasis only at a word boundary, so `snake_case`, `A__B` and
   `SITE_CT_PHONE610` stay as written. A thread's title is its root's first line through the same
-  subset, as plain text: emphasis keeps its words and drops its marks, a literal `_` stays.
+  subset, as plain text: emphasis keeps its words and drops its marks, a literal `_` stays. A
+  thread whose root a purge took is titled "purged thread" (in the list and the heading, at its
+  read and when a live `purge` event takes the root), never its root's id and never a reply's
+  words, which are not what the thread was opened about.
 - **Text from outside is inert**: escaped, never interpreted.
 - Posts past 600 characters are collapsed behind "show all".
 - **A card is a reference, never a payload.** A message carries a card as a trailer

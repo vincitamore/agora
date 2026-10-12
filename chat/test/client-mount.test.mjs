@@ -190,3 +190,27 @@ test("a thread the person opens before the link resolves is not taken back by th
   await tick();
   assert.deepEqual(rows(el), ["the other one"]);
 });
+
+test("a thread whose root was purged is headed \"purged thread\", at its read and when a live purge takes the root", async (t) => {
+  network(t);
+  const el = doc.createElement("div");
+  const chat = mountChat(el, { base: "/chat", thread: ROOT });
+  t.after(() => chat.unmount());
+  await tick();
+  request("/chat/state")?.answer(STATE);
+  request(`/chat/thread/${ROOT}`)?.answer({ messages: [{ ...msg(ROOT, "", "e:1"), purged: { at: new Date(2026, 9, 9, 12, 0).toISOString(), purge: "p".repeat(64) } }, msg("m2", "a reply that stayed", "e:2")], annotations: [], through: "e:2" });
+  await tick();
+  assert.equal(el.querySelector(".chat-thread-title").textContent, "purged thread");
+
+  const other = "o".repeat(64);
+  void chat.open(other);
+  await tick();
+  request(`/chat/thread/${other}`)?.answer({ messages: [{ ...msg(other, "The pump schedule", "e:5"), thread: undefined }], annotations: [], through: "e:5" });
+  await tick();
+  assert.equal(el.querySelector(".chat-thread-title").textContent, "The pump schedule");
+  const stream = streams.find((s) => s.url === `/chat/stream?thread=${other}`);
+  assert.ok(stream, "the thread stream never opened");
+  stream.emit("purge", { id: "q".repeat(64), cursor: "e:6", ts: new Date().toISOString(), purged: [other], reason: "asked", by: { name: "pat" } });
+  await tick();
+  assert.equal(el.querySelector(".chat-thread-title").textContent, "purged thread");
+});
