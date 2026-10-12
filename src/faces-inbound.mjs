@@ -455,3 +455,52 @@ export class FaceInbound {
     return { refs, files, lines };
   }
 }
+
+/**
+ * The seat service's inbound tick: the `onTick` the daemon hands `NativeFaceWiring`, which runs it
+ * per faced room after that room's sweep with the room's own `FaceRunner`. For each enabled Slack
+ * face it runs `FaceInbound.poll` through that runner (never a second runner per room, which would
+ * get around the one-sweep-at-a-time rule) and one `agora/client` connected to this seat's service
+ * as `slack-face`, so the service stamps `via` on every crossing and the outbound side never faces
+ * a crossing back out. The client is connected on the first tick that needs it, kept across ticks,
+ * and dropped after a failed poll so the next tick connects afresh; `close` releases it.
+ * @param {{ connect: (options: { state: string, clientName: string }) => Promise<any>, warn?: (line: string) => void, now?: () => Date }} deps
+ */
+export function slackInboundTick({ connect, warn = (line) => { process.stderr.write(`${redact(line)}\n`); }, now }) {
+  /** @type {Promise<any> | undefined} */
+  let connecting;
+  /** @type {string | undefined} */
+  let connectedRoot;
+  const drop = async () => {
+    const c = connecting;
+    connecting = undefined;
+    connectedRoot = undefined;
+    if (c) { try { (await c).close(); } catch { /* a client that never connected has nothing to close */ } }
+  };
+  /** @param {string} root */
+  const client = (root) => {
+    if (!connecting || connectedRoot !== root) {
+      connectedRoot = root;
+      connecting = connect({ state: root, clientName: inboundVia("slack") });
+      connecting.catch(() => { connecting = undefined; connectedRoot = undefined; });
+    }
+    return connecting;
+  };
+  /** @param {{ root: string, roomId: string, runner: import('./faces.mjs').FaceRunner, faces: import('./faces.mjs').Face[] }} tick */
+  const onTick = async ({ root, roomId, runner, faces }) => {
+    /** @type {any[]} */
+    const results = [];
+    for (const face of faces) {
+      if (face.transport !== "slack" || !face.enabled) continue;
+      try {
+        const c = await client(root);
+        results.push(await new FaceInbound({ stateRoot: root, roomId, runner, client: c, warn, ...(now ? { now } : {}) }).poll(face));
+      } catch (e) {
+        warn(`agora: inbound slack face of ${roomId} not polled: ${e instanceof Error ? e.message : String(e)}`);
+        await drop();
+      }
+    }
+    return results;
+  };
+  return { onTick, close: drop };
+}

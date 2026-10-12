@@ -655,7 +655,12 @@ config room the face names, read and never written. An `edit` reaches a publishe
 slack-face`) is never faced back to it. At start, and on a slow tick, the service sweeps: a
 `pending` face whose writer died becomes `unknown` and is reconciled against the channel before any
 repost, a message withdrawn or purged meanwhile is never reposted, and a stale mirror is carried
-again. A GitHub face edits and deletes nothing: its mirror rows are `refused` by `capability`.
+again. A GitHub copy follows too: an edit replaces the comment's body, a withdraw or purge deletes it,
+and one already deleted counts as deleted. The same tick runs the Slack face's inbound half for each
+faced room through that room's own runner and one client the service connects to itself as
+`slack-face`. A rotated token needs no restart: a call refused for its token (Slack `invalid_auth`,
+`token_revoked`, GitHub 401) re-reads the room's `tokenFile`/`tokenEnv` once and retries; refused
+again, the row is `refused` `token-refused`.
 
 **A native room keeps files, edits and removals as records.** `post <room> --attach <path>`
 (repeatable) uploads each file into the room's custody and posts carrying it; the kind is what the
@@ -671,7 +676,8 @@ keeps its place and cursor, so a purged message reads back with an empty text. O
 connections purge (`purge-refused-remote`); a room made before log version 2 refuses
 (`purge-unsupported-log-version`). The purge deletes the copies its faces published within a few
 seconds and its receipt lists, as `facesOutOfReach`, each copy it could not delete (a face that cannot
-delete, a refused delete, or one not confirmed in time, whose deletion goes on). Only a message
+delete, a refused delete, or one not confirmed in time, whose deletion goes on), each
+`{ transport, channel, ts?, file?, message, reason }`. Only a message
 carries attachments (`attachment-invalid` otherwise). `post --attach` sends an image's width and
 height from its header. A purge never collects bytes an upload or an append is about to reference.
 An app that shows messages subscribes with a `purge` handler (`purge-v1`) and strikes them with
@@ -683,7 +689,7 @@ An app that shows messages subscribes with a `purge` handler (`purge-v1`) and st
 | transport | room is | threads | cursor | identity |
 |---|---|---|---|---|
 | `slack` | one channel, by **id** (`C…`), not name; `&`, `<`, `>` decode on read and encode on post, while real mention/channel/URL tokens pass through; attachment metadata always arrives and `--files` or room `files: true` materializes images below the session's `media/` directory | yes; `--thread <parent ts>` | message `ts`; reads after a cursor are exclusive | the bot user; a bot token `xoxb-…` with `channels:history`, `channels:read`, `chat:write`, `files:read`, `files:write`, `groups:history`, `groups:read`, `users:read`, invited to the channel (the manifest carries all seven; `files:write` is what the pictures-face upload ladder needs, and an app created before it was added must be reinstalled). `post --file` remains text |
-| `github` | one issue, `owner/name#N`; as a face of a native room (`room faces --add github --via <room>`) it takes one comment per faced post, the body verbatim, no rider, no upload | no | `created_at\|id`; an edited old comment is not re-delivered; reads are conditional and a watch defaults to five minutes | the token's user; falls back to `gh auth token` |
+| `github` | one issue, `owner/name#N`; as a face of a native room (`room faces --add github --via <room>`) it takes one comment per faced post, the body verbatim, no rider, no upload; a native edit or withdraw edits or deletes that comment | no | `created_at\|id`; an edited old comment is not re-delivered; reads are conditional and a watch defaults to five minutes | the token's user; falls back to `gh auth token` |
 | `github-events` | a read-only feed: one repo (`repo`), an org (`org`), or a user (`user`); narrowed by `events` (types) and `refs` (branches or tags) in the room's config | no | the event id; reads are conditional; a watch defaults to one minute | the token's user; `post` is a usage error, the issue or the pull request is the room for that |
 | `local` | one NDJSON file | yes; the room read carries every reply with `thread` set, so `--threads`, `carry` and `--follow` read nothing more | lines consumed | the configured actor |
 | `native-remote` | another seat's native room, reached over a Tailcat member channel named by a route descriptor (`agora enroll <authenticated-room> --json` publishes this seat's public node key; the host opens the route for that key; `agora room add-remote` verifies the carried descriptor plus its `proofRef` secret and prints the row; the room id comes from the descriptor's binding, never a config key); read, post, join, cursors and a pushed `watch` behave as on a local native room; one-shot operations close the channel after their result is printed; a drop is reported and the next verb re-dials; `post --face` is refused, the face being the host's policy. Busy previews and ordinary reads retry once at the host's fitting frame limit for their own requested rows, report the shrink or omitted rows, and advance only through what they displayed | yes, as on `native`, sent only to a host whose member welcome offers `threads-v1` | `<epoch>:<sequence>`, the host's | the minted member principal `m-<32hex>` bound to this seat's enrolled node key; the bearer is the signature |

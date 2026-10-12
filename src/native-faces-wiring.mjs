@@ -83,12 +83,14 @@ export class NativeFaceWiring {
    * @param {{ root: string, attestor: { serviceId: string, serviceBootId: string },
    *   transportFor: (face: Face) => Promise<any>, now?: () => Date, warn?: (line: string) => void,
    *   settleMs?: number, tickMs?: number, purgeDeadlineMs?: number, drainMs?: number,
-   *   onTick?: (tick: { root: string, roomId: string, store: NativeRoomStore, runner: FaceRunner, faces: Face[] }) => Promise<unknown> }} options
+   *   onTick?: (tick: { root: string, roomId: string, store: NativeRoomStore, runner: FaceRunner, faces: Face[] }) => Promise<unknown>,
+   *   onStop?: () => Promise<unknown> | unknown }} options
    * `transportFor` builds the face's transport from the shared config room the face borrows a token
    * from (see `configFaceTransports`); a test hands one built on an injected fetch. `onTick` is the
    * inbound side's seam: run once per faced room on each tick, after that room's sweep, with the
    * room's own runner (so the inbound poll and the sweep share one runner and never reconcile one
-   * face twice) and its enabled faces. A failure in it is a warning.
+   * face twice) and its enabled faces. A failure in it is a warning. `onStop` releases what the
+   * tick holds (the inbound side's client), after the drain.
    */
   constructor(options) {
     this.root = options.root;
@@ -101,6 +103,7 @@ export class NativeFaceWiring {
     this.purgeDeadlineMs = options.purgeDeadlineMs ?? PURGE_FACE_DEADLINE_MS;
     this.drainMs = options.drainMs ?? FACE_DRAIN_MS;
     this.onTick = options.onTick;
+    this.onStop = options.onStop;
     /** @type {Map<string, FaceRunner>} */
     this.runners = new Map();
     /** The store each runner reads through; replaced when the service reopens a room. @type {Map<string, NativeRoomStore>} */
@@ -239,11 +242,14 @@ export class NativeFaceWiring {
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
-    if (!this.work.size) return;
-    /** @type {NodeJS.Timeout | undefined} */
-    let timer;
-    await Promise.race([Promise.allSettled([...this.work]), new Promise((resolve) => { timer = setTimeout(resolve, this.drainMs); })]);
-    clearTimeout(timer);
+    if (this.work.size) {
+      /** @type {NodeJS.Timeout | undefined} */
+      let timer;
+      await Promise.race([Promise.allSettled([...this.work]), new Promise((resolve) => { timer = setTimeout(resolve, this.drainMs); })]);
+      clearTimeout(timer);
+    }
+    try { await this.onStop?.(); }
+    catch (e) { this.warn(`agora: face tick release failed: ${e instanceof Error ? e.message : String(e)}`); }
   }
 }
 
@@ -263,15 +269,34 @@ export async function facedRooms(root) {
   return out.sort();
 }
 
+/** What a transport answers when the token it holds is no longer good: the call was refused, never performed. */
+export const TOKEN_REFUSED = Object.freeze(new Set(["invalid_auth", "token_revoked"]));
+
+/** Was this call refused for the token it carried? A Slack answer names it; GitHub answers 401. @param {unknown} e */
+function tokenRefused(e) {
+  const x = /** @type {any} */ (e);
+  if (!x || typeof x !== "object" || !x.answered) return false;
+  return (typeof x.error === "string" && TOKEN_REFUSED.has(x.error)) || x.status === 401;
+}
+
 /**
  * The production `transportFor`: the face borrows the token of the shared config room it names
- * (`face.alias`), read fresh per transport the runner builds, and aims it at the face's own
- * target. The config is read, never written.
+ * (`face.alias`), read from the config the service reads, and aims it at the face's own target.
+ * The config is read, never written.
+ *
+ * A rotated token needs no service restart. The transport handed back holds the token it was built
+ * with; when a call is refused for that token (Slack `invalid_auth` or `token_revoked`, GitHub
+ * 401), the config row is read again, the token re-resolved from its `tokenFile` or `tokenEnv`, the
+ * transport rebuilt, and the call made once more. A token refusal means the call was not performed,
+ * so the second attempt cannot double a post. Refused again, the call fails by name
+ * (`token-refused`), and the next call re-reads once more: a fixed token file is picked up without
+ * a restart, a still-bad one costs one extra refused call each time.
  * @param {{ loadConfig: () => Promise<any>, createTransport: (alias: string, room: any, cfg: any, deps?: any) => Promise<any>, fetch?: typeof fetch }} deps
  * @returns {(face: Face) => Promise<any>}
  */
 export function configFaceTransports({ loadConfig, createTransport, fetch: f }) {
-  return async (face) => {
+  /** @param {Face} face */
+  const build = async (face) => {
     const cfg = await loadConfig();
     const room = cfg?.rooms?.[face.alias];
     if (!room || room.transport !== face.transport)
@@ -279,4 +304,41 @@ export function configFaceTransports({ loadConfig, createTransport, fetch: f }) 
     const aimed = face.transport === "slack" && face.target.channel ? { ...room, channel: face.target.channel } : room;
     return createTransport(face.alias, aimed, cfg, f ? { fetch: f } : {});
   };
+  return async (face) => refreshingTransport(await build(face), () => build(face), face);
+}
+
+/**
+ * A transport whose methods re-resolve the token once on a token refusal (see
+ * `configFaceTransports`). Properties pass through to the current transport; methods are called on
+ * it, so a rebuilt transport takes over for every later call.
+ * @param {any} first @param {() => Promise<any>} rebuild @param {Face} face
+ */
+export function refreshingTransport(first, rebuild, face) {
+  let current = first;
+  return new Proxy(/** @type {any} */ ({}), {
+    has: (_t, key) => key in current,
+    ownKeys: () => Reflect.ownKeys(current),
+    getOwnPropertyDescriptor: (_t, key) => {
+      const d = Reflect.getOwnPropertyDescriptor(current, key);
+      return d ? { ...d, configurable: true } : undefined;
+    },
+    get(_t, key) {
+      const value = current[key];
+      if (typeof value !== "function") return value;
+      return async (/** @type {unknown[]} */ ...args) => {
+        try { return await current[key](...args); }
+        catch (e) {
+          if (!tokenRefused(e)) throw e;
+          const why = /** @type {any} */ (e).error ?? `http-${/** @type {any} */ (e).status}`;
+          current = await rebuild();
+          try { return await current[key](...args); }
+          catch (again) {
+            if (!tokenRefused(again)) throw again;
+            throw Object.assign(new AgoraError(`token-refused: the ${face.transport} token of room "${face.alias}" was refused (${why}), and again after re-reading its tokenFile or tokenEnv; replace the token and the next call picks it up`),
+              { code: "token-refused", answered: true, sent: true, error: "token-refused" });
+          }
+        }
+      };
+    },
+  });
 }

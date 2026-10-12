@@ -32,6 +32,8 @@ import {
 } from "../src/core.mjs";
 import { TRANSPORTS, createTransport, tokenSource } from "../src/transports/index.mjs";
 import { configFaceTransports } from "../src/native-faces-wiring.mjs";
+import { slackInboundTick } from "../src/faces-inbound.mjs";
+import { connect as connectClient } from "../src/client.mjs";
 import { asBoardSubject } from "../src/board-subject.mjs";
 import { watch } from "../src/watch.mjs";
 
@@ -1324,11 +1326,13 @@ async function main(argv) {
     if (action === "daemon") {
       const accountId = process.env.AGORA_SERVICE_ACCOUNT || await seatAccountId(stateRoot);
       const label = process.env.AGORA_SERVICE_LABEL || seatLabel();
-      // the faces borrow tokens from the shared config the starter read, re-read per face transport
-      // and never written (src/native-faces-wiring.mjs)
+      // the faces borrow tokens from the shared config the starter read, re-read when a token is
+      // refused and never written (src/native-faces-wiring.mjs); the inbound half runs on the faces'
+      // tick with each room's own runner and one client connected to this service as slack-face
       const configFile = configPath(values.config);
+      const inbound = slackInboundTick({ connect: (o) => connectClient(o) });
       await runService({ root: stateRoot, accountId, seatLabel: label, build, authorityId: process.env.AGORA_SERVICE_AUTHORITY || undefined,
-        faces: { transportFor: configFaceTransports({ loadConfig: () => loadConfig(configFile), createTransport }) } });
+        faces: { transportFor: configFaceTransports({ loadConfig: () => loadConfig(configFile), createTransport }), onTick: inbound.onTick, onStop: inbound.close } });
       await new Promise(() => {});
       return EXIT.ok;
     }

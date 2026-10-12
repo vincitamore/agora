@@ -805,6 +805,19 @@ to a message they cannot see, and flattening it to top level loses the thread. R
 when a person on a Slack face asks for top-level messages to reach the room, or for native replies
 whose root they never saw.
 
+### Face contracts (ruled)
+
+Two shapes changed between the face plan and the build, and both stand as built. A purge receipt's
+`facesOutOfReach` entry is `{ transport, channel, ts?, file?, message, reason }`: `ts` is optional
+because a picture copy has a file id and no ts, and `message` and `reason` say which purged message
+the copy carries and why it was not deleted (`docs/PURGE.md`). The admin verb is `agora room faces
+<room> --add slack --channel <id>` (with `--via`, `--human`, `--agent`, `--system`, `--pictures`),
+the shipped spelling, not a separate `room face` verb. GitHub copies follow edits and withdraws too
+(`PATCH` and `DELETE` of the issue comment). A face's token is re-resolved from its config room's
+`tokenFile` or `tokenEnv` when a call is refused for it, once per call, so a rotated token needs no
+service restart; a fixed per-tick re-read was the alternative, and lost because it reads the token
+file sixty times an hour to catch an event that happens a few times a year.
+
 ## Standing prohibitions
 
 Constraints on future contributions, not descriptions of the present. Each is the kind of

@@ -17,6 +17,9 @@ import { readServiceDescriptor } from "../src/wake/subscriber.mjs";
 import { FaceRunner, appendFaceRecord, readFaceRecords, selectFaces, writeFacePolicy } from "../src/faces.mjs";
 import { configFaceTransports, facedRooms, faceChoiceOf } from "../src/native-faces-wiring.mjs";
 import { slackTransport } from "../src/transports/slack.mjs";
+import { githubTransport } from "../src/transports/github.mjs";
+import { createTransport } from "../src/transports/index.mjs";
+import { slackInboundTick } from "../src/faces-inbound.mjs";
 import { fakeFetch } from "./helpers.mjs";
 
 const ROOM = "5".repeat(32);
@@ -53,7 +56,7 @@ function fakeSlack(over = {}) {
  * A seat whose service runs the faces on an injected fetch, with one native room faced to one
  * Slack channel. Stopped, then removed, in one hook.
  * @param {import('node:test').TestContext} t
- * @param {{ face?: Record<string, unknown>, slack?: ReturnType<typeof fakeSlack>, dark?: boolean, purgeDeadlineMs?: number, tickMs?: number, onTick?: (tick: any) => Promise<unknown> }} [o]
+ * @param {{ face?: Record<string, unknown>, slack?: ReturnType<typeof fakeSlack>, dark?: boolean, purgeDeadlineMs?: number, tickMs?: number, onTick?: (tick: any) => Promise<unknown>, onStop?: () => unknown }} [o]
  */
 async function seat(t, o = {}) {
   const root = await mkdtemp(path.join(tmpdir(), "agora-faces-wired-"));
@@ -66,7 +69,7 @@ async function seat(t, o = {}) {
   };
   const options = { root, accountId: ACCOUNT, seatLabel: "seat-f",
     faces: { transportFor, warn: (/** @type {string} */ l) => warned.push(l), ...(o.purgeDeadlineMs ? { purgeDeadlineMs: o.purgeDeadlineMs } : {}),
-    ...(o.tickMs ? { tickMs: o.tickMs } : {}), ...(o.onTick ? { onTick: o.onTick } : {}) } };
+    ...(o.tickMs ? { tickMs: o.tickMs } : {}), ...(o.onTick ? { onTick: o.onTick } : {}), ...(o.onStop ? { onStop: o.onStop } : {}) } };
   let service = new NativeRoomService(options);
   /** @type {Array<{ close(): void }>} */
   const clients = [];
@@ -304,23 +307,61 @@ test("facedRooms lists the rooms with a face policy, and configFaceTransports bo
   await assert.rejects(transportFor(/** @type {any} */ ({ transport: "slack", alias: "house", target: {} })), /does not name as a slack room/);
 });
 
-test("a face that cannot edit or delete (github) records its mirror refused by capability, and a purge lists its copy out of reach with no call", async (t) => {
+test("a github face carries an edit by PATCH and a withdraw or purge by DELETE of the issue comment; a comment already deleted counts as deleted", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "agora-faces-wired-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const origin = "ab".repeat(32);
   await writeFacePolicy(root, ROOM, { faces: [{ transport: "github", alias: "issue", target: { repo: "owner/name", issue: "7" } }] });
   await appendFaceRecord(root, ROOM, { originId: origin, cursor: `${EPOCH}:1`, transport: "github", status: "published", id: "1234567", attempt: 1, at: new Date().toISOString() });
-  let built = 0;
+  let deleted = false;
+  const gh = fakeFetch([
+    ["/issues/comments/1234567", (_u, init) => {
+      if (init?.method === "PATCH") return { body: { id: 1234567, body: JSON.parse(String(init.body)).body } };
+      if (init?.method === "DELETE") {
+        if (deleted) return { status: 404, body: { message: "Not Found" } };
+        deleted = true;
+        return { status: 204 };
+      }
+      return { status: 405, body: { message: "method" } };
+    }],
+  ]);
   const runner = new FaceRunner({ stateRoot: root, roomId: ROOM, attestor: { serviceId: ACCOUNT, serviceBootId: EPOCH }, warn: () => {},
-    transportFor: async () => { built++; throw new Error("no transport is built for a face that cannot mirror"); } });
+    lookupMessage: () => ({ id: origin, text: "the corrected text", author: GRACE }),
+    transportFor: async () => /** @type {any} */ (githubTransport({ transport: "github", repo: "owner/name", issue: 7 }, { token: "ghp-fake-test", fetch: gh.fetch })) });
   const [edited] = await runner.mirror({ act: "edit", id: "e".repeat(64), target: origin });
-  assert.deepEqual([edited.status, edited.code], ["refused", "capability"]);
-  const { facesOutOfReach, work } = await runner.purge({ id: "f".repeat(64), purged: [origin] }, { deadlineMs: 1000 });
+  assert.deepEqual([edited.status, edited.copy], ["published", "1234567"]);
+  const patch = gh.calls.find((c) => c.init?.method === "PATCH");
+  assert.equal(patch?.url.pathname, "/repos/owner/name/issues/comments/1234567");
+  assert.equal(JSON.parse(String(patch?.init?.body)).body, "the corrected text");
+  const { facesOutOfReach, work } = await runner.purge({ id: "f".repeat(64), purged: [origin] }, { deadlineMs: 2000 });
+  await work;
+  assert.deepEqual(facesOutOfReach, [], "the purge reached the comment");
+  assert.equal(gh.calls.filter((c) => c.init?.method === "DELETE").length, 1);
+  // the comment is gone now; a withdraw of it is a delete that already happened
+  const [withdrawn] = await runner.mirror({ act: "withdraw", id: "d".repeat(64), target: origin });
+  assert.deepEqual([withdrawn.status, withdrawn.copy], ["published", "1234567"]);
+  assert.equal(gh.calls.filter((c) => c.init?.method === "DELETE").length, 2);
+  const rows = [...(await readFaceRecords(root, ROOM)).values()].filter((r) => r.part === "mirror");
+  assert.deepEqual(rows.map((r) => [r.act, r.status]).sort(), [["edit", "published"], ["purge", "published"], ["withdraw", "published"]]);
+  // an id that is not a comment id never reaches a path
+  const direct = githubTransport({ transport: "github", repo: "owner/name", issue: 7 }, { token: "ghp-fake-test", fetch: gh.fetch });
+  await assert.rejects(direct.remove({ ts: "../../x" }), /comment id must be digits/);
+});
+
+test("a github purge whose delete is refused lists the comment out of reach with the reason", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "agora-faces-wired-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const origin = "cd".repeat(32);
+  await writeFacePolicy(root, ROOM, { faces: [{ transport: "github", alias: "issue", target: { repo: "owner/name", issue: "7" } }] });
+  await appendFaceRecord(root, ROOM, { originId: origin, cursor: `${EPOCH}:1`, transport: "github", status: "published", id: "7654321", attempt: 1, at: new Date().toISOString() });
+  const gh = fakeFetch([["/issues/comments/7654321", () => ({ status: 403, body: { message: "Resource not accessible by integration" } })]]);
+  const runner = new FaceRunner({ stateRoot: root, roomId: ROOM, attestor: { serviceId: ACCOUNT, serviceBootId: EPOCH }, warn: () => {},
+    transportFor: async () => /** @type {any} */ (githubTransport({ transport: "github", repo: "owner/name", issue: 7 }, { token: "ghp-fake-test", fetch: gh.fetch })) });
+  const { facesOutOfReach, work } = await runner.purge({ id: "f".repeat(64), purged: [origin] }, { deadlineMs: 2000 });
   await work;
   assert.equal(facesOutOfReach.length, 1);
-  assert.deepEqual([facesOutOfReach[0].transport, facesOutOfReach[0].channel, facesOutOfReach[0].ts, facesOutOfReach[0].message], ["github", "owner/name#7", "1234567", origin]);
-  assert.match(facesOutOfReach[0].reason, /^capability: the github face cannot delete/);
-  assert.equal(built, 0);
+  assert.deepEqual([facesOutOfReach[0].transport, facesOutOfReach[0].channel, facesOutOfReach[0].ts, facesOutOfReach[0].message], ["github", "owner/name#7", "7654321", origin]);
+  assert.match(facesOutOfReach[0].reason, /403 Resource not accessible/);
 });
 
 test("a message that crossed in from a face is never faced back to it: via slack-face selects no Slack face, in policy mode or by name", { timeout: 60_000 }, async (t) => {
@@ -359,4 +400,141 @@ test("the tick runs the inbound seam per faced room with that room's own runner 
   const after = ticks.length;
   await new Promise((r) => setTimeout(r, 150));
   assert.equal(ticks.length, after, "a stopped service ticks no more");
+});
+
+test("the running service's tick brings a reply in a faced Slack thread into the native room, and the loop guard keeps it off Slack", { timeout: 60_000 }, async (t) => {
+  const ROOT_COPY = "1790000000.000001";
+  const REPLY = "1790000000.500000";
+  let replies = false;
+  const slack = fakeFetch([
+    ["auth.test", () => ({ body: { ok: true, user_id: "UBOT", user: "seatbot", bot_id: "BBOT" } })],
+    ["chat.postMessage", () => ({ body: { ok: true, ts: ROOT_COPY, channel: CHANNEL } })],
+    ["users.info", (u) => ({ body: { ok: true, user: { id: u.searchParams.get("user"), real_name: "operator" } } })],
+    ["conversations.replies", (u) => {
+      const root = { ts: ROOT_COPY, bot_id: "BBOT", user: "UBOT", text: "the relay is up", reply_count: replies ? 1 : 0 };
+      if (u.searchParams.get("ts") !== ROOT_COPY) return { body: { ok: false, error: "thread_not_found" } };
+      return { body: { ok: true, has_more: false, messages: replies ? [root, { ts: REPLY, thread_ts: ROOT_COPY, user: "U2", text: "yes, both ports answer" }] : [root] } };
+    }],
+    ["conversations.history", () => ({ body: { ok: true, messages: [], has_more: false } })],
+  ]);
+  /** @type {any[]} */
+  const ticked = [];
+  /** @type {string[]} */
+  const inboundWarned = [];
+  const inbound = slackInboundTick({ connect: (o) => connect(o), warn: (l) => inboundWarned.push(l) });
+  const s = await seat(t, { slack, tickMs: 50, face: { post: { human: ["always"], agent: ["always"] } },
+    onTick: async (tick) => { const r = await inbound.onTick(tick); ticked.push(r); return r; }, onStop: () => inbound.close() });
+  const app = await s.open();
+  const root = await app.append("house", { text: "the relay is up", author: GRACE });
+  await s.records((r) => rowOf(r, root.id)?.status === "published");
+  replies = true;
+  /** @type {any} */
+  let crossed;
+  for (let i = 0; i < 250 && !crossed; i++) {
+    crossed = (await app.read("house", { thread: root.id })).messages.find((m) => m.id !== root.id);
+    if (!crossed) await new Promise((r) => setTimeout(r, 20));
+  }
+  assert.ok(crossed, `the reply crossed in through the service's tick (warnings: ${inboundWarned.join(" | ")})`);
+  assert.equal(crossed.thread, root.id);
+  assert.equal(crossed.text, "yes, both ports answer");
+  assert.deepEqual([crossed.author.kind, crossed.author.name, crossed.author.ref, crossed.via], ["human", "operator", "U2", "slack-face"]);
+  // a few more ticks: the crossing is neither appended twice nor faced back out
+  const seen = ticked.length;
+  for (let i = 0; i < 150 && ticked.length < seen + 3; i++) await new Promise((r) => setTimeout(r, 20));
+  assert.ok(ticked.length >= seen + 3, "the tick kept running");
+  const thread = (await app.read("house", { thread: root.id })).messages;
+  assert.equal(thread.length, 2, "one root, one crossed reply");
+  assert.equal(slack.calls.filter((c) => c.url.href.includes("chat.postMessage")).length, 1, "only the root was ever posted to Slack");
+  assert.equal(rowOf(await readFaceRecords(s.root, ROOM), crossed.id), undefined, "the crossed reply has no face row at all");
+});
+
+test("a rotated token needs no restart: a call refused invalid_auth re-reads the tokenFile once and goes through; refused again it fails by name", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "agora-faces-token-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tokenFile = path.join(root, "slack.token");
+  await writeFile(tokenFile, "xoxb-old-test\n", "utf8");
+  /** @type {string[]} */
+  const seen = [];
+  let good = "xoxb-new-test";
+  let error = "invalid_auth";
+  const slack = fakeFetch([
+    ["chat.postMessage", (_u, init) => {
+      const auth = new Headers(init?.headers).get("authorization") ?? "";
+      seen.push(auth.replace(/^Bearer /, ""));
+      return auth === `Bearer ${good}` ? { body: { ok: true, ts: "1790000001.000001", channel: CHANNEL } } : { body: { ok: false, error } };
+    }],
+  ]);
+  const cfg = { actor: GRACE, rooms: { slackroom: { transport: "slack", channel: "C0OTHER", tokenFile } } };
+  let loads = 0;
+  const transportFor = configFaceTransports({ loadConfig: async () => { loads++; return cfg; }, createTransport, fetch: slack.fetch });
+  const face = /** @type {any} */ ({ transport: "slack", alias: "slackroom", target: { channel: CHANNEL } });
+  const transport = await transportFor(face);
+  // the token is rotated on disk while the service runs
+  await writeFile(tokenFile, "xoxb-new-test\n", "utf8");
+  const posted = await transport.post("after the rotation");
+  assert.equal(posted.id, "1790000001.000001");
+  assert.deepEqual(seen, ["xoxb-old-test", "xoxb-new-test"], "refused once on the old token, then sent once on the re-read one");
+  assert.equal(loads, 2, "the config row was read again for the re-resolve");
+  // a token still bad after the re-read is refused by name: one call on the held token, one after the re-read, no more
+  good = "xoxb-never";
+  error = "token_revoked";
+  seen.length = 0;
+  await assert.rejects(transport.post("refused twice"), (e) => {
+    assert.match(String(/** @type {Error} */ (e).message), /^token-refused: the slack token of room "slackroom" was refused \(token_revoked\)/);
+    assert.equal(/** @type {any} */ (e).code, "token-refused");
+    assert.doesNotMatch(String(/** @type {Error} */ (e).message), /xoxb-/);
+    return true;
+  });
+  assert.equal(seen.length, 2);
+  // any other refusal passes straight through with no re-read
+  const before = loads;
+  error = "channel_not_found";
+  await assert.rejects(transport.post("elsewhere"), /channel_not_found/);
+  assert.equal(loads, before);
+});
+
+test("a rotated token reaches a running face: a post refused invalid_auth is published on the re-read token with no service restart", { timeout: 60_000 }, async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "agora-faces-rotate-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const tokenFile = path.join(dir, "slack.token");
+  await writeFile(tokenFile, "xoxb-old-test\n", "utf8");
+  const slack = fakeFetch([
+    ["auth.test", () => ({ body: { ok: true, user_id: "UBOT", user: "seatbot", bot_id: "BBOT" } })],
+    ["chat.postMessage", (_u, init) => (new Headers(init?.headers).get("authorization") === "Bearer xoxb-new-test"
+      ? { body: { ok: true, ts: "1790000002.000001", channel: CHANNEL } } : { body: { ok: false, error: "invalid_auth" } })],
+    ["conversations.history", () => ({ body: { ok: true, messages: [], has_more: false } })],
+  ]);
+  const cfg = { actor: GRACE, rooms: { slackroom: { transport: "slack", channel: CHANNEL, tokenFile } } };
+  const transportFor = configFaceTransports({ loadConfig: async () => cfg, createTransport, fetch: slack.fetch });
+  const root = await mkdtemp(path.join(tmpdir(), "agora-faces-wired-"));
+  const service = new NativeRoomService({ root, accountId: ACCOUNT, seatLabel: "seat-f", faces: { transportFor, warn: () => {} } });
+  /** @type {Array<{ close(): void }>} */
+  const clients = [];
+  t.after(async () => { for (const c of clients) c.close(); await service.stop(); await rm(root, { recursive: true, force: true }); });
+  await service.start();
+  await service.createRoom({ roomId: ROOM, epoch: EPOCH });
+  await writeFacePolicy(root, ROOM, { faces: [{ transport: "slack", alias: "slackroom", target: { channel: CHANNEL }, post: { agent: ["always"] } }] });
+  const config = path.join(root, "agora.json");
+  await writeFile(config, JSON.stringify({ actor: GRACE, rooms: { house: { transport: "native", roomId: ROOM } } }), "utf8");
+  const app = await connect({ state: root, config });
+  clients.push(app);
+  // a first post builds the face's transport on the old token, and that post is refused for it
+  const first = await app.append("house", { text: "before the rotation", author: GRACE });
+  /** @type {any} */
+  let row;
+  for (let i = 0; i < 250; i++) {
+    row = rowOf(await readFaceRecords(root, ROOM), first.id);
+    if (row && row.status !== "pending") break;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  assert.deepEqual([row?.status, row?.code], ["refused", "token-refused"], "refused by name: the old token, and again after the re-read of an unchanged file");
+  // the operator rotates the token file; the running service's cached transport picks it up on its next refusal
+  await writeFile(tokenFile, "xoxb-new-test\n", "utf8");
+  const posted = await app.append("house", { text: "after the rotation", author: GRACE });
+  for (let i = 0; i < 250; i++) {
+    row = rowOf(await readFaceRecords(root, ROOM), posted.id);
+    if (row && row.status !== "pending") break;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  assert.deepEqual([row?.status, row?.id], ["published", "1790000002.000001"], `published on the re-read token (${row?.reason ?? ""})`);
 });

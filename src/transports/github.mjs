@@ -1,5 +1,5 @@
 // @ts-check
-import { AgoraError, parseSignature } from "../core.mjs";
+import { AgoraError, EXIT, parseSignature } from "../core.mjs";
 import { failedBeforeSend } from "./slack.mjs";
 
 /** GitHub refuses an issue comment body past this many characters (a 422); a face refuses before the call. */
@@ -58,6 +58,8 @@ export const githubFaceHalf = Object.freeze({
   textOf: (raw) => (typeof raw?.body === "string" ? raw.body : undefined),
   fileIds: () => [],
   pictureLine: (a, line) => `${line} ${typeof a.url === "string" && /^https?:\/\//.test(a.url) ? `<${a.url}>` : String(a.digest ?? "no digest")}`,
+  mirrors: true,
+  where: (target) => (target.repo ? `${target.repo}#${target.issue}` : "unknown"),
 });
 
 /**
@@ -65,9 +67,18 @@ export const githubFaceHalf = Object.freeze({
  * Transport contract. Reachable only through a face; the CLI's verbs never call it.
  * @typedef {object} GitHubFaceTransport
  * @property {(window: { since: string, until: string }) => Promise<{ messages: any[], complete: boolean }>} history
+ * @property {(copy: { ts: string, text: string }) => Promise<{ id: string }>} update replace the body of a comment this seat posted (PATCH)
+ * @property {(copy: { ts: string }) => Promise<{ removed: true, already: boolean }>} remove delete a comment this seat posted (DELETE); one already gone is gone
  */
 
 const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+
+/** A comment id off a face record: digits only, so it is never a path. @param {unknown} id */
+function commentId(id) {
+  const s = String(id ?? "");
+  if (!/^[0-9]{1,20}$/.test(s)) throw new AgoraError(`github comment id must be digits, not "${s.slice(0, 40)}"`);
+  return s;
+}
 
 /** @param {string} createdAt @param {number} id */
 const encodeCursor = (createdAt, id) => `${createdAt}|${id}`;
@@ -258,6 +269,33 @@ export function githubTransport(room, { token, fetch: f = globalThis.fetch, cach
       }
       raw.sort((a, b) => (String(a.created_at) < String(b.created_at) ? -1 : String(a.created_at) > String(b.created_at) ? 1 : Number(a.id) - Number(b.id)));
       return { messages: raw, complete };
+    },
+    /**
+     * The face half's mirror of a native edit: replace the body of a comment this seat posted
+     * (`PATCH /repos/{repo}/issues/comments/{id}`). The face's copy id is the comment id, carried
+     * in `ts` as on every face. Idempotent: the same body twice is the same comment.
+     * @param {{ ts: string, text: string }} copy
+     */
+    async update({ ts, text }) {
+      const id = commentId(ts);
+      if (text.length > GITHUB_COMMENT_MAX) throw new AgoraError(`github edit is ${text.length} characters; the limit is ${GITHUB_COMMENT_MAX}`, EXIT.usage);
+      const c = await call(`/repos/${repo}/issues/comments/${id}`, { method: "PATCH", body: { body: text } });
+      return { id: String(c?.id ?? id) };
+    },
+    /**
+     * The face half's mirror of a native withdraw or purge: delete a comment this seat posted
+     * (`DELETE /repos/{repo}/issues/comments/{id}`). A comment already gone (404) is gone, so a
+     * re-run after a lost response cannot do harm.
+     * @param {{ ts: string }} copy
+     * @returns {Promise<{ removed: true, already: boolean }>}
+     */
+    async remove({ ts }) {
+      const id = commentId(ts);
+      try { await call(`/repos/${repo}/issues/comments/${id}`, { method: "DELETE" }); return { removed: true, already: false }; }
+      catch (e) {
+        if (e instanceof GitHubApiError && e.status === 404) return { removed: true, already: true };
+        throw e;
+      }
     },
     async post(text, { thread } = {}) {
       if (thread) throw new AgoraError(`github rooms have no threads; the issue is the thread`);

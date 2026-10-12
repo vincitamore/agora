@@ -90,12 +90,15 @@ foldPurges(messages, purges)
 ## Faces
 
 When the seat service runs faces, a committed purge deletes the copies of its messages that a face
-already published (Slack: `chat.delete` for the text copy, `files.delete` for each uploaded picture),
+already published (Slack: `chat.delete` for the text copy, `files.delete` for each uploaded picture;
+GitHub: `DELETE` of the issue comment, where a comment already deleted counts as deleted),
 one mirror row per copy in the seat's face record log, and waits for them a bounded few seconds
 before its receipt. `facesOutOfReach` lists every copy it could not delete: `{ transport, channel,
 ts }` for a text copy or `{ transport, channel, file }` for a picture, with `message` (the purged
-message it copies) and `reason`. A copy is listed when its face cannot delete (GitHub), when the
-face refused the delete, when its own publication is still unsettled, or when its deletion was not
+message it copies) and `reason`. `ts` is optional because a picture has a file id and no ts; on a
+GitHub face `channel` is `owner/name#issue` and `ts` the comment id. This entry shape is the
+contract (ruled at integration: kept as widened from `{ transport, channel, ts }`). A copy is
+listed when its face's policy no longer names it, when the face refused the delete, when its own publication is still unsettled, or when its deletion was not
 confirmed by the receipt; that deletion goes on, and `agora faces <room> --for <id>` reads its
 outcome. A message no face carried lists nothing. A resent purge does not delete twice what landed.
 
