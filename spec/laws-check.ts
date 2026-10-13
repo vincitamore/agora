@@ -88,13 +88,20 @@ function main(argv: string[]): number {
 // the checkout must be at the pinned commit: a proof against another Bend is a proof of nothing
 // this repository ships (spec/bend.pin.json; scripts/bend-checkout.mjs fetches the pin)
 const PIN = JSON.parse(readFileSync(join(ROOT, "spec", "bend.pin.json"), "utf8"));
+// BEND_PIN_TRIAL=<sha> proves against that commit instead of the pin (scripts/bend-upstream-trial.mjs
+// sets it for one scratch run); the pin file is never read differently and never written, and the
+// banner says so on stderr, so nothing a trial produces can be mistaken for a committed result
+const TRIAL = process.env.BEND_PIN_TRIAL;
+const EXPECT = TRIAL ?? PIN.sha;
 {
   const head = spawnSync("git", ["-C", CLONE, "rev-parse", "HEAD"], { encoding: "utf8" });
   const at = (head.stdout ?? "").trim();
-  if (head.status !== 0 || at !== PIN.sha) {
-    console.error(`Bend checkout at ${CLONE} is ${at || "not a git checkout"}; the pin is ${PIN.sha} (${PIN.version}). Fetch it: node scripts/bend-checkout.mjs --into ${CLONE}`);
+  if (head.status !== 0 || at !== EXPECT) {
+    const want = TRIAL ? `the trial commit is ${TRIAL} (BEND_PIN_TRIAL)` : `the pin is ${PIN.sha} (${PIN.version})`;
+    console.error(`Bend checkout at ${CLONE} is ${at || "not a git checkout"}; ${want}. Fetch it: node scripts/bend-checkout.mjs --into ${CLONE}`);
     return 2;
   }
+  if (TRIAL) console.error(`TRIAL: proving against Bend ${TRIAL.slice(0, 7)}, not the pin ${PIN.sha.slice(0, 7)} (${PIN.version}); this run is a report, never a committed result`);
 }
   const at = argv.indexOf("--kernel");
   const names = at >= 0 ? [argv[at + 1]] : Object.keys(KERNELS);
