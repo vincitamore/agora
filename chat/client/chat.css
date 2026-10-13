@@ -215,7 +215,10 @@
   /* the author column holds a bearer's Name/role (13 characters of 12px mono) on one line */
   grid-template-columns: 44px 96px minmax(0, 1fr);
   column-gap: 14px;
-  padding: 12px 0;
+  /* the right gutter is the "more" control's (36 px wide, absolute at the top right): without it the
+     control's background covers the end of the first line of text. The narrow layout resets it, since
+     there the control sits beside the short time and author line. */
+  padding: 12px 44px 12px 0;
   border-top: 1px solid var(--chat-rule2);
 }
 .chat-msg-time { font-family: var(--chat-font-mono); font-size: 12.5px; color: var(--chat-ink3); padding-top: 3px; font-variant-numeric: tabular-nums; }
