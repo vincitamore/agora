@@ -62,12 +62,15 @@ export function firstLine(m) {
 }
 
 /**
- * A thread's title: its root's first line, or "purged thread" when a purge took the root's text.
- * The kit never titles a thread with a reply's words: the root is what the thread was opened about.
+ * A thread's title: the title someone gave it (the newest `title` annotation on its root), else its
+ * root's first line, or "purged thread" when a purge took the root's text. The kit never titles a
+ * thread with a reply's words: the root is what the thread was opened about.
  * @param {import("./thread.js").ChatMessage | undefined} root
  */
 export function threadTitle(root) {
   if (root && /** @type {any} */ (root).purged) return PURGED_THREAD_TITLE;
+  const named = /** @type {any} */ (root)?.title;
+  if (named && typeof named.text === "string" && named.text.trim()) return named.text.trim();
   return firstLine(root);
 }
 

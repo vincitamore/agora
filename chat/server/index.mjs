@@ -38,7 +38,7 @@ import { handleFile, handleThumb, handleUpload } from "./uploads.mjs";
  * A person as the host knows them. `ref` is stamped on the person's messages as `author.ref`.
  * @typedef {{ id: string, name: string, ref?: string }} Person
  */
-/** @typedef {'read' | 'post' | 'upload' | 'edit' | 'withdraw' | 'pin' | 'purge' | 'react'} ChatAct */
+/** @typedef {'read' | 'post' | 'upload' | 'edit' | 'withdraw' | 'pin' | 'purge' | 'react' | 'title'} ChatAct */
 /** @typedef {{ state: 'ready' | 'busy' | 'away' | 'dark', lastSeen?: string, running?: string }} Presence */
 /**
  * The host's side of the seam. Every hook is the host's knowledge; the kit never learns what it means.
@@ -431,7 +431,7 @@ export async function createChat(options) {
       room: options.room,
       me: { id: person.id, name: person.name, ...(person.ref ? { ref: person.ref } : {}) },
       // what the person may do beyond reading and posting, so the client offers only what is theirs
-      may: { purge: Boolean(hooks.authorize(person, "purge", { targets: [], thread: null })) },
+      may: { purge: Boolean(hooks.authorize(person, "purge", { targets: [], thread: null })), title: Boolean(hooks.authorize(person, "title", { target: null, thread: null })) },
       resident: { name: hooks.residentName, ...presence },
       capabilities: room.capabilities(),
       version: CHAT_VERSION,

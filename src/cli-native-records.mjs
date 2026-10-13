@@ -9,6 +9,7 @@
  *   agora withdraw <room> <message id>
  *   agora pin <room> <message id>
  *   agora unpin <room> <message id>
+ *   agora title <room> <root id> --text "..."   a thread's title, one line of at most 120 characters
  *   agora room purge <room> (--message <id> ... | --thread <root id>) --reason "..."
  *
  * The CLI dispatches every one of them here: `nativeRecordVerb` names the verb a command line is,
@@ -28,10 +29,10 @@ import { AgoraError, EXIT, resolvePath, sign } from "./core.mjs";
 import { ClientError, connect } from "./client.mjs";
 import { validateNativeThread } from "./transports/native.mjs";
 
-/** @typedef {'attachment-get' | 'edit' | 'withdraw' | 'pin' | 'unpin' | 'room-purge'} NativeRecordVerb */
+/** @typedef {'attachment-get' | 'edit' | 'withdraw' | 'pin' | 'unpin' | 'title' | 'room-purge'} NativeRecordVerb */
 
 /** Every native record verb, as `nativeRecordVerb` names them. `post --attach` is a post option. */
-export const NATIVE_RECORD_VERBS = Object.freeze(/** @type {const} */ (["attachment-get", "edit", "withdraw", "pin", "unpin", "room-purge"]));
+export const NATIVE_RECORD_VERBS = Object.freeze(/** @type {const} */ (["attachment-get", "edit", "withdraw", "pin", "unpin", "title", "room-purge"]));
 
 const ID_RE = /^[A-Za-z0-9_-]{16,128}$/;
 const AUTHOR_KINDS = new Set(["human", "agent", "system"]);
@@ -57,7 +58,7 @@ const DECLARED_TYPES = Object.freeze(/** @type {Record<string, string>} */ ({
  */
 export function nativeRecordVerb(verb, sub) {
   if (verb === "attachment") return "attachment-get";
-  if (verb === "edit" || verb === "withdraw" || verb === "pin" || verb === "unpin") return verb;
+  if (verb === "edit" || verb === "withdraw" || verb === "pin" || verb === "unpin" || verb === "title") return verb;
   if (verb === "room" && sub === "purge") return "room-purge";
   return undefined;
 }
@@ -94,6 +95,14 @@ export function nativeRecordArgumentRefusal(context) {
     }
     if (values.reason === undefined || !String(values.reason).trim()) return "agora room purge needs --reason \"...\": why, recorded on the purge record";
     if (String(values.reason).length > 1000) return "--reason is at most 1000 characters";
+    return undefined;
+  }
+  if (name === "title") {
+    if (roomAlias === undefined || rest.length !== 1) return "agora title takes a room and a thread's root id: agora title <room> <root id> --text \"...\"";
+    if (!ID_RE.test(rest[0])) return `${JSON.stringify(rest[0])} is not a message id (the id read --json prints)`;
+    if (values.text === undefined || values.stdin === true) return "agora title takes the title from --text \"...\": one line of at most 120 characters";
+    const t = String(values.text).trim();
+    if (!t || /[\r\n]/.test(t) || [...t].length > 120) return "a title is one line of 1 to 120 characters";
     return undefined;
   }
   if (name === "edit" || name === "withdraw" || name === "pin" || name === "unpin") {
@@ -176,7 +185,7 @@ export async function runNativeRecordVerb(context) {
 
 /** @param {NativeRecordContext} context */
 async function annotate(context) {
-  const act = /** @type {'edit' | 'withdraw' | 'pin' | 'unpin'} */ (context.name);
+  const act = /** @type {'edit' | 'withdraw' | 'pin' | 'unpin' | 'title'} */ (context.name);
   const alias = /** @type {string} */ (context.sub);
   const target = context.rest[0];
   nativeRoom(context.cfg, alias, `agora ${act}`);
@@ -188,6 +197,8 @@ async function annotate(context) {
     // an edit is signed as a post is, so the folded text still says who wrote it
     text = context.cfg.sign !== false && !context.values["no-sign"] ? sign(raw, { ...context.cfg.actor, name: context.bearer.name }) : raw.replace(/\s+$/, "");
   }
+  // a title is the thread's name, one line, never signed: who set it travels on the record
+  if (act === "title") text = String(context.values.text).trim();
   const app = await client(context.cfg, context.stateRoot);
   try {
     const receipt = await app.annotate(alias, { act, target, ...(text !== undefined ? { text } : {}), author: author(context.cfg, context.bearer.name) });

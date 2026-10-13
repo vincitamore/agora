@@ -28,7 +28,7 @@ const chat = await createChat({
   storeDir,                              // the kit's own store: kit.sqlite, thumbs/
   hooks: {
     identify: async (req) => person | null,        // person = { id, name, ref }; ref goes to author.ref
-    authorize: (person, act, ctx) => boolean,      // act: read | post | upload | edit | withdraw | pin | purge | react
+    authorize: (person, act, ctx) => boolean,      // act: read | post | upload | edit | withdraw | pin | purge | react | title
     people: async () => person[],                  // mentions, push targets, waiting
     scanText: (text) => ({ refuse?: string, warn?: string }),
     scanUpload: async ({ name, mimetype, bytes }) => ({ ok: true } | { ok: false, reason }),
@@ -67,7 +67,7 @@ The host's cross-site checks and session sit in front of every route.
 
 | Route | Body / query | Answer |
 |---|---|---|
-| `GET /chat/state` | | `{ room, me: { id, name, ref? }, may: { purge }, resident: { name, ...presence }, capabilities: [service capabilities], version, link: { state: "live" \| "dark" \| "refused", reason? } }` |
+| `GET /chat/state` | | `{ room, me: { id, name, ref? }, may: { purge, title }, resident: { name, ...presence }, capabilities: [service capabilities], version, link: { state: "live" \| "dark" \| "refused", reason? } }` |
 | `GET /chat/threads` | `scope=all\|mine`, `context=<k>=<v>` (repeatable, all must match), `before=<lastCursor>`, `limit` (1-200, default 50) | `{ threads: [summary], through }` |
 | `GET /chat/thread/:root` | `:root` is a root id or `main`; `since` | `{ messages (folded), annotations, through }`; `annotations` are those whose target is not in `messages` |
 | `GET /chat/stream` | `thread=<root>\|main` (SSE); `Last-Event-ID` or `since` resumes | events below |
@@ -300,6 +300,11 @@ Subscription endpoints are limited to the browsers' push services.
   thread whose root a purge took is titled "purged thread" (in the list and the heading, at its
   read and when a live `purge` event takes the root), never its root's id and never a reply's
   words, which are not what the thread was opened about.
+- **A thread has a title.** A thread is titled by its newest `title` annotation (agora titles-v1,
+  `POST /chat/annotate { act: "title", target: <root>, text }`, one line of at most 120
+  characters, authorize `title`), else by its root's first line. A person `may.title` sees
+  "rename" in the open thread's heading, which edits the title in a strip under it; the heading's
+  caption names who titled it. On a phone, rename and delete sit behind one "···" menu.
 - **A deleted thread leaves the list.** A thread whose root and newest message a purge took has
   nothing left to read and is not listed (a thread whose root alone was purged, with replies still
   carrying words, stays, titled "purged thread"). A person `may.purge` (`GET /chat/state`) sees

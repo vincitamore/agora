@@ -140,7 +140,7 @@ export function mountChat(el, options) {
   /** @type {{ id: string, name: string } | null} */
   let me = null;
   /** what the person may do beyond reading and posting (`GET /chat/state` `may`) */
-  /** @type {{ purge?: boolean }} */
+  /** @type {{ purge?: boolean, title?: boolean }} */
   let may = {};
   /** @type {Map<string, string>} */
   const names = new Map();
@@ -203,6 +203,16 @@ export function mountChat(el, options) {
   const presenceLine = h("span", { class: "chat-presence" });
   // delete: the whole thread, for a person who may purge; asked once in a strip under the heading
   const deleteButton = h("button", { type: "button", class: "chat-delete", hidden: true, "aria-expanded": "false" }, ["delete"]);
+  // rename: the thread's title, for a person who may title; edited in a strip under the heading
+  const renameButton = h("button", { type: "button", class: "chat-rename", hidden: true, "aria-expanded": "false" }, ["rename"]);
+  // on a phone the two sit behind one button, as a small menu
+  const actionsButton = h("button", { type: "button", class: "chat-actions-toggle", "aria-label": "Thread actions", "aria-expanded": "false", hidden: true }, ["···"]);
+  const actions = h("div", { class: "chat-thread-actions" }, [renameButton, deleteButton]);
+  const renameInput = h("input", { type: "text", class: "chat-rename-input", maxlength: "120", "aria-label": "Thread title", autocomplete: "off" });
+  const renameSave = h("button", { type: "submit", class: "chat-confirm-yes chat-rename-save" }, ["save"]);
+  const renameCancel = h("button", { type: "button", class: "chat-confirm-no" }, ["cancel"]);
+  const renameNote = h("span", { class: "chat-rename-note", role: "status" });
+  const renameStrip = h("form", { class: "chat-confirm chat-rename-strip", hidden: true, "aria-label": "Rename this thread" }, [renameInput, h("span", { class: "chat-confirm-acts" }, [renameCancel, renameSave]), renameNote]);
   const confirmText = h("span", { class: "chat-confirm-text", role: "status" });
   const confirmYes = h("button", { type: "button", class: "chat-confirm-yes" }, ["delete thread"]);
   const confirmNo = h("button", { type: "button", class: "chat-confirm-no" }, ["cancel"]);
@@ -210,8 +220,9 @@ export function mountChat(el, options) {
   const head = h("header", { class: "chat-thread-head" }, [
     back,
     h("div", { class: "chat-thread-heading" }, [cap, title, meta]),
-    h("div", { class: "chat-thread-side" }, [presenceLine, deleteButton]),
+    h("div", { class: "chat-thread-side" }, [presenceLine, actionsButton, actions]),
     confirmStrip,
+    renameStrip,
   ]);
   const ledger = h("div", { class: "chat-ledger" });
   const scroller = h("div", { class: "chat-scroll" }, [ledger]);
@@ -311,7 +322,8 @@ export function mountChat(el, options) {
     const fromList = summary && typeof summary.root !== "string" ? summary.root : undefined;
     const r = rootMsg ?? fromList;
     title.textContent = threadTitle(r) || root;
-    cap.textContent = r ? `thread · opened ${dayLabel(r.ts, now())} ${clock(r.ts)} by ${r.author?.name ?? ""}` : "thread";
+    const named = /** @type {any} */ (r)?.title;
+    cap.textContent = r ? `thread · opened ${dayLabel(r.ts, now())} ${clock(r.ts)} by ${r.author?.name ?? ""}${named?.by?.name && !r.purged ? ` · named by ${named.by.name}` : ""}` : "thread";
     const people = [...new Set(messages.filter((m) => m.author?.kind === "human").map((m) => m.author.name))];
     const ctxValues = r ? contextOf(r).map(([, v]) => v) : [];
     meta.textContent = [...ctxValues, people.join(", ")].filter(Boolean).join(" · ");
@@ -335,7 +347,8 @@ export function mountChat(el, options) {
     cap.textContent = "thread";
     meta.textContent = "";
     setConfirm(false);
-    deleteButton.hidden = !may.purge;
+    setRename(false);
+    drawActions();
     view = renderThread(ledger, [], ctxFor(root), { base, me, name: nameOf });
     if (options.onOpenThread) options.onOpenThread(root);
     try {
@@ -373,6 +386,7 @@ export function mountChat(el, options) {
         if (active !== root || !view || !a || typeof a !== "object") return;
         view.annotate(a);
         composerIn(composer)?.annotation(a);
+        if (a.act === "title" && a.target === root) drawHead(view.messages(), root);
       },
       // someone reacted: the composer draws the reactions line under each row
       reaction: (r) => { if (active === root && r && typeof r === "object") composerIn(composer)?.reaction(r); },
@@ -392,6 +406,64 @@ export function mountChat(el, options) {
     shell.setAttribute("data-view", "list");
   };
 
+  /** Which thread actions this person has, and on a phone the menu that holds them. */
+  function drawActions() {
+    deleteButton.hidden = !may.purge;
+    renameButton.hidden = !may.title;
+    actionsButton.hidden = !(may.purge || may.title);
+    setMenu(false);
+  }
+  /** @param {boolean} on */
+  function setMenu(on) {
+    if (on) actions.setAttribute("data-open", ""); else actions.removeAttribute("data-open");
+    actionsButton.setAttribute("aria-expanded", String(on));
+  }
+  actionsButton.addEventListener("click", () => setMenu(!actions.hasAttribute("data-open")));
+  /** @param {boolean} on */
+  function setRename(on) {
+    renameStrip.hidden = !on;
+    renameButton.setAttribute("aria-expanded", String(on));
+    renameSave.disabled = false;
+    renameNote.textContent = "";
+    if (on) {
+      renameInput.value = title.textContent === PURGED_THREAD_TITLE ? "" : (title.textContent ?? "");
+      renameInput.focus();
+      renameInput.select();
+    }
+  }
+  renameButton.addEventListener("click", () => { setMenu(false); setConfirm(false); setRename(renameStrip.hidden); });
+  renameCancel.addEventListener("click", () => { setRename(false); renameButton.focus(); });
+  renameInput.addEventListener("keydown", (ev) => { if (ev.key === "Escape") { ev.preventDefault(); setRename(false); renameButton.focus(); } });
+  renameStrip.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const root = active;
+    const text = renameInput.value.replace(/\s+/g, " ").trim();
+    if (!root) return;
+    if (!text) { renameNote.textContent = "a title needs at least one word"; return; }
+    if ([...text].length > 120) { renameNote.textContent = "a title is at most 120 characters"; return; }
+    if (text === title.textContent) { setRename(false); return; }
+    renameSave.disabled = true;
+    const operationId = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `op-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const payload = JSON.stringify({ act: "title", target: root, text, operationId });
+    try {
+      for (let tries = 0; ; tries++) {
+        const r = await call(base, "/annotate", { method: "POST", body: payload });
+        if (r.status === 202 && tries < 3) { await new Promise((res) => setTimeout(res, 1000 * (tries + 1))); continue; }
+        dataOf(r);
+        break;
+      }
+    } catch (e) {
+      renameNote.textContent = `not renamed: ${e instanceof Error ? e.message : String(e)}`;
+      renameSave.disabled = false;
+      return;
+    }
+    if (active !== root) return;
+    // the stream brings the record back; the heading and the list show it now
+    title.textContent = text;
+    setRename(false);
+    queueList();
+  });
+
   /** @param {boolean} on */
   function setConfirm(on) {
     confirmStrip.hidden = !on;
@@ -401,6 +473,8 @@ export function mountChat(el, options) {
     if (on) confirmText.textContent = "Delete this thread for everyone? Its messages and files are removed and cannot be brought back.";
   }
   deleteButton.addEventListener("click", () => {
+    setMenu(false);
+    setRename(false);
     setConfirm(confirmStrip.hidden);
     if (!confirmStrip.hidden) confirmNo.focus();
   });
@@ -466,7 +540,7 @@ export function mountChat(el, options) {
       const state = dataOf(await call(base, "/state"));
       me = state?.me ?? null;
       may = state?.may && typeof state.may === "object" ? state.may : {};
-      if (active) deleteButton.hidden = !may.purge;
+      if (active) drawActions();
       if (state?.resident) { presence = state.resident; drawPresence(); }
     } catch (e) {
       roomDetail = `the room could not be read: ${e instanceof Error ? e.message : String(e)}`;

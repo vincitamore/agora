@@ -247,6 +247,7 @@ const SCHEMA = {
     },
     pin: { args: ["<room>", "<message id>"], options: {}, does: "native rooms: append a pin annotation to a message" },
     unpin: { args: ["<room>", "<message id>"], options: {}, does: "native rooms: append an unpin annotation to a message" },
+    title: { args: ["<room>", "<root id>"], options: { "--text <text>": "the title: one line of at most 120 characters" }, does: "native rooms: give a thread its title (a title annotation on its root; the newest one is the thread's name)" },
     faces: {
       args: ["<room>"],
       options: {

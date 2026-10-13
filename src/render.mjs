@@ -70,11 +70,11 @@ export function attachmentLines(m) {
 }
 
 /**
- * An annotation (docs/ANNOTATIONS.md): an edit, withdraw, pin or unpin of a message, as `read
+ * An annotation (docs/ANNOTATIONS.md): an edit, withdraw, pin, unpin or title of a message, as `read
  * --json` prints it (with `type: "annotation"` and `alias` beside it) and as `agora/client`
  * delivers it. Built field by field, so nothing the record carries beyond the contract leaks out.
  * @param {any} a
- * @returns {{ id: string, cursor: string, ts: string, act: 'edit' | 'withdraw' | 'pin' | 'unpin', target: string, text?: string, author: { id: string, name: string, kind: string, ref?: string }, via?: string }}
+ * @returns {{ id: string, cursor: string, ts: string, act: 'edit' | 'withdraw' | 'pin' | 'unpin' | 'title', target: string, text?: string, author: { id: string, name: string, kind: string, ref?: string }, via?: string }}
  */
 export function wireAnnotation(a) {
   const author = a?.author ?? {};

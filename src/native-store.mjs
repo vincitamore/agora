@@ -30,7 +30,11 @@ const LOG_VERSION_3 = 3;
 export const UPGRADE_BACKUP = "upgrade-v2-backup";
 const DIGEST_RE = /^sha256:[a-f0-9]{64}$/;
 const MANIFEST_VERSION = 1;
-export const ANNOTATION_ACTS = Object.freeze(["edit", "withdraw", "pin", "unpin"]);
+export const ANNOTATION_ACTS = Object.freeze(["edit", "withdraw", "pin", "unpin", "title"]);
+/** The acts that carry a text: an edit's new text, a thread's title (docs/ANNOTATIONS.md). */
+export const TEXT_ACTS = Object.freeze(["edit", "title"]);
+/** A thread title: one line of at most this many characters, no leading or trailing space. */
+export const TITLE_MAX = 120;
 const TEXT_DIGEST_RE = /^sha256:[a-f0-9]{64}$/;
 const LOG_RECORD_MAX = 1024 * 1024;
 const MESSAGE_TEXT_MAX = 256 * 1024;
@@ -497,8 +501,13 @@ function validateAnnotationRecord(record, manifest, sequence, ctx) {
     throw new AgoraError(`${at} carries an invalid via; do not advance or truncate it`);
   if (a.author.ref !== undefined && (typeof a.author.ref !== "string" || !AUTHOR_REF_PATTERN.test(a.author.ref) || a.via === undefined))
     throw new AgoraError(`${at} carries an invalid author ref; do not advance or truncate it`);
-  if (a.act === "edit") {
-    if (!TEXT_DIGEST_RE.test(a.textDigest ?? "")) throw new AgoraError(`${at} is an edit without a text digest; do not advance or truncate it`);
+  if (a.act === "title") {
+    const target = ctx.messages.get(a.target);
+    if (target && typeof target === "object" && target.thread !== undefined && target.thread !== target.id)
+      throw new AgoraError(`${at} titles a reply, not a thread's root; do not advance or truncate it`);
+  }
+  if (TEXT_ACTS.includes(a.act)) {
+    if (!TEXT_DIGEST_RE.test(a.textDigest ?? "")) throw new AgoraError(`${at} is an ${a.act} without a text digest; do not advance or truncate it`);
     if (!("text" in a)) {
       // a purge took this edit's text with its message's: the purge that names the message, later in
       // the log, must say so (checked when the scan ends)
@@ -1384,18 +1393,21 @@ export class NativeRoomStore {
     const unknown = Object.keys(a).filter((k) => !["act", "target", "text"].includes(k));
     if (unknown.length) throw refusal("annotation-invalid", `an annotation carries only act, target and text, not ${unknown.join(", ")}`);
     if (typeof a.act !== "string" || !ANNOTATION_ACTS.includes(a.act))
-      throw refusal("annotation-invalid", "an annotation's act is edit, withdraw, pin or unpin");
+      throw refusal("annotation-invalid", "an annotation's act is edit, withdraw, pin, unpin or title");
     if (typeof a.target !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(a.target))
       throw refusal("annotation-invalid", "an annotation's target is a message id");
     if (a.act === "edit") {
       if (typeof a.text !== "string" || Buffer.byteLength(a.text) > MESSAGE_TEXT_MAX)
         throw refusal("annotation-invalid", `an edit carries a text of at most ${MESSAGE_TEXT_MAX} bytes`);
+    } else if (a.act === "title") {
+      if (typeof a.text !== "string" || !a.text.trim() || a.text !== a.text.trim() || /[\r\n]/.test(a.text) || [...a.text].length > TITLE_MAX)
+        throw refusal("annotation-invalid", `a title is one line of 1 to ${TITLE_MAX} characters, with no leading or trailing space`);
     } else if (a.text !== undefined) {
       throw refusal("annotation-invalid", `a ${a.act} carries no text`);
     }
-    const act = /** @type {'edit' | 'withdraw' | 'pin' | 'unpin'} */ (a.act);
+    const act = /** @type {'edit' | 'withdraw' | 'pin' | 'unpin' | 'title'} */ (a.act);
     const target = a.target;
-    const digestOfText = act === "edit" ? textDigest(/** @type {string} */ (a.text)) : undefined;
+    const digestOfText = TEXT_ACTS.includes(act) ? textDigest(/** @type {string} */ (a.text)) : undefined;
     const authorName = input.authorName.trim();
     const authorKind = input.authorKind ?? "agent";
     const payload = { accountId: authenticated.accountId, authorName, authorKind, act, target,
@@ -1418,6 +1430,9 @@ export class NativeRoomStore {
     if (this.purged.has(target))
       throw refusal("annotation-target-purged", `message ${target} was purged; nothing more is annotated on it`);
     const message = this.records[at].message;
+    // a title names a thread, so it goes on the thread's root; who may title is the host's call
+    if (act === "title" && message.thread !== undefined && message.thread !== message.id)
+      throw refusal("annotation-not-root", `message ${target} is a reply; a title goes on its thread's root`);
     if (act === "edit" || act === "withdraw") {
       const sameRef = message.author.ref === input.authorRef && (message.author.ref === undefined || message.via === via);
       if (message.author.id !== authenticated.accountId || !sameRef)

@@ -41,7 +41,7 @@ Appended through the same `append` frame as a message:
 ```js
 { kind: "annotation", operationId, annotation, authorKind, authorName, authorRef? }
 // annotation:
-{ act: "edit" | "withdraw" | "pin" | "unpin", target: "<message id>", text /* edit only, <= 256 KiB */ }
+{ act: "edit" | "withdraw" | "pin" | "unpin" | "title", target: "<message id>", text /* edit: <= 256 KiB; title: one line, 1-120 characters */ }
 ```
 
 An edit's text is held as a message's: `annotation.textDigest` inside the record digest,
@@ -65,6 +65,23 @@ Refusals:
 `pin` and `unpin` may come from any author the host admits; who may pin is the host
 application's decision, made before it appends.
 
+## Thread titles (titles-v1)
+
+A `title` names a thread: its target is a thread's root (a reply is refused `annotation-not-root`),
+its text one line of 1 to 120 characters with no leading or trailing space (`annotation-invalid`
+otherwise). Like `pin`, any author the host admits may title; who may is the host's call. Its text
+is held as an edit's is (`textDigest` inside the record digest), so a purge of the root takes every
+title's text with it. The root's own text is never touched.
+
+A title reaches only a reader that asks for it: a `read` or `subscribe` frame with
+`annotations: true` and `titles: true`. A reader that does not ask (a build from before titles,
+whose client refuses an act it does not know) is carried past title records as past a board
+record. A service offering this sends `titles-v1` on the `welcome`, and `agora/client` asks for
+titles, and sends one, only to a service that offered it (`titles-unsupported` otherwise).
+
+Folding: the newest title on a root is its `title: { at, text, by: { name, kind, ref? } }`.
+`agora title <room> <root id> --text "..."` appends one.
+
 ## Client
 
 ```js
@@ -80,7 +97,7 @@ client.follow(room, opts, { message, annotation, state })
 import { foldAnnotations } from "agora/client";
 foldAnnotations(messages, annotations)
   // -> messages with { edited?: { at, text }, withdrawn?: { at }, pinned?: boolean } folded in;
-  //    text replaced by the latest edit
+  //    text replaced by the latest edit; a thread's root gains title?: { at, text, by } (titles-v1)
 ```
 
 An edit whose message was purged carries `purged` and no text.

@@ -34,7 +34,7 @@ const SIGNATURE_RE = /^(?:--|—|–)\s?(.{1,80}?)\s*$/;
  * }} ChatMessage
  */
 /**
- * @typedef {{ id: string, cursor?: string, ts: string, act: "edit" | "withdraw" | "pin" | "unpin", target: string, text?: string, author?: ChatMessage["author"], via?: string }} ChatAnnotation
+ * @typedef {{ id: string, cursor?: string, ts: string, act: "edit" | "withdraw" | "pin" | "unpin" | "title", target: string, text?: string, author?: ChatMessage["author"], via?: string }} ChatAnnotation
  */
 
 /**
@@ -198,6 +198,11 @@ export function renderThread(el, messages, ctx, opts = {}) {
       const m = { ...list[at] };
       if (a.act === "withdraw") m.withdrawn ??= { at: a.ts };
       else if (a.act === "pin" || a.act === "unpin") m.pinned = a.act === "pin";
+      else if (a.act === "title") {
+        // a title names the thread; the root's row is unchanged, the heading and the list read it
+        if (typeof a.text === "string") list[at] = { ...m, title: { at: a.ts, text: a.text, by: { name: a.author?.name ?? "", kind: a.author?.kind ?? "", ...(a.author?.ref ? { ref: a.author.ref } : {}) } } };
+        return;
+      }
       else if (a.act === "edit" && !m.withdrawn && typeof a.text === "string") {
         const split = splitMessage(a.text);
         m.text = a.text;

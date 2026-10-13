@@ -114,6 +114,10 @@ export * from "./client-attachments.mjs";
 
 /** The capability a service offers when it carries annotations (docs/ANNOTATIONS.md). */
 export const ANNOTATIONS_CAPABILITY = "annotations-v1";
+/** titles-v1: a service that keeps thread titles hands them only to a reader that asks. */
+export const TITLES_CAPABILITY = "titles-v1";
+/** A thread title: one line of at most this many characters (the native store's own bound). */
+export const TITLE_MAX = 120;
 /** The capability a service offers when it keeps purges and sends them to subscribers (docs/PURGE.md). */
 export const PURGE_CAPABILITY = "purge-v1";
 
@@ -139,20 +143,21 @@ export function foldPurges(messages, purges) {
     return /** @type {any} */ ({ ...rest, text: "", purged: { ...marker } });
   });
 }
-const ANNOTATION_ACTS = new Set(["edit", "withdraw", "pin", "unpin"]);
+const ANNOTATION_ACTS = new Set(["edit", "withdraw", "pin", "unpin", "title"]);
 
 /**
  * Fold annotations onto messages (docs/ANNOTATIONS.md): a later edit replaces an earlier one, a
  * withdrawal wins over any edit, earlier or later, and the last of pin and unpin decides `pinned`.
+ * The latest title on a thread's root is its `title`: `{ at, text, by: { name, kind, ref? } }`.
  * An edited message's text is the latest edit's, with its trailers and signature read off the new
  * text. A pure function of its arguments: it returns new messages, keeps their order, ignores an
  * annotation whose target is not among them, and keeps no folded state anywhere.
  * @template {ClientMessage} M
  * @param {readonly M[]} messages @param {readonly ClientAnnotation[]} annotations
- * @returns {Array<M & { edited?: { at: string, text: string }, withdrawn?: { at: string }, pinned?: boolean }>}
+ * @returns {Array<M & { edited?: { at: string, text: string }, withdrawn?: { at: string }, pinned?: boolean, title?: { at: string, text: string, by: { name: string, kind: string, ref?: string } } }>}
  */
 export function foldAnnotations(messages, annotations) {
-  /** @type {Map<string, { edited?: { at: string, text: string }, withdrawn?: { at: string }, pinned?: boolean }>} */
+  /** @type {Map<string, { edited?: { at: string, text: string }, withdrawn?: { at: string }, pinned?: boolean, title?: { at: string, text: string, by: { name: string, kind: string, ref?: string } } }>} */
   const folded = new Map();
   const ids = new Set(messages.map((m) => m.id));
   const ordered = [...annotations].filter((a) => ids.has(a.target))
@@ -162,6 +167,10 @@ export function foldAnnotations(messages, annotations) {
     folded.set(a.target, state);
     if (a.act === "withdraw") { state.withdrawn ??= { at: a.ts }; continue; }
     if (a.act === "pin" || a.act === "unpin") { state.pinned = a.act === "pin"; continue; }
+    if (a.act === "title") {
+      if (typeof a.text === "string") state.title = { at: a.ts, text: a.text, by: { name: a.author.name, kind: a.author.kind, ...(a.author.ref !== undefined ? { ref: a.author.ref } : {}) } };
+      continue;
+    }
     // an edit after the withdrawal changes nothing: withdrawn wins
     if (a.act === "edit" && !state.withdrawn && typeof a.text === "string") state.edited = { at: a.ts, text: a.text };
   }
@@ -177,7 +186,7 @@ export function foldAnnotations(messages, annotations) {
       base = decorate(/** @type {any} */ ({ ...rest, text, ...(signedAs !== undefined ? { signedAs } : {}) }));
     }
     return { ...base, ...(state.edited ? { edited: state.edited } : {}), ...(state.withdrawn ? { withdrawn: state.withdrawn } : {}),
-      ...(state.pinned !== undefined ? { pinned: state.pinned } : {}) };
+      ...(state.pinned !== undefined ? { pinned: state.pinned } : {}), ...(state.title ? { title: state.title } : {}) };
   });
 }
 
@@ -423,8 +432,8 @@ class AgoraClient {
     if (!raw || typeof raw !== "object" || typeof raw.id !== "string" || !ANNOTATION_ACTS.has(raw.act) || typeof raw.target !== "string" ||
         !raw.author || typeof raw.author.id !== "string" || typeof raw.author.name !== "string" || typeof raw.author.kind !== "string" ||
         (raw.text !== undefined && typeof raw.text !== "string") ||
-        // an edit carries its text, unless a purge took it and says so
-        (raw.act === "edit" ? typeof raw.text !== "string" && !AgoraClient.#purgedMarker(raw.purged) : typeof raw.text === "string"))
+        // an edit or a title carries its text, unless a purge took it and says so
+        (raw.act === "edit" || raw.act === "title" ? typeof raw.text !== "string" && !AgoraClient.#purgedMarker(raw.purged) : typeof raw.text === "string"))
       throw refused(code, "the service delivered an annotation that is not one");
     /** @type {ClientAnnotation} */
     const a = { ...wireAnnotation(raw), ...(AgoraClient.#purgedMarker(raw.purged) ? { purged: { at: raw.purged.at, purge: raw.purged.purge } } : {}) };
@@ -479,7 +488,7 @@ class AgoraClient {
     const withAnnotations = c.capabilities.has(ANNOTATIONS_CAPABILITY);
     /** @param {number | undefined} n */
     const ask = (n) => c.request("read", { roomId, ...(thread !== undefined ? { thread } : {}), ...(since ? { since } : {}), ...(n !== undefined ? { limit: n } : {}),
-      ...(withAnnotations ? { annotations: true } : {}) });
+      ...(withAnnotations ? { annotations: true } : {}), ...(withAnnotations && c.capabilities.has(TITLES_CAPABILITY) ? { titles: true } : {}) });
     /** @type {any} */
     let answer;
     /** the count asked for when the host named a smaller page that fits one frame */
@@ -776,11 +785,14 @@ class AgoraClient {
     if (typeof request !== "object" || request === null) throw refused("annotation-invalid", "annotate takes { act, target, text?, author, operationId? }");
     if (typeof operationId !== "string" || !OPERATION_ID_RE.test(operationId)) throw refused("operation-id-invalid", "an operation id is 16-128 letters, digits, _ or -");
     const { act, target, text } = request;
-    if (typeof act !== "string" || !ANNOTATION_ACTS.has(act)) throw refused("annotation-invalid", "act is edit, withdraw, pin or unpin");
+    if (typeof act !== "string" || !ANNOTATION_ACTS.has(act)) throw refused("annotation-invalid", "act is edit, withdraw, pin, unpin or title");
     if (typeof target !== "string" || !OPERATION_ID_RE.test(target)) throw refused("annotation-invalid", "target is a message id");
     if (act === "edit") {
       if (typeof text !== "string") throw refused("annotation-invalid", "an edit carries its new text");
       if (Buffer.byteLength(text, "utf8") > TEXT_MAX_BYTES) throw refused("text-too-long", `the text is over ${TEXT_MAX_BYTES} bytes`);
+    } else if (act === "title") {
+      if (typeof text !== "string" || !text.trim() || text !== text.trim() || /[\r\n]/.test(text) || [...text].length > TITLE_MAX)
+        throw refused("annotation-invalid", `a title is one line of 1 to ${TITLE_MAX} characters, with no leading or trailing space`);
     } else if (text !== undefined) throw refused("annotation-invalid", `a ${act} carries no text`);
     const author = request.author;
     if (typeof author?.name !== "string" || !AUTHOR_KINDS.has(author.kind) || !author.name.trim() || author.name.length > 120)
@@ -799,10 +811,12 @@ class AgoraClient {
     }
     const { client: c, accountId } = conn;
     AgoraClient.#annotations(c, "this seat's service", "not keep an annotation");
+    if (act === "title" && !c.capabilities.has(TITLES_CAPABILITY))
+      throw refused("titles-unsupported", `this seat's service does not offer ${TITLES_CAPABILITY}, so it would not keep a title; nothing was sent`);
     if (this.#secret !== undefined && typeof text === "string" && text.includes(this.#secret))
       throw refused("service-secret-in-text", "the text carries the seat service secret; nothing was annotated");
     const operation = { kind: "annotation", operationId, authorName: author.name, authorKind: author.kind,
-      annotation: { act, target, ...(act === "edit" ? { text } : {}) },
+      annotation: { act, target, ...(act === "edit" || act === "title" ? { text } : {}) },
       ...(author.ref !== undefined ? { authorRef: author.ref } : {}) };
     if (nativeFramePayloadBytes({ roomId, operation, protocol: NATIVE_PROTOCOL, type: "append", requestId: "0".repeat(32) }) > NATIVE_FRAME_MAX)
       throw refused("text-too-long", "the annotation would not fit one native frame");

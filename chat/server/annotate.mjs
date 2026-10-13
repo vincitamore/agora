@@ -36,7 +36,9 @@ import { MESSAGE_ID, NAME_MAX, TEXT_MAX_BYTES, postFault } from "./post.mjs";
 import { forgetPurge } from "./search.mjs";
 import { once, withThumbs } from "./uploads.mjs";
 
-const ACTS = new Set(["edit", "withdraw", "pin", "unpin"]);
+const ACTS = new Set(["edit", "withdraw", "pin", "unpin", "title"]);
+/** A thread title: one line of at most this many characters (agora's own bound, docs/ANNOTATIONS.md). */
+export const TITLE_MAX = 120;
 const DRAFT_ID = /^[A-Za-z0-9_-]{8,128}$/;
 const REACTION = /^[\p{L}\p{N}_-]{1,32}$/u;
 const BODY_MAX_BYTES = 1_048_576;
@@ -84,11 +86,14 @@ export async function handleAnnotate(req, person, kit) {
   const b = await body(req, kit);
   if (b instanceof Response) return b;
   const { act, target, text } = b;
-  if (typeof act !== "string" || !ACTS.has(act)) return kit.fail(400, "BAD_REQUEST", "act is edit, withdraw, pin or unpin.");
+  if (typeof act !== "string" || !ACTS.has(act)) return kit.fail(400, "BAD_REQUEST", "act is edit, withdraw, pin, unpin or title.");
   if (typeof target !== "string" || !MESSAGE_ID.test(target)) return kit.fail(400, "BAD_REQUEST", "target is a message's id.");
   if (act === "edit") {
     if (typeof text !== "string" || !text.trim()) return kit.fail(400, "BAD_REQUEST", "An edit carries the message's new words.");
     if (Buffer.byteLength(text, "utf8") > TEXT_MAX_BYTES) return kit.fail(413, "TOO_LARGE", `The text is over ${TEXT_MAX_BYTES} bytes.`);
+  } else if (act === "title") {
+    if (typeof text !== "string" || !text.trim() || /[\r\n]/.test(text) || [...text.trim()].length > TITLE_MAX)
+      return kit.fail(400, "BAD_REQUEST", `A title is one line of 1 to ${TITLE_MAX} characters.`);
   } else if (text !== undefined) return kit.fail(400, "BAD_REQUEST", `A ${act} carries no text.`);
   const op = operation(b.operationId, person.id, `annotate:${act}:${target}`);
   if (!op) return kit.fail(400, "BAD_REQUEST", "operationId is 8 to 128 letters, digits, - or _.");
@@ -97,6 +102,10 @@ export async function handleAnnotate(req, person, kit) {
   const thread = held ? kit.store.threadOf(target) ?? target : null;
   const act_ = /** @type {import("./index.mjs").ChatAct} */ (act === "unpin" ? "pin" : act);
   if (!kit.hooks.authorize(person, act_, { target, thread })) return kit.fail(403, "FORBIDDEN", "You cannot do that here.");
+  if (act === "title") {
+    if (!held) return kit.fail(404, "NOT_FOUND", "There is no such thread.");
+    if (thread !== target) return kit.fail(400, "BAD_REQUEST", "A title goes on a thread's first message.");
+  }
   if (act === "edit" || act === "withdraw") {
     if (!held) return kit.fail(404, "NOT_FOUND", "There is no such message.");
     const ref = kit.personRef(person);
@@ -105,7 +114,7 @@ export async function handleAnnotate(req, person, kit) {
 
   /** @type {{ refuse?: string, warn?: string }} */
   let scan = {};
-  if (act === "edit") {
+  if (act === "edit" || act === "title") {
     try { scan = kit.hooks.scanText(/** @type {string} */ (text)) ?? {}; }
     catch (e) {
       kit.log(`chat: the host's text scan threw: ${e instanceof Error ? e.message : String(e)}`);
@@ -114,7 +123,8 @@ export async function handleAnnotate(req, person, kit) {
     if (scan.refuse) return kit.fail(422, "TEXT_REFUSED", "The edit was not made.", { reason: scan.refuse });
   }
   try {
-    const receipt = await kit.room.annotate({ act, target, ...(act === "edit" ? { text } : {}), author: authorOf(person, kit), operationId: op.operationId });
+    const words = act === "title" ? /** @type {string} */ (text).trim() : text;
+    const receipt = await kit.room.annotate({ act, target, ...(act === "edit" || act === "title" ? { text: words } : {}), author: authorOf(person, kit), operationId: op.operationId });
     return kit.json(200, { ok: true, data: { receipt: { id: receipt.id, cursor: receipt.cursor, duplicate: receipt.duplicate, operationId: op.draft }, ...(scan.warn ? { warn: scan.warn } : {}) } });
   } catch (e) {
     const f = faultOf(e) ?? asFault(e);

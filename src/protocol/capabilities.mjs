@@ -14,8 +14,10 @@ import { validateAcceptedHostContext, validateNativeAccountRef } from './identit
  * a message naming them, and read their bytes back (docs/ATTACHMENTS.md). `annotations-v1`: a read
  * or subscription may ask for annotation records, and an append may carry one (docs/ANNOTATIONS.md).
  * `purge-v1`: an append may carry a purge, and a subscription that asks for annotations also
- * receives each purge as an event naming the messages it took (docs/PURGE.md). */
-export const NATIVE_CAPABILITIES = Object.freeze(/** @type {const} */ (['contracts-v2', 'board-v1', 'threads-v1', 'client-name-v1', 'attachments-v1', 'annotations-v1', 'purge-v1']));
+ * receives each purge as an event naming the messages it took (docs/PURGE.md). `titles-v1`: an
+ * annotation may title a thread's root, and a read or subscription that also asks `titles: true`
+ * receives those records; one that does not is carried past them (docs/ANNOTATIONS.md). */
+export const NATIVE_CAPABILITIES = Object.freeze(/** @type {const} */ (['contracts-v2', 'board-v1', 'threads-v1', 'client-name-v1', 'attachments-v1', 'annotations-v1', 'purge-v1', 'titles-v1']));
 /** @param {unknown} value */
 function capabilities(value) {
   const result = readArray(value, 'capabilities', PROTOCOL_LIMITS.capabilities, (v) => readEnum(v, 'capabilities', NATIVE_CAPABILITIES));

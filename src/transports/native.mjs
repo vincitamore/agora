@@ -104,7 +104,8 @@ export function nativeTransport(room, { actor, stateRoot, session, connect }) {
       let result;
       try {
         result = await c.request("read", { roomId, ...(thread !== undefined ? { thread } : {}), ...(since ? { since } : {}), ...(limit ? { limit } : {}),
-          ...(annotations === true && c.capabilities.has("annotations-v1") ? { annotations: true } : {}) });
+          ...(annotations === true && c.capabilities.has("annotations-v1") ? { annotations: true } : {}),
+          ...(annotations === true && c.capabilities.has("titles-v1") ? { titles: true } : {}) });
       } catch (e) {
         if (c.socket.destroyed) throw new ServiceDarkError(`seat service went dark during the read: ${e instanceof Error ? e.message : String(e)}`);
         throw e;

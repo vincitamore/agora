@@ -319,6 +319,16 @@ test("a thread a purge emptied (root and newest message) leaves the list; a root
   assert.equal(all(items[0], ".chat-ti-title")[0].textContent, "purged thread");
 });
 
+test("a thread someone titled is listed and headed by its title; a purge still says purged thread", () => {
+  const el = doc.createElement("nav");
+  const id = "d".repeat(64);
+  const named = msg({ id, text: "the first words someone typed", title: { at: "t", text: "Phone chat layout", by: { name: "Network Assistant", kind: "agent" } } });
+  renderThreadList(el, [{ root: named, lastAt: new Date(2026, 9, 9, 10, 0).toISOString() }], ctx, {});
+  assert.equal(all(el, ".chat-ti-title")[0].textContent, "Phone chat layout");
+  assert.equal(threadTitle(named), "Phone chat layout");
+  assert.equal(threadTitle(msg({ id, text: "", purged: { at: "t", purge: "p".repeat(64) }, title: { at: "t", text: "x", by: { name: "n", kind: "human" } } })), "purged thread");
+});
+
 test("a title keeps a literal underscore; emphasis keeps its words and drops its marks", () => {
   assert.equal(titleText("Link to SITE_CT_PHONE610"), "Link to SITE_CT_PHONE610");
   assert.equal(firstLine(/** @type {any} */ ({ id: "r", text: "Link to SITE_CT_PHONE610\nsecond line" })), "Link to SITE_CT_PHONE610");

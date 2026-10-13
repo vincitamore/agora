@@ -41,7 +41,7 @@ function codedRefusal(code, detail) {
  * older service ignores a field it does not know and would answer the whole room.
  * `client-name-v1` is local-only: a member session cannot declare a client name.
  */
-const LOCAL_OFFER = validateCapabilityOffer({ advertised: ["threads-v1", "client-name-v1", "attachments-v1", "annotations-v1", "purge-v1"], required: [] });
+const LOCAL_OFFER = validateCapabilityOffer({ advertised: ["threads-v1", "client-name-v1", "attachments-v1", "annotations-v1", "purge-v1", "titles-v1"], required: [] });
 const MEMBER_OFFER = validateCapabilityOffer({ advertised: ["threads-v1"], required: [] });
 
 const MAX_PENDING_WRITE = 2 * 1024 * 1024;
@@ -458,7 +458,7 @@ export class NativeRoomService {
      * shapes; #broadcast writes through sendFrame, which is duck-typed for the same reason.
      * Per stream, per room: the last sequence written to it, and the thread a thread-scoped
      * subscription narrows to.
-     * @type {Map<net.Socket | import("node:stream").Duplex, Map<string, { sequence: number, thread?: string, annotations?: boolean, purges?: boolean }>>} */
+     * @type {Map<net.Socket | import("node:stream").Duplex, Map<string, { sequence: number, thread?: string, annotations?: boolean, titles?: boolean, purges?: boolean }>>} */
     this.subscriptions = new Map();
     /** @type {number | undefined} */
     this.panePid = undefined;
@@ -819,6 +819,13 @@ export class NativeRoomService {
       if (frame.annotations !== undefined && typeof frame.annotations !== "boolean")
         throw codedRefusal("annotations-invalid", "annotations is true or false");
       const withAnnotations = frame.annotations === true;
+      // titles-v1 (docs/ANNOTATIONS.md): a title record reaches only a reader that asks for titles,
+      // so a reader built before titles is never handed an act it does not know
+      if (frame.titles !== undefined && typeof frame.titles !== "boolean")
+        throw codedRefusal("titles-invalid", "titles is true or false");
+      const withTitles = frame.titles === true;
+      /** @param {any} a */
+      const shown = (a) => withTitles || a.act !== "title";
       // purge-v1 (docs/PURGE.md): a subscriber asks for purge events by name; one that does not is
       // carried past purge records, as past board records
       if (frame.purges !== undefined && typeof frame.purges !== "boolean")
@@ -829,7 +836,7 @@ export class NativeRoomService {
         // annotations-v1: a reader that asks for annotations gets them in log order beside the
         // messages, and a page is cut over both; a reader that does not ask is carried past them
         // exactly as it is carried past board records, and its frames are what they always were
-        const annotations = withAnnotations ? view.annotations : [];
+        const annotations = withAnnotations ? view.annotations.filter(shown) : [];
         const isAnnotation = new Set(annotations);
         const messages = annotations.length
           ? [...view.messages, ...annotations].sort((x, y) => parseNativeCursor(x.cursor).sequence - parseNativeCursor(y.cursor).sequence)
@@ -906,7 +913,7 @@ export class NativeRoomService {
       /** @type {{ message?: any, annotation?: any, purge?: any, cursor: string }[]} the replay in log order; annotations and purges only when asked for */
       const backlog = !replay ? []
         : [...replay.messages.map((message) => ({ message, cursor: message.cursor })),
-          ...(withAnnotations ? replay.annotations.map((annotation) => ({ annotation, cursor: annotation.cursor })) : []),
+          ...(withAnnotations ? replay.annotations.filter(shown).map((annotation) => ({ annotation, cursor: annotation.cursor })) : []),
           ...(withPurges ? replay.purges.map((purge) => ({ purge, cursor: purge.cursor })) : [])]
           .sort((x, y) => parseNativeCursor(x.cursor).sequence - parseNativeCursor(y.cursor).sequence);
       // One event frame per message, so the batch bound above does not apply -- but a SINGLE
@@ -932,7 +939,7 @@ export class NativeRoomService {
         throw new AgoraError(`native subscription backlog needs ${replayBytes} buffered bytes; read forward before subscribing (no cursor advanced)`);
       for (const encoded of replayFrames) socket.write(encoded);
       this.subscriptions.get(socket)?.set(roomId, { sequence: committed, ...(thread !== undefined ? { thread } : {}),
-        ...(withAnnotations ? { annotations: true } : {}), ...(withPurges ? { purges: true } : {}) });
+        ...(withAnnotations ? { annotations: true } : {}), ...(withAnnotations && withTitles ? { titles: true } : {}), ...(withPurges ? { purges: true } : {}) });
       socket.write(resultFrame);
       return;
     }
@@ -1063,6 +1070,8 @@ export class NativeRoomService {
     for (const [socket, rooms] of this.subscriptions) {
       const held = rooms.get(roomId);
       if (held === undefined || !held.annotations || sequence <= held.sequence) continue;
+      // a subscription that did not ask for titles is carried past a title, as past a board record
+      if (annotation.act === "title" && !held.titles) { rooms.set(roomId, { ...held, sequence }); continue; }
       if (held.thread !== undefined) {
         const index = store.messageIndex.get(annotation.target);
         const target = index === undefined ? undefined : store.records[index].message;
@@ -1619,7 +1628,8 @@ export class NativeServiceClient {
     if (onPurge) { purgeListeners.add(onPurge); this.purgeListeners.set(roomId, purgeListeners); }
     try {
       return await this.request("subscribe", { roomId, since, ...(thread !== undefined ? { thread } : {}),
-        ...(onAnnotation ? { annotations: true } : {}), ...(onPurge ? { purges: true } : {}) });
+        ...(onAnnotation ? { annotations: true } : {}), ...(onAnnotation && this.capabilities.has("titles-v1") ? { titles: true } : {}),
+        ...(onPurge ? { purges: true } : {}) });
     } catch (e) {
       listeners.delete(listener);
       if (onAnnotation) annotationListeners.delete(onAnnotation);

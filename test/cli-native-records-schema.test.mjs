@@ -27,16 +27,16 @@ test("schema carries every native record verb and the post --attach option", asy
 
 test("a command line names its native record verb, and nothing else does", () => {
   assert.equal(nativeRecordVerb("attachment", "get"), "attachment-get");
-  for (const v of ["edit", "withdraw", "pin", "unpin"]) assert.equal(nativeRecordVerb(v, "room"), v);
+  for (const v of ["edit", "withdraw", "pin", "unpin", "title"]) assert.equal(nativeRecordVerb(v, "room"), v);
   assert.equal(nativeRecordVerb("room", "purge"), "room-purge");
   assert.equal(nativeRecordVerb("room", "faces"), undefined);
   assert.equal(nativeRecordVerb("room", "add-remote"), undefined);
   assert.equal(nativeRecordVerb("post", "room"), undefined, "post --attach is a post option, not a record verb");
-  assert.deepEqual([...NATIVE_RECORD_VERBS].sort(), ["attachment-get", "edit", "pin", "room-purge", "unpin", "withdraw"]);
+  assert.deepEqual([...NATIVE_RECORD_VERBS].sort(), ["attachment-get", "edit", "pin", "room-purge", "title", "unpin", "withdraw"]);
 });
 
 test("--help prints each verb's block", async () => {
-  for (const verb of ["attachment", "edit", "withdraw", "pin", "unpin"]) {
+  for (const verb of ["attachment", "edit", "withdraw", "pin", "unpin", "title"]) {
     const { stdout } = await run(process.execPath, [BIN, verb, "--help"], { windowsHide: true });
     assert.match(stdout, new RegExp(`^  ${verb} `, "m"), verb);
   }
