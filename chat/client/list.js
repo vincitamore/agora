@@ -38,6 +38,17 @@ export function rootId(t) {
   return typeof t.root === "string" ? t.root : t.root?.id ?? "";
 }
 
+/**
+ * A thread a purge emptied: its root and its newest message are gone, so nothing in it is left to
+ * read and the list does not carry it. A root alone purged, with later replies, stays listed.
+ * @param {ThreadSummary} t
+ */
+export function deleted(t) {
+  const root = typeof t.root === "string" ? undefined : t.root;
+  if (!root || !(/** @type {any} */ (root).purged)) return false;
+  return !t.last || t.last.id === root.id || Boolean(/** @type {any} */ (t.last).purged);
+}
+
 /** What a thread whose root a purge took is called: its words are gone, and its id is not a title. */
 export const PURGED_THREAD_TITLE = "purged thread";
 
@@ -80,7 +91,7 @@ export function renderThreadList(el, threads, ctx, opts = {}) {
   while (el.firstChild) el.removeChild(el.firstChild);
   const meId = opts.me?.id ?? ctx.person?.id ?? null;
   const nameOf = opts.name ?? ((/** @type {string} */ id) => id);
-  const sorted = [...threads].filter((t) => rootId(t)).sort((a, b) => String(b.lastAt ?? "").localeCompare(String(a.lastAt ?? "")));
+  const sorted = [...threads].filter((t) => rootId(t) && !deleted(t)).sort((a, b) => String(b.lastAt ?? "").localeCompare(String(a.lastAt ?? "")));
   if (!sorted.length) {
     el.appendChild(h("p", { class: "chat-empty" }, ["no threads here yet"]));
     return;

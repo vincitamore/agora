@@ -67,7 +67,7 @@ The host's cross-site checks and session sit in front of every route.
 
 | Route | Body / query | Answer |
 |---|---|---|
-| `GET /chat/state` | | `{ room, me: { id, name, ref? }, resident: { name, ...presence }, capabilities: [service capabilities], version, link: { state: "live" \| "dark" \| "refused", reason? } }` |
+| `GET /chat/state` | | `{ room, me: { id, name, ref? }, may: { purge }, resident: { name, ...presence }, capabilities: [service capabilities], version, link: { state: "live" \| "dark" \| "refused", reason? } }` |
 | `GET /chat/threads` | `scope=all\|mine`, `context=<k>=<v>` (repeatable, all must match), `before=<lastCursor>`, `limit` (1-200, default 50) | `{ threads: [summary], through }` |
 | `GET /chat/thread/:root` | `:root` is a root id or `main`; `since` | `{ messages (folded), annotations, through }`; `annotations` are those whose target is not in `messages` |
 | `GET /chat/stream` | `thread=<root>\|main` (SSE); `Last-Event-ID` or `since` resumes | events below |
@@ -300,6 +300,12 @@ Subscription endpoints are limited to the browsers' push services.
   thread whose root a purge took is titled "purged thread" (in the list and the heading, at its
   read and when a live `purge` event takes the root), never its root's id and never a reply's
   words, which are not what the thread was opened about.
+- **A deleted thread leaves the list.** A thread whose root and newest message a purge took has
+  nothing left to read and is not listed (a thread whose root alone was purged, with replies still
+  carrying words, stays, titled "purged thread"). A person `may.purge` (`GET /chat/state`) sees
+  "delete" in the open thread's heading; it asks once ("delete this thread for everyone?") and then
+  purges the thread (`POST /chat/purge { thread }`) and returns to the list. Copies a face carried
+  out (a Slack thread) are out of the purge's reach and stay where they are.
 - **Text from outside is inert**: escaped, never interpreted.
 - Posts past 600 characters are collapsed behind "show all".
 - **A card is a reference, never a payload.** A message carries a card as a trailer

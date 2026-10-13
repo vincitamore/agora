@@ -430,6 +430,8 @@ export async function createChat(options) {
     return json(200, { ok: true, data: {
       room: options.room,
       me: { id: person.id, name: person.name, ...(person.ref ? { ref: person.ref } : {}) },
+      // what the person may do beyond reading and posting, so the client offers only what is theirs
+      may: { purge: Boolean(hooks.authorize(person, "purge", { targets: [], thread: null })) },
       resident: { name: hooks.residentName, ...presence },
       capabilities: room.capabilities(),
       version: CHAT_VERSION,

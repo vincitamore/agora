@@ -43,6 +43,7 @@ export { registerBlock } from "./blocks.js";
  *   base: string,
  *   context?: () => Array<[string, string]>,
  *   onOpenThread?: (root: string) => void,
+ *   onThreadDeleted?: (root: string) => void,
  *   people?: () => Promise<Array<{ id: string, name: string }>>,
  *   thread?: string,
  *   now?: () => Date,
@@ -138,6 +139,9 @@ export function mountChat(el, options) {
   const now = options.now ?? (() => new Date());
   /** @type {{ id: string, name: string } | null} */
   let me = null;
+  /** what the person may do beyond reading and posting (`GET /chat/state` `may`) */
+  /** @type {{ purge?: boolean }} */
+  let may = {};
   /** @type {Map<string, string>} */
   const names = new Map();
   const nameOf = (/** @type {string} */ id) => names.get(id) ?? (me && me.id === id ? me.name : id);
@@ -197,10 +201,17 @@ export function mountChat(el, options) {
   const title = h("h1", { class: "chat-thread-title" });
   const meta = h("span", { class: "chat-thread-meta" });
   const presenceLine = h("span", { class: "chat-presence" });
+  // delete: the whole thread, for a person who may purge; asked once in a strip under the heading
+  const deleteButton = h("button", { type: "button", class: "chat-delete", hidden: true, "aria-expanded": "false" }, ["delete"]);
+  const confirmText = h("span", { class: "chat-confirm-text", role: "status" });
+  const confirmYes = h("button", { type: "button", class: "chat-confirm-yes" }, ["delete thread"]);
+  const confirmNo = h("button", { type: "button", class: "chat-confirm-no" }, ["cancel"]);
+  const confirmStrip = h("div", { class: "chat-confirm", hidden: true, role: "group", "aria-label": "Delete this thread" }, [confirmText, h("span", { class: "chat-confirm-acts" }, [confirmNo, confirmYes])]);
   const head = h("header", { class: "chat-thread-head" }, [
     back,
     h("div", { class: "chat-thread-heading" }, [cap, title, meta]),
-    h("div", { class: "chat-thread-side" }, [presenceLine]),
+    h("div", { class: "chat-thread-side" }, [presenceLine, deleteButton]),
+    confirmStrip,
   ]);
   const ledger = h("div", { class: "chat-ledger" });
   const scroller = h("div", { class: "chat-scroll" }, [ledger]);
@@ -323,6 +334,8 @@ export function mountChat(el, options) {
     title.textContent = "";
     cap.textContent = "thread";
     meta.textContent = "";
+    setConfirm(false);
+    deleteButton.hidden = !may.purge;
     view = renderThread(ledger, [], ctxFor(root), { base, me, name: nameOf });
     if (options.onOpenThread) options.onOpenThread(root);
     try {
@@ -378,6 +391,55 @@ export function mountChat(el, options) {
   const backToList = () => {
     shell.setAttribute("data-view", "list");
   };
+
+  /** @param {boolean} on */
+  function setConfirm(on) {
+    confirmStrip.hidden = !on;
+    deleteButton.setAttribute("aria-expanded", String(on));
+    confirmYes.disabled = false;
+    confirmNo.disabled = false;
+    if (on) confirmText.textContent = "Delete this thread for everyone? Its messages and files are removed and cannot be brought back.";
+  }
+  deleteButton.addEventListener("click", () => {
+    setConfirm(confirmStrip.hidden);
+    if (!confirmStrip.hidden) confirmNo.focus();
+  });
+  confirmNo.addEventListener("click", () => { setConfirm(false); deleteButton.focus(); });
+  confirmYes.addEventListener("click", async () => {
+    const root = active;
+    if (!root) return;
+    confirmYes.disabled = true;
+    confirmNo.disabled = true;
+    confirmText.textContent = "deleting";
+    const operationId = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `op-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const payload = JSON.stringify({ thread: root, reason: `deleted by ${me?.name ?? "a person"} in the chat`, operationId });
+    try {
+      for (let tries = 0; ; tries++) {
+        const r = await call(base, "/purge", { method: "POST", body: payload });
+        // acceptance unknown: the same operation id is resent, never a new one
+        if (r.status === 202 && tries < 3) { await new Promise((res) => setTimeout(res, 1000 * (tries + 1))); continue; }
+        dataOf(r);
+        break;
+      }
+    } catch (e) {
+      confirmText.textContent = `not deleted: ${e instanceof Error ? e.message : String(e)}`;
+      confirmNo.disabled = false;
+      confirmYes.disabled = false;
+      return;
+    }
+    if (active !== root) return;
+    setConfirm(false);
+    threads = threads.filter((t) => rootId(t) !== root);
+    active = null;
+    if (threadStream) { threadStream.close(); threadStream = null; }
+    while (ledger.firstChild) ledger.removeChild(ledger.firstChild);
+    while (composer.firstChild) composer.removeChild(composer.firstChild);
+    shell.setAttribute("data-open", "false");
+    shell.setAttribute("data-view", "list");
+    drawList();
+    options.onThreadDeleted?.(root);
+    queueList();
+  });
   back.addEventListener("click", backToList);
 
   const mainStream = openStream(`${base}/stream?thread=main`, {
@@ -403,6 +465,8 @@ export function mountChat(el, options) {
     try {
       const state = dataOf(await call(base, "/state"));
       me = state?.me ?? null;
+      may = state?.may && typeof state.may === "object" ? state.may : {};
+      if (active) deleteButton.hidden = !may.purge;
       if (state?.resident) { presence = state.resident; drawPresence(); }
     } catch (e) {
       roomDetail = `the room could not be read: ${e instanceof Error ? e.message : String(e)}`;

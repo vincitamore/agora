@@ -302,6 +302,23 @@ test("a thread whose root a purge took is titled \"purged thread\", never by its
   assert.equal(threadTitle(msg({ id: "x", text: "Still here\nmore" })), "Still here");
 });
 
+test("a thread a purge emptied (root and newest message) leaves the list; a root alone purged stays", () => {
+  const el = doc.createElement("nav");
+  const purged = { at: new Date(2026, 9, 9, 9, 0).toISOString(), purge: "p".repeat(64) };
+  const a = "a".repeat(64);
+  const b = "b".repeat(64);
+  const c = "c".repeat(64);
+  const at = new Date(2026, 9, 9, 10, 0).toISOString();
+  renderThreadList(el, [
+    { root: msg({ id: a, text: "", purged }), last: msg({ id: "ra", text: "", thread: a, purged }), lastAt: at },
+    { root: msg({ id: b, text: "", purged }), lastAt: at },
+    { root: msg({ id: c, text: "", purged }), last: msg({ id: "rc", text: "a surviving reply", thread: c }), lastAt: at },
+  ], ctx, {});
+  const items = all(el, ".chat-ti");
+  assert.equal(items.length, 1);
+  assert.equal(all(items[0], ".chat-ti-title")[0].textContent, "purged thread");
+});
+
 test("a title keeps a literal underscore; emphasis keeps its words and drops its marks", () => {
   assert.equal(titleText("Link to SITE_CT_PHONE610"), "Link to SITE_CT_PHONE610");
   assert.equal(firstLine(/** @type {any} */ ({ id: "r", text: "Link to SITE_CT_PHONE610\nsecond line" })), "Link to SITE_CT_PHONE610");
