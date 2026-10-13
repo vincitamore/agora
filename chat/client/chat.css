@@ -127,7 +127,7 @@
   color: var(--chat-ink2);
 }
 .chat-filter[aria-pressed="true"] { background: var(--chat-raised); border-color: var(--chat-ink3); color: var(--chat-ink); }
-.chat-list-scroll { flex: 1; min-height: 0; overflow-y: auto; }
+.chat-list-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; }
 .chat-threads { display: flex; flex-direction: column; gap: 4px; }
 
 .chat-ti {
@@ -141,6 +141,7 @@
   border-left: 3px solid transparent;
   background: transparent;
   cursor: pointer;
+  min-width: 0;
 }
 .chat-ti.is-active { background: var(--chat-raised); }
 .chat-ti.is-you { border-left-color: var(--chat-you); }
@@ -157,7 +158,7 @@
   color: var(--chat-ink3);
 }
 .chat-ti-you { color: var(--chat-you); font-weight: 600; }
-.chat-chip { white-space: nowrap; }
+.chat-chip { white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .chat-chip--context { border: 1px solid var(--chat-rule); padding: 0 5px; line-height: 1.45; }
 .chat-unread { flex: none; width: 7px; height: 7px; background: var(--chat-ink); align-self: center; }
 .chat-ti.is-unread .chat-ti-last { color: var(--chat-ink); }
