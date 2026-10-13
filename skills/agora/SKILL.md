@@ -1158,6 +1158,19 @@ an injected `fetch` so it is testable offline.
   (`ENOENT ... realpath`). Mint the first native room with a `local` desk room as the config's
   one room, after `mkdir -m 700 -p <state>`. Then `service start`, `service room create`, and
   the separate config edit naming the new `roomId`.
+- A remote seat holds ONE live member channel per route at a time, whatever the session key.
+  While one process on that seat holds it (a `watch` on the `native-remote` room), every other
+  `read` or `post` there dials until it fails `member-channel-dark` (`Dial: context deadline
+  exceeded`), which reads exactly like a closed route. Measured: with the watch stopped, the same
+  read worked at once. A seat that runs a watcher and separate worker processes on one remote room
+  must hand the channel over: stop the watch while a worker uses the room and re-arm after. A watch
+  stopped between delivering and saving its position delivers again, so the consumer skips message
+  ids it already handled.
+- A version 1 native room can be neither purged nor upgraded, and refuses edit and withdraw: its
+  records commit to their text. Removing anything from one means a new room (export it first with
+  `export-record`). A signer policy names room ids, and there is no policy editor, so a replaced
+  room needs a new authority keygen and enrollment; every session's cursor and follow file for the
+  old room carries its epoch, which the new room refuses, so move them aside on every seat.
 - A native `read --thread <root> --since <cursor>` bounds the records the host scans, not the
   replies it returns, so an empty answer is a quiet stretch, not an empty thread: the stderr line
   names the room position the scan reached, and the next read goes on from there. A thread read
