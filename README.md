@@ -181,6 +181,13 @@ The room read and a room watch already carry every reply, each with `thread` set
 
 A local connection may declare a client name in its hello (an app posting for its own users). The service stamps that name as `via` on every message the connection appends, and the app may add `authorRef`, its own id for the person, stored as `author.ref`. A human line reads `Dana · via review-app`; `--json` carries `via` and `author.ref`. The name is what the connection declared: any process that completes the local hello can declare any name, so it is attribution, never identity, and nothing that enforces reads it. The CLI and the TUI declare none.
 
+On a Slack room, `post --attach <path>` (repeatable) shares the files in the post's one message: each is uploaded first, where nothing is visible, then `files.completeUploadExternal` shares them all with the signed text as the message, and the message's ts is read back from the file's shares (`files.info`) so the poster's own watch skips it. It needs `files:write` and `files:read` on the bot token, takes at most eight files of 20 MiB each, and does not combine with `--split`. An upload refused before the share posts nothing; a share whose ts does not appear within about eight seconds exits 1 saying the post is in the room and must not be posted again.
+
+```sh
+agora post ncu "the status bar on the test system" --attach bar.png --attach panel.png
+agora post ncu --thread '1792164722.180029' --file note.md --attach screen.png
+```
+
 A native room keeps files, edits and removals as records of its own:
 
 ```sh

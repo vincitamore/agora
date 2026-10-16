@@ -105,7 +105,7 @@ import { runUsageSessionsCli } from "../src/session-accounting.mjs";
 import { readShadowArgs, runEconomyShadowCli, ShadowInputError } from "../src/economy/shadow.mjs";
 import { clearStandDown, clearWatchStop, completeStandDownAck, declareStandDown, listStandDowns, standDownRequested } from "../src/stand-down.mjs";
 import { DEFAULT_DEAF_SECONDS, DEFAULT_IDLE_SECONDS, DEFAULT_MAX_CONTEXT, DEFAULT_MIN_CONTEXT, ROOM_MECHANICS_DOC, assertResidentSlug, configuredResidents, planCycle, readInheritMarker, removeInheritMarker, renderResidentPrompt, restartCommand, writeInheritMarker } from "../src/resident.mjs";
-import { nativeRecordArgumentRefusal, nativeRecordVerb, prepareAttachments, runNativeRecordVerb } from "../src/cli-native-records.mjs";
+import { nativeRecordArgumentRefusal, nativeRecordVerb, prepareAttachments, readSlackFiles, runNativeRecordVerb } from "../src/cli-native-records.mjs";
 import { NativeRoomStore } from "../src/native-store.mjs";
 import { FACE_ATTACHMENT_MODES, FACE_BUILT, FACE_SELECTORS, appendFaceRecord, faceCopies, facePolicyPath, listFaceRecords, normalizeSelectors, readFacePolicy, selectFaces, writeFacePolicy } from "../src/faces.mjs";
 
@@ -192,7 +192,7 @@ const SCHEMA = {
         "--fyi": "emit ack: none, licensing the reader's silence. Honouring it is a judgement; the tool never filters, suppresses or delays on an incoming ack:",
         "--face <name>": "native rooms: also publish this post to the named face of the room (slack, github), whatever the room's policy would have chosen; repeatable or comma-separated. A name that is not a face of the room, a transport with no audience, or a face that is off is a refused row on the receipt, never an exit code: the native post is the outcome",
         "--no-face": "native rooms: this post stays native only, whatever the room's policy says",
-        "--attach <path>": "native rooms: upload this file into the room's custody and carry it on the post, repeatable (images and files; docs/ATTACHMENTS.md)",
+        "--attach <path>": "native rooms: upload this file into the room's custody and carry it on the post; Slack rooms: share it in the post's one message (files:write, files:read; at most 8, 20 MiB each, not with --split). Repeatable (images and files; docs/ATTACHMENTS.md)",
       },
       does: "post one message signed as this session's bearer, with any trailers in a block above the signature; prints id and cursor. On a native room --claim is a board acquire before the message (refused if a live holder is present; an expired lease is no holder); --lease sets the claim's length in seconds; the receipt also carries one row per face of the room (pending | published | refused | unknown), read from the seat's face records; agora faces <room> --for <cursor> reads them again later",
     },
@@ -2344,13 +2344,19 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       const choice = faceChoice(values);
       if (choice !== undefined && room.transport !== "native") throw new AgoraError(`--face and --no-face belong to a native room; "${roomAlias}" is a ${room.transport} room, and a post there is already where its readers are`, EXIT.usage);
       if (values.split && room.transport === "native") throw new AgoraError(`--split chunks a Slack post; "${roomAlias}" is a native room, whose message is one message, and a face carries no split`, EXIT.usage);
-      // `--attach` uploads into the room's custody first; the post then carries the references
-      // (docs/ATTACHMENTS.md). Elsewhere a file is a transport's own business.
+      // `--attach` on a native room uploads into the room's custody first; the post then carries the
+      // references (docs/ATTACHMENTS.md). On a Slack room the files are read whole here and the
+      // transport shares them in the post's one message. Elsewhere there is nowhere to put a file.
       /** @type {import('../src/protocol/attachment.mjs').WireAttachment[] | undefined} */
       let attachments;
+      /** @type {{ name: string, bytes: Buffer, mimetype: string }[] | undefined} */
+      let files;
       if (values.attach?.length) {
-        if (room.transport !== "native") throw new AgoraError(`--attach belongs to a native room; "${roomAlias}" is a ${room.transport} room`, EXIT.usage);
-        attachments = await prepareAttachments({ roomAlias, room, cfg, stateRoot, paths: values.attach.map(String) });
+        if (room.transport === "native") attachments = await prepareAttachments({ roomAlias, room, cfg, stateRoot, paths: values.attach.map(String) });
+        else if (room.transport === "slack") {
+          if (values.split) throw new AgoraError(`--attach and --split do not combine: a Slack post with files is one message; shorten the text`, EXIT.usage);
+          files = await readSlackFiles(values.attach.map(String));
+        } else throw new AgoraError(`--attach belongs to a native or Slack room; "${roomAlias}" is a ${room.transport} room`, EXIT.usage);
       }
       /** @type {{ transport: string, code: string, reason: string }[]} */
       let faceRefusals = [];
@@ -2407,7 +2413,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       try {
         for (const piece of pieces) {
           const intent = await beginCarryPost(sdir, roomAlias, session, bearer.name, payload(piece));
-          last = await recordedPost(transport, sdir, payload(piece), { thread, ...(wireChoice === undefined ? {} : { face: wireChoice }), ...(attachments?.length ? { attachments } : {}) }, { session, bearer: bearer.name });
+          last = await recordedPost(transport, sdir, payload(piece), { thread, ...(wireChoice === undefined ? {} : { face: wireChoice }), ...(attachments?.length ? { attachments } : {}), ...(files?.length ? { files } : {}) }, { session, bearer: bearer.name });
           await captureCarryPost(sdir, roomAlias, session, bearer.name, payload(piece), last, intent);
           ids.push(last.id);
         }
@@ -2454,7 +2460,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         if (!faceRows.length) console.error(`agora: no face rows for ${r.cursor}${wireChoice === "none" ? " (--no-face)" : ""}: ${wireChoice === "none" ? "the post is native only" : "the seat service wrote none (no face of the room selected it, or the service that publishes faces has not run over it); agora faces " + roomAlias + " --for " + r.cursor + " reads them later"}`);
         return EXIT.ok;
       }
-      console.log(json ? JSON.stringify({ ...r, alias: roomAlias, room: transport.room, thread, ...(ids.length > 1 ? { ids } : {}) }) : `posted ${ids.join(" ")}${r.url ? `  ${r.url}` : ""}  cursor ${r.cursor}`);
+      console.log(json ? JSON.stringify({ ...r, alias: roomAlias, room: transport.room, thread, ...(ids.length > 1 ? { ids } : {}) }) : `posted ${ids.join(" ")}${r.url ? `  ${r.url}` : ""}  cursor ${r.cursor}${r.files?.length ? `  files ${r.files.join(" ")}` : ""}`);
       return EXIT.ok;
     }
     case "contest": {

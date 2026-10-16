@@ -28,6 +28,7 @@ import path from "node:path";
 import { AgoraError, EXIT, resolvePath, sign } from "./core.mjs";
 import { ClientError, connect } from "./client.mjs";
 import { validateNativeThread } from "./transports/native.mjs";
+import { ATTACHMENT_SNIFF_BYTES, detectAttachmentType } from "./protocol/attachment.mjs";
 
 /** @typedef {'attachment-get' | 'edit' | 'withdraw' | 'pin' | 'unpin' | 'title' | 'room-purge'} NativeRecordVerb */
 
@@ -342,6 +343,27 @@ export function imageDimensions(input) {
     }
   }
   return undefined;
+}
+
+/**
+ * `post --attach` on a Slack room: read each path into the file the Slack transport shares. The type
+ * is what the bytes prove for an image, else the extension's, else a plain byte stream. Read whole
+ * before anything is sent, so a missing path posts nothing.
+ * @param {string[]} paths
+ * @returns {Promise<{ name: string, bytes: Buffer, mimetype: string }[]>}
+ */
+export async function readSlackFiles(paths) {
+  const out = [];
+  for (const given of paths) {
+    const file = resolvePath(given);
+    let bytes;
+    try { bytes = await readFile(file); }
+    catch (e) { throw new AgoraError(`--attach ${given}: ${e instanceof Error ? e.message : String(e)}; nothing was posted`, EXIT.error); }
+    const sniffed = detectAttachmentType(bytes.subarray(0, ATTACHMENT_SNIFF_BYTES));
+    const mimetype = sniffed.mimetype ?? DECLARED_TYPES[path.extname(file).toLowerCase()] ?? "application/octet-stream";
+    out.push({ name: path.basename(file).slice(0, 255), bytes, mimetype });
+  }
+  return out;
 }
 
 /**

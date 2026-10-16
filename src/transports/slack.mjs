@@ -22,6 +22,16 @@ export const SLACK_READ_PAGES = 10;
 export const SLACK_IMAGE_MAX_BYTES = 20 * 1024 * 1024;
 export const SLACK_IMAGE_MAX_PER_MESSAGE = 8;
 
+/** Files one `post --attach` shares in its one message; the same bound a read materializes. */
+export const SLACK_POST_FILES_MAX = SLACK_IMAGE_MAX_PER_MESSAGE;
+
+/**
+ * The waits, in ms, between asks of `files.info` for the ts of the message a `post --attach` shared.
+ * Slack processes an upload asynchronously, so the share's ts is not on the completion's response;
+ * the waits sum to under eight seconds, after which the post is reported shared with its id unknown.
+ */
+export const SLACK_SHARE_WAITS_MS = Object.freeze([250, 500, 1000, 2000, 4000]);
+
 /** Pages one reconciliation window walks; a face settles inside seconds, so a window is small. */
 const SLACK_HISTORY_WINDOW_PAGES = 3;
 
@@ -58,6 +68,8 @@ export function failedBeforeSend(e) {
   return NEVER_CONNECTED.test(e.message);
 }
 
+/** A local file `post --attach` shares into a Slack room: its name, its bytes, and the type the bytes or the extension say. @typedef {{ name: string, bytes: Buffer, mimetype: string }} PostFile */
+
 /** One message of a thread as the inbound face's edit and delete survey sees it. @typedef {{ ts: string, text: string, subtype?: string, hidden?: boolean, editedTs?: string }} InboundSurveyItem */
 
 /**
@@ -65,7 +77,7 @@ export function failedBeforeSend(e) {
  * contract. Every member here is reachable only through a face; the CLI's verbs never call them.
  * @typedef {object} SlackFaceTransport
  * @property {() => Promise<{ id: string, name: string, botId?: string }>} whoami
- * @property {(text: string, opts?: { thread?: string, metadata?: { event_type: string, event_payload: Record<string, string> } }) => Promise<import('../core.mjs').PostResult>} post
+ * @property {(text: string, opts?: { thread?: string, metadata?: { event_type: string, event_payload: Record<string, string> }, files?: PostFile[] }) => Promise<import('../core.mjs').PostResult>} post
  * @property {(window: { oldest: string, latest: string }) => Promise<{ messages: any[], complete: boolean }>} history
  * @property {(file: { name: string, length: number }) => Promise<{ uploadUrl: string, fileId: string }>} uploadUrl
  * @property {(file: { uploadUrl: string, bytes: Buffer, mimetype: string, digest: string }) => Promise<void>} putUpload
@@ -439,6 +451,86 @@ export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep
     });
   }
 
+  /**
+   * Step two of an upload, for a face and for `post --attach` alike: the bytes, to the pre-signed
+   * URL Slack issued. Parse, never pattern-match: a suffix test on the string admits evilslack.com.
+   * The host must BE slack.com or a subdomain of it, over https, and a redirect is refused rather
+   * than followed, so the bytes cannot be forwarded off a valid URL by a 307/308 (P6 finding at 2f7ea47).
+   * @param {string} uploadUrl @param {Buffer} bytes @param {string} mimetype
+   */
+  async function sendBytes(uploadUrl, bytes, mimetype) {
+    let u;
+    try { u = new URL(uploadUrl); } catch { throw new AgoraError(`upload url is not a URL; not uploaded`); }
+    if (u.protocol !== "https:" || !(u.hostname === "slack.com" || u.hostname.endsWith(".slack.com")))
+      throw new AgoraError(`upload url is not a slack.com origin; not uploaded`);
+    let res;
+    try {
+      res = await f(u.href, { method: "POST", headers: { "content-type": mimetype }, body: new Uint8Array(bytes), redirect: "error" });
+    } catch (e) {
+      throw new SlackApiError(`slack upload: ${failedBeforeSend(e) ? "unreachable" : "the link died during the upload"}`, { answered: false, sent: !failedBeforeSend(e), method: "upload" });
+    }
+    if (!res.ok) throw new SlackApiError(`slack upload: HTTP ${res.status}`, { answered: res.status < 500, status: res.status, method: "upload" });
+  }
+
+  /**
+   * The ts of the message that shared `fileId` into this channel (and into `thread`, when given),
+   * from the file's own `shares` record (files:read). Slack fills it asynchronously after the
+   * completion, so it is asked a bounded number of times; undefined when it never appeared.
+   * @param {string} fileId @param {string | undefined} thread
+   */
+  async function sharedTs(fileId, thread) {
+    for (const wait of SLACK_SHARE_WAITS_MS) {
+      await sleep(wait);
+      let body;
+      try { body = await call("files.info", { file: fileId }); }
+      catch (e) { if (e instanceof SlackApiError && e.answered && e.error !== "file_not_found") throw e; continue; }
+      const shares = body.file?.shares ?? {};
+      /** @type {any[]} */
+      const here = [...(shares.public?.[channel] ?? []), ...(shares.private?.[channel] ?? [])];
+      const hit = here.find((x) => thread
+        ? String(x?.thread_ts ?? "") === thread && String(x?.ts) !== thread
+        : !x?.thread_ts || String(x.thread_ts) === String(x.ts));
+      if (hit?.ts) return String(hit.ts);
+    }
+    return undefined;
+  }
+
+  /**
+   * `post --attach` on a Slack room: every file uploaded (invisible), then ONE visible step,
+   * `files.completeUploadExternal`, which shares them all in one message whose text is the signed
+   * post. That message's ts is the post's id, read back from the file's shares so the poster's
+   * ledger names it and its own watch never delivers it back as foreign.
+   * @param {string} payload the encoded, signed text
+   * @param {{ thread?: string, files: PostFile[] }} opts
+   */
+  async function postWithFiles(payload, { thread, files }) {
+    if (files.length > SLACK_POST_FILES_MAX) throw new AgoraError(`--attach takes at most ${SLACK_POST_FILES_MAX} files on one Slack post; nothing was posted`, EXIT.usage);
+    for (const file of files) {
+      if (!file.bytes.length) throw new AgoraError(`--attach ${file.name} is empty; nothing was posted`, EXIT.usage);
+      if (file.bytes.length > imageMaxBytes) throw new AgoraError(`--attach ${file.name} is ${file.bytes.length} bytes, over the ${imageMaxBytes}-byte limit for one file; nothing was posted`, EXIT.usage);
+    }
+    /** @type {{ id: string, title: string }[]} */
+    const uploaded = [];
+    for (const file of files) {
+      // nothing is visible in any channel until the completion, so a failure here posts nothing
+      const body = await call("files.getUploadURLExternal", { filename: file.name, length: String(file.bytes.length) });
+      await sendBytes(String(body.upload_url), file.bytes, file.mimetype);
+      uploaded.push({ id: String(body.file_id), title: file.name });
+    }
+    /** @type {Record<string, unknown>} */
+    const params = { files: uploaded, channel_id: channel, initial_comment: payload };
+    if (thread) params.thread_ts = thread;
+    try { await call("files.completeUploadExternal", params, { post: true }); }
+    catch (e) {
+      if (e instanceof SlackApiError && !e.answered && e.sent !== false)
+        throw new AgoraError(`slack post: the share of ${uploaded.map((u) => u.id).join(", ")} was sent and its answer lost; read the room before posting again`, EXIT.error);
+      throw e;
+    }
+    const ts = await sharedTs(uploaded[0].id, thread);
+    if (!ts) throw new AgoraError(`slack post: shared ${uploaded.map((u) => u.id).join(", ")} into the room, but Slack did not report the message's ts in time; the post is there, do not post it again`, EXIT.error);
+    return { id: ts, cursor: ts, files: uploaded.map((u) => u.id) };
+  }
+
   return /** @type {import('../core.mjs').Transport & SlackFaceTransport} */ ({
     kind: "slack",
     room: channel,
@@ -493,20 +585,7 @@ export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep
       if (bytes.length > imageMaxBytes) throw new AgoraError(`image exceeds the ${imageMaxBytes}-byte limit`);
       const actual = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
       if (actual !== digest) throw new AgoraError(`image bytes do not match their digest; not uploaded`);
-      // Parse, never pattern-match: a suffix test on the string admits evilslack.com. The host must
-      // BE slack.com or a subdomain of it, over https, and a redirect is refused rather than
-      // followed, so the bytes cannot be forwarded off a valid URL by a 307/308 (P6 finding at 2f7ea47).
-      let u;
-      try { u = new URL(uploadUrl); } catch { throw new AgoraError(`upload url is not a URL; not uploaded`); }
-      if (u.protocol !== "https:" || !(u.hostname === "slack.com" || u.hostname.endsWith(".slack.com")))
-        throw new AgoraError(`upload url is not a slack.com origin; not uploaded`);
-      let res;
-      try {
-        res = await f(u.href, { method: "POST", headers: { "content-type": mimetype }, body: new Uint8Array(bytes), redirect: "error" });
-      } catch (e) {
-        throw new SlackApiError(`slack upload: ${failedBeforeSend(e) ? "unreachable" : "the link died during the upload"}`, { answered: false, sent: !failedBeforeSend(e), method: "upload" });
-      }
-      if (!res.ok) throw new SlackApiError(`slack upload: HTTP ${res.status}`, { answered: res.status < 500, status: res.status, method: "upload" });
+      await sendBytes(uploadUrl, bytes, mimetype);
     },
     /**
      * Step three, the only visible one: share the uploaded file into this channel (files:write).
@@ -648,12 +727,18 @@ export function slackTransport(room, { token, fetch: f = globalThis.fetch, sleep
     /**
      * `metadata` is Slack's per-message structured rider (an optional machine-readable rider, never
      * the carrier): a face puts its origin id there so a lost response can be reconciled exactly.
-     * @param {string} text @param {{ thread?: string, metadata?: { event_type: string, event_payload: Record<string, string> } }} [opts]
+     * `files` (`post --attach`) are shared in the post's one message; see `postWithFiles`.
+     * @param {string} text @param {{ thread?: string, metadata?: { event_type: string, event_payload: Record<string, string> }, files?: PostFile[] }} [opts]
      */
-    async post(text, { thread, metadata } = {}) {
+    async post(text, { thread, metadata, files } = {}) {
       const payload = encodeSlackText(text);
       if (payload.length > SLACK_TEXT_MAX) {
         throw new AgoraError(`slack post is ${payload.length} rendered characters (trailers and signature included); the limit is ${SLACK_TEXT_MAX}`, EXIT.usage);
+      }
+      if (files?.length) {
+        // a file share carries no metadata rider; a face never posts files this way
+        if (metadata) throw new AgoraError(`a Slack post with files carries no metadata rider`, EXIT.usage);
+        return postWithFiles(payload, { thread, files });
       }
       /** @type {Record<string, unknown>} */
       const params = { channel, text: payload };

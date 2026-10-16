@@ -194,6 +194,12 @@ refuses past it with exit 2 unless `--split` is explicit; split output breaks at
 signs every part, puts the original trailer block on the last part, adds `part: i/n`, and records
 every returned id in the posted-id ledger. `--split` is for overflow; the answer to a
 4,600-character post is a shorter post.
+`post <slack room> --attach <path>` (repeatable) shares files with the post: each is uploaded
+first, invisibly, then one `files.completeUploadExternal` shares them all in a single message whose
+text is the signed post, and that message's ts, read back from the file's shares, is the post's id
+in the ledger. At most eight files of 20 MiB each, never with `--split`; an upload refused before the
+share posts nothing, and a share whose ts never appears exits 1 saying the post is in the room:
+read it there, never post it again.
 Keep a post to the settled thing, its exhibit, and the ask: no narration of your own
 process, no preamble, no restating what others already said. The humans read the room in
 one pass, and a verbose bearer gets stood down.
@@ -703,7 +709,7 @@ An app that shows messages subscribes with a `purge` handler (`purge-v1`) and st
 
 | transport | room is | threads | cursor | identity |
 |---|---|---|---|---|
-| `slack` | one channel, by **id** (`C…`), not name; `&`, `<`, `>` decode on read and encode on post, while real mention/channel/URL tokens pass through; attachment metadata always arrives and `--files` or room `files: true` materializes images below the session's `media/` directory | yes; `--thread <parent ts>` | message `ts`; reads after a cursor are exclusive | the bot user; a bot token `xoxb-…` with `channels:history`, `channels:read`, `chat:write`, `files:read`, `files:write`, `groups:history`, `groups:read`, `users:read`, invited to the channel (the manifest carries all seven; `files:write` is what the pictures-face upload ladder needs, and an app created before it was added must be reinstalled). `post --file` remains text |
+| `slack` | one channel, by **id** (`C…`), not name; `&`, `<`, `>` decode on read and encode on post, while real mention/channel/URL tokens pass through; attachment metadata always arrives and `--files` or room `files: true` materializes images below the session's `media/` directory | yes; `--thread <parent ts>` | message `ts`; reads after a cursor are exclusive | the bot user; a bot token `xoxb-…` with `channels:history`, `channels:read`, `chat:write`, `files:read`, `files:write`, `groups:history`, `groups:read`, `users:read`, invited to the channel (the manifest carries all seven; `files:write` is what the pictures-face upload ladder and `post --attach` need, and an app created before it was added must be reinstalled). `post --file` remains text; `post --attach` shares files in the post's message |
 | `github` | one issue, `owner/name#N`; as a face of a native room (`room faces --add github --via <room>`) it takes one comment per faced post, the body verbatim, no rider, no upload; a native edit or withdraw edits or deletes that comment | no | `created_at\|id`; an edited old comment is not re-delivered; reads are conditional and a watch defaults to five minutes | the token's user; falls back to `gh auth token` |
 | `github-events` | a read-only feed: one repo (`repo`), an org (`org`), or a user (`user`); narrowed by `events` (types) and `refs` (branches or tags) in the room's config | no | the event id; reads are conditional; a watch defaults to one minute | the token's user; `post` is a usage error, the issue or the pull request is the room for that |
 | `local` | one NDJSON file | yes; the room read carries every reply with `thread` set, so `--threads`, `carry` and `--follow` read nothing more | lines consumed | the configured actor |
@@ -807,11 +813,12 @@ an injected `fetch` so it is testable offline.
   the caller, or pass the text as an argument or `--file`.
 - `post --file` reads the path as UTF-8 **text into the message body**. It is not a Slack
   file upload. A PNG or other binary will either refuse at the 3,900-character cap or
-  dump garbage. The pictures-face upload ladder (native `room faces --pictures`, verified
-  image bytes, `files.getUploadURLExternal` then `completeUploadExternal`) needs
-  `files:write` on the bot token; the upload API requires `files:write`. An app
-  whose manifest omitted the scope must be reinstalled after it is added. Direct Slack
-  post attachments are not supported by the current CLI.
+  dump garbage. A picture goes with `--attach <path>`, which on a Slack room shares it in the
+  post's own message. Both that and the pictures-face upload ladder (native
+  `room faces --pictures`, verified image bytes) run `files.getUploadURLExternal` then
+  `completeUploadExternal` and need `files:write` on the bot token; `--attach` also needs
+  `files:read` to read the share's ts back. An app whose manifest omitted a scope must be
+  reinstalled after it is added.
 - Slack image delivery needs `files:read` on the bot token. An app created before that scope was
   added must be reinstalled to the workspace; until then the text and attachment metadata still
   arrive, but the attachment says HTTP 403 and has no local path. `read --files`, `watch --files`,

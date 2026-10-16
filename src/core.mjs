@@ -57,7 +57,7 @@ const execFileAsync = promisify(execFile);
  * this session's own) and follows the first, the rest as other names for it.
  * `faces` is present only on a native room whose service returned the per-face rows of the
  * receipt (`pending`, `refused` before any call); a transport never invents one.
- * @typedef {{ id: string, cursor: string, url?: string, ids?: string[], faces?: { transport: string, status: string, reason?: string, id?: string, attachmentId?: string }[] }} PostResult
+ * @typedef {{ id: string, cursor: string, url?: string, ids?: string[], files?: string[], faces?: { transport: string, status: string, reason?: string, id?: string, attachmentId?: string }[] }} PostResult
  */
 /**
  * Why a read after a cursor could not reach it: the page cap, or a walk that stopped early. A read
@@ -86,8 +86,10 @@ const execFileAsync = promisify(execFile);
 /**
  * `face` is a native room's post-time face choice: transports named by `--face`, `"none"` for
  * `--no-face`, absent for the room's own policy. Only the native transport reads it. `attachments` are
- * the durable references a native post carries (`post --attach`, docs/ATTACHMENTS.md).
- * @typedef {{ thread?: string, face?: 'none' | string[], beforeSend?: (id: string) => Promise<void> | void, attachments?: import('./protocol/attachment.mjs').WireAttachment[] }} PostOptions
+ * the durable references a native post carries (`post --attach`, docs/ATTACHMENTS.md). `files` are the
+ * local files a Slack post shares in its one message (`post --attach` on a Slack room); only the
+ * Slack transport reads them.
+ * @typedef {{ thread?: string, face?: 'none' | string[], beforeSend?: (id: string) => Promise<void> | void, attachments?: import('./protocol/attachment.mjs').WireAttachment[], files?: { name: string, bytes: Buffer, mimetype: string }[] }} PostOptions
  */
 /**
  * What a transport implements. `read` returns messages ascending, each carrying a cursor.
