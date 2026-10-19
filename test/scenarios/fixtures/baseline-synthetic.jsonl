@@ -1,0 +1,18 @@
+{"event":"register","session":"s-coding","author":"coding/Opus"}
+{"event":"register","session":"s-review","author":"review/Sonnet"}
+{"event":"register","session":"s-build","author":"Opus/build"}
+{"event":"register","session":"s-messenger","author":"messenger/Haiku"}
+{"id":"room","author":"Ada","kind":"human","text":"Room subject: this room's own business.","title":"Room"}
+{"id":"q1","author":"Ada","kind":"human","text":"The parser test fails on the new fixture. Can someone look?","to":["coding"],"title":"Parser test"}
+{"id":"a1","author":"coding/Opus","session":"s-coding","kind":"agent","text":"Taking it: the fixture predates the grammar change.","thread":"q1","to":["Ada"]}
+{"id":"a2","author":"review/Sonnet","session":"s-review","kind":"agent","text":"I can take the parser test as well.","thread":"q1"}
+{"event":"register","session":"s-build","author":"Sonnet/build"}
+{"id":"q2","author":"Lin","kind":"human","text":"Is the release note drafted?","to":["Opus/build"]}
+{"id":"a3","author":"Sonnet/build","session":"s-build","kind":"agent","text":"Drafted; it is in the notes folder.","re":"q2"}
+{"id":"m1","author":"messenger/Haiku","session":"s-messenger","kind":"agent","text":"Routing the open review question.","to":["rev"]}
+{"id":"h1","author":"Lin","kind":"human","text":"Separate thing: can the demo move to Friday?","thread":"q1"}
+{"id":"a4","author":"coding/Opus","session":"s-coding","kind":"agent","text":"Friday works for the demo.","re":"h1"}
+{"id":"q3","author":"Ada","kind":"human","text":"Anyone free for the docs pass?","title":"Docs pass"}
+{"id":"a5","author":"review/Sonnet","session":"s-review","kind":"agent","text":"I am.","re":"q3"}
+{"id":"a6","author":"Sonnet/build","session":"s-build","kind":"agent","text":"I can help with the docs too.","re":"q3"}
+{"id":"m2","author":"messenger/Haiku","session":"s-messenger","kind":"agent","text":"Reminder: the review is still open.","to":["Linus"]}

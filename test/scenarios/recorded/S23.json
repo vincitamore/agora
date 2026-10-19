@@ -1,0 +1,37 @@
+{
+  "scenario": "S23",
+  "recordedOn": "2026-10-19",
+  "build": "eb00daa",
+  "checks": {
+    "verdict-cold-and-large": {
+      "today": "green",
+      "observed": {
+        "action": "cycle",
+        "reason": "cold"
+      }
+    },
+    "marker-written-then-consumed": {
+      "today": "green",
+      "observed": {
+        "written": true,
+        "consumed": true
+      }
+    },
+    "cursors-equal": {
+      "today": "green",
+      "observed": true
+    },
+    "own-posts-echoed": {
+      "today": "green",
+      "observed": 0
+    },
+    "departure-lines": {
+      "today": "green",
+      "observed": 0
+    },
+    "name-match-role-first": {
+      "today": "red",
+      "observed": false
+    }
+  }
+}

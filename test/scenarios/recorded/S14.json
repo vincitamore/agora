@@ -1,0 +1,39 @@
+{
+  "scenario": "S14",
+  "recordedOn": "2026-10-19",
+  "build": "eb00daa",
+  "checks": {
+    "re-replies-in-thread": {
+      "today": "red",
+      "observed": {
+        "inThread": 1,
+        "of": 2
+      }
+    },
+    "thread-replies-in-thread": {
+      "today": "green",
+      "observed": {
+        "inThread": 2,
+        "of": 2
+      }
+    },
+    "toplevel-re-warned": {
+      "today": "red",
+      "observed": {
+        "warned": 0,
+        "of": 1
+      }
+    },
+    "untitled-roots": {
+      "today": "red",
+      "observed": 3
+    },
+    "room-business-in-room-subject": {
+      "today": "red",
+      "observed": {
+        "inRoomSubject": 0,
+        "of": 1
+      }
+    }
+  }
+}

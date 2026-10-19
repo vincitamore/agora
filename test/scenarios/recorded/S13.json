@@ -1,0 +1,47 @@
+{
+  "scenario": "S13",
+  "recordedOn": "2026-10-19",
+  "build": "eb00daa",
+  "checks": {
+    "reach:Lin": {
+      "today": "green",
+      "observed": []
+    },
+    "reach:@member": {
+      "today": "red",
+      "observed": []
+    },
+    "reach:@member/coding": {
+      "today": "red",
+      "observed": []
+    },
+    "reach:coding": {
+      "today": "green",
+      "observed": [
+        "coding/Argon",
+        "coding/Opus"
+      ]
+    },
+    "reach:*": {
+      "today": "green",
+      "observed": [
+        "Grace/Haiku/messenger",
+        "coding/Argon",
+        "coding/Opus",
+        "messenger/Haiku",
+        "orchestrator/Opus",
+        "review/Sonnet"
+      ]
+    },
+    "reach:Grace": {
+      "today": "red",
+      "observed": [
+        "Grace/Haiku/messenger"
+      ]
+    },
+    "reach:host": {
+      "today": "green",
+      "observed": []
+    }
+  }
+}

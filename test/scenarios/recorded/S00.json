@@ -1,0 +1,289 @@
+{
+  "scenario": "S00",
+  "recordedOn": "2026-10-19",
+  "build": "eb00daa",
+  "fixture": "fixtures/baseline-synthetic.jsonl",
+  "checks": {
+    "unmatched-addresses": {
+      "today": "red",
+      "observed": {
+        "count": 3,
+        "retired": 1,
+        "halfName": 1,
+        "unknown": 1
+      }
+    },
+    "toplevel-re-replies": {
+      "today": "red",
+      "observed": 4
+    },
+    "untitled-roots": {
+      "today": "red",
+      "observed": 7
+    },
+    "human-pings-answered-twice": {
+      "today": "red",
+      "observed": 2
+    },
+    "wake-table": {
+      "today": "green",
+      "observed": {
+        "messages": 13,
+        "humanLines": 5,
+        "humanLinesInThreads": 1,
+        "renames": 1,
+        "modes": {
+          "all": {
+            "wakes": 44,
+            "silent": 0,
+            "crowdedHumanLines": 5
+          },
+          "addressed": {
+            "wakes": 28,
+            "silent": 4,
+            "crowdedHumanLines": 3
+          },
+          "mine": {
+            "wakes": 1,
+            "silent": 12,
+            "crowdedHumanLines": 0
+          }
+        },
+        "addressedUnheard": 3,
+        "rows": [
+          {
+            "n": 1,
+            "author": "Ada",
+            "woke": {
+              "all": [
+                "Opus/build",
+                "coding/Opus",
+                "messenger/Haiku",
+                "review/Sonnet"
+              ],
+              "addressed": [
+                "Opus/build",
+                "coding/Opus",
+                "messenger/Haiku",
+                "review/Sonnet"
+              ],
+              "mine": []
+            }
+          },
+          {
+            "n": 2,
+            "author": "Ada",
+            "to": [
+              "coding"
+            ],
+            "woke": {
+              "all": [
+                "Opus/build",
+                "coding/Opus",
+                "messenger/Haiku",
+                "review/Sonnet"
+              ],
+              "addressed": [
+                "coding/Opus"
+              ],
+              "mine": [
+                "coding/Opus"
+              ]
+            }
+          },
+          {
+            "n": 3,
+            "author": "coding/Opus",
+            "to": [
+              "Ada"
+            ],
+            "inThread": true,
+            "woke": {
+              "all": [
+                "Opus/build",
+                "messenger/Haiku",
+                "review/Sonnet"
+              ],
+              "addressed": [],
+              "mine": []
+            }
+          },
+          {
+            "n": 4,
+            "author": "review/Sonnet",
+            "inThread": true,
+            "woke": {
+              "all": [
+                "Opus/build",
+                "coding/Opus",
+                "messenger/Haiku"
+              ],
+              "addressed": [
+                "Opus/build",
+                "coding/Opus",
+                "messenger/Haiku"
+              ],
+              "mine": []
+            }
+          },
+          {
+            "n": 5,
+            "author": "Lin",
+            "to": [
+              "Opus/build"
+            ],
+            "woke": {
+              "all": [
+                "Sonnet/build",
+                "coding/Opus",
+                "messenger/Haiku",
+                "review/Sonnet"
+              ],
+              "addressed": [],
+              "mine": []
+            }
+          },
+          {
+            "n": 6,
+            "author": "Sonnet/build",
+            "woke": {
+              "all": [
+                "coding/Opus",
+                "messenger/Haiku",
+                "review/Sonnet"
+              ],
+              "addressed": [
+                "coding/Opus",
+                "messenger/Haiku",
+                "review/Sonnet"
+              ],
+              "mine": []
+            }
+          },
+          {
+            "n": 7,
+            "author": "messenger/Haiku",
+            "to": [
+              "rev"
+            ],
+            "woke": {
+              "all": [
+                "Sonnet/build",
+                "coding/Opus",
+                "review/Sonnet"
+              ],
+              "addressed": [],
+              "mine": []
+            }
+          },
+          {
+            "n": 8,
+            "author": "Lin",
+            "inThread": true,
+            "woke": {
+              "all": [
+                "Sonnet/build",
+                "coding/Opus",
+                "messenger/Haiku",
+                "review/Sonnet"
+              ],
+              "addressed": [
+                "Sonnet/build",
+                "coding/Opus",
+                "messenger/Haiku",
+                "review/Sonnet"
+              ],
+              "mine": []
+            }
+          },
+          {
+            "n": 9,
+            "author": "coding/Opus",
+            "woke": {
+              "all": [
+                "Sonnet/build",
+                "messenger/Haiku",
+                "review/Sonnet"
+              ],
+              "addressed": [
+                "Sonnet/build",
+                "messenger/Haiku",
+                "review/Sonnet"
+              ],
+              "mine": []
+            }
+          },
+          {
+            "n": 10,
+            "author": "Ada",
+            "woke": {
+              "all": [
+                "Sonnet/build",
+                "coding/Opus",
+                "messenger/Haiku",
+                "review/Sonnet"
+              ],
+              "addressed": [
+                "Sonnet/build",
+                "coding/Opus",
+                "messenger/Haiku",
+                "review/Sonnet"
+              ],
+              "mine": []
+            }
+          },
+          {
+            "n": 11,
+            "author": "review/Sonnet",
+            "woke": {
+              "all": [
+                "Sonnet/build",
+                "coding/Opus",
+                "messenger/Haiku"
+              ],
+              "addressed": [
+                "Sonnet/build",
+                "coding/Opus",
+                "messenger/Haiku"
+              ],
+              "mine": []
+            }
+          },
+          {
+            "n": 12,
+            "author": "Sonnet/build",
+            "woke": {
+              "all": [
+                "coding/Opus",
+                "messenger/Haiku",
+                "review/Sonnet"
+              ],
+              "addressed": [
+                "coding/Opus",
+                "messenger/Haiku",
+                "review/Sonnet"
+              ],
+              "mine": []
+            }
+          },
+          {
+            "n": 13,
+            "author": "messenger/Haiku",
+            "to": [
+              "Linus"
+            ],
+            "woke": {
+              "all": [
+                "Sonnet/build",
+                "coding/Opus",
+                "review/Sonnet"
+              ],
+              "addressed": [],
+              "mine": []
+            }
+          }
+        ]
+      }
+    }
+  }
+}

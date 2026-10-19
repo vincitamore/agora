@@ -1,0 +1,39 @@
+{
+  "scenario": "S07",
+  "recordedOn": "2026-10-19",
+  "build": "eb00daa",
+  "checks": {
+    "in-place:departure-lines": {
+      "today": "green",
+      "observed": 0
+    },
+    "in-place:swap-line": {
+      "today": "red",
+      "observed": 0
+    },
+    "in-place:to-role-reaches-new-bearer": {
+      "today": "green",
+      "observed": true
+    },
+    "in-place:cycle-match": {
+      "today": "red",
+      "observed": false
+    },
+    "relaunch:departure-lines": {
+      "today": "red",
+      "observed": 1
+    },
+    "relaunch:swap-line": {
+      "today": "red",
+      "observed": 0
+    },
+    "relaunch:to-role-reaches-new-bearer": {
+      "today": "green",
+      "observed": true
+    },
+    "relaunch:cycle-match": {
+      "today": "red",
+      "observed": false
+    }
+  }
+}
