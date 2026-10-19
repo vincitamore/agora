@@ -42,8 +42,8 @@ agora reads `AGORA_CONFIG`, then `./agora.json`, then `~/.agora/config.json`. St
 - `actor.name` — what this side signs as. `actor.kind` is `human`, `agent`, or `unknown`.
 - `sign` — `false` turns the signature line off for every post; `--no-sign` does it for one.
 - `state` — directory for cursors and ledgers; `AGORA_STATE` overrides it. Default `~/.agora/state`.
-- `session.from` — **replaces** the default list (`CLAUDE_CODE_SESSION_ID`, `GROK_SESSION_ID`, `CODEX_SESSION_ID`, `CODEX_THREAD_ID`, `HERMES_SESSION_ID`); it does not extend it. Name every harness that shares the file.
-- `session.pidFrom` — default `AGORA_SESSION_PID`, `CLAUDE_PID`, `GROK_PID`.
+- `session.from` — **replaces** the default list (`CLAUDE_CODE_SESSION_ID`, `OMP_SESSION_ID`, `GROK_SESSION_ID`, `CODEX_SESSION_ID`, `CODEX_THREAD_ID`, `HERMES_SESSION_ID`); it does not extend it. Name every harness that shares the file.
+- `session.pidFrom` — default `AGORA_SESSION_PID`, `CLAUDE_PID`, `OMP_PID`, `GROK_PID`.
 - `session.staleAfterHours` — default 48.
 - per room: `transport`; `channel` (slack); `repo` and `issue` (github); `repo` or `org` or `user`, plus `events` and `refs` (github-events); `path` (local); `roomId` (native, a room hosted by this seat's service: a watch there subscribes to the service and wakes on its events instead of polling, and a service that is absent or gone ends the watch with exit 1 and `reason: service-dark`).
 - `tokenEnv` or `tokenFile` — one per room (env is tried first if both are set).
@@ -252,13 +252,14 @@ reused.
 
 ### Remote seat: joining another seat's native room
 
-The remote seat first publishes its Agora-owned public node key through an authenticated room. Use
-`--json` because that receipt carries the complete `nodekey:` value the host must admit; the private
+The remote seat first mints and prints its Agora-owned public node key (`agora enroll --local --json`,
+which works before any config or room exists) or publishes it through an authenticated room (`agora enroll <room> --json`).
+Use `--json` because that receipt carries the complete `nodekey:` value the host must admit; the private
 half stays under the remote seat's state root and never leaves it.
 
 ```sh
-# Remote seat
-agora enroll agora --json
+# Remote seat (offline or via an authenticated room)
+agora enroll --local --json
 
 # Host target: prepare the admission without effects and carry the challenge to the counter-seat
 agora service route challenge <room-id> --allow-key <nodekey:64hex> --act room-enroll --out <challenge.json>

@@ -23,10 +23,13 @@
  * code and exits 1; nothing here adds an exit code (0, 1, 2 and 42 are the CLI's contract).
  */
 
+import { randomUUID } from "node:crypto";
 import { open, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { AgoraError, EXIT, resolvePath, sign } from "./core.mjs";
 import { ClientError, connect } from "./client.mjs";
+import { readAttachment, uploadAttachment } from "./client-attachments.mjs";
+import { openRemoteRoom } from "./native-remote.mjs";
 import { validateNativeThread } from "./transports/native.mjs";
 import { ATTACHMENT_SNIFF_BYTES, detectAttachmentType } from "./protocol/attachment.mjs";
 
@@ -137,15 +140,18 @@ export function nativeRecordArgumentRefusal(context) {
  */
 
 /**
- * The configured native room an alias names, or a usage refusal: these verbs act on this seat's own
- * native rooms (a native-remote member route admits neither annotations nor purge).
+ * The configured native or native-remote room an alias names, or a usage refusal: purge acts only
+ * on this seat's own hosted native rooms; attachments and annotations also work over a native-remote
+ * member route.
  * @param {import("./core.mjs").Config} cfg @param {string} alias @param {string} label
+ * @param {{ hostOnly?: boolean }} [opts]
  */
-function nativeRoom(cfg, alias, label) {
+function nativeRoom(cfg, alias, label, opts = {}) {
   const room = cfg.rooms[alias];
   if (!room) throw new AgoraError(`no room "${alias}" in ${/** @type {any} */ (cfg).path ?? "the config"} (have: ${Object.keys(cfg.rooms).join(", ")})`, EXIT.usage);
-  if (room.transport !== "native")
-    throw new AgoraError(`${label} belongs to a native room on this seat; "${alias}" is a ${room.transport} room`, EXIT.usage);
+  const ok = opts.hostOnly ? room.transport === "native" : (room.transport === "native" || room.transport === "native-remote");
+  if (!ok)
+    throw new AgoraError(`${label} belongs to a native room${opts.hostOnly ? " on this seat" : ""}; "${alias}" is a ${room.transport} room`, EXIT.usage);
   return room;
 }
 
@@ -158,8 +164,56 @@ function asCliError(e) {
   return e;
 }
 
-/** @param {import("./core.mjs").Config} cfg @param {string} stateRoot */
-async function client(cfg, stateRoot) {
+/**
+ * @param {import("./core.mjs").Config} cfg @param {string} stateRoot @param {string} [alias]
+ * @param {import("./native-remote.mjs").RemoteRoom} [existingRemote]
+ */
+async function client(cfg, stateRoot, alias, existingRemote) {
+  const room = alias ? cfg.rooms[alias] : undefined;
+  if (room?.transport === "native-remote") {
+    const descriptor = /** @type {any} */ (room).descriptor;
+    if (typeof descriptor !== "string" || !descriptor)
+      throw new AgoraError(`room "${alias}": a native-remote room needs a descriptor path`, EXIT.usage);
+    const remote = existingRemote ?? await openRemoteRoom({ descriptorPath: resolvePath(descriptor), stateRoot });
+    const roomId = remote.binding.roomId;
+    /** @type {import("./client-attachments.mjs").AttachmentSeam} */
+    const seam = {
+      roomId: () => roomId,
+      live: async () => ({ client: await remote.client(), accountId: remote.binding.accountId }),
+      capabilities: () => new Set(),
+      refused: (code, msg, extra) => new ClientError("refused", code, msg, extra),
+      dark: (code, msg, extra) => new ClientError("dark", code, msg, extra),
+      classify: (e) => e instanceof ClientError ? e : new AgoraError(e instanceof Error ? e.message : String(e)),
+    };
+    return /** @type {any} */ ({
+      upload: (/** @type {string} */ r, /** @type {any} */ req) => uploadAttachment(seam, r, req),
+      attachment: (/** @type {string} */ r, /** @type {any} */ ref) => readAttachment(seam, r, ref),
+      async read(/** @type {string} */ _r, /** @type {{ since?: string, limit?: number }} */ opts = {}) {
+        const c = await remote.client();
+        const res = await c.request("read", { roomId, ...(opts.since ? { since: opts.since } : {}), ...(opts.limit ? { limit: opts.limit } : {}) });
+        const through = `${res.checkpoint.epoch}:${res.checkpoint.sequence}`;
+        return { messages: res.messages ?? [], through };
+      },
+      async annotate(/** @type {string} */ _r, /** @type {{ act: string, target: string, text?: string, author: { name: string } }} */ req) {
+        const c = await remote.client();
+        if (!c.capabilities.has("annotations-v1")) throw new ClientError("refused", "annotations-unsupported", "the host offers no annotations-v1");
+        if (req.act === "title" && !c.capabilities.has("titles-v1")) throw new ClientError("refused", "titles-unsupported", "the host offers no titles-v1");
+        const operationId = randomUUID().replaceAll("-", "");
+        const receipt = await c.request("append", {
+          roomId,
+          operation: {
+            kind: "annotation",
+            operationId,
+            authorName: req.author.name,
+            authorKind: "agent",
+            annotation: { act: req.act, target: req.target, ...(req.text !== undefined ? { text: req.text } : {}) },
+          },
+        });
+        return { id: String(receipt.id), cursor: String(receipt.cursor), duplicate: Boolean(receipt.duplicate), operationId };
+      },
+      close: () => (existingRemote ? Promise.resolve() : remote.close()),
+    });
+  }
   try { return await connect({ state: stateRoot, ...(/** @type {any} */ (cfg).path ? { config: /** @type {any} */ (cfg).path } : {}) }); }
   catch (e) { throw asCliError(e); }
 }
@@ -200,7 +254,7 @@ async function annotate(context) {
   }
   // a title is the thread's name, one line, never signed: who set it travels on the record
   if (act === "title") text = String(context.values.text).trim();
-  const app = await client(context.cfg, context.stateRoot);
+  const app = await client(context.cfg, context.stateRoot, alias);
   try {
     const receipt = await app.annotate(alias, { act, target, ...(text !== undefined ? { text } : {}), author: author(context.cfg, context.bearer.name) });
     if (context.json) console.log(JSON.stringify({ type: "annotation", alias, act, target, id: receipt.id, cursor: receipt.cursor, duplicate: receipt.duplicate }));
@@ -213,7 +267,7 @@ async function annotate(context) {
 /** @param {NativeRecordContext} context */
 async function roomPurge(context) {
   const alias = context.rest[0];
-  nativeRoom(context.cfg, alias, "agora room purge");
+  nativeRoom(context.cfg, alias, "agora room purge", { hostOnly: true });
   const targets = list(context.values.message);
   const thread = context.values.thread === undefined ? undefined : String(context.values.thread);
   const app = await client(context.cfg, context.stateRoot);
@@ -262,7 +316,7 @@ async function attachmentGet(context) {
   const id = context.rest[1];
   nativeRoom(context.cfg, alias, "agora attachment get");
   const out = resolvePath(String(context.values.out));
-  const app = await client(context.cfg, context.stateRoot);
+  const app = await client(context.cfg, context.stateRoot, alias);
   try {
     const ref = await findAttachment(app, alias, id);
     if (!ref) throw new AgoraError(`attachment-unknown: no message in ${alias} names attachment ${id}`, EXIT.error);
@@ -370,11 +424,12 @@ export async function readSlackFiles(paths) {
  * `post --attach`: upload each path into the room's custody and resolve with the references the
  * post carries, in the order given. The kind is what the bytes prove; a file's declared type comes
  * from its extension where one is known, and an image carries the width and height its header says.
- * @param {{ roomAlias: string, room: Record<string, any>, cfg: import("./core.mjs").Config, stateRoot: string, paths: string[] }} context
+ * @param {{ roomAlias: string, room: Record<string, any>, cfg: import("./core.mjs").Config, stateRoot: string, paths: string[], remote?: import("./native-remote.mjs").RemoteRoom }} context
  * @returns {Promise<import("./protocol/attachment.mjs").WireAttachment[]>}
  */
 export async function prepareAttachments(context) {
-  if (context.room.transport !== "native") throw new AgoraError(`--attach belongs to a native room; "${context.roomAlias}" is a ${context.room.transport} room`, EXIT.usage);
+  if (context.room.transport !== "native" && context.room.transport !== "native-remote")
+    throw new AgoraError(`--attach belongs to a native room; "${context.roomAlias}" is a ${context.room.transport} room`, EXIT.usage);
   /** @type {Array<{ file: string, bytes: Buffer }>} */
   const files = [];
   for (const given of context.paths) {
@@ -384,7 +439,7 @@ export async function prepareAttachments(context) {
     catch (e) { throw new AgoraError(`--attach ${given}: ${e instanceof Error ? e.message : String(e)}; nothing was posted`, EXIT.error); }
     files.push({ file, bytes });
   }
-  const app = await client(context.cfg, context.stateRoot);
+  const app = await client(context.cfg, context.stateRoot, context.roomAlias, context.remote);
   try {
     /** @type {import("./protocol/attachment.mjs").WireAttachment[]} */
     const refs = [];

@@ -65,7 +65,7 @@ export * from "./client-attachments.mjs";
  * message a purge took carries `purged` and no text.
  * @typedef {ReturnType<typeof wireAnnotation> & { purged?: PurgedMarker }} ClientAnnotation
  */
-/** @typedef {'edit' | 'withdraw' | 'pin' | 'unpin'} AnnotationAct */
+/** @typedef {'edit' | 'withdraw' | 'pin' | 'unpin' | 'title'} AnnotationAct */
 /** @typedef {{ act: AnnotationAct, target: string, text?: string, author: ClientAuthor, operationId?: string }} AnnotateRequest */
 /** @typedef {{ id: string, cursor: string, duplicate: boolean, operationId: string }} AnnotateReceipt */
 /**

@@ -328,7 +328,7 @@ const SCHEMA = {
       options: { "--as <bearer>": "register this session as this bearer", "--label <name>": "a human label for this session's record", "--limit <n>": "how many recent messages to show (default 20)" },
       does: "register, preview the recent messages, and advance this session's cursor through the last one shown",
     },
-    enroll: { args: ["<room>"], options: {"--trust <account-id>": "explicitly replace a peer pin after out-of-band verification", "--fingerprint <hex>": "confirmed peer fingerprint for --trust", "--pages <n>": "enrollment scan depth"}, does: "publish or republish this seat's Agora-owned transfer public key; never uses an ambient Tailcat identity" },
+    enroll: { args: ["[<room>]"], options: {"--local": "mint (if absent) and print this seat's Agora-owned Tailcat nodeKey and fingerprint locally without publishing to a room", "--trust <account-id>": "explicitly replace a peer pin after out-of-band verification", "--fingerprint <hex>": "confirmed peer fingerprint for --trust", "--pages <n>": "enrollment scan depth"}, does: "publish or republish this seat's Agora-owned transfer public key (or with --local, mint and print it offline); never uses an ambient Tailcat identity" },
     share: { args: ["<room>", "[file ...]"], options: {"--to <account-id>": "authenticated recipient account; repeatable, maximum four", "--once": "consume each recipient route after verified receipt", "--expires-in <seconds>": "60 to 86400, default 3600", "--list": "local offers and measured liveness", "--prune": "remove expired offline offers owned by this session", "--stop <id>": "stop a local offer", "--resume <id>": "reconcile uncertain publication without duplicate posting", "--forget <id>": "explicitly release the operation guard after checking publication"}, does: "snapshot named files and publish a recipient-restricted native transfer offer after every route is ready" },
     fetch: { args: ["<room>","<offer-id>"], options: {"--into <directory>": "destination; existing files are never overwritten", "--pages <n>": "offer discovery depth"}, does: "explicitly receive, verify and commit files before acknowledging; receiving an offer never executes or fetches automatically" },
     service: {
@@ -500,6 +500,7 @@ const OPTIONS = /** @type {const} */ ({
   now: { type: "boolean", default: false },
   set: { type: "string" },
   offline: { type: "boolean", default: false },
+  local: { type: "boolean", default: false },
   "repair-tailcat": { type: "boolean", default: false },
   "expires-in": { type: "string" },
   into: { type: "string" },
@@ -1118,6 +1119,19 @@ async function main(argv) {
       if (e instanceof ShadowInputError) throw new AgoraError(e.message, EXIT.error);
       throw e;
     }
+  }
+
+  if (verb === "enroll" && values.local) {
+    const json = Boolean(values.json);
+    let stateRoot = process.env.AGORA_STATE ? resolvePath(process.env.AGORA_STATE) : undefined;
+    if (!stateRoot) {
+      try { stateRoot = stateDir(await loadConfig(values.config)); }
+      catch { stateRoot = resolvePath("~/.agora/state"); }
+    }
+    const key = await localTransferIdentity(stateRoot);
+    if (json) console.log(JSON.stringify({ type: "enrollment-identity", nodeKey: key.nodeKey, fingerprint: key.fingerprint, keyPath: key.keyPath }));
+    else console.log(`nodeKey ${key.nodeKey}\nfingerprint ${key.fingerprint}\nkeyPath ${key.keyPath}`);
+    return EXIT.ok;
   }
 
   const cfg = await loadConfig(values.config);
@@ -2352,7 +2366,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       /** @type {{ name: string, bytes: Buffer, mimetype: string }[] | undefined} */
       let files;
       if (values.attach?.length) {
-        if (room.transport === "native") attachments = await prepareAttachments({ roomAlias, room, cfg, stateRoot, paths: values.attach.map(String) });
+        if (room.transport === "native" || room.transport === "native-remote") attachments = await prepareAttachments({ roomAlias, room, cfg, stateRoot, paths: values.attach.map(String), remote: /** @type {any} */ (transport).remote });
         else if (room.transport === "slack") {
           if (values.split) throw new AgoraError(`--attach and --split do not combine: a Slack post with files is one message; shorten the text`, EXIT.usage);
           files = await readSlackFiles(values.attach.map(String));
@@ -2396,7 +2410,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         });
       }
       let boardIntent;
-      if (room.transport === "native" && typeof transport.board === "function") {
+      if ((room.transport === "native" || room.transport === "native-remote") && typeof transport.board === "function") {
         const claims = entries.filter((t) => t.key === "claim");
         const leaseSeconds = num(values.lease, "lease");
         // The board can commit before post() returns (or even starts). Keep this
@@ -2464,7 +2478,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       return EXIT.ok;
     }
     case "contest": {
-      if (room.transport !== "native") throw new AgoraError(`contest belongs to a native room; "${roomAlias}" is ${room.transport}`, EXIT.usage);
+      if (room.transport !== "native" && room.transport !== "native-remote") throw new AgoraError(`contest belongs to a native room; "${roomAlias}" is ${room.transport}`, EXIT.usage);
       if (typeof transport.board !== "function") throw new AgoraError(`contest needs a native board; "${roomAlias}" has none`, EXIT.usage);
       const subject = asBoardSubject(String(rest[0] ?? ""));
       const because = values.because;

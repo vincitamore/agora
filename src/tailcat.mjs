@@ -49,7 +49,7 @@ export async function assertPrivateAncestry(dir) {
   const absolute=path.resolve(dir);
   for(let current=absolute;;current=path.dirname(current)) {
     try {const st=await lstat(current);if(st.isSymbolicLink() || !st.isDirectory())throw new AgoraError('Transfer state traverses a linked or non-directory path. Select a private AGORA_STATE and retry.');}
-    catch(e){if(/** @type {NodeJS.ErrnoException} */(e).code!=='ENOENT')throw e;}
+    catch(e){const c=/** @type {NodeJS.ErrnoException} */(e).code;if(c!=='ENOENT'&&c!=='UNKNOWN')throw e;}
     if(path.dirname(current)===current)break;
   }
   return absolute;
@@ -126,9 +126,10 @@ export async function localTransferIdentity(stateRoot,deps={}) {
   return {keyPath,nodeKey,fingerprint:fingerprint(nodeKey)};
 }
 
+const AUTHENTICATED_TRANSFER_TRANSPORTS = new Set(['slack', 'github', 'native', 'native-remote']);
 /** @param {import('./core.mjs').Transport} transport */
 export function requireAuthenticatedTransport(transport) {
-  if(transport.kind!=='slack' && transport.kind!=='github') throw new AgoraError('Secure peer transfer requires an authenticated Slack or GitHub room. Local-file author labels are not authentication; use a configured Slack/GitHub room.');
+  if(!AUTHENTICATED_TRANSFER_TRANSPORTS.has(transport.kind)) throw new AgoraError('Secure peer transfer requires an authenticated Slack, GitHub, or native room. Local-file author labels are not authentication; use a configured Slack, GitHub, or native room.');
 }
 
 /** @param {string} stateRoot @param {import('./core.mjs').Transport} transport */
@@ -251,9 +252,18 @@ export async function snapshotTransferFiles(directory,inputs) {
       const full=path.resolve(input), name=portableTransferName(path.basename(full)), folded=name.toLowerCase();
       if(names.has(folded)) throw new AgoraError('Transfer filenames collide across platforms. Rename the duplicates, then retry agora share.');
       names.add(folded);
-      const st=await lstat(full);
+      let st;
+      try { st = await lstat(full); }
+      catch (e) {
+        if (/** @type {NodeJS.ErrnoException} */ (e).code === 'UNKNOWN')
+          throw new AgoraError('Transfer input traverses a symbolic link. Supply the real file path and retry agora share.');
+        throw e;
+      }
       if(!st.isFile() || st.isSymbolicLink() || st.size>MAX_FILE_BYTES || total+st.size>MAX_OFFER_BYTES) throw new AgoraError('Share accepts regular files up to 128 MiB each and 512 MiB total, without symbolic links. Split or rename the input and retry agora share.');
-      if(path.resolve(await realpath(full))!==full) throw new AgoraError('Transfer input traverses a symbolic link. Supply the real file path and retry agora share.');
+      let resolvedReal;
+      try { resolvedReal = path.resolve(await realpath(full)); }
+      catch { throw new AgoraError('Transfer input traverses a symbolic link. Supply the real file path and retry agora share.'); }
+      if(resolvedReal!==full) throw new AgoraError('Transfer input traverses a symbolic link. Supply the real file path and retry agora share.');
       const source=await open(full,constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
       const id=String(files.length);
       const dest=await open(path.join(directory,id),'wx',0o600);

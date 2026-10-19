@@ -66,13 +66,30 @@ export function renderResidentPrompt(profile, block) {
  * prefix in the session slug; the project directory is found by listing, never guessed from cwd.
  * @param {{ slug: string, source?: string }} rec
  * @param {{ home?: string }} [deps]
- * @returns {{ status: 'found', harness: 'claude-code', file: string } | { status: 'unsupported', reason: string }}
+ * @returns {{ status: 'found', harness: 'claude-code' | 'omp', file: string } | { status: 'unsupported', reason: string }}
  */
 export function transcriptFor(rec, deps = {}) {
-  if (rec.source !== "CLAUDE_CODE_SESSION_ID" || !rec.slug.startsWith("claude-code-"))
-    return { status: "unsupported", reason: `context measurement reads Claude Code transcripts only; ${rec.slug} came from ${rec.source ?? "an unknown source"}` };
+  const home = deps.home ?? homedir();
+  if ((rec.source === "OMP_SESSION_ID" || rec.source === "AGORA_SESSION (OMP_SESSION_ID)") && rec.slug.startsWith("omp-")) {
+    const uuid = rec.slug.slice("omp-".length);
+    const sessions = path.join(home, ".omp", "agent", "sessions");
+    if (!existsSync(sessions)) return { status: "unsupported", reason: `no transcripts under ${sessions}` };
+    for (const dir of readdirSync(sessions)) {
+      const bucket = path.join(sessions, dir);
+      let entries;
+      try { entries = readdirSync(bucket); } catch { continue; }
+      for (const name of entries) {
+        if (name === `${uuid}.jsonl` || name.endsWith(`_${uuid}.jsonl`)) {
+          return { status: "found", harness: "omp", file: path.join(bucket, name) };
+        }
+      }
+    }
+    return { status: "unsupported", reason: `no transcript *_${uuid}.jsonl under ${sessions}` };
+  }
+  if ((rec.source !== "CLAUDE_CODE_SESSION_ID" && rec.source !== "AGORA_SESSION (CLAUDE_CODE_SESSION_ID)") || !rec.slug.startsWith("claude-code-"))
+    return { status: "unsupported", reason: `context measurement reads Claude Code or OMP transcripts only; ${rec.slug} came from ${rec.source ?? "an unknown source"}` };
   const uuid = rec.slug.slice("claude-code-".length);
-  const projects = path.join(deps.home ?? homedir(), ".claude", "projects");
+  const projects = path.join(home, ".claude", "projects");
   if (!existsSync(projects)) return { status: "unsupported", reason: `no transcripts under ${projects}` };
   for (const dir of readdirSync(projects)) {
     const file = path.join(projects, dir, `${uuid}.jsonl`);
@@ -107,6 +124,36 @@ export async function measureClaudeTranscript(file) {
     const n = (/** @type {unknown} */ v) => (Number.isSafeInteger(v) && /** @type {number} */ (v) >= 0 ? /** @type {number} */ (v) : 0);
     const uncached = n(u.input_tokens), cacheRead = n(u.cache_read_input_tokens), cacheWrite = n(u.cache_creation_input_tokens);
     if (uncached + cacheRead + cacheWrite + n(u.output_tokens) === 0) continue;
+    last = { lastInference: o.timestamp, context: uncached + cacheRead + cacheWrite, uncached, cacheRead, cacheWrite };
+  }
+  return last;
+}
+
+/**
+ * Last inference and current context from an OMP transcript (`~/.omp/agent/sessions/<bucket>/<ts>_<uuid>.jsonl`):
+ * the newest assistant message's usage, context = input + cacheRead + cacheWrite (input is exclusive in OMP).
+ * @param {string} file
+ * @returns {Promise<{ lastInference: string, context: number, uncached: number, cacheRead: number, cacheWrite: number } | null>}
+ */
+export async function measureOmpTranscript(file) {
+  /** @type {{ lastInference: string, context: number, uncached: number, cacheRead: number, cacheWrite: number } | null} */
+  let last = null;
+  const rl = readline.createInterface({ input: createReadStream(file, { encoding: "utf8" }), crlfDelay: Infinity });
+  for await (const line of rl) {
+    if (!line.includes('"assistant"')) continue;
+    /** @type {any} */
+    let o;
+    try { o = JSON.parse(line); } catch { continue; }
+    if (o?.type !== "message" || o?.message?.role !== "assistant" || typeof o.timestamp !== "string") continue;
+    const u = o.message?.usage;
+    if (!u || typeof u !== "object") continue;
+    if (o.message?.model === "<synthetic>" || o.message?.stopReason === "aborted") continue;
+    const n = (/** @type {unknown} */ v) => (Number.isSafeInteger(v) && /** @type {number} */ (v) >= 0 ? /** @type {number} */ (v) : 0);
+    const uncached = n(u.input ?? u.input_tokens);
+    const cacheRead = n(u.cacheRead ?? u.cache_read_input_tokens);
+    const cacheWrite = n(u.cacheWrite ?? u.cache_creation_input_tokens);
+    const output = n(u.output ?? u.output_tokens);
+    if (uncached + cacheRead + cacheWrite + output === 0) continue;
     last = { lastInference: o.timestamp, context: uncached + cacheRead + cacheWrite, uncached, cacheRead, cacheWrite };
   }
   return last;
@@ -159,7 +206,7 @@ export function transcriptMeasure(deps = {}) {
   return async (/** @type {any} */ rec) => {
     const t = transcriptFor(rec, deps);
     if (t.status !== "found") return t;
-    const m = await measureClaudeTranscript(t.file);
+    const m = t.harness === "omp" ? await measureOmpTranscript(t.file) : await measureClaudeTranscript(t.file);
     if (!m) return { status: /** @type {const} */ ("unsupported"), reason: `${t.file} holds no assistant usage yet` };
     return { status: /** @type {const} */ ("measured"), ...m, file: t.file };
   };

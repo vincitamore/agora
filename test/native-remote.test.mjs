@@ -1441,7 +1441,7 @@ test("a remote seat replies in a thread, reads it, and subscribes to it; the hos
   await transport.post("elsewhere");
   await transport.post("reply", { thread: root.id });
   const client = await room.client();
-  assert.deepEqual([...client.capabilities], ["threads-v1"], "a member is offered threads, never a client name");
+  assert.deepEqual([...client.capabilities].sort(), ["annotations-v1", "attachments-v1", "purge-v1", "threads-v1", "titles-v1"], "a member is offered threads, attachments, annotations, purges and titles, never a client name");
   const thread = await transport.read({ thread: root.id });
   assert.deepEqual(thread.map((m) => m.text), ["root", "reply"]);
   assert.deepEqual((await transport.read({})).map((m) => [m.text, m.thread ?? null]), [["root", null], ["elsewhere", null], ["reply", root.id]]);
@@ -1481,4 +1481,69 @@ test("a member welcome's offer is read as offered: none from an older host, unkn
   assert.deepEqual([...(await handshake(undefined)).capabilities], [], "an older host offers nothing, so nothing thread-scoped is sent to it");
   assert.deepEqual([...(await handshake({ advertised: ["threads-v1", "later-v3"], required: [] })).capabilities], ["threads-v1"]);
   await assert.rejects(handshake({ advertised: ["later-v3"], required: ["later-v3"] }), /member-welcome-refused/);
+});
+
+test("a remote seat uploads and downloads durable attachments, annotates its own messages, and is refused cross-room attachment access", async (t) => {
+  const { room, service } = await rig(t);
+  const { readAttachment, uploadAttachment } = await import("../src/client-attachments.mjs");
+  const { ClientError } = await import("../src/client.mjs");
+  const actor = /** @type {any} */ ({ name: "Grace/remote", kind: "agent" });
+  const transport = nativeRemoteTransport(/** @type {any} */ ({ transport: "native-remote" }), { actor, remote: room });
+  t.after(() => transport.close?.());
+  /** @type {import("../src/client-attachments.mjs").AttachmentSeam} */
+  const seam = {
+    roomId: () => ROOM,
+    live: async () => ({ client: await room.client(), accountId: room.binding.accountId }),
+    capabilities: () => new Set(),
+    refused: (code, msg, extra) => new ClientError("refused", code, msg, extra),
+    dark: (code, msg, extra) => new ClientError("dark", code, msg, extra),
+    classify: (e) => e instanceof ClientError ? e : new AgoraError(e instanceof Error ? e.message : String(e)),
+  };
+  const bytes = Buffer.from("patch from remote seat\n");
+  const ref = await uploadAttachment(seam, "remote", { bytes, name: "fix.patch", mimetype: "text/plain" });
+  const posted = await transport.post("here is the patch", { attachments: [ref] });
+  const msgs = await transport.read({ annotations: true });
+  assert.equal(msgs.length, 1);
+  assert.deepEqual(msgs[0].attachments, [ref]);
+
+  const got = await readAttachment(seam, "remote", { id: ref.id, digest: ref.digest });
+  const chunks = [];
+  for await (const part of /** @type {any} */ (got.stream)) chunks.push(part);
+  assert.deepEqual(Buffer.concat(chunks), bytes);
+
+  const client = await room.client();
+  await client.request("append", {
+    roomId: ROOM,
+    operation: {
+      kind: "annotation",
+      operationId: "1".repeat(32),
+      authorName: "Grace/remote",
+      authorKind: "agent",
+      annotation: { act: "edit", target: posted.id, text: "here is the patch (v2)\n\n-- Grace/remote" },
+    },
+  });
+  const withEdit = await transport.read({ annotations: true });
+  assert.equal(withEdit.annotations?.length, 1);
+  assert.equal(withEdit.annotations?.[0]?.act, "edit");
+
+  // Cross-room attachment access on a member route is refused member-room-refused
+  await service.createRoom({ roomId: "9".repeat(32), epoch: "8".repeat(32) });
+  await assert.rejects(
+    client.request("attachment-begin", { roomId: "9".repeat(32), name: "x.txt", size: 1, digest: `sha256:${"0".repeat(64)}` }),
+    /member-room-refused/,
+  );
+});
+
+test("enroll --local mints and prints the seat's Tailcat nodeKey and fingerprint with no config", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "agora-enroll-local-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const res = await agora(["enroll", "--local", "--json"], {
+    AGORA_STATE: root,
+    AGORA_CONFIG: path.join(root, "nonexistent.json"),
+  });
+  assert.equal(res.code, 0, res.stderr);
+  const parsed = JSON.parse(res.stdout.trim());
+  assert.equal(parsed.type, "enrollment-identity");
+  assert.match(parsed.nodeKey, /^nodekey:[a-f0-9]{64}$/);
+  assert.match(parsed.fingerprint, /^[a-f0-9]{16}$/);
 });

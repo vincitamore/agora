@@ -18,15 +18,17 @@ build, and a profile that already contains its heading is printed unchanged.
 
 ## The launcher
 
-`scripts/start-claude-resident.sh` / `.ps1` start a Claude Code session with the rendered
-prompt as the whole system prompt:
+`scripts/start-claude-resident.sh` / `.ps1` (Claude Code) and `scripts/start-omp-resident.sh` / `.ps1`
+(OMP) start a resident session with the rendered prompt:
 
 ```
 scripts/start-claude-resident.sh --slug <slug> --profile <path> [--model <name>] [--effort <level>] [--resume <session-id>] [--cwd <dir>]
+scripts/start-omp-resident.sh --slug <slug> --profile <path> [--model <name>] [--thinking <level>] [--skills <csv>] [--resume <session-id>] [--cwd <dir>]
 ```
 
 It renders the prompt to `<state>/residents/<slug>/profile.rendered.md`, moves to `--cwd` (the
-working tree the resident operates in), and runs `claude --system-prompt "." --append-system-prompt-file <rendered> --dangerously-skip-permissions [--model] [--effort]` with the first prompt
+working tree the resident operates in), and runs Claude Code (`claude --system-prompt "." --append-system-prompt-file <rendered> --dangerously-skip-permissions`)
+or OMP (`omp --append-system-prompt <rendered> --approval-mode yolo`) with the first prompt
 "You are the `<slug>` resident. Run the arming sequence in your profile now, then report the
 room state in one line." A seat launcher that needs to export its own markers wraps this one.
 
@@ -64,7 +66,7 @@ successor armed at 118K.
 
 `agora resident cycle <slug>... | --all [--dry-run] [--idle <s>] [--min-context <n>] [--max-context <n>] [--deaf <s>] [--restart <cmd>] [--json]`
 is the guard and the act. Per resident it finds the newest live session whose bearer ends in
-`/<slug>`, reads that session's Claude Code transcript, and takes the newest assistant message's
+`/<slug>`, reads that session's Claude Code or OMP transcript, and takes the newest assistant message's
 usage: context = input + cache read + cache creation, last inference = its timestamp. An entry the
 harness wrote itself is not an inference and is skipped: Claude Code logs an API error (a 529, a
 spend limit) as model `<synthetic>` with all-zero usage, and reading that as the newest message

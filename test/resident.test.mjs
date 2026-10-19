@@ -9,14 +9,14 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  DEFAULT_DEAF_SECONDS, DEFAULT_IDLE_SECONDS, DEFAULT_MAX_CONTEXT, DEFAULT_MIN_CONTEXT, configuredResidents, cycleVerdict, inheritMarkerPath, measureClaudeTranscript,
+  DEFAULT_DEAF_SECONDS, DEFAULT_IDLE_SECONDS, DEFAULT_MAX_CONTEXT, DEFAULT_MIN_CONTEXT, configuredResidents, cycleVerdict, inheritMarkerPath, measureClaudeTranscript, measureOmpTranscript,
   readInheritMarker, renderResidentPrompt, restartCommand, transcriptFor, writeInheritMarker,
 } from "../src/resident.mjs";
 import { writeRecord } from "../src/session.mjs";
 
 const run = promisify(execFile);
 const BIN = fileURLToPath(new URL("../bin/agora.mjs", import.meta.url));
-const CLEARED = ["CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_PID", "GROK_SESSION_ID", "GROK_PID", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "HERMES_SESSION_ID", "AGORA_SESSION_PID", "AGORA_SESSION", "AGORA_ACTOR", "AGORA_CONFIG", "AGORA_STATE"];
+const CLEARED = ["CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_PID", "OMP_SESSION_ID", "OMP_PID", "GROK_SESSION_ID", "GROK_PID", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "HERMES_SESSION_ID", "AGORA_SESSION_PID", "AGORA_SESSION", "AGORA_ACTOR", "AGORA_CONFIG", "AGORA_STATE"];
 
 /** @param {string[]} args @param {Record<string, string>} env */
 async function agora(args, env) {
@@ -126,9 +126,19 @@ test("transcriptFor finds the harness transcript by session uuid and refuses oth
   const found = transcriptFor({ slug: s.slug, source: "CLAUDE_CODE_SESSION_ID" }, { home: s.home });
   assert.equal(found.status, "found");
   assert.ok(/** @type {any} */ (found).file.endsWith(`${s.uuid}.jsonl`));
+  const ompDir = path.join(s.home, ".omp", "agent", "sessions", "-work-project");
+  await mkdir(ompDir, { recursive: true });
+  const ompFile = path.join(ompDir, `2026-10-19T12-00-00-000Z_${s.uuid}.jsonl`);
+  await writeFile(ompFile, JSON.stringify({ type: "message", timestamp: "2026-10-19T12:05:00.000Z", message: { role: "assistant", usage: { input: 500, output: 100, cacheRead: 160_000, cacheWrite: 2_000 } } }) + "\n");
+  const ompFound = transcriptFor({ slug: `omp-${s.uuid}`, source: "OMP_SESSION_ID" }, { home: s.home });
+  assert.equal(ompFound.status, "found");
+  assert.equal(/** @type {any} */ (ompFound).harness, "omp");
+  assert.equal(/** @type {any} */ (ompFound).file, ompFile);
+  const ompMeasured = await measureOmpTranscript(ompFile);
+  assert.deepEqual(ompMeasured, { lastInference: "2026-10-19T12:05:00.000Z", context: 162_500, uncached: 500, cacheRead: 160_000, cacheWrite: 2_000 });
   const other = transcriptFor({ slug: "codex-abc", source: "CODEX_SESSION_ID" }, { home: s.home });
   assert.equal(other.status, "unsupported");
-  assert.match(/** @type {any} */ (other).reason, /Claude Code transcripts only/);
+  assert.match(/** @type {any} */ (other).reason, /Claude Code or OMP transcripts only/);
   const missing = transcriptFor({ slug: "claude-code-nope", source: "CLAUDE_CODE_SESSION_ID" }, { home: s.home });
   assert.equal(missing.status, "unsupported");
 });

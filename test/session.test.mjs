@@ -44,6 +44,7 @@ const cfg = /** @type {import('../src/core.mjs').Config} */ ({ actor, rooms: { r
 test("session key: AGORA_SESSION, then the first set harness variable, then default", () => {
   assert.deepEqual(DEFAULT_SESSION_FROM, [
     "CLAUDE_CODE_SESSION_ID",
+    "OMP_SESSION_ID",
     "GROK_SESSION_ID",
     "CODEX_SESSION_ID",
     "CODEX_THREAD_ID",
@@ -52,6 +53,9 @@ test("session key: AGORA_SESSION, then the first set harness variable, then defa
   assert.deepEqual(resolveSession(cfg, { AGORA_SESSION: "grace-a" }), { slug: "grace-a", source: "AGORA_SESSION", explicit: true });
   assert.deepEqual(resolveSession(cfg, { CLAUDE_CODE_SESSION_ID: "2bfa6030-9abd-48d4-835f-53c4123fb0ed" }), {
     slug: "claude-code-2bfa6030-9abd-48d4-835f-53c4123fb0ed", source: "CLAUDE_CODE_SESSION_ID", explicit: false,
+  });
+  assert.deepEqual(resolveSession(cfg, { OMP_SESSION_ID: "01a1542d-dbe9-74fa-b4e6-d4ca65c1f0bd" }), {
+    slug: "omp-01a1542d-dbe9-74fa-b4e6-d4ca65c1f0bd", source: "OMP_SESSION_ID", explicit: false,
   });
   assert.deepEqual(resolveSession(cfg, { CODEX_SESSION_ID: "01a06940-dfba-7360-ae3f-20e45b7b41d1" }), {
     slug: "codex-01a06940-dfba-7360-ae3f-20e45b7b41d1", source: "CODEX_SESSION_ID", explicit: false,
@@ -355,9 +359,10 @@ test("listRecords: every session with state, registered or not, with its livenes
     const rows = await listRecords(dir);
     assert.deepEqual(rows.map((r) => [r.slug, r.state]), [["a", "live"], ["b", "unregistered"]]);
     assert.equal(harnessPid(cfg, { CLAUDE_PID: "77" }).pid, 77);
+    assert.equal(harnessPid(cfg, { OMP_PID: "79" }).pid, 79, "an OMP seat is probeable too");
     assert.equal(harnessPid(cfg, { GROK_PID: "78" }).pid, 78, "a Grok Build seat is probeable too");
     // with no pid the caller says WHICH variable the harness failed to inject: that is the remedy
-    assert.deepEqual(harnessPid(cfg, { CLAUDE_PID: "nope" }), { pid: undefined, pidSource: undefined, looked: ["AGORA_SESSION_PID", "CLAUDE_PID", "GROK_PID"] });
+    assert.deepEqual(harnessPid(cfg, { CLAUDE_PID: "nope" }), { pid: undefined, pidSource: undefined, looked: ["AGORA_SESSION_PID", "CLAUDE_PID", "OMP_PID", "GROK_PID"] });
     assert.equal(harnessPid({ ...cfg, session: { pidFrom: ["MY_PID"] } }, { MY_PID: "5", CLAUDE_PID: "6" }).pidSource, "MY_PID");
   } finally {
     await cleanup();

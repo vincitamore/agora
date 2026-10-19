@@ -5,9 +5,10 @@ import path from "node:path";
 import test from "node:test";
 import { buildLabel, buildPredates, claudeProjectSlug, clearWatchMode, HARNESS_DESCRIPTORS, installedBuild, readWatchMode, touchWatchMode, watchModeSentinel } from "../src/harness.mjs";
 
-test("the descriptor table names Claude Code and Codex session transcript sources", () => {
+test("the descriptor table names Claude Code, OMP and Codex session transcript sources", () => {
   assert.deepEqual(HARNESS_DESCRIPTORS.map((h) => [h.name, h.sessionEnv]), [
     ["claude-code", "CLAUDE_CODE_SESSION_ID"],
+    ["omp", "OMP_SESSION_ID"],
     ["codex", "CODEX_SESSION_ID"],
   ]);
 });
@@ -49,6 +50,24 @@ test("the Codex sentinel finds the root-session rollout recursively under CODEX_
     assert.equal(target.harness, "codex");
     assert.equal(target.transcript, transcript);
     assert.equal(target.sentinel, path.join(dir, `rollout-2026-09-04T00-00-00-${id}.watch-mode`));
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("the OMP sentinel finds the session transcript under ~/.omp/agent/sessions/<bucket>/<timestamp>_<id>.jsonl", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "agora-harness-omp-"));
+  try {
+    const id = "01a1542d-dbe9-74fa-b4e6-d4ca65c1f0bd";
+    const dir = path.join(home, ".omp", "agent", "sessions", "-work-project");
+    await mkdir(dir, { recursive: true });
+    const transcript = path.join(dir, `2026-10-19T12-40-53-993Z_${id}.jsonl`);
+    await writeFile(transcript, "", "utf8");
+    const target = watchModeSentinel({ OMP_SESSION_ID: id }, path.join(home, "work", "project"), home);
+    assert.ok(target);
+    assert.equal(target.harness, "omp");
+    assert.equal(target.transcript, transcript);
+    assert.equal(target.sentinel, path.join(dir, `2026-10-19T12-40-53-993Z_${id}.watch-mode`));
   } finally {
     await rm(home, { recursive: true, force: true });
   }

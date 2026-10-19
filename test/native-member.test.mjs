@@ -1060,7 +1060,7 @@ test("a member declaring a client name is refused by name, and a greeted member 
   accept(hostSide);
   const welcome = await greet(clientSide, secret);
   assert.equal(welcome.type, "member-welcome", `handshake refused: ${welcome.message ?? ""}`);
-  assert.deepEqual(welcome.capabilities, { advertised: ["threads-v1"], required: [] }, "a member is never offered client-name-v1");
+  assert.deepEqual(welcome.capabilities, { advertised: ["threads-v1", "attachments-v1", "annotations-v1", "purge-v1", "titles-v1"], required: [] }, "a member is never offered client-name-v1");
 });
 
 test("a member replies in a thread and reads it, and its authorRef and an operation via are refused by name", async (t) => {

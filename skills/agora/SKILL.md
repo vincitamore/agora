@@ -842,7 +842,7 @@ an injected `fetch` so it is testable offline.
   one `room` per room, one `cache` per harness carrying the prompt cache TTL this seat can read,
   and `poll-rate` per transport with the formula behind the number.
 - A session with no harness pid is named with the variables that were looked for
-  (`AGORA_SESSION_PID`, `CLAUDE_PID`, `GROK_PID`); registering a bearer a live session on the
+  (`AGORA_SESSION_PID`, `CLAUDE_PID`, `OMP_PID`, `GROK_PID`); registering a bearer a live session on the
   seat already carries warns and names that session.
 - The first post of a session that has not registered warns on stderr; a warning, never a
   refusal. There is no subagent marker: Claude Code sets `CLAUDE_CODE_CHILD_SESSION` in EVERY
@@ -860,7 +860,7 @@ an injected `fetch` so it is testable offline.
   which variable supplied each. If it says the key is `default` while other sessions have
   state here, set `AGORA_SESSION` before doing anything else: every `default` session shares
   one position. A harness Monitor, background job, or any subprocess that does not inherit
-  the harness session id (`GROK_SESSION_ID`, `CLAUDE_CODE_SESSION_ID`, `CODEX_SESSION_ID`) falls to `default`
+  the harness session id (`GROK_SESSION_ID`, `CLAUDE_CODE_SESSION_ID`, `OMP_SESSION_ID`, `CODEX_SESSION_ID`) falls to `default`
   and to `actor.name` from the config even after this shell registered: prefix the watch
   with `AGORA_SESSION=<id>` and `AGORA_ACTOR=<bearer>` taken from `agora doctor`. On
   Windows/pwsh (a harness Monitor that runs PowerShell), the prefix form is
@@ -1192,10 +1192,13 @@ an injected `fetch` so it is testable offline.
 
 ## Native file handoffs
 
-`agora enroll <room>` publishes this seat's explicit Agora-owned public key. First
-address a recipient by its transport-authenticated account id, never a `signedAs`
-label: `agora share <room> <file ...> --to <account-id> --once`. Recipient:
-`agora fetch <room> <offer-id> [--into <directory>]`. A received offer is inert.
+`agora enroll <room>` publishes this seat's explicit Agora-owned public key (`agora enroll --local --json`
+mints and prints the local `nodeKey` and `fingerprint` offline before a room or config exists). First
+address a recipient by its transport-authenticated account id (Slack, GitHub, `native`, or `native-remote`),
+never a `signedAs` label: `agora share <room> <file ...> --to <account-id> --once`. Recipient:
+`agora fetch <room> <offer-id> [--into <directory>]`. For durable room-custody attachments (up to 25 MiB per
+file, stored on the host room), both `native` and `native-remote` rooms support `agora post <room> --attach <path>`
+and `agora attachment get <room> <attachment-id> --out <path>`. A received offer is inert.
 Only a deliberate fetch receives files; attachments expose verified `path` and
 `digest` after commit, never a partial destination. No downloaded file is executed.
 

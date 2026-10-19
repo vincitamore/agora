@@ -92,6 +92,18 @@ function codexTranscript(env, _cwd, home) {
   return findFile(sessions, (file) => path.basename(file).startsWith("rollout-") && path.basename(file).endsWith(`-${id}.jsonl`));
 }
 
+/** @param {NodeJS.ProcessEnv} env @param {string} _cwd @param {string} home */
+function ompTranscript(env, _cwd, home) {
+  const id = env.OMP_SESSION_ID;
+  if (!id || !SESSION_ID.test(id)) return undefined;
+  const agentDir = env.PI_CODING_AGENT_DIR || path.join(env.OMP_HOME || path.join(home, ".omp"), "agent");
+  const sessions = path.join(agentDir, "sessions");
+  return findFile(sessions, (file) => {
+    const base = path.basename(file);
+    return base === `${id}.jsonl` || base.endsWith(`_${id}.jsonl`);
+  });
+}
+
 /**
  * A harness's prompt-cache TTL as this seat can actually read it. `ttl` is seconds when a value was
  * read off a file or the environment, and null when nothing on this machine says. Nothing here
@@ -105,6 +117,9 @@ const CLAUDE_TTL_UNKNOWN = `unknown (defaults to 1h on a subscription's main con
 
 /** Codex has no local setting to read: retention is a property of the request OpenAI serves. */
 const CODEX_TTL_UNKNOWN = `unknown (OpenAI's equivalent is 24h cache retention, carried in the request rather than written in a setting this seat can read)`;
+
+/** OMP cache retention is provider-specific unless explicitly pinned on the environment. */
+const OMP_TTL_UNKNOWN = `unknown (OMP cache retention is provider-specific: 1h on Anthropic subscription/OAuth prefix breakpoints, 24h on OpenAI)`;
 
 /**
  * Seconds from a TTL as a settings file or an environment variable writes it (`"1h"`, `"5m"`,
@@ -165,12 +180,23 @@ function codexCacheTtl() {
   return { ttl: null, value: null, source: null, label: CODEX_TTL_UNKNOWN };
 }
 
+/** @param {NodeJS.ProcessEnv} env @returns {CacheTtl} */
+function ompCacheTtl(env) {
+  const parsed = parseCacheTtl(env.OMP_PROMPT_CACHE_TTL ?? env.CLAUDE_CODE_PROMPT_CACHE_TTL);
+  if (parsed) {
+    const source = env.OMP_PROMPT_CACHE_TTL !== undefined ? "OMP_PROMPT_CACHE_TTL" : "CLAUDE_CODE_PROMPT_CACHE_TTL";
+    return { ttl: parsed.seconds, value: parsed.value, source, label: `${parsed.value} (from ${source})` };
+  }
+  return { ttl: null, value: null, source: null, label: OMP_TTL_UNKNOWN };
+}
+
 /**
  * One declarative inventory for harness-specific transcript state. Adding a harness extends this
  * table; the watcher and stop-hook courtesy do not grow another harness branch of their own.
  */
 export const HARNESS_DESCRIPTORS = Object.freeze([
   Object.freeze({ name: "claude-code", sessionEnv: "CLAUDE_CODE_SESSION_ID", transcript: claudeTranscript, cacheTtl: claudeCacheTtl }),
+  Object.freeze({ name: "omp", sessionEnv: "OMP_SESSION_ID", transcript: ompTranscript, cacheTtl: ompCacheTtl }),
   Object.freeze({ name: "codex", sessionEnv: "CODEX_SESSION_ID", transcript: codexTranscript, cacheTtl: codexCacheTtl }),
 ]);
 

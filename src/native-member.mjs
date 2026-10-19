@@ -288,7 +288,7 @@ export function memberTranscript(binding, base) {
  *
  * Board operations admitted through the host protocol under the remote principal are allowed;
  * direct store or control access is not, which is why create-room and spawn are absent. */
-export const MEMBER_REQUEST_TYPES = Object.freeze(["status", "read", "subscribe", "append"]);
+export const MEMBER_REQUEST_TYPES = Object.freeze(["status", "read", "subscribe", "append", "attachment-begin", "attachment-chunk", "attachment-commit", "attachment-read"]);
 
 /** @param {string} type */
 export function memberMayRequest(type) {

@@ -42,7 +42,7 @@ function codedRefusal(code, detail) {
  * `client-name-v1` is local-only: a member session cannot declare a client name.
  */
 const LOCAL_OFFER = validateCapabilityOffer({ advertised: ["threads-v1", "client-name-v1", "attachments-v1", "annotations-v1", "purge-v1", "titles-v1"], required: [] });
-const MEMBER_OFFER = validateCapabilityOffer({ advertised: ["threads-v1"], required: [] });
+const MEMBER_OFFER = validateCapabilityOffer({ advertised: ["threads-v1", "attachments-v1", "annotations-v1", "purge-v1", "titles-v1"], required: [] });
 
 const MAX_PENDING_WRITE = 2 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -794,11 +794,17 @@ export class NativeRoomService {
       });
       return;
     }
-    // Attachment custody (docs/ATTACHMENTS.md) answers its own frames. A member session never gets
-    // here with one: memberMayRequest refused the type above.
-    if (!member && isAttachmentFrame(frame.type)) {
+    // Attachment custody (docs/ATTACHMENTS.md) answers its own frames. On a member route, roomId is
+    // fenced to the route's bound room before custody is touched.
+    if (isAttachmentFrame(frame.type)) {
+      if (member && frame.roomId !== undefined && frame.roomId !== member.binding.roomId)
+        throw codedRefusal("member-room-refused", "a member session may only reach the room its route binds");
       await handleAttachmentFrame({ root: this.root, socket, send: (answer) => sendFrame(socket, answer),
-        openRoom: (id) => this.openRoom(id), ...(local.clientName !== undefined ? { clientName: local.clientName } : {}) }, frame);
+        openRoom: (id) => {
+          if (member && id !== member.binding.roomId)
+            throw codedRefusal("member-room-refused", "a member session may only reach the room its route binds");
+          return this.openRoom(id);
+        }, ...(!member && local.clientName !== undefined ? { clientName: local.clientName } : {}) }, frame);
       return;
     }
     const roomId = requiredString(frame.roomId, "room id");

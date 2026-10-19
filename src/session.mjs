@@ -28,6 +28,7 @@ export const BEARER_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}(?:\/[A-Za-z0-9][A-Za-
 export const BEARER_MAX = 64;
 export const DEFAULT_SESSION_FROM = Object.freeze([
   "CLAUDE_CODE_SESSION_ID",
+  "OMP_SESSION_ID",
   "GROK_SESSION_ID",
   "CODEX_SESSION_ID",
   "CODEX_THREAD_ID",
@@ -290,7 +291,7 @@ export function hasLegacyState(stateRoot) {
  * @property {string} lastSeen
  */
 
-export const DEFAULT_PID_FROM = Object.freeze(["AGORA_SESSION_PID", "CLAUDE_PID", "GROK_PID"]);
+export const DEFAULT_PID_FROM = Object.freeze(["AGORA_SESSION_PID", "CLAUDE_PID", "OMP_PID", "GROK_PID"]);
 const recordPath = (/** @type {string} */ dir) => path.join(dir, "session.json");
 
 /** Seconds since the epoch at which this machine booted; a pid is meaningless across a reboot. */

@@ -1,7 +1,7 @@
 // @ts-check
 import { randomUUID } from "node:crypto";
 import { AgoraError, redact } from "../core.mjs";
-import { parseNativeCursor } from "../native-protocol.mjs";
+import { nativeMessageId, parseNativeCursor } from "../native-protocol.mjs";
 import { ServiceDarkError, requireThreads } from "../wake/subscriber.mjs";
 import { nativeReadResult, validateNativeThread } from "./native.mjs";
 
@@ -67,12 +67,14 @@ export function nativeRemoteTransport(room, { actor, remote, session }) {
     },
     /** A `thread` read as on a local native room, sent only to a host whose member welcome offered
      * threads-v1. */
-    async read({ thread, since, limit } = {}) {
+    async read({ thread, since, limit, annotations } = {}) {
       const client = await remote.client();
       if (thread !== undefined) requireThreads(client, `the host of ${roomId}`);
       let result;
       try {
-        result = await client.request("read", { roomId, ...(thread !== undefined ? { thread } : {}), ...(since ? { since } : {}), ...(limit ? { limit } : {}) });
+        result = await client.request("read", { roomId, ...(thread !== undefined ? { thread } : {}), ...(since ? { since } : {}), ...(limit ? { limit } : {}),
+          ...(annotations === true && client.capabilities.has("annotations-v1") ? { annotations: true } : {}),
+          ...(annotations === true && client.capabilities.has("titles-v1") ? { titles: true } : {}) });
       } catch (e) {
         if (client.socket.destroyed) throw new ServiceDarkError(`the member channel went dark during the read: ${e instanceof Error ? e.message : String(e)}`);
         throw e;
@@ -85,15 +87,16 @@ export function nativeRemoteTransport(room, { actor, remote, session }) {
      * they are for a local caller. `authorKind` is the actor's, and the host refuses anything but
      * `agent` from a member session — a remote may not claim to be a human.
      */
-    async post(text, { thread, face } = {}) {
+    async post(text, { thread, face, beforeSend, attachments } = {}) {
       if (face !== undefined) throw new AgoraError("a face is the HOST's policy and is published by the host's own service; a remote seat cannot choose one for it");
       let client;
       try { client = await remote.client(); }
       catch (e) { throw dark(e); }
       if (thread !== undefined) requireThreads(client, `the host of ${roomId}`);
       const operationId = randomUUID().replaceAll("-", "");
+      if (beforeSend) await beforeSend(nativeMessageId(roomId, remote.binding.accountId, operationId));
       const receipt = await client.request("append", { roomId,
-        operation: { operationId, authorName: actor.name, authorKind: actor.kind, text, ...(thread !== undefined ? { thread } : {}) } });
+        operation: { operationId, authorName: actor.name, authorKind: actor.kind, text, ...(thread !== undefined ? { thread } : {}), ...(attachments?.length ? { attachments } : {}) } });
       return { id: String(receipt.id), cursor: String(receipt.cursor),
         ...(Array.isArray(receipt.faces) ? { faces: receipt.faces } : {}) };
     },
