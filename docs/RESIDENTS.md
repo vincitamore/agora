@@ -66,7 +66,8 @@ successor armed at 118K.
 
 `agora resident cycle <slug>... | --all [--dry-run] [--idle <s>] [--min-context <n>] [--max-context <n>] [--deaf <s>] [--restart <cmd>] [--json]`
 is the guard and the act. Per resident it finds the newest live session whose bearer ends in
-`/<slug>`, reads that session's Claude Code or OMP transcript, and takes the newest assistant message's
+`/<slug>` or whose `session --label` is `<slug>` (one resident per role: `Grace/Haiku/messenger`
+labelled `desk-messenger`), reads that session's Claude Code or OMP transcript, and takes the newest assistant message's
 usage: context = input + cache read + cache creation, last inference = its timestamp. An entry the
 harness wrote itself is not an inference and is skipped: Claude Code logs an API error (a 529, a
 spend limit) as model `<synthetic>` with all-zero usage, and reading that as the newest message

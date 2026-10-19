@@ -707,7 +707,8 @@ function printDigest(msgs, json, alias) {
 
 /**
  * The usual --wake for a role segment: a suggestion join and doctor print once and never apply.
- * `watch` is the thin seat-level reader (`all`); every other named role is a working bearer (`mine`).
+ * `watch`, `messenger` and `router` are the thin front-door readers (`all`): one cheap bearer that
+ * reads everything and addresses the rest; every other named role is a working bearer (`mine`).
  * @param {string} name
  * @returns {{ role: string, wake: "all" | "mine" } | undefined}
  */
@@ -716,7 +717,7 @@ function usualWake(name) {
   if (i < 0) return undefined;
   const role = name.slice(i + 1);
   if (!role) return undefined;
-  return { role, wake: role === "watch" ? "all" : "mine" };
+  return { role, wake: role === "watch" || role === "messenger" || role === "router" ? "all" : "mine" };
 }
 
 /** @param {string | undefined} s @param {string} what @param {number} [fallback] */

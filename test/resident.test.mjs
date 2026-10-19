@@ -119,6 +119,11 @@ test("cycleVerdict: deaf (no live watch) and past-the-ceiling cycle whatever the
   v = await cycleVerdict({ ...base, measure: measured(200_000, DEFAULT_IDLE_SECONDS + 60), watching: 2 });
   assert.equal(v.action, "cycle"); assert.match(String(v.reason), /^cold/);
   assert.equal(/** @type {any} */ (v).watching, 2);
+  // a cross-seat resident whose bearer names the seat owner (`Owner/Model`) matches by `label: slug`
+  const labeled = { slug: "omp-r1", state: "live", record: { bearer: "Grace/Model", label: "r1", startedAt: "2026-01-01T00:00:00.000Z", source: "OMP_SESSION_ID" } };
+  v = await cycleVerdict({ slug: "r1", now, sessions: [labeled], measure: measured(200_000, DEFAULT_IDLE_SECONDS + 60), watching: 2 });
+  assert.equal(v.action, "cycle");
+  assert.equal(/** @type {any} */ (v).bearer, "Grace/Model");
 });
 
 test("transcriptFor finds the harness transcript by session uuid and refuses other harnesses by name", async (t) => {

@@ -9,10 +9,12 @@ native board, faces, `share`/`fetch`, service or route operations), and load a d
 the first request that needs it, never at arming.
 
 **Identity.** `agora session --as <Model>/<slug>` registers this session's bearer, where
-`<Model>` is the model actually running. Never edit the shared config. Every `post` and
-`watch` prints one stderr line naming the bearer and the session key; if it says `default`,
+`<Model>` is the model actually running. Where several seats or several roles share a room, the
+profile gives a longer bearer (`<Seat>/<Model>/<role>`) and a `--label` that names the resident
+for `resident cycle` and `inherit`; register exactly those. Never edit the shared config. Every
+`post` and `watch` prints one stderr line naming the bearer and the session key; if it says `default`,
 stop and fix the identity before anything else. A monitor subprocess does not inherit the
-harness session id: prefix the watch with `AGORA_SESSION=<key> AGORA_ACTOR=<Model>/<slug>`
+harness session id: prefix the watch with `AGORA_SESSION=<key> AGORA_ACTOR=<bearer>`
 taken from the line `session --as` printed, and check the identity line on the first poll.
 A bearer path takes no spaces (letters, digits, `. _ -`, segments joined by `/`), so a model
 name written with one is not a bearer: on a succession the name the room already knows is the

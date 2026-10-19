@@ -1309,7 +1309,7 @@ test("cli: a rate is always a number, and a session with no harness pid says whi
     const { cfgPath, root } = await room(dir);
     const env = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "a" };
     let r = await agora(["session", "--as", "Grace/watch"], env);
-    assert.match(r.stdout, /no harness pid found \(looked for AGORA_SESSION_PID, CLAUDE_PID, GROK_PID\); liveness unknown/);
+    assert.match(r.stdout, /no harness pid found \(looked for AGORA_SESSION_PID, CLAUDE_PID, OMP_PID, GROK_PID\); liveness unknown/);
 
     // a registration from an older build (or a hand-written one) carrying a zero interval
     await mkdir(path.join(root, "sessions", "a", "armed"), { recursive: true });
@@ -1466,6 +1466,8 @@ test("cli: --digest renders author, cursor, first characters, never a summary; j
 
     r = await agora(["join", "down", "--as", "Grok-4.6/forge"], { ...env, AGORA_SESSION: "g" });
     assert.match(r.stderr, /usual --wake for role forge is mine \(not applied\)/);
+    r = await agora(["join", "down", "--as", "Grace/Haiku/messenger"], { ...env, AGORA_SESSION: "m" });
+    assert.match(r.stderr, /usual --wake for role messenger is all \(not applied\)/);
 
     await agora(["post", "down", "alpha-bravo-charlie-delta-echo-foxtrot-golf-hotel-india-juliet-kilo"], them);
     r = await agora(["watch", "down", "--once", "--json", "--digest", "1"], env);
@@ -1546,12 +1548,14 @@ test("cli: doctor reads the prompt cache TTL where it is written, and warns only
     assert.doesNotMatch(r.stdout, /prompt cache TTL is/, "an hour under a resident is what the doctrine asks for");
 
     r = await agora(["doctor", "--offline", "--json"], env, { cwd });
-    assert.deepEqual(cache(r).map((/** @type {any} */ o) => o.harness), ["claude-code", "codex"]);
+    assert.deepEqual(cache(r).map((/** @type {any} */ o) => o.harness), ["claude-code", "omp", "codex"]);
     assert.deepEqual([cache(r)[0].ttl, cache(r)[0].value], [3600, "1h"]);
     // macOS exposes /var through /private/var; the child may report the canonical cwd.
     // Compare file identity without weakening the requirement to name the actual source.
     assert.equal(await realpath(cache(r)[0].source), await realpath(settings));
-    assert.deepEqual([cache(r)[1].ttl, cache(r)[1].value, cache(r)[1].source], [null, null, null], "Codex exposes nothing local to read");
+    const byHarness = (/** @type {string} */ h) => cache(r).find((/** @type {any} */ o) => o.harness === h);
+    assert.deepEqual([byHarness("omp").ttl, byHarness("omp").source], [null, null], "nothing on this seat pins OMP's retention");
+    assert.deepEqual([byHarness("codex").ttl, byHarness("codex").value, byHarness("codex").source], [null, null, null], "Codex exposes nothing local to read");
     assert.equal(ttlWarning(r), undefined);
 
     // the same seat, dropped to the five-minute window: every wake past it pays a cold read

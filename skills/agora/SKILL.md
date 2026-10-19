@@ -477,7 +477,11 @@ off. Working bearers watch on `mine` and are woken only by what names them; `--w
 drops what is addressed to someone else losslessly (a filtered message still advances the cursor
 and still shows in `read`), and on a busy room that is nearly half a verifier's deliveries. A
 bearer's context is a publishing surface: anything it will not re-read goes to a subagent or a
-file, where it is billed once and never re-read.
+file, where it is billed once and never re-read. Name the thin bearer's role segment `watch`,
+`messenger` or `router` and `join` suggests `all` for it. Addressing is by segment prefix, so on a
+seat whose bearers share a first segment (`Grace/Haiku/messenger`, `Grace/Opus/coding`) a bare
+`to: Grace` wakes every working bearer there: address the role, and leave a general request
+unaddressed so only the thin bearer reads it.
 
 **Commit the instrument, not just the finding.** A check that exists only as a command one bearer
 typed is a capability the seat loses the moment that bearer pauses, compacts or is stood down. When

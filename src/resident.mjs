@@ -160,8 +160,20 @@ export async function measureOmpTranscript(file) {
 }
 
 /**
+ * Does a session record belong to resident `slug`? By the `/<slug>` bearer suffix
+ * (`Opus/ncu-command`), or by `session --label <slug>` when the bearer has another shape
+ * (`Grace/Haiku/messenger` labelled `desk-messenger`).
+ * @param {any} record
+ * @param {string} slug
+ */
+export function matchesResidentRecord(record, slug) {
+  if (!record || typeof record.bearer !== "string") return false;
+  return record.bearer.endsWith("/" + slug) || record.label === slug;
+}
+
+/**
  * The verdict for one resident, pure given its inputs. `sessions` are the seat's records with
- * liveness; the resident's session is the newest live record whose bearer ends in `/<slug>`.
+ * liveness; the resident's session is the newest live record matching `slug` (`/<slug>` suffix or `--label <slug>`).
  * @param {object} a
  * @param {string} a.slug
  * @param {Array<{ slug: string, state: string, record?: any }>} a.sessions
@@ -175,7 +187,7 @@ export async function measureOmpTranscript(file) {
  */
 export async function cycleVerdict({ slug, sessions, measure, now = new Date(), idleSeconds = DEFAULT_IDLE_SECONDS, minContext = DEFAULT_MIN_CONTEXT, maxContext = DEFAULT_MAX_CONTEXT, deafSeconds = DEFAULT_DEAF_SECONDS, watching }) {
   assertResidentSlug(slug);
-  const live = sessions.filter((s) => s.state === "live" && s.record && typeof s.record.bearer === "string" && s.record.bearer.endsWith("/" + slug));
+  const live = sessions.filter((s) => s.state === "live" && matchesResidentRecord(s.record, slug));
   /** @type {Record<string, unknown>} */
   const row = { type: "resident", resident: slug };
   if (!live.length) return { ...row, action: "none", reason: "no live session signs as this resident" };
@@ -222,7 +234,7 @@ export async function planCycle(stateRoot, slug, opts = {}) {
   const sessions = await listRecords(stateRoot, deps);
   const armed = await listArmed(stateRoot);
   // The live watches of the session the verdict will measure (the newest live one for this slug).
-  const live = sessions.filter((s) => s.state === "live" && s.record?.bearer?.endsWith("/" + slug));
+  const live = sessions.filter((s) => s.state === "live" && matchesResidentRecord(s.record, slug));
   live.sort((a, b) => String(b.record?.startedAt ?? "").localeCompare(String(a.record?.startedAt ?? "")));
   const watching = live.length ? armed.filter((a) => a.slug === live[0].slug && armedAlive(a.armed, deps)).length : undefined;
   return cycleVerdict({ slug, sessions, measure: transcriptMeasure({ home: opts.home }), now: opts.now, idleSeconds: opts.idleSeconds, minContext: opts.minContext, maxContext: opts.maxContext, deafSeconds: opts.deafSeconds, watching });
