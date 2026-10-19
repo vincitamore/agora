@@ -112,14 +112,17 @@ then HMACs is the whole attack.
 
 ## What a member session may do
 
-Admitted: `status`, `read`, `subscribe`, `append`. Board operations through the host protocol under
-the member principal are allowed.
+Admitted: `status`, `read`, `subscribe`, `append`, and the attachment frames `attachment-begin`,
+`attachment-chunk`, `attachment-commit` and `attachment-read` (`docs/ATTACHMENTS.md`), fenced to the
+room its route binds. Board operations through the host protocol under the member principal are
+allowed. The member welcome offers `attachments-v1`; a purge is not allowed (see the table below).
 
 Refused, each by name:
 
 | refusal | when |
 |---|---|
 | `member-request-refused` | any control verb — `create-room`, `spawn`, `route-*` |
+| `purge-refused-remote` | an append carrying a purge: the host's own connections purge, a member route may not (the member welcome still lists `purge-v1`, so a client that checks the capability proceeds and is refused here) |
 | `member-room-refused` | a room other than the one its route binds |
 | `member-actor-mismatch` | a frame naming an account or author other than the binding's |
 | `member-author-kind-refused` | a frame claiming a non-agent author kind |
@@ -324,7 +327,8 @@ verb ends `native service is dark; request was not sent`, from the shared reques
 ## What a remote seat may do
 
 Everything a member session may do, which is the host's list above: `status`, `read`, `subscribe`,
-`append`, and board operations through the host protocol under the member principal. A remote post
+`append`, the attachment frames (upload and read, in the route's room), and board operations
+through the host protocol under the member principal; it may not purge. A remote post
 is appended by the **host's** single writer, so ordering and the one-writer invariant are unchanged.
 
 Two narrowings on this side, stated so they are visible rather than discovered:

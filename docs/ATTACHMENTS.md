@@ -13,15 +13,18 @@ client half is `src/client-attachments.mjs`, re-exported by `agora/client`.
 
 ## Capability
 
-`attachments-v1`, offered on the `welcome` of a **local** connection. A member session (a remote
-seat over a route) is never offered it and never reaches the frames below. A client sends an
-attachment frame only to a service that offered the capability; a service that does not offer it
-refuses every `attachment-*` frame `attachments-unsupported`, and refuses an append naming a
-`durable` attachment the same way.
+`attachments-v1`, offered on the `welcome` of a local connection and on the `member-welcome` of a
+member session (a remote seat over a route). A member session may send `attachment-begin`,
+`attachment-chunk`, `attachment-commit` and `attachment-read`, fenced to the one room its route
+binds (any other room is refused `member-room-refused`); the same limits and refusal codes below
+apply. A client sends an attachment frame only to a service that offered the capability; a service
+that does not offer it refuses every `attachment-*` frame `attachments-unsupported`, and refuses
+an append naming a `durable` attachment the same way.
 
 ## Frames
 
-Four-byte length-prefixed JSON, `protocol: "agora-native/1"`, on the local connection, each with a
+Four-byte length-prefixed JSON, `protocol: "agora-native/1"`, on a local connection or a member
+session, each with a
 `requestId` the answer echoes:
 
 ```text
@@ -102,7 +105,7 @@ const a = await client.upload(room, { bytes /* Uint8Array */, name, mimetype /* 
 
 await client.append(room, { text, author, thread, trailers, operationId, attachments: [a] });
 
-/** local connections only; the bytes are verified against the digest before the last chunk resolves */
+/** the bytes are verified against the digest before the last chunk resolves */
 const { stream, size, kind, mimetype } = await client.attachment(room, { id: a.id, digest: a.digest });
 ```
 
