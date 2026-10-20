@@ -16,43 +16,134 @@ without loading the full skill, whose size it would otherwise pay on every cold 
 launcher renders the prompt at every start; the block is single-sourced from the installed
 build, and a profile that already contains its heading is printed unchanged.
 
-## The launcher
+## The manifest
 
-`scripts/start-claude-resident.sh` / `.ps1` (Claude Code) and `scripts/start-omp-resident.sh` / `.ps1`
-(OMP) start a resident session with the rendered prompt:
+A seat's residents are rows of one **resident manifest**, a JSON file the seat's operator keeps
+and agora reads and never writes. Where it is: `--manifest <path>` on the call, else the config's
+`residentManifest` (a path, relative to the config file), else `<state>/residents.json`. Paths
+inside it are relative to the manifest's own folder, so a manifest kept in a working tree travels
+with the tree.
+
+```json
+{
+  "version": 1,
+  "models": { "small": "anthropic/claude-haiku-4-5", "large": "anthropic/claude-opus-4-1" },
+  "vars": { "TREE": { "path": "../.." }, "TEAM": "desk" },
+  "defaults": {
+    "harness": "omp", "host": "tern", "model": "large", "rooms": ["desk"],
+    "profile": "PROFILE.md", "preamble": "off",
+    "workdir": { "files": { "AGENTS.md": ["HOME.md", { "text": "The tree is at {{TREE}}." }] } },
+    "skills": { "dir": "../skills", "names": ["agora"] }
+  },
+  "residents": {
+    "desk.messenger": { "role": "messenger", "model": "small", "wake": "all" },
+    "desk.coding": { "role": "coding", "wake": "mine", "rooms": ["desk", "builds"] }
+  }
+}
+```
+
+Each key under `residents` is the resident's **position** (see [Positions](#positions)); each row
+is `defaults` with the row's own fields over it. Fields:
+
+| Field | | |
+|---|---|---|
+| `role` | required | one segment (`coding`); the bearer is `<role>/<Model>` |
+| `harness` | required | `omp` or `claude` |
+| `model` | required | the harness's model id, or an alias from `models` |
+| `rooms` | required | aliases from the agora config; the harness's agora-room extension or plugin watches and posts in these |
+| `profile` | required | the profile `resident prompt` renders |
+| `host` | required | `tern`, `tmux` or `none` (below) |
+| `wake` | | `all`, `addressed` (default) or `mine`, for every room of the row |
+| `thinking` | | omp `--thinking`, Claude Code `--effort` |
+| `append` | | files appended after the rendered prompt, in order |
+| `workdir` | | `path` (default `<state>/residents/<slug>/work`) and `files`: each a path inside the folder built from parts, a part being a file or `{ "text": ... }`, joined with a blank line; `{{NAME}}` is replaced by each declared var |
+| `skills` | | `dir` and `names`: omp reads them in place through its settings overlay (`skills.customDirectories`, `--skills`); Claude Code gets copies under the folder's `.claude/skills/`, rebuilt each start |
+| `env` | | extra environment for the harness (paths and switches; a name that looks like a credential, or one the verb sets itself, is refused) |
+| `args` | | extra harness arguments, before the first prompt |
+| `preamble` | | `on` or `off`: the extension's or plugin's preamble before each delivered line (off when the profile explains a delivery) |
+| `bearer` | | an explicit bearer instead of `<role>/<Model>` |
+| `restart` | | the cycle's restart command for this resident (`{slug}` is the position) |
+| `command` | | the harness executable and leading arguments, when it is not `omp` or `claude` on `PATH` |
+
+`vars` are text, or `{ "path": ... }` for an absolute path (forward slashes) resolved against the
+manifest. An unknown key, a missing required field, a bad value, a working-folder file outside the
+folder or a skill name with a separator is refused with the file and the field named. One wake mode
+covers all of a row's rooms: the extension and the plugin take one `AGORA_ROOM_WAKE`, so a
+different wake per room needs a per-room form of that setting in both.
+
+## Start and stop
 
 ```
-scripts/start-claude-resident.sh --slug <slug> --profile <path> [--model <name>] [--effort <level>] [--resume <session-id>] [--cwd <dir>]
-scripts/start-omp-resident.sh --slug <slug> --profile <path> [--model <name>] [--thinking <level>] [--skills <csv>] [--resume <session-id>] [--cwd <dir>]
+agora resident start <slug>... | --all [--room <alias>] [--host tern|tmux|none] [--model <id>] [--plan] [--json]
+agora resident stop <slug>... | --all [--json]
 ```
 
-It renders the prompt to `<state>/residents/<slug>/profile.rendered.md`, moves to `--cwd` (the
-working tree the resident operates in), and runs Claude Code (`claude --system-prompt "." --append-system-prompt-file <rendered> --dangerously-skip-permissions`)
-or OMP (`omp --append-system-prompt <rendered> --approval-mode yolo`) with the first prompt
-"You are the `<slug>` resident. Run the arming sequence in your profile now, then report the
-room state in one line." A seat launcher that needs to export its own markers wraps this one.
+`start` turns a row into one plan and runs it:
 
-Under systemd, one user unit per resident wrapping one tmux server per resident:
+1. renders the prompt to `<state>/residents/<slug>/prompt.md`: the profile, the room-mechanics
+   block, then `append`;
+2. builds the working folder (its `files`, and for Claude Code the skill copies and the folder's
+   trust entry in `~/.claude.json`, which an unattended session cannot answer);
+3. writes the harness's own room watch into the run: omp gets a per-run settings overlay,
+   `<state>/residents/<slug>/omp-config.yml`, whose `extensions:` entry is this checkout's
+   `plugins/omp/agora-room` (`--config`); Claude Code gets `--plugin-dir` this checkout's
+   `plugins/claude/agora-room`;
+4. sets the environment that extension or plugin reads (`AGORA_ROOM`, `AGORA_ROOM_WAKE`,
+   `AGORA_ROOM_PREAMBLE`, `AGORA_ROOM_CMD` naming this checkout's CLI), the position
+   (`AGORA_LABEL=<slug>`), the bearer (omp: `AGORA_ROLE=<role>`, so the extension registers
+   `<role>/<Model>` itself and follows a model change; Claude Code, or an explicit `bearer`:
+   `AGORA_ACTOR`), and `AGORA_CONFIG` / `AGORA_STATE`;
+5. starts the harness under its host with **one fixed first prompt** ("You are the `<slug>`
+   resident: role, bearer, position. Rooms … Wake … The harness's agora-room extension owns your
+   watch: arm none. Run the arming sequence in your profile now, then report in one line."). That is
+   the spawner's only act: nothing is typed into the session after it.
+
+omp runs with `--append-system-prompt <prompt.md> --approval-mode yolo`; Claude Code with
+`--system-prompt "." --append-system-prompt-file <prompt.md> --dangerously-skip-permissions`. The
+profile is the latitude boundary; Claude Code's bypass-permissions warning must have been accepted
+once on the seat.
+
+**Hosts.** `none` runs the harness in this terminal and waits for it. `tern` runs
+`tern new session <slug> --cwd <workdir> -- agora resident start <slug> --run <run.json>`, and
+`tmux` one server per resident, `tmux -L agora-resident-<slug> new-session -d -s <slug>` with the
+same program: a Tern session does not inherit the caller's environment, so the harness's argv,
+environment and folder travel in the run record, `<state>/residents/<slug>/run.json`, and the
+program in the session runs exactly that. The run record also keeps the host's own handle (the
+Tern session id, the tmux server), which is what `stop` acts on.
+
+**Once per position.** A resident whose position already holds a live session (its session
+record, by label), or whose last start's host handle is still running (the window between a start
+and the session's registration), is not started again: `start` reports `running` and why. A run
+record whose handle is gone is cleared, with the empty host session it left, and the start goes
+ahead. `--plan` prints the whole plan (files, overlay, environment, argv, host command) and the
+position's state, and writes nothing. `--room <alias>` replaces the rooms for one run (a test
+room); `--host` and `--model` replace the row's.
+
+`stop` ends a resident by its recorded handle (`tern kill session <id>`, `tmux kill-server`, or the
+harness pid under `none`), waits until the handle is gone, and removes the run record. A resident
+no start recorded is reported as `none`. The session's agora state is kept: the next start at the
+position is a restart, not a departure.
+
+Under systemd, the unit owns the process and the tmux server; `--host none` runs the resident in
+it:
 
 ```
 [Service]
 Type=forking
-WorkingDirectory=%h/src/<tree>
-ExecStart=/usr/bin/tmux -L resident-<slug> new-session -d -s resident-<slug> "bash -lc '<agora>/scripts/start-claude-resident.sh --slug <slug> --profile <path> --cwd %h/src/<tree>'"
+ExecStart=/usr/bin/tmux -L resident-<slug> new-session -d -s resident-<slug> "bash -lc 'agora resident start <slug> --host none'"
 ExecStop=/usr/bin/tmux -L resident-<slug> kill-server
 Restart=on-failure
 ```
 
-A shared tmux server reads as dead to the second unit; the launcher runs through a login shell so
-it sees the user's PATH; Claude Code's workspace-trust and bypass-permissions dialogs must be
-pre-accepted in `~/.claude.json`, since a unit cannot answer them.
+A shared tmux server reads as dead to the second unit, and the login shell gives the start the
+user's `PATH`. Such a resident's manifest row carries `restart: "systemctl --user restart resident-{slug}.service"`.
 
 ## The arming sequence a profile carries
 
 1. Load no skill. Load a domain skill on the first request that needs it.
 2. `agora resident inherit <slug>` (does nothing without a marker), then `agora session --as <bearer> --label <position>` with the bearer and position the profile gives (a single-room resident's position is its slug: `--as <Model>/<slug> --label <slug>`). A launcher may export `AGORA_LABEL=<position>` instead of passing `--label`.
 3. Read the room to now from the saved cursor (`read --threads --files --json`); classify every unanswered message. Never `cursor --now`.
-4. Arm one `watch --follow --files --json` per room as a background shell command (never under a monitor tool: Claude Code's Monitor expires every 30 minutes and each expiry is a whole-context wake), with `AGORA_SESSION` and `AGORA_ACTOR` carried in; it exits 42 on a delivery, and the wake re-arms it first, before disposing. Check the identity line.
+4. Arm one `watch --follow --files --json` per room as a background shell command (never under a monitor tool: Claude Code's Monitor expires every 30 minutes and each expiry is a whole-context wake), with `AGORA_SESSION` and `AGORA_ACTOR` carried in; it exits 42 on a delivery, and the wake re-arms it first, before disposing. Check the identity line. A resident started by `agora resident start` arms none: the harness's agora-room extension or plugin owns its watch, and its status line is the proof.
 5. Prove the instrument the subject needs, with read-only commands, before promising anything.
 
 ## Positions
@@ -107,10 +198,13 @@ measured two 700K residents as context 0 for three days. It cycles in three case
   150000: a small cold read is not worth a floor).
 
 The act writes
-`<state>/residents/<slug>/inherit.json` naming the predecessor and then runs the restart
-command: `--restart` on the call, else `restart` on the config's `residents.<slug>` row, else
-none (the marker is written and the restart is the caller's). `{slug}` in the command is the
-resident. `--all` takes the slugs from the config's `residents` table.
+`<state>/residents/<slug>/inherit.json` naming the predecessor and then restarts it: `--restart`
+on the call, else `restart` on the manifest's row, else `restart` on the config's
+`residents.<slug>` row (`{slug}` in a command is the resident); else, for a manifest resident,
+`stop` by its recorded handle and `start` again; else none (the marker is written and the restart
+is the caller's). A manifest resident on host `none` has no handle a timer can start into and
+needs a `restart` command. `--all` takes the slugs from the config's `residents` table and the
+manifest.
 
 Idle is the age of the last **assistant** message, never the transcript's mtime: hooks and
 monitors append without an inference. A session from a harness whose transcript this cannot read
@@ -127,16 +221,17 @@ session, where a restart replays the room and echoes the session's own posts. `s
 summary; a successor pays the floor and nothing for the old context. Warm and large: compact.
 Cold and large: succeed. Small: leave it.
 
-Run it from a timer (systemd user timer, cron, Task Scheduler) every 10 to 15 minutes:
+Run it every 10 to 15 minutes. `agora resident timer install` writes that schedule for this OS
+and this config (and `--manifest`, when given): a Windows scheduled task `agora-resident-cycle`
+(run in the user's session, headless, one instance at a time), a systemd user timer
+`agora-resident-cycle.timer` with its oneshot service (through a login shell, for the user's
+`PATH`), or a launchd agent `agora.resident-cycle` (logging to `<state>/residents/cycle.log`).
+`--interval <seconds>` sets the period in whole minutes (default 900). `timer check` compares what
+is installed with what install would write and exits 1 on `missing` or `differs`, changing
+nothing; `timer remove` takes it out.
 
 ```
-[Service]
-Type=oneshot
-ExecStart=bash -lc 'agora resident cycle --all'
-
-[Timer]
-OnBootSec=10min
-OnUnitActiveSec=15min
+agora resident timer install|check|remove [--interval <seconds>] [--manifest <path>] [--json]
 ```
 
 ## The marker
@@ -152,10 +247,13 @@ room this session already read.
 ## Config
 
 ```json
+"residentManifest": "~/team/residents.json",
 "residents": {
   "support": { "restart": "systemctl --user restart resident-{slug}.service" }
 }
 ```
 
-Read only; nothing here writes the shared config. The profile itself is the operator's file and
-never travels through agora.
+Read only; nothing here writes the shared config. `residentManifest` names the seat's manifest;
+the `residents` table names residents the manifest does not (a seat whose residents run from
+systemd units, say) for `cycle --all`. The profile and the manifest are the operator's files and
+never travel through agora.

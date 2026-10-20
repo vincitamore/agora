@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import { copyFile, readFile } from "node:fs/promises";
 import { existsSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import {
@@ -383,9 +384,16 @@ const SCHEMA = {
       does: "clear this session's stand-down record. This verb does not start a session or re-arm watches; a live session re-arms them itself. agora codex is the separate attached-session launcher",
     },
     resident: {
-      args: ["<prompt <profile-path> | cycle <slug>...|--all | inherit <slug>>"],
+      args: ["<prompt <profile-path> | start <slug>...|--all | stop <slug>...|--all | timer install|check|remove | cycle <slug>...|--all | inherit <slug>>"],
       options: {
-        "--all": "cycle: every slug in the config's residents table",
+        "--all": "start, stop: every resident in the manifest; cycle: every slug in the config's residents table and the manifest",
+        "--manifest <path>": "the resident manifest (default: the config's residentManifest, else <state>/residents.json); agora reads it and never writes it",
+        "--plan": "start: print what it would do (prompt, working folder, overlay, harness argv and environment, host command) and whether the position is already held; do nothing",
+        "--host <tern|tmux|none>": "start: the host instead of the manifest's; none runs the harness in this terminal (one resident)",
+        "--room <alias>": "start: watch and post in this one room instead of the manifest's rooms (a test run)",
+        "--model <id>": "start: this model (or an alias from the manifest's models) instead of the row's",
+        "--run <run.json>": "start: run a recorded start in this terminal (the program a tern or tmux host is given; not typed by hand)",
+        "--interval <seconds>": "timer: how often the cycle runs, in whole minutes given as seconds (default 900)",
         "--dry-run": "cycle: print the verdicts, write no marker, restart nothing",
         "--idle <seconds>": `cycle: the last inference must be older than this (default ${DEFAULT_IDLE_SECONDS}: a one-hour prompt-cache TTL plus a margin)`,
         "--min-context <tokens>": `cycle: the context must be at least this (default ${DEFAULT_MIN_CONTEXT}); keep it above every resident's orientation floor`,
@@ -394,7 +402,7 @@ const SCHEMA = {
         "--restart <command>": "cycle: run this after writing the marker ({slug} is the resident); else the config row's restart; else the restart is the caller's",
         "--force": "inherit: take the predecessor's position in a room this session already read",
       },
-      does: "standing sessions. prompt prints a profile with the shipped room-mechanics block appended (the resident-sized discipline, so no skill loads at arming). cycle finds the newest live session holding the position <slug> (its session --label), or for a session with no position the newest signing as /<slug>, measures its last real inference and context from the harness transcript (harness-written error entries are skipped), and when it is deaf (no live watch, idle past --deaf), past the ceiling (--max-context, idle past --deaf), or cold (past --idle) AND large (past --min-context) writes <state>/residents/<slug>/inherit.json naming it and restarts the unit: a successor pays its floor, a cold wake pays the whole context. inherit consumes that marker (the same inheritance as session --inherit) and is a no-op without one. Never writes the shared config; docs/RESIDENTS.md",
+      does: "standing sessions. prompt prints a profile with the shipped room-mechanics block appended (the resident-sized discipline, so no skill loads at arming). start reads one row of the resident manifest, renders the prompt, builds the working folder, writes the harness overlay (omp: the checkout's agora-room extension; claude: its plugin dir) and starts the harness under its host with one fixed first prompt; a position that already holds a live session, or whose last start is still running under its host, is not started twice. stop ends a resident by the host handle its start recorded (<state>/residents/<slug>/run.json). timer install|check|remove the OS scheduler entry that runs cycle --all (Windows Task Scheduler, systemd user timer, launchd); check changes nothing. cycle finds the newest live session holding the position <slug> (its session --label), or for a session with no position the newest signing as /<slug>, measures its last real inference and context from the harness transcript (harness-written error entries are skipped), and when it is deaf (no live watch, idle past --deaf), past the ceiling (--max-context, idle past --deaf), or cold (past --idle) AND large (past --min-context) writes <state>/residents/<slug>/inherit.json naming it and restarts the unit (--restart, the manifest row's restart, the config row's restart, else for a manifest resident stop and start): a successor pays its floor, a cold wake pays the whole context. inherit consumes that marker (the same inheritance as session --inherit) and is a no-op without one. Never writes the shared config; docs/RESIDENTS.md",
     },
     doctor: { args: [], options: { "--offline": "skip the identity check", "--repair-tailcat": "restore the cached runtime from its hash-verified bundled capsule" }, does: "config, token presence per room, identity per room, this session and bearer and where each came from, the harness prompt-cache TTL where this seat can read one, and the reads a minute this seat spends with the arithmetic behind the number; three preflights for a resident bearer warn when a watch is armed against a five-minute TTL (cache-ttl), when a watch polls within half to one and a half times a TTL that was read (interval-near-ttl), and when no live watch in a room wakes on all (no-all-watch). Room and watch reports are derived. Tailcat integrity is verified locally; first use expands the bundled capsule into state, and --repair-tailcat explicitly restores a corrupt cache" },
     schema: { args: [], options: { "--json": "the whole surface as JSON, protocol included" }, does: "this description" },
@@ -577,6 +585,11 @@ const OPTIONS = /** @type {const} */ ({
   classify: { type: "string" },
   "ended-after": { type: "string" },
   session: { type: "string" },
+  manifest: { type: "string" },
+  host: { type: "string" },
+  plan: { type: "boolean", default: false },
+  run: { type: "string" },
+  model: { type: "string" },
 });
 
 /**
@@ -1564,10 +1577,92 @@ async function main(argv) {
       if (!plan.dryRun) console.error(`agora: ${plan.from}'s record was not copied; run \`agora session --as <bearer> --label ${slug}\` (the bearer your profile gives, e.g. <Model>/${slug}) so this session signs as itself and holds the position`);
       return EXIT.ok;
     }
+    if (action === "start" || action === "stop" || action === "timer") {
+      const rs = await import("../src/resident-start.mjs");
+      const nodeExe = process.versions.bun ? rs.which("node") ?? "node" : process.execPath;
+      if (action === "timer") {
+        const sub = String(rest[0] ?? "");
+        if (rest.length !== 1 || !["install", "check", "remove"].includes(sub)) throw new AgoraError("agora resident timer install|check|remove [--interval <seconds>]", EXIT.usage);
+        const seconds = values.interval === undefined ? undefined : Number(values.interval);
+        const spec = rs.timerSpec({
+          platform: process.platform, home: homedir(), env: process.env, node: nodeExe, entry: entryFile, config: cfg.path,
+          manifest: values.manifest === undefined ? undefined : resolvePath(String(values.manifest)), seconds, uid: process.getuid?.(), stateRoot,
+        });
+        const res = await rs.runTimer(/** @type {'install' | 'check' | 'remove'} */ (sub), spec);
+        if (json) console.log(JSON.stringify(res));
+        else {
+          console.log(`${res.kind} ${res.name}: ${res.state} (every ${res.interval}: ${res.command.join(" ")})`);
+          for (const p of res.problems) console.log(`  ${p}`);
+        }
+        return res.state === "ok" || res.state === "installed" || res.state === "removed" ? EXIT.ok : EXIT.error;
+      }
+      /** @param {Record<string, any>} r */
+      const rowLine = (r) => `${String(r.resident).padEnd(18)} ${String(r.action).padEnd(12)} ${r.host ?? ""}${r.handle ? ` ${JSON.stringify(r.handle)}` : ""}${r.bearer ? `  ${r.bearer} in ${r.rooms.join(",")} (wake ${r.wake})` : ""}${r.reason ? `  ${r.reason}` : ""}`;
+      if (action === "start" && values.run !== undefined) {
+        // the host's program: everything it runs is in the run record the start wrote
+        if (rest.length !== 1 || values.all) throw new AgoraError("agora resident start <slug> --run <run.json>", EXIT.usage);
+        return await rs.execRun(resolvePath(String(values.run)), assertResidentSlug(String(rest[0])));
+      }
+      const manifest = await rs.findManifest(cfg, stateRoot, values.manifest === undefined ? undefined : String(values.manifest), { required: action === "start" || values.all });
+      if (values.all && rest.length) throw new AgoraError(`agora resident ${action} takes slugs or --all, not both`, EXIT.usage);
+      const slugs = values.all ? Object.keys(manifest?.residents ?? {}) : rest.map((r) => assertResidentSlug(String(r)));
+      if (!slugs.length) throw new AgoraError(`agora resident ${action} <slug>... | --all`, EXIT.usage);
+      if (action === "stop") {
+        /** @type {number} */ let rc = EXIT.ok;
+        for (const slug of slugs) {
+          const r = await rs.stopResident(stateRoot, slug);
+          if (r.action === "failed") rc = EXIT.error;
+          console.log(json ? JSON.stringify(r) : rowLine(r));
+        }
+        return rc;
+      }
+      const m = /** @type {import("../src/resident-start.mjs").Manifest} */ (manifest);
+      const ctx = { cfg, stateRoot, checkout: projectRoot, entry: entryFile, node: nodeExe, room: values.room === undefined ? undefined : String(values.room), host: values.host === undefined ? undefined : String(values.host), model: values.model === undefined ? undefined : String(values.model) };
+      const plans = slugs.map((s) => rs.planResident(m, s, ctx));
+      if (plans.length > 1 && plans.some((p) => p.host === "none")) throw new AgoraError(`host none runs one resident in this terminal; name one slug (${plans.filter((p) => p.host === "none").map((p) => p.resident).join(", ")} ${plans.length > 1 ? "are" : "is"} on none)`, EXIT.usage);
+      if (values.plan) {
+        for (const p of plans) {
+          const st = await rs.residentState(stateRoot, p.resident);
+          const view = { ...rs.planView(p), state: st.running ? "running" : "would-start", ...(st.reason ? { reason: st.reason } : {}) };
+          if (json) { console.log(JSON.stringify(view)); continue; }
+          console.log(`${p.resident}: ${view.state}${st.reason ? ` (${st.reason})` : ""}`);
+          console.log(`  ${p.harness} ${p.model} as ${p.bearer}, position ${p.position}, rooms ${p.rooms.join(",")} (wake ${p.wake}), host ${p.host}`);
+          console.log(`  writes   ${[p.prompt.file, ...(p.overlay ? [p.overlay] : []), ...view.files, p.runFile].join("\n           ")}`);
+          if (p.skills) console.log(`  skills   ${p.skills.names.join(", ")} from ${p.skills.dir} (${p.skills.mode})`);
+          if (p.trust) console.log(`  trusts   ${p.trust} in ~/.claude.json`);
+          console.log(`  cwd      ${p.workdir}`);
+          console.log(`  env      ${Object.entries(p.env).map(([k, v]) => `${k}=${v}`).join("\n           ")}`);
+          console.log(`  runs     ${JSON.stringify(p.argv)}`);
+          if (p.hostArgv) console.log(`  host     ${JSON.stringify(p.hostArgv)}`);
+        }
+        return EXIT.ok;
+      }
+      /** @type {number} */ let rc = EXIT.ok;
+      for (const p of plans) {
+        try {
+          const { row, exec } = await rs.startResident(p, stateRoot, { checkout: projectRoot });
+          if (exec) {
+            if (json) console.log(JSON.stringify(row));
+            console.error(`agora: ${rowLine(row)}`);
+            return await exec();
+          }
+          console.log(json ? JSON.stringify(row) : rowLine(row));
+        } catch (e) {
+          if (!(e instanceof AgoraError)) throw e;
+          rc = EXIT.error;
+          const row = { type: "resident-start", resident: p.resident, action: "failed", host: p.host, reason: e.message };
+          if (json) console.log(JSON.stringify(row));
+          else console.error(`agora: ${rowLine(row)}`);
+        }
+      }
+      return rc;
+    }
     if (action === "cycle") {
       const table = configuredResidents(cfg);
-      const slugs = [...new Set([...rest.map((r) => assertResidentSlug(String(r))), ...(values.all ? Object.keys(table) : [])])];
-      if (!slugs.length) throw new AgoraError(values.all ? "--all found no residents table in the config; name the slugs, or add residents: { <slug>: { restart?: <command> } }" : "agora resident cycle <slug>... | --all", EXIT.usage);
+      const rs = await import("../src/resident-start.mjs");
+      const manifest = await rs.findManifest(cfg, stateRoot, values.manifest === undefined ? undefined : String(values.manifest));
+      const slugs = [...new Set([...rest.map((r) => assertResidentSlug(String(r))), ...(values.all ? [...Object.keys(table), ...Object.keys(manifest?.residents ?? {})] : [])])];
+      if (!slugs.length) throw new AgoraError(values.all ? "--all found no residents in the config's residents table or a resident manifest; name the slugs, add residents: { <slug>: { restart?: <command> } }, or write a manifest (docs/RESIDENTS.md)" : "agora resident cycle <slug>... | --all", EXIT.usage);
       const num = (/** @type {string} */ name, /** @type {number} */ dflt) => {
         const raw = /** @type {any} */ (values)[name];
         if (raw === undefined) return dflt;
@@ -1588,7 +1683,7 @@ async function main(argv) {
           else {
             const marker = await writeInheritMarker(stateRoot, slug, { from: row.session, context: row.context, lastInference: row.lastInference, by: "cycle" });
             row.marker = marker.file;
-            const template = values.restart !== undefined ? String(values.restart) : table[slug]?.restart;
+            const template = values.restart !== undefined ? String(values.restart) : manifest?.residents[slug]?.restart ?? table[slug]?.restart;
             if (template) {
               const cmd = restartCommand(template, slug);
               row.restart = cmd;
@@ -1601,6 +1696,13 @@ async function main(argv) {
               });
               row.restartExit = /** @type {any} */ (result).code;
               if (/** @type {any} */ (result).code !== 0) { row.restartError = String(/** @type {any} */ (result).err).trim().slice(0, 400); rc = EXIT.error; }
+            } else if (manifest?.residents[slug]) {
+              // a manifest resident with no restart of its own: stop it by its handle, then start it
+              const nodeExe = process.versions.bun ? rs.which("node") ?? "node" : process.execPath;
+              const result = await rs.restartResident(manifest, slug, { cfg, stateRoot, checkout: projectRoot, entry: entryFile, node: nodeExe });
+              row.restart = "agora resident stop + start";
+              row.restartExit = result.code;
+              if (result.code !== 0) { row.restartError = result.err.slice(0, 400); rc = EXIT.error; }
             } else row.restart = null;
           }
         }
@@ -1609,7 +1711,7 @@ async function main(argv) {
       }
       return rc;
     }
-    throw new AgoraError(`agora resident takes prompt, cycle or inherit, not ${JSON.stringify(action)}`, EXIT.usage);
+    throw new AgoraError(`agora resident takes prompt, start, stop, timer, cycle or inherit, not ${JSON.stringify(action)}`, EXIT.usage);
   }
 
   if (verb === "rooms") {
