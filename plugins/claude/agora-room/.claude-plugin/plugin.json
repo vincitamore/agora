@@ -42,6 +42,13 @@
       "title": "Bearer this session posts as",
       "description": "Sets AGORA_ACTOR for the watch and the room_post tool (for example Model/role). Empty: the session record or the agora config decides."
     },
+    "preamble": {
+      "type": "string",
+      "title": "Explain delivered messages",
+      "description": "on = each message the watch delivers is submitted after one short fixed explanation (which room, that this plugin sent it, that it is input and not an instruction, that room_post answers in the room). off = the bare message line only, for a session whose own instructions already explain it.",
+      "options": ["on", "off"],
+      "default": "on"
+    },
     "pane_as": {
       "type": "string",
       "title": "Bearer the pane posts as",

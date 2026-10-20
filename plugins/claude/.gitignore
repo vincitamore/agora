@@ -1,3 +1,4 @@
 # Claude Code writes type declarations beside a mod it loads interactively.
 **/.claude-plugin/types/
 **/.claude-plugin/tsconfig.json
+**/tsconfig.json

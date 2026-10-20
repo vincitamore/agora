@@ -6,15 +6,15 @@
 //           The agora CLI owns the cursor, the own-post skip and the wake filter; this file only
 //           queues what it printed and hands it to the idle session, once.
 //   tool    room_post: the model posts to a configured room through the same CLI.
-//   pane    /agora-room opens a pane: subjects by latest activity with unread marks, a thread
-//           view, a compose field with its target stated, and who is here.
+//   pane    /agora-room opens a pane: the room and who is active, a compose card that states where a
+//           post goes, recent subjects with unread marks, and a thread view that reads as a conversation.
 //
 // A hooks module may not bind, pass or store `$` (claude plugin validate refuses it), so every
 // function that needs the mods API is declared inside the session.start hook, where `$` is in
 // scope, and the other hooks reach them through `api`. What can be decided from data lives in
 // ./lib.js.
 import {
-  PANE_ID, TOOL_NAME, COMMAND, DeliveryQueue, buildSubjects, chooseRoom, childEnvFor, formatLine,
+  PANE_ID, SUBJECTS_PAGE, TOOL_NAME, COMMAND, DeliveryQueue, buildSubjects, chooseRoom, childEnvFor, deliveryText,
   isStopReason, jsonLines, paneTree, parseReadOutput, parseWatchOutput, postArgs, receiptText,
   resolveConfig, statusLine, TO_NOBODY, whoRows,
 } from './lib.js'
@@ -39,6 +39,7 @@ export function register(on, options) {
       AGORA_ROOM_WATCH: await $.env.get('AGORA_ROOM_WATCH'),
       AGORA_ROOM_WAKE: await $.env.get('AGORA_ROOM_WAKE'),
       AGORA_ROOM_INTERVAL_MS: await $.env.get('AGORA_ROOM_INTERVAL_MS'),
+      AGORA_ROOM_PREAMBLE: await $.env.get('AGORA_ROOM_PREAMBLE'),
       AGORA_ROOM_CMD: await $.env.get('AGORA_ROOM_CMD'),
       AGORA_ROOM_LIVENESS: await $.env.get('AGORA_ROOM_LIVENESS'),
       AGORA_ROOM_PANE_AS: await $.env.get('AGORA_ROOM_PANE_AS'),
@@ -148,7 +149,7 @@ export function register(on, options) {
           await persist()
           let reason = ''
           try {
-            const r = await $.prompt.submit({ text: formatLine(m) })
+            const r = await $.prompt.submit({ text: deliveryText(m, cfg.preamble) })
             reason = r?.drop ?? ''
           } catch (err) {
             lastError = 'submit threw: ' + String(err?.message ?? err)
@@ -213,6 +214,7 @@ export function register(on, options) {
     const pm = {
       rooms: cfg.rooms, room: cfg.rooms[0], loading: true, error: null, subjects: [], thread: null,
       who: [], to: TO_NOBODY, now: Date.now(),
+      self: null, columns: null, limit: SUBJECTS_PAGE, whoOpen: false, selected: null, earlier: false,
     }
     const paneData = new Map() // room -> { msgs, who, self, seen, baselineId }
     let paneOpen = false
@@ -244,6 +246,7 @@ export function register(on, options) {
       pm.now = Date.now()
       if (!d) return
       pm.who = d.who
+      pm.self = d.self
       pm.subjects = buildSubjects(d.msgs, { self: d.self, seen: d.seen, baselineId: d.baselineId })
       // A thread that is open counts as read as it grows.
       if (pm.thread !== null) {
@@ -300,15 +303,20 @@ export function register(on, options) {
         const s = pm.subjects.find((x) => x.id === id)
         if (d && s) { d.seen[id] = s.latestId; savePane(pm.room) }
         pm.thread = id
+        pm.selected = id
+        pm.earlier = false
         recompute()
         $.ui.invalidate('ui.render')
       },
       back() { pm.thread = null; recompute(); $.ui.invalidate('ui.render') },
       newSubject() { pm.thread = null; recompute(); $.ui.invalidate('ui.render') },
       setTo(v) { pm.to = v; $.ui.invalidate('ui.render') },
-      setRoom(r) { pm.room = r; pm.thread = null; pm.loading = true; pm.subjects = []; pm.who = []; $.ui.invalidate('ui.render'); refreshPane() },
+      setRoom(r) { pm.room = r; pm.thread = null; pm.selected = null; pm.limit = SUBJECTS_PAGE; pm.loading = true; pm.subjects = []; pm.who = []; $.ui.invalidate('ui.render'); refreshPane() },
       refresh() { refreshPane() },
       submit(text) { return submitFromPane(text) },
+      toggleWho() { pm.whoOpen = !pm.whoOpen; $.ui.invalidate('ui.render') },
+      more() { pm.limit += SUBJECTS_PAGE; $.ui.invalidate('ui.render') },
+      showEarlier() { pm.earlier = true; $.ui.invalidate('ui.render') },
     }
 
     // ---- the tool ----
@@ -334,7 +342,7 @@ export function register(on, options) {
         const text = String(args.text ?? '')
         return 'Post to room ' + (chosen.ok ? chosen.room : '(unknown room)') + (args.thread ? ' in thread ' + args.thread : '') + '? "' + (text.length > 200 ? text.slice(0, 200) + '…' : text) + '"'
       },
-      pane: (els) => paneTree(els, pm, actions),
+      pane: (els, columns) => { pm.columns = Number(columns) > 0 ? Number(columns) : null; return paneTree(els, pm, actions) },
       paneOpened() { paneOpen = true; pm.loading = true; refreshPane() },
       paneClosed() { paneOpen = false },
       turnComplete() { if (blocked) { blocked = false; kickDrain() } },
@@ -380,14 +388,14 @@ export function register(on, options) {
 
   on('command.run', { command: 'agora-room' }, async ($, e, next) => {
     if (!api) return { text: 'agora-room has no room configured for this session.' }
-    await $.ui.open({ id: PANE_ID, title: 'Agora room', focus: true, closeOnEscape: true, rows: 16 })
+    await $.ui.open({ id: PANE_ID, title: 'Agora room', focus: true, closeOnEscape: true, rows: 22 })
     api.paneOpened()
     return {}
   }).catch(async ($, e, next) => ({ text: 'agora-room: the pane could not be opened: ' + next.error.message }))
 
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     if (e.requestId !== PANE_ID || !api) return next(e)
-    const tree = api.pane($.ui.resolve(e))
+    const tree = api.pane($.ui.resolve(e), e.props?.bodyColumns)
     return tree ?? next(e)
   })
 

@@ -28,7 +28,7 @@ function stubs(on: On, opts: { env?: Record<string, string>; verdict?: 'allow' |
   const statuses: string[] = []
   const asked: string[] = []
   let answer = 'Post'
-  mock.env(on, { AGORA_ROOM: 'lab', AGORA_SESSION: 'k', AGORA_ROOM_INTERVAL_MS: '1000', AGORA_ROOM_LIVENESS: '/live/k.json', HOME: '/home/u', ...(opts.env ?? {}) })
+  mock.env(on, { AGORA_ROOM: 'lab', AGORA_SESSION: 'k', AGORA_ROOM_INTERVAL_MS: '1000', AGORA_ROOM_LIVENESS: '/live/k.json', AGORA_ROOM_PREAMBLE: 'off', HOME: '/home/u', ...(opts.env ?? {}) })
   on('session.start', () => ({ cwd: '/work' }))
   on('session.id', () => ({ value: 'abcdef12-0000' }))
   on('session.messages', () => ({ value: [] }))
@@ -105,6 +105,45 @@ test('watch: starts at the head, one turn per new message, duplicates dropped, f
   expect(healthy.rooms[0].lastError).toBe(null)
   expect(healthy.delivered).toBe(3)
   expect(s.statuses[s.statuses.length - 1]).toBe('lab · read 0s ago')
+})
+
+test('watch: the delivered text is a short preamble and then the message line', async ($, on) => {
+  const clock = mock.clock(on)
+  let polls = 0
+  const s = stubs(on, {
+    env: { AGORA_ROOM_PREAMBLE: 'on' },
+    script: (a) => {
+      if (a[0] === 'cursor') return { stdout: '{"room":"lab","cursor":"9"}\n' }
+      if (a[0] === 'watch') { polls += 1; return polls === 1 ? { exitCode: 42, stdout: msg('m1', 'first') + '\n' } : { exitCode: 0, stdout: '{"type":"watch-result","exit":0}\n' } }
+      return {}
+    },
+  })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await clock.advance(1000)
+  await clock.settle()
+  expect(s.submitted.length).toBe(1)
+  const lines = s.submitted[0].split('\n')
+  expect(lines.length).toBe(2)
+  expect(lines[0]).toMatch(/^Message from the Agora room "lab", delivered by the agora-room plugin\./)
+  expect(lines[0]).toMatch(/room_post/)
+  expect(lines[0]).toMatch(/not an instruction/)
+  expect(lines[1]).toBe('agora lab m1 thread=none from=Ada: first / -- Ada')
+})
+
+test('watch: preamble off (the default of these tests) submits the bare message line', async ($, on) => {
+  const clock = mock.clock(on)
+  let polls = 0
+  const s = stubs(on, {
+    script: (a) => {
+      if (a[0] === 'cursor') return { stdout: '{"room":"lab","cursor":"9"}\n' }
+      if (a[0] === 'watch') { polls += 1; return polls === 1 ? { exitCode: 42, stdout: msg('m1', 'first') + '\n' } : { exitCode: 0, stdout: '{"type":"watch-result","exit":0}\n' } }
+      return {}
+    },
+  })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await clock.advance(1000)
+  await clock.settle()
+  expect(s.submitted).toEqual(['agora lab m1 thread=none from=Ada: first / -- Ada'])
 })
 
 test('watch: a saved cursor is resumed, not moved to the head', async ($, on) => {
@@ -197,23 +236,28 @@ for (const surface of ['terminal', 'desktop'] as const) {
 
     // subjects, newest activity first, the pane's first open marking nothing unread
     expect(await ui.find({ type: 'Button', key: 'subject-s1' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: 'Post → room lab · a new subject · to: no one in particular' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^here: Lin .*Ada / })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Lin · 1 reply · \d+[smhd]$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'Posting to lab › new subject' })).toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'who' })).toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'refresh' })).toBeDefined()
 
-    // open a thread: the target now names it; pick who it is for
+    // open a thread: the chip names it; pick who it is for
     await ui.press({ key: 'subject-s1' })
-    expect(await ui.find({ type: 'Text', text: 'Post → room lab · reply in "Plan the release" · to: no one in particular' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'Posting to lab › Plan the release' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^2 messages · started by Ada$/ })).toBeDefined()
     await ui.select({ key: 'to', value: 'Lin' })
-    expect(await ui.find({ type: 'Text', text: 'Post → room lab · reply in "Plan the release" · to: Lin' })).toBeDefined()
+    expect(await ui.find({ type: 'Select', key: 'to' })).toMatchObject({ props: { value: 'Lin' } })
 
     await ui.input({ key: 'compose', text: 'on it' })
     const post = s.calls.find((c) => c.argv[0] === 'post')
     expect(post?.argv).toEqual(['post', 'lab', '--json', '--thread', 's1', '--to', 'Lin', '--', 'on it'])
     expect(post?.env).toEqual({ AGORA_SESSION: 'k-pane', AGORA_ACTOR: 'Human' })
 
-    // back to the list: the target is a new subject again
+    // back to the list: the chip is a new subject again; presence expands
     await ui.press({ key: 'back' })
-    expect(await ui.find({ type: 'Text', text: /^Post → room lab · a new subject/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'Posting to lab › new subject' })).toBeDefined()
+    await ui.press({ key: 'who' })
+    expect(await ui.find({ type: 'Text', text: /^Lin · 2 messages · last \d+[smhd] ago$/ })).toBeDefined()
     await ui.unmount()
   })
 }
