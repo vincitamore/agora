@@ -1235,8 +1235,8 @@ Details and maintainer checks: [docs/TRANSFERS.md](../../docs/TRANSFERS.md).
 
 - Zero runtime dependencies. Use web `fetch`; never add an HTTP or Slack client
   library. Dev dependencies exist for `npm run check` only.
-- A test fixture that needs a credential shape uses the suite's short fakes (`xoxb-1234567890-abcdefghijklmnop`,
-  `xoxb-fake-test`), never a realistic-length token: GitHub push protection refuses the push, and once
+- A test fixture that needs a credential shape uses the suite's short fakes (`TOKENISH` in
+  `test/cli-faces.test.mjs`, or a `-fake-test` stub), never a realistic-length token: GitHub push protection refuses the push, and once
   the commit has reached the other remote, clearing it means rewriting history the forge's branch
   protection refuses.
 - `src/native-*.kernel.mjs` are GENERATED from `spec/cursor.bend`, `spec/board.bend` and
