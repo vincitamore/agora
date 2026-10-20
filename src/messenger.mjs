@@ -4,7 +4,10 @@
  *
  * One code path, `tick`: a pure fold over durable records (the room read with its titles and
  * pins, the board read, the seat's session records through the resolver) at an instant, returning
- * the acts that are due. The shell (`runTick`) gathers the records, asks `tick`, and when anything
+ * the acts that are due. The clocks run on evidence before time: a delivery starts at the session's
+ * seen record, and a holder's own activity record (is it busy, producing, calling tools, or idle)
+ * decides whether a notice is due at all; the time bounds are backstops (see `evidenceOf`).
+ * The shell (`runTick`) gathers the records, asks `tick`, and when anything
  * is due takes the room's messenger lock, gathers again and posts what the fresh fold still says
  * is due. Nothing else is kept: **its own posts are its incident record**. Every notice is one of
  * a fixed set of one-line forms (`NOTICE_TEMPLATES`), and `tick` skips an act whose form already
@@ -24,7 +27,7 @@ import path from "node:path";
 import { AgoraError, EXIT, writeFileAtomic } from "./core.mjs";
 import { claimAuthors, foldBoard, safeSubject } from "./board-read.mjs";
 import { parseNativeCursor } from "./native-protocol.mjs";
-import { pidAlive } from "./session.mjs";
+import { listSessions, pidAlive } from "./session.mjs";
 import { matchesAddress, parseTrailers } from "./trailers.mjs";
 
 /**
@@ -48,16 +51,25 @@ export const NOTICE_TEMPLATES = Object.freeze({
 /** @typedef {keyof typeof NOTICE_TEMPLATES} NoticeKind */
 
 /**
- * The bounds, in milliseconds. R: delivery to taken, then N2. R2: the human line (N3) on either
- * clock. I: the grace after a lease expires before N4. Bo: an open subject before N6. H: the
- * horizon; an incident that started before it is not raised. T: the stream's interval tick.
+ * The bounds, in milliseconds. The clocks run on evidence first (what a holder's session is doing:
+ * `readActivity`) and on these times only where evidence is absent or has to be bounded.
+ * G: how long a holder with no turn, tool call or output may sit idle on an unresolved delivery or
+ * lapsed lease before N2 or N4. G2: the same idle time before the human line (N3). S: a busy holder
+ * with no progress at all for this long is stalled, which reads as dark. D: a watch whose record has
+ * not been refreshed for this long (at least three of its own intervals) is silent, which reads as
+ * dark. R, R2, I: the time-only backstops for a holder whose session writes no activity record (an
+ * older client): R, delivery to taken, then N2; R2, the human line (N3) on either clock; I, the
+ * grace after a lease expires before N4. Raise them (hours) where older clients are common. Bo: an
+ * open subject before N6. H: the horizon; an incident that started before it is not raised. T: the
+ * stream's interval tick.
  */
-export const DEFAULT_BOUNDS = Object.freeze({ R: 900_000, R2: 2_700_000, I: 120_000, Bo: 1_800_000, H: 14_400_000, T: 30_000 });
+export const DEFAULT_BOUNDS = Object.freeze({ R: 900_000, R2: 2_700_000, I: 120_000, Bo: 1_800_000, H: 14_400_000, T: 30_000, G: 600_000, G2: 1_800_000, S: 7_200_000, D: 300_000 });
 
-/** @typedef {{ R: number, R2: number, I: number, Bo: number, H: number, T: number }} Bounds */
+/** @typedef {{ R: number, R2: number, I: number, Bo: number, H: number, T: number, G: number, G2: number, S: number, D: number }} Bounds */
 
 /**
- * `R=15m,R2=45m,I=2m,Bo=30m,H=4h,T=30s` (any subset; the rest are the defaults). Units ms, s, m, h.
+ * `R=15m,R2=45m,I=2m,Bo=30m,H=4h,T=30s,G=10m,G2=30m,S=2h,D=5m` (any subset; the rest are the
+ * defaults). Units ms, s, m, h.
  * @param {string | undefined} spec @returns {Bounds}
  */
 export function parseBounds(spec) {
@@ -65,12 +77,14 @@ export function parseBounds(spec) {
   const b = { ...DEFAULT_BOUNDS };
   if (spec !== undefined && spec.trim()) {
     for (const part of spec.split(",")) {
-      const m = /^\s*(R2|R|I|Bo|H|T)\s*=\s*(\d+)(ms|s|m|h)\s*$/.exec(part);
-      if (!m) throw new AgoraError(`--bounds takes NAME=<n><ms|s|m|h> joined by commas (names R, R2, I, Bo, H, T), not ${JSON.stringify(part)}`, EXIT.usage);
+      const m = /^\s*(R2|R|I|Bo|H|T|G2|G|S|D)\s*=\s*(\d+)(ms|s|m|h)\s*$/.exec(part);
+      if (!m) throw new AgoraError(`--bounds takes NAME=<n><ms|s|m|h> joined by commas (names R, R2, I, Bo, H, T, G, G2, S, D), not ${JSON.stringify(part)}`, EXIT.usage);
       b[/** @type {keyof Bounds} */ (m[1])] = Number(m[2]) * { ms: 1, s: 1000, m: 60_000, h: 3_600_000 }[/** @type {'ms' | 's' | 'm' | 'h'} */ (m[3])];
     }
   }
   if (!(b.R > 0 && b.R < b.R2)) throw new AgoraError(`--bounds needs 0 < R < R2 (R ${b.R} ms, R2 ${b.R2} ms)`, EXIT.usage);
+  if (!(b.G > 0 && b.G < b.G2)) throw new AgoraError(`--bounds needs 0 < G < G2 (G ${b.G} ms, G2 ${b.G2} ms)`, EXIT.usage);
+  if (!(b.S > 0 && b.D > 0)) throw new AgoraError("--bounds needs S and D above 0", EXIT.usage);
   if (!(b.T >= 1000)) throw new AgoraError("--bounds T is at least 1s", EXIT.usage);
   return b;
 }
@@ -156,18 +170,63 @@ export function noticeKey(kind, f, t) {
  * @typedef {{ kind: NoticeKind, key: string, text: string, trailers: Array<{ key: string, value: string }>, thread: string | undefined }} Act
  * @typedef {import('./board-read.mjs').Resolution} Resolution
  * @typedef {{
+ *   session: string, turn: "busy" | "idle", since: number, lastToolAt: number | null, lastOutputAt: number | null,
+ *   progressAt: number | null, progress: number, updatedAt: number, intervalMs: number | null,
+ * }} Activity
+ * @typedef {{
  *   now: number, messages: any[], titles: Map<string, string>, pinned: Set<string>, boardRecords: any[],
  *   accountId: string | null, resolve: (address: string) => Resolution, human: string, bounds: Bounds,
+ *   seen?: Map<string, number>, activity?: Map<string, Activity>,
  * }} TickInput
+ * `seen` is `readSeen`'s map: when each of this seat's sessions admitted each line into its intake.
+ * `activity` is `readActivity`'s: what each of this seat's sessions is doing now.
+ * @typedef {{ clock: 1 | 2, id: string, position: string, state: "working" }} Held
  */
 
 /** @param {string} cursor */
 const seqOf = (cursor) => { try { return parseNativeCursor(cursor).sequence; } catch { return 0; } };
 
 /**
+ * What a position's sessions are doing, from their activity records (docs/MESSENGER.md § Evidence).
+ * Per holder: `working` (a turn is running and it shows progress within S), `idle` (no turn; the
+ * time it went quiet is the latest of its turn end, tool call and output), `dark` (its process is
+ * gone, its watch has not refreshed the record for D or three of its intervals, or its turn has made
+ * no progress for S), or `none` (no record: an older client, or a session with no watch of this
+ * kind). A position is `working` if any holder is; else `idle` if any holder with a record is (a live
+ * session that is not taking it); else `dark`; else `none`. `since` is when it went idle or dark
+ * (`null` when unknown); `verdict` is the one token the N3 line prints for it.
+ * @param {import('./board-read.mjs').ResolvedHolder[]} holders @param {Map<string, Activity> | undefined} activity @param {number} now @param {Bounds} bounds
+ * @returns {{ state: "working" | "idle" | "dark" | "none", since: number | null, verdict: string }}
+ */
+export function evidenceOf(holders, activity, now, bounds) {
+  /** @type {Array<{ state: "working" | "idle" | "dark" | "none", since: number | null, why: string }>} */
+  const per = holders.map((h) => {
+    const a = h.session === null ? undefined : activity?.get(h.session);
+    if (!a) return h.process === "gone" ? { state: "dark", since: null, why: "gone" } : { state: "none", since: null, why: "none" };
+    if (h.process === "gone") return { state: "dark", since: a.updatedAt, why: "gone" };
+    const silent = Math.max(bounds.D, 3 * (a.intervalMs ?? 0));
+    if (now - a.updatedAt > silent) return { state: "dark", since: a.updatedAt + silent, why: "silent" };
+    const last = Math.max(a.since, a.lastToolAt ?? 0, a.lastOutputAt ?? 0, a.progressAt ?? 0);
+    if (a.turn === "busy") return now - last > bounds.S ? { state: "dark", since: last + bounds.S, why: "stalled" } : { state: "working", since: a.since, why: "working" };
+    return { state: "idle", since: last, why: "idle" };
+  });
+  const latest = (/** @type {typeof per} */ rows) => {
+    const ts = rows.map((r) => r.since).filter((t) => t !== null);
+    return ts.length === rows.length && ts.length ? Math.max(.../** @type {number[]} */ (ts)) : null;
+  };
+  const working = per.filter((p) => p.state === "working");
+  if (working.length) return { state: "working", since: latest(working), verdict: "working" };
+  const idle = per.filter((p) => p.state === "idle");
+  if (idle.length) return { state: "idle", since: latest(idle), verdict: "idle" };
+  const dark = per.filter((p) => p.state === "dark");
+  if (dark.length) return { state: "dark", since: latest(dark), verdict: [...new Set(dark.map((p) => p.why))].join("+") };
+  return { state: "none", since: null, verdict: "none" };
+}
+
+/**
  * The acts due at `now`. Pure.
  * @param {TickInput} input
- * @returns {{ acts: Act[], notices: number }}
+ * @returns {{ acts: Act[], notices: number, held: Held[] }}
  */
 export function tick(input) {
   const { now, bounds, human } = input;
@@ -227,15 +286,48 @@ export function tick(input) {
     }
     return ms.some((x) => x.seq > m.seq && !x.notice && named(x.bearer) && (trailer(x, "re") === m.id || trailer(x, "re") === m.cursor || x.thread === m.id));
   };
-  /** clock 1 for one (message, address) @param {typeof ms[number]} m @param {string} addr @param {import('./board-read.mjs').ResolvedHolder[]} holders @param {number} startTs */
-  const clock1 = (m, addr, holders, startTs) => {
+  /**
+   * Where clock 1 starts for a delivery: the earliest instant (not after `now`, not before the post) at
+   * which a holder's session admitted the line, when a seen record says so, else the post.
+   * @param {string} deliveredId the line the holder is delivered: the message itself, or its route line
+   * @param {import('./board-read.mjs').ResolvedHolder[]} holders @param {number} postedTs
+   * @returns {{ ts: number, since: "seen" | "posted" }}
+   */
+  const startOf = (deliveredId, holders, postedTs) => {
+    const at = holders.flatMap((h) => {
+      const t = h.session === null ? undefined : input.seen?.get(seenKey(h.session, deliveredId));
+      return t !== undefined && t <= now ? [t] : [];
+    });
+    return at.length ? { ts: Math.max(postedTs, Math.min(...at)), since: "seen" } : { ts: postedTs, since: "posted" };
+  };
+  /** the incidents an idle-or-dark clock would raise but a working holder holds back, in the order found */
+  /** @type {Held[]} */
+  const held = [];
+  /**
+   * clock 1 for one (message, address): the delivery's evidence first. A working holder draws no
+   * notice (the line waits in its own harness); an idle or dark one draws N2 after G of idleness
+   * that began no earlier than the delivery, N3 after G2; with no activity record the time-only
+   * bounds R and R2 run from the delivery.
+   * @param {typeof ms[number]} m @param {string} addr @param {import('./board-read.mjs').ResolvedHolder[]} holders @param {string} deliveredId @param {number} postedTs
+   */
+  const clock1 = (m, addr, holders, deliveredId, postedTs) => {
     if (taken(m, addr, holders)) return;
+    const { ts: startTs, since } = startOf(deliveredId, holders, postedTs);
     const age = now - startTs;
-    if (age >= bounds.R) emit("N2", m.seq, { age: formatAge(age), since: "posted", id: m.id }, [{ key: "to", value: addr }, { key: "re", value: m.id }], m.root);
-    if (age >= bounds.R2) {
-      const position = [...new Set(holders.map((h) => h.position ?? h.bearer))].join("+");
-      const verdict = [...new Set(holders.map((h) => h.verdict))].join("+");
-      emit("N3", m.seq, { position, verb: "taken", id: m.id, age: formatAge(age), verdict }, [{ key: "to", value: human }, { key: "re", value: m.id }], m.root);
+    const ev = evidenceOf(holders, input.activity, now, bounds);
+    const to = [{ key: "to", value: addr }, { key: "re", value: m.id }];
+    const toHuman = [{ key: "to", value: human }, { key: "re", value: m.id }];
+    const position = [...new Set(holders.map((h) => h.position ?? h.bearer))].join("+");
+    if (ev.state === "working") {
+      if (age >= bounds.G) held.push({ clock: 1, id: m.id, position, state: "working" });
+      return;
+    }
+    const quiet = ev.state === "none" ? age : now - Math.max(startTs, ev.since ?? startTs);
+    const [first, second] = ev.state === "none" ? [bounds.R, bounds.R2] : [bounds.G, bounds.G2];
+    if (quiet >= first) emit("N2", m.seq, { age: formatAge(age), since, id: m.id }, to, m.root);
+    if (quiet >= second) {
+      const verdict = ev.state === "none" ? [...new Set(holders.map((h) => h.verdict))].join("+") : ev.verdict;
+      emit("N3", m.seq, { position, verb: "taken", id: m.id, age: formatAge(age), verdict }, toHuman, m.root);
     }
   };
 
@@ -251,7 +343,7 @@ export function tick(input) {
           continue;
         }
         const local = localOf(r);
-        if (local.length) clock1(m, addr, local, m.ts);
+        if (local.length) clock1(m, addr, local, m.id, m.ts);
       }
     }
     // routing, no model: an unaddressed human request outside the Room subject
@@ -265,7 +357,7 @@ export function tick(input) {
       } else if (route.notice?.kind === "N1" && route.to[0]) {
         const addr = route.to[0];
         const local = localOf(resolve(addr));
-        if (local.length) clock1(m, addr, local, route.ts);
+        if (local.length) clock1(m, addr, local, route.id, route.ts);
       }
     }
     // a reply posted at top level
@@ -286,7 +378,10 @@ export function tick(input) {
     }
   }
 
-  // clock 2: a lease of this seat's that lapsed with no renew, release or verdict
+  // clock 2: a lease of this seat's that lapsed with no renew, release or verdict. Expiry alone never
+  // pings a working holder (it is held, and reported as working); an idle or dark holder is pinged
+  // once it has been quiet for G since the later of its going quiet and the expiry, and the human
+  // line follows at G2. With no activity record the time-only bounds run from the expiry.
   for (const s of board.subjects) {
     const lease = s.lapsed;
     if (!lease || (input.accountId && lease.accountId !== input.accountId)) continue;
@@ -299,16 +394,23 @@ export function tick(input) {
     const expired = Date.parse(lease.expiresAt);
     if (expired < horizon) continue;
     const since = now - expired;
-    if (since < bounds.I) continue;
+    const holders = localOf(resolve(author.bearer));
+    const ev = evidenceOf(holders, input.activity, now, bounds);
+    const position = holders.length ? [...new Set(holders.map((h) => h.position ?? h.bearer))].join("+") : author.bearer;
+    if (ev.state === "working") {
+      held.push({ clock: 2, id: s.subject, position, state: "working" });
+      continue;
+    }
+    const quiet = ev.state === "none" ? since : now - Math.max(expired, ev.since ?? expired);
+    const [first, second] = ev.state === "none" ? [bounds.I, bounds.R2] : [bounds.G, bounds.G2];
+    if (quiet < first) continue;
     emit("N4", from, { subject: s.subject, age: formatAge(since) }, [{ key: "to", value: author.bearer }], author.root);
-    if (since >= bounds.R2) {
-      const holders = localOf(resolve(author.bearer));
-      const position = holders.length ? [...new Set(holders.map((h) => h.position ?? h.bearer))].join("+") : author.bearer;
-      const verdict = holders.length ? [...new Set(holders.map((h) => h.verdict))].join("+") : "absent";
+    if (quiet >= second) {
+      const verdict = ev.state !== "none" ? ev.verdict : holders.length ? [...new Set(holders.map((h) => h.verdict))].join("+") : "absent";
       emit("N3", from, { position, verb: "renewed", id: s.subject, age: formatAge(since), verdict }, [{ key: "to", value: human }], author.root);
     }
   }
-  return { acts, notices: done.size };
+  return { acts, notices: done.size, held };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -316,7 +418,7 @@ export function tick(input) {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * @typedef {{ messages: any[], annotations: any[], boardRecords: any[], resolve: (a: string) => Resolution }} Snapshot
+ * @typedef {{ messages: any[], annotations: any[], boardRecords: any[], resolve: (a: string) => Resolution, seen?: Map<string, number>, activity?: Map<string, Activity> }} Snapshot
  * @typedef {{
  *   gather: () => Promise<Snapshot>, post: (act: Act) => Promise<{ id: string, cursor: string }>,
  *   lock: <T>(fn: () => Promise<T>) => Promise<T | undefined>, now: () => number,
@@ -340,18 +442,131 @@ export function annotationState(annotations) {
 function fold(snap, deps, now) {
   const { titles, pinned } = annotationState(snap.annotations);
   return tick({ now, messages: snap.messages, titles, pinned, boardRecords: snap.boardRecords, accountId: deps.accountId,
-    resolve: snap.resolve, human: deps.human, bounds: deps.bounds });
+    resolve: snap.resolve, human: deps.human, bounds: deps.bounds, ...(snap.seen ? { seen: snap.seen } : {}), ...(snap.activity ? { activity: snap.activity } : {}) });
+}
+
+// ---------------------------------------------------------------------------------------------
+// The seen records
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Where a session keeps its delivery record: one line per message its watch admitted into its
+ * intake, in the session's own state directory (`<state>/sessions/<key>/seen.jsonl`). The agora-room
+ * plugins write it (plugins/claude/agora-room/hooks/lib.js SEEN_FILE, pinned equal in the tests);
+ * the clock reads it from the seat that holds the session, so a member seat's record is read by the
+ * member's own messenger and never by the host's, which runs no clock for an address held elsewhere.
+ */
+export const SEEN_FILE = "seen.jsonl";
+
+/** The key a line is looked up by: the session that admitted it, and its message id. @param {string} session @param {string} id */
+export const seenKey = (session, id) => `${session}\n${id}`;
+
+/**
+ * Read one session's seen lines for a room alias into `into`, keeping the earliest admission per
+ * line. A line that is not a v1 seen record for this room, or has no readable instant, is skipped.
+ * @param {string} text @param {string} session @param {string} room @param {Map<string, number>} into
+ */
+export function parseSeen(text, session, room, into) {
+  for (const l of text.split("\n")) {
+    const s = l.trim();
+    if (!s.startsWith("{")) continue;
+    let rec;
+    try { rec = JSON.parse(s); } catch { continue; }
+    if (rec?.v !== 1 || rec.type !== "seen" || rec.room !== room || typeof rec.id !== "string") continue;
+    const at = Date.parse(rec.admittedAt);
+    if (!Number.isFinite(at)) continue;
+    const key = seenKey(session, rec.id);
+    const prev = into.get(key);
+    if (prev === undefined || at < prev) into.set(key, at);
+  }
+}
+
+/**
+ * Every seen record under a state root for one room alias: session and message id → the instant it
+ * was admitted. A session with no file, or an unreadable one, contributes nothing, and its lines
+ * read as unseen (the clock then runs from the post).
+ * @param {string} stateRoot @param {string} room @returns {Promise<Map<string, number>>}
+ */
+export async function readSeen(stateRoot, room) {
+  /** @type {Map<string, number>} */
+  const out = new Map();
+  for (const slug of await listSessions(stateRoot)) {
+    let text;
+    try { text = await readFile(path.join(stateRoot, "sessions", slug, SEEN_FILE), "utf8"); } catch { continue; }
+    parseSeen(text, slug, room, out);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------------------------
+// The activity records
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Where a session keeps its activity record: what its own watch last saw the session doing, in the
+ * session's own state directory (`<state>/sessions/<key>/activity.json`), rewritten whole by the
+ * agora-room plugins (plugins/claude/agora-room/hooks/lib.js ACTIVITY_FILE, pinned equal in the
+ * tests). `turn` is `busy` or `idle` since `since`; `lastToolAt` and `lastOutputAt` are the last tool
+ * call and the last assistant output; `progress` counts transcript entries observed and `progressAt`
+ * says when it last moved; `updatedAt` is the watch's own heartbeat, and `intervalMs` its poll
+ * interval. It is the evidence the clocks run on: is the session still producing transcript, calling
+ * tools, or sitting idle.
+ */
+export const ACTIVITY_FILE = "activity.json";
+
+/**
+ * One activity file's text as an `Activity`, or null when it is not a v1 record with readable instants.
+ * @param {string} text @param {string} session @returns {Activity | null}
+ */
+export function parseActivity(text, session) {
+  let rec;
+  try { rec = JSON.parse(text); } catch { return null; }
+  if (rec?.v !== 1 || rec.type !== "activity" || (rec.turn !== "busy" && rec.turn !== "idle")) return null;
+  const at = (/** @type {unknown} */ v) => (typeof v === "string" && Number.isFinite(Date.parse(v)) ? Date.parse(v) : null);
+  const since = at(rec.since);
+  const updatedAt = at(rec.updatedAt);
+  if (since === null || updatedAt === null) return null;
+  const interval = Number(rec.intervalMs);
+  return {
+    session, turn: rec.turn, since, lastToolAt: at(rec.lastToolAt), lastOutputAt: at(rec.lastOutputAt), progressAt: at(rec.progressAt),
+    progress: Number.isInteger(rec.progress) && rec.progress >= 0 ? rec.progress : 0, updatedAt, intervalMs: Number.isFinite(interval) && interval > 0 ? interval : null,
+  };
+}
+
+/**
+ * Every activity record under a state root: session → what it was doing. A session with no file, or
+ * an unreadable one, contributes nothing and reads as `none` (the time-only backstops run for it).
+ * @param {string} stateRoot @returns {Promise<Map<string, Activity>>}
+ */
+export async function readActivity(stateRoot) {
+  /** @type {Map<string, Activity>} */
+  const out = new Map();
+  for (const slug of await listSessions(stateRoot)) {
+    let text;
+    try { text = await readFile(path.join(stateRoot, "sessions", slug, ACTIVITY_FILE), "utf8"); } catch { continue; }
+    const rec = parseActivity(text, slug);
+    if (rec) out.set(slug, rec);
+  }
+  return out;
+}
+
+/**
+ * The seat's evidence for a room, as the snapshot carries it: seen records and activity records.
+ * @param {string} stateRoot @param {string} room
+ */
+export async function readEvidence(stateRoot, room) {
+  return { seen: await readSeen(stateRoot, room), activity: await readActivity(stateRoot) };
 }
 
 /**
  * One tick: fold; when anything is due, under the room's lock fold again on a fresh read and post
  * what is still due. `dryRun` returns the acts and posts nothing.
  * @param {TickDeps} deps
- * @returns {Promise<{ due: Act[], posted: Array<Act & { id: string, cursor: string }>, locked: boolean }>}
+ * @returns {Promise<{ due: Act[], posted: Array<Act & { id: string, cursor: string }>, locked: boolean, held: Held[] }>}
  */
 export async function runTick(deps) {
   const first = fold(await deps.gather(), deps, deps.now());
-  if (!first.acts.length || deps.dryRun) return { due: first.acts, posted: [], locked: false };
+  if (!first.acts.length || deps.dryRun) return { due: first.acts, posted: [], locked: false, held: first.held };
   /** @type {Array<Act & { id: string, cursor: string }>} */
   const posted = [];
   const ran = await deps.lock(async () => {
@@ -359,7 +574,7 @@ export async function runTick(deps) {
     for (const act of fresh.acts) posted.push({ ...act, ...(await deps.post(act)) });
     return true;
   });
-  return { due: first.acts, posted, locked: ran === true };
+  return { due: first.acts, posted, locked: ran === true, held: first.held };
 }
 
 /** A lock older than this is a crashed holder's, and is taken over. */

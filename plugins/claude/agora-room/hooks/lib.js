@@ -275,6 +275,188 @@ export class DeliveryQueue {
   }
 }
 
+// ---- the seen record ----
+
+/**
+ * A session's delivery record: one line per message its watch admitted into its intake, kept in
+ * the session's own state directory beside its posted ledger (`<state>/sessions/<key>/seen.jsonl`).
+ * The seat's messenger reads it to start the delivery clock at the moment the line reached the
+ * session instead of the moment it was posted (src/messenger.mjs `readSeen`). It means delivered
+ * into the session; it never means the model attended. Not a room post: a receipt row per delivery
+ * would be noise, and the record is only ever read on the seat that holds the session.
+ */
+export const SEEN_FILE = "seen.jsonl";
+/** Lines kept: the newest. A message whose line has aged out is read as unseen, so its clock runs from the post. */
+export const SEEN_KEEP = 200;
+
+/**
+ * A file in a session's own state directory. The state root is the one the agora CLI uses for the
+ * same child: AGORA_STATE (the project file's `env` object counts) or `<home>/.agora/state`. A
+ * session whose state root comes from the agora config's `state` key must have AGORA_STATE set to it,
+ * or its records land where the seat's messenger does not look and its clocks run on the time-only
+ * backstops.
+ * @param {{ env?: Record<string, string | undefined>, childEnv?: Record<string, string>, home: string | null, session: string }} p @param {string} name
+ * @returns {string | null} null when no home or state is known
+ */
+function sessionFile({ env = {}, childEnv = {}, home, session }, name) {
+  const norm = (/** @type {string} */ s) => s.replace(/\\/g, "/").replace(/\/+$/, "");
+  const named = [childEnv.AGORA_STATE, env.AGORA_STATE].find((v) => typeof v === "string" && v.trim());
+  let root = named ? String(named).trim() : home ? `${norm(String(home))}/.agora/state` : null;
+  if (root && home && (root === "~" || root.startsWith("~/") || root.startsWith("~\\"))) root = `${norm(String(home))}${root.slice(1)}`;
+  return root && SESSION_RE.test(session) ? `${norm(root)}/sessions/${session}/${name}` : null;
+}
+
+/** The seen file of a session. @param {Parameters<typeof sessionFile>[0]} p */
+export function seenPath(p) { return sessionFile(p, SEEN_FILE); }
+
+/**
+ * One seen line. `position` is the session's label (its place on the seat), `readAt` when the poll
+ * that read the message finished, `admittedAt` when the watch put it in its intake; the room, the
+ * message id and its cursor say what was delivered.
+ * @param {{ session: string, position: string | null, room: string, id: string, cursor: string | null, readAt: string, admittedAt: string }} r
+ */
+export function seenRecord(r) {
+  return { v: 1, type: "seen", session: r.session, position: r.position, room: r.room, id: r.id, cursor: r.cursor, readAt: r.readAt, admittedAt: r.admittedAt };
+}
+
+/** The newest SEEN_KEEP seen lines, in memory, written whole by the one watch that owns the file. */
+export class SeenLog {
+  /** @param {string | null} [text] what the file held, to continue it across a reload */
+  constructor(text = null) {
+    /** @type {string[]} */
+    this.lines = [];
+    for (const l of String(text ?? "").split("\n")) {
+      const s = l.trim();
+      if (!s.startsWith("{")) continue;
+      try { JSON.parse(s); this.lines.push(s); } catch { /* a torn line from a killed writer */ }
+    }
+    this.trim();
+  }
+
+  /** @param {ReturnType<typeof seenRecord>} rec */
+  add(rec) {
+    this.lines.push(JSON.stringify(rec));
+    this.trim();
+  }
+
+  text() { return this.lines.length ? `${this.lines.join("\n")}\n` : ""; }
+
+  trim() { if (this.lines.length > SEEN_KEEP) this.lines.splice(0, this.lines.length - SEEN_KEEP); }
+}
+
+// ---- the activity record ----
+
+/**
+ * What a session's own watch last saw the session doing, as one JSON file in the session's state
+ * directory beside the seen record (`<state>/sessions/<key>/activity.json`), rewritten whole by the
+ * one watch that owns it. The seat's messenger reads it as evidence (src/messenger.mjs
+ * `readActivity`): is the session still producing transcript and calling tools, or sitting idle.
+ */
+export const ACTIVITY_FILE = "activity.json";
+/** A live watch rewrites its record at least this often, so a reader can tell a quiet session from a silent watch. */
+export const ACTIVITY_HEARTBEAT_MS = 30000;
+
+/** The activity file of a session. @param {Parameters<typeof sessionFile>[0]} p */
+export function activityPath(p) { return sessionFile(p, ACTIVITY_FILE); }
+
+/**
+ * The facts a watch observes about its own session, with no wake of its own: it is told of turn
+ * starts and ends, tool calls and assistant output by the events the harness already delivers, and
+ * asked when a write is due by the poll tick it already runs. A turn change is written at once;
+ * everything else waits for the next tick (or the heartbeat).
+ */
+export class ActivityTracker {
+  /** @param {{ now?: () => number, prior?: string | null }} [o] `prior`: what the file held, to continue its progress counter and last-seen times across a reload */
+  constructor({ now = Date.now, prior = null } = {}) {
+    this.now = now;
+    /** @type {"busy" | "idle"} */
+    this.turn = "idle";
+    this.since = now();
+    /** @type {number | null} */
+    this.lastToolAt = null;
+    /** @type {number | null} */
+    this.lastOutputAt = null;
+    /** @type {number | null} */
+    this.progressAt = null;
+    this.progress = 0;
+    this.dirty = true;
+    this.lastWrite = 0;
+    if (prior) {
+      try {
+        const p = JSON.parse(prior);
+        const at = (/** @type {unknown} */ v) => (typeof v === "string" && Number.isFinite(Date.parse(v)) ? Date.parse(v) : null);
+        if (p && p.v === 1 && p.type === "activity") {
+          if (Number.isInteger(p.progress) && p.progress >= 0) this.progress = p.progress;
+          this.lastToolAt = at(p.lastToolAt);
+          this.lastOutputAt = at(p.lastOutputAt);
+          this.progressAt = at(p.progressAt);
+        }
+      } catch { /* a torn file: start from nothing */ }
+    }
+  }
+
+  /** A turn began. @returns {boolean} true when the state changed (write it now) */
+  turnStart() {
+    if (this.turn === "busy") return false;
+    this.turn = "busy";
+    this.since = this.now();
+    this.dirty = true;
+    return true;
+  }
+
+  /** The turn ended. @returns {boolean} true when the state changed (write it now) */
+  turnEnd() {
+    if (this.turn === "idle") return false;
+    this.turn = "idle";
+    this.since = this.now();
+    this.dirty = true;
+    return true;
+  }
+
+  /** A tool call began or ended. */
+  tool() {
+    const t = this.now();
+    this.lastToolAt = t;
+    this.progressAt = t;
+    this.progress += 1;
+    this.dirty = true;
+  }
+
+  /** Assistant output: a streamed chunk moves the time, a finished message also counts an entry. @param {boolean} [finished] */
+  output(finished = false) {
+    const t = this.now();
+    this.lastOutputAt = t;
+    this.progressAt = t;
+    if (finished) this.progress += 1;
+    this.dirty = true;
+  }
+
+  /** A transcript entry of another kind was kept (a prompt, a notice). */
+  entry() {
+    this.progressAt = this.now();
+    this.progress += 1;
+    this.dirty = true;
+  }
+
+  /** Is a write due: something changed, or the heartbeat has run out. */
+  due() { return this.dirty || this.now() - this.lastWrite >= ACTIVITY_HEARTBEAT_MS; }
+
+  /**
+   * The record to write now; taking it clears the dirty mark and restarts the heartbeat.
+   * @param {{ session: string, position: string | null, intervalMs: number }} who
+   */
+  take({ session, position, intervalMs }) {
+    const iso = (/** @type {number | null} */ t) => (t === null ? null : new Date(t).toISOString());
+    const now = this.now();
+    this.dirty = false;
+    this.lastWrite = now;
+    return {
+      v: 1, type: "activity", session, position, turn: this.turn, since: iso(this.since), lastToolAt: iso(this.lastToolAt), lastOutputAt: iso(this.lastOutputAt),
+      progress: this.progress, progressAt: iso(this.progressAt), intervalMs, updatedAt: iso(now),
+    };
+  }
+}
+
 /** The refusal reasons that mean the user stopped a turn: park the queue until the turn is over. */
 export const STOPPED_REASONS = Object.freeze([
   "the session was stopped and nobody has sent input since",

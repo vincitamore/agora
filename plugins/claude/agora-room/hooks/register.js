@@ -4,7 +4,9 @@
 //           each new message becomes one $.prompt.submit, the single line
 //             agora <room> <id> thread=<thread|none> from=<author>: <text>
 //           The agora CLI owns the cursor, the own-post skip and the wake filter; this file only
-//           queues what it printed and hands it to the idle session, once.
+//           queues what it printed and hands it to the idle session, once. It also writes one seen
+//           line per message it admitted (lib.js SEEN_FILE) and keeps an activity record of what the session
+//           is doing (lib.js ACTIVITY_FILE): the evidence the seat's messenger reads.
 //   tool    room_post: the model posts to a configured room through the same CLI.
 //   pane    /agora-room opens a pane: the room and who is active, a compose card that states where a
 //           post goes, recent subjects with unread marks, and a thread view that reads as a conversation.
@@ -14,9 +16,9 @@
 // scope, and the other hooks reach them through `api`. What can be decided from data lives in
 // ./lib.js.
 import {
-  PANE_ID, SUBJECTS_PAGE, TOOL_NAME, COMMAND, DeliveryQueue, buildSubjects, chooseRoom, childEnvFor, deliveryText,
+  PANE_ID, SUBJECTS_PAGE, TOOL_NAME, COMMAND, ActivityTracker, DeliveryQueue, SeenLog, activityPath, buildSubjects, chooseRoom, childEnvFor, deliveryText,
   isStopReason, jsonLines, paneTree, parseReadOutput, parseWatchOutput, postArgs, receiptText,
-  resolveConfig, statusLine, TO_NOBODY, whoRows,
+  resolveConfig, seenPath, seenRecord, statusLine, TO_NOBODY, whoRows,
 } from './lib.js'
 
 const PROJECT_FILE = '.agora-room.json'
@@ -43,6 +45,8 @@ export function register(on, options) {
       AGORA_ROOM_CMD: await $.env.get('AGORA_ROOM_CMD'),
       AGORA_ROOM_LIVENESS: await $.env.get('AGORA_ROOM_LIVENESS'),
       AGORA_ROOM_PANE_AS: await $.env.get('AGORA_ROOM_PANE_AS'),
+      AGORA_STATE: await $.env.get('AGORA_STATE'),
+      AGORA_LABEL: await $.env.get('AGORA_LABEL'),
     }
     const home = (await $.env.get('HOME')) || (await $.env.get('USERPROFILE')) || null
     let file = null
@@ -56,6 +60,7 @@ export function register(on, options) {
     const key = cfg.session
     const livenessPath = cfg.liveness
       ?? (home ? String(home).replace(/\\/g, '/') + '/.agora/claude-room/' + key + '.json' : '.agora-room/' + key + '.json')
+    const seenFile = seenPath({ env, childEnv: cfg.childEnv, home, session: key })
 
     if (!cfg.rooms.length) {
       $.ui.log('no room is configured: set AGORA_ROOM, rooms in ' + PROJECT_FILE + ', or the plugin\'s rooms option')
@@ -74,6 +79,18 @@ export function register(on, options) {
     let ticking = false
     let draining = false
     let blocked = false
+    // The seen record: one line per message admitted into this session's intake, in the session's own
+    // state directory (docs/CLAUDE-PLUGIN.md § Seen record). A failed write is reported in the liveness
+    // file and never stops the watch: without a record the messenger's clock runs from the post.
+    let seenLog = new SeenLog(null)
+    const seenState = { written: 0, lastError: null }
+    const position = String(cfg.childEnv.AGORA_LABEL ?? env.AGORA_LABEL ?? '').trim() || null
+    // The activity record: what this session is doing, written by this watch from the hooks it already
+    // has (docs/CLAUDE-PLUGIN.md § Activity record). A turn change is written at once; tool calls and
+    // output wait for the poll tick, so it adds no wake of its own.
+    const activityFile = activityPath({ env, childEnv: cfg.childEnv, home, session: key })
+    let activity = new ActivityTracker()
+    const activityState = { written: 0, lastError: null }
 
     const stamp = () => new Date().toISOString()
 
@@ -85,12 +102,28 @@ export function register(on, options) {
       try { await $.store.set(STORE_STATE, { ...dq.snapshot(), inflight }) } catch { /* the store is a convenience; the room is the record */ }
     }
 
+    async function recordSeen(msgs, readAt) {
+      if (!cfg.watchEnabled || !seenFile) return
+      for (const m of msgs) seenLog.add(seenRecord({ session: key, position, room: m.room, id: m.id, cursor: m.cursor, readAt, admittedAt: stamp() }))
+      try { await $.fs.write(seenFile, seenLog.text()); seenState.written += msgs.length; seenState.lastError = null } catch (err) { seenState.lastError = String(err?.message ?? err) }
+    }
+
+    async function writeActivity(force) {
+      if (!cfg.watchEnabled || !activityFile || (!force && !activity.due())) return
+      try {
+        await $.fs.write(activityFile, JSON.stringify(activity.take({ session: key, position, intervalMs: cfg.intervalMs }), null, 1) + '\n')
+        activityState.written += 1
+        activityState.lastError = null
+      } catch (err) { activityState.lastError = String(err?.message ?? err) }
+    }
+
     async function flush() {
       const doc = {
         plugin: 'agora-room', session: key, wake: cfg.wake, intervalMs: cfg.intervalMs, watch: cfg.watchEnabled,
         rooms: [...rooms.entries()].map(([room, s]) => ({ room, ready: s.ready, lastRead: s.lastRead, lastTick: s.lastTick, polls: s.polls, lastError: s.lastError })),
         ticks, errors, lastError, delivered: dq.deliveredCount, dropped: dq.droppedCount, queued: dq.queue.length,
-        inflight, blocked, updatedAt: stamp(),
+        inflight, blocked, seen: { path: seenFile, written: seenState.written, lastError: seenState.lastError },
+        activity: { path: activityFile, written: activityState.written, lastError: activityState.lastError }, updatedAt: stamp(),
       }
       try { await $.fs.write(livenessPath, JSON.stringify(doc, null, 1)) } catch (err) { lastError = 'liveness write: ' + String(err?.message ?? err) }
     }
@@ -118,11 +151,11 @@ export function register(on, options) {
       s.lastTick = stamp()
       if (!s.ready) await ensureStart(room)
       const r = await run(['watch', room, '--once', '--json', '--wake', cfg.wake])
+      const readAt = stamp()
       const { messages, result } = parseWatchOutput(r.stdout, room)
       // Whatever the child printed was already past the saved cursor: queue it even if the exit was not clean.
-      let added = 0
-      for (const m of messages) if (dq.add(m)) added += 1
-      if (added) await persist()
+      const fresh = messages.filter((m) => dq.add(m))
+      if (fresh.length) { await recordSeen(fresh, readAt); await persist() }
       const clean = r.exitCode === 0 || r.exitCode === 42
       if (clean || result) { s.lastRead = stamp(); s.polls += 1 }
       if (!clean) throw new Error('agora watch ' + room + ' exit ' + r.exitCode + ': ' + String(r.stderr).slice(0, 200))
@@ -195,6 +228,7 @@ export function register(on, options) {
         ticking = false
       }
       showStatus()
+      await writeActivity(false)
       try { await flush() } catch { /* already recorded */ }
       kickDrain()
       // The platform logs a throwing timer callback and runs the timer again at the next interval.
@@ -209,6 +243,12 @@ export function register(on, options) {
         if (saved.inflight) for (const m of dq.queue) if (m.room + ' ' + m.id === saved.inflight) m.maybeSent = true
       }
     } catch { /* start clean */ }
+    try {
+      if (seenFile && (await $.fs.exists(seenFile))) seenLog = new SeenLog(await $.fs.read(seenFile))
+    } catch { /* start a fresh file */ }
+    try {
+      if (activityFile && (await $.fs.exists(activityFile))) activity = new ActivityTracker({ prior: await $.fs.read(activityFile) })
+    } catch { /* start fresh */ }
 
     // ---- the pane ----
     const pm = {
@@ -346,7 +386,15 @@ export function register(on, options) {
       paneOpened() { paneOpen = true; pm.loading = true; refreshPane() },
       paneClosed() { paneOpen = false },
       turnComplete() { if (blocked) { blocked = false; kickDrain() } },
-      sessionEnd: async () => { await persist(); await flush() },
+      // evidence of what the session is doing: the main loop's turn start and end, and every row it keeps
+      turnStart: async () => { if (activity.turnStart()) await writeActivity(true) },
+      turnEnd: async () => { if (activity.turnEnd()) await writeActivity(true) },
+      appended(door, type) {
+        if (door === 'tool-result') activity.tool()
+        else if (type === 'assistant') activity.output(true)
+        else activity.entry()
+      },
+      sessionEnd: async () => { await persist(); activity.turnEnd(); await writeActivity(true); await flush() },
     }
 
     // ---- start: the tool, the timers, then the command (a refused command name must not stop the rest) ----
@@ -376,6 +424,7 @@ export function register(on, options) {
         try { await ensureStart(room) } catch (err) { rooms.get(room).lastError = String(err?.message ?? err); lastError = rooms.get(room).lastError; errors += 1 }
       }
       showStatus()
+      await writeActivity(true)
       await flush()
       $.clock.every(cfg.intervalMs, () => tick())
       if (dq.queue.length) kickDrain()
@@ -420,10 +469,24 @@ export function register(on, options) {
     return { result: await api.post(e) }
   }).catch(async ($, e, next) => ({ result: 'room_post failed: ' + next.error.message }))
 
-  on('turn.complete', async ($, e, next) => {
-    if (api) api.turnComplete()
+  on('turn.start', async ($, e, next) => {
+    if (api && e.agentId === undefined) await api.turnStart()
     return next(e)
   })
+
+  on('turn.complete', async ($, e, next) => {
+    if (api) {
+      api.turnComplete()
+      if (e.agentId === undefined) await api.turnEnd()
+    }
+    return next(e)
+  })
+
+  // Observe only: every row the conversation keeps, with its door and type, counts as progress.
+  on('session.append', async ($, e, next) => {
+    if (api) api.appended(e.door, e.message?.type)
+    return next(e)
+  }).catch(async ($, e, next) => (next.called ? undefined : next(e)))
 
   on('session.end', async ($, e, next) => {
     if (api) { try { await api.sessionEnd() } catch { /* ending anyway */ } }

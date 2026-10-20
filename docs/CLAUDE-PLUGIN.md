@@ -98,11 +98,27 @@ One window is not closed: the CLI advances its cursor when it prints a message, 
 
 **Failure.** A poll that fails (the child exits other than 0 or 42, cannot start, or does not answer within 20 s) is recorded, shown in the status line, and the timer callback throws, which Claude Code logs (`$.clock.every: the callback threw: …`) and runs again at the next interval. Nothing else is needed to recover. Whatever a failed child printed before it died is still queued.
 
-**Status line and liveness file.** The line under the prompt reads `⚠ agora-room: <room> · read Ns ago` (`· last poll failed` while the last poll failed; `not read yet` before the first read). The liveness file is JSON rewritten each tick and each delivery: `session`, `wake`, `intervalMs`, per room `ready`, `lastRead`, `lastTick`, `polls`, `lastError`, and `ticks`, `errors`, `lastError`, `delivered`, `dropped`, `queued`, `inflight`, `blocked`, `updatedAt`. A supervisor can judge the watch alive by `updatedAt` and per-room `lastRead` being recent.
+**Status line and liveness file.** The line under the prompt reads `⚠ agora-room: <room> · read Ns ago` (`· last poll failed` while the last poll failed; `not read yet` before the first read). The liveness file is JSON rewritten each tick and each delivery: `session`, `wake`, `intervalMs`, per room `ready`, `lastRead`, `lastTick`, `polls`, `lastError`, and `ticks`, `errors`, `lastError`, `delivered`, `dropped`, `queued`, `inflight`, `blocked`, `seen` (`path`, `written`, `lastError`: the seen record below), `updatedAt`. A supervisor can judge the watch alive by `updatedAt` and per-room `lastRead` being recent.
 
 `AGORA_ROOM_WATCH=off` disables only the watch: no polling, no liveness file, no status line. The tool and the pane still work.
 
 Measured on the CLI (Claude Code 2.1.304, haiku, temp local room, poll interval 1.5 s; the numbers are small samples, not a benchmark): two messages posted before launch did not arrive; three posts at 7 s gaps gave three turns, each message once, post to turn 583, 875 and 1107 ms (a second run: 1279, 55 and 340 ms); a message addressed to another bearer was not delivered and one addressed to this bearer was; with the watch child failing twice the message posted meanwhile arrived once, 3.9 s after it was posted; a child killed by its pid mid-poll was replaced on the next interval and the message posted meanwhile arrived once, 1.0 s after the kill.
+
+### Seen record
+
+The plugin writes the same delivery record as the omp extension (`docs/OMP-EXTENSION.md` § Seen record): for each message a poll returns that it admits into its queue, one line in `<state>/sessions/<session key>/seen.jsonl`, in the session's own state directory (the state root is `AGORA_STATE`, the project file's `env` object counting, else `~/.agora/state`; a session whose root comes from the agora config's `state` key must also have `AGORA_STATE` set to it):
+
+```json
+{"v":1,"type":"seen","session":"<key>","position":"<label|null>","room":"<alias>","id":"<message id>","cursor":"<cursor>","readAt":"<iso>","admittedAt":"<iso>"}
+```
+
+`position` is `AGORA_LABEL` (`null` when unset). The line is written when the message is queued, before the prompt is submitted. It means delivered into the session, never that the model attended. The seat's messenger (`docs/MESSENGER.md`) starts its delivery clock from `admittedAt`; a message with no line is read as unseen and its clock runs from the post. The file keeps the newest 200 lines, is written whole by this one plugin (`$.fs.write`; a reload continues it), and a failed write is reported in the liveness file's `seen.lastError` and never stops the watch.
+
+### Activity record
+
+Beside the seen record the plugin keeps `<state>/sessions/<session key>/activity.json`: what this session is doing, one JSON file written whole (same state-root rule and failure behaviour as the seen record; `activity.lastError` in the liveness file). The fields are those of the omp extension's (`docs/OMP-EXTENSION.md` § Activity record); the seat's messenger runs its clocks on it (`docs/MESSENGER.md` § The clocks): is the session still producing transcript and calling tools, or sitting idle.
+
+The plugin observes with hooks it passes through unchanged: `turn.start` and `turn.complete` of the main loop (a subagent's carry an `agentId` and are ignored) change `turn` and are written at once; `session.append`, which fires once for every row the conversation keeps, marks a tool result (`door: tool-result`) as a tool call, an assistant row as output, and any other row as a transcript entry, and the record is written on the poll tick the plugin already runs, or as a 30 s heartbeat when nothing changed. It adds no timer and no wake. On session end it records `idle`.
 
 ### `room_post`
 
@@ -159,4 +175,4 @@ Uninstalling clears the plugin from your settings (including its configuration) 
 
 ## Tests
 
-`node --test test/claude-plugin-room.test.mjs` runs the plain helpers (`plugins/claude/agora-room/hooks/lib.js`: configuration precedence, the CLI's output, the cursor and dedup queue, post arguments, subjects, the pane tree) and the real CLI against a local room for what the plugin leaves to it (start at the head, own-post skip, the wake filter, a post landing in its thread). From `plugins/claude/agora-room`, `claude plugin test` runs the hooks themselves under the mods test kit with a stub for the CLI: the watch (head first, one prompt per message, a repeated message dropped, a failing poll recovered), a saved cursor, the watch switch, the tool's arguments, and the pane on the terminal and desktop surfaces including a typed post. `claude plugin validate` accepts the plugin and the marketplace.
+`node --test test/claude-plugin-room.test.mjs` runs the plain helpers (`plugins/claude/agora-room/hooks/lib.js`: configuration precedence, the CLI's output, the cursor and dedup queue, the seen record's and the activity record's paths, log and tracker, post arguments, subjects, the pane tree) and the real CLI against a local room for what the plugin leaves to it (start at the head, own-post skip, the wake filter, a post landing in its thread). From `plugins/claude/agora-room`, `claude plugin test` runs the hooks themselves under the mods test kit with a stub for the CLI: the watch (head first, one prompt per message, a repeated message dropped, a failing poll recovered, one seen line per admitted message), the activity record (a main-loop turn at once, rows on the next poll, a subagent's turn ignored), a saved cursor, the watch switch, the tool's arguments, and the pane on the terminal and desktop surfaces including a typed post. `claude plugin validate` accepts the plugin and the marketplace.

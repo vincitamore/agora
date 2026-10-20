@@ -7,7 +7,9 @@
 //             <preamble>
 //             agora <room> <id> thread=<thread|none> from=<author>: <text>
 //           The agora CLI owns the cursor, the own-post skip and the wake filter; this file only
-//           queues what it printed and hands it to the idle session, once.
+//           queues what it printed and hands it to the idle session, once. It also writes one seen
+//           line per message it admitted (lib.js SEEN_FILE), and keeps an activity record of what the
+//           session is doing (lib.js ACTIVITY_FILE): the delivery and activity evidence the seat's messenger reads.
 //   tool    room_post: the model posts to a configured room through the same CLI.
 //   status  `agora-room: <room> · read Ns ago`, and a liveness file a supervisor can read.
 //
@@ -20,8 +22,8 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  DeliveryQueue, SESSION_RE, TOOL_NAME, chooseRoom, childEnvFor, deliveryText, jsonLines, parseWatchOutput, postArgs, receiptText,
-  resolveConfig, statusLine,
+  ActivityTracker, DeliveryQueue, SESSION_RE, SeenLog, TOOL_NAME, activityPath, chooseRoom, childEnvFor, deliveryText, jsonLines, parseWatchOutput, postArgs, receiptText,
+  resolveConfig, seenPath, seenRecord, statusLine,
 } from "../../claude/agora-room/hooks/lib.js";
 
 export const CUSTOM_TYPE = "agora-room";
@@ -104,6 +106,8 @@ export function resolveOmpConfig({ env = {}, file = null, sessionId = null, home
     sessionEnv,
     liveness,
     statePath: path.join(path.dirname(liveness), `${path.basename(liveness, ".json")}.queue.json`),
+    seen: seenPath({ env, childEnv: cfg.childEnv, home: base, session: cfg.session }),
+    activity: activityPath({ env, childEnv: cfg.childEnv, home: base, session: cfg.session }),
     role: role === undefined ? null : String(role).trim(),
     modelLabel: label === undefined ? null : String(label).trim(),
   };
@@ -156,12 +160,17 @@ export function runAgora(command, args, env, timeoutMs) {
   });
 }
 
-/** @param {string} file @param {unknown} doc */
-function writeJson(file, doc) {
+/** @param {string} file @param {string} text */
+function writeText(file, text) {
   mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(doc, null, 1));
+  writeFileSync(tmp, text);
   renameSync(tmp, file);
+}
+
+/** @param {string} file @param {unknown} doc */
+function writeJson(file, doc) {
+  writeText(file, JSON.stringify(doc, null, 1));
 }
 
 // ---- the extension ----
@@ -222,6 +231,18 @@ export function createAgoraRoom(pi, deps = {}) {
   pi.on("session_switch", async (/** @type {any} */ _e, /** @type {any} */ ctx) => begin(ctx));
   pi.on("agent_start", async () => { rt?.agentStart(); });
   pi.on("agent_end", async () => { rt?.agentEnd(); });
+  // Activity evidence: these handlers only count. They return nothing (a returned value would steer the
+  // tool call or rewrite the result) and ignore a subagent's or an advisor's events, which are not this
+  // session's own work.
+  pi.on("tool_call", async (/** @type {any} */ _e, /** @type {any} */ ctx) => { if (ctx?.agent?.kind !== "sub") rt?.noteTool(); });
+  pi.on("tool_result", async (/** @type {any} */ _e, /** @type {any} */ ctx) => { if (ctx?.agent?.kind !== "sub") rt?.noteTool(); });
+  pi.on("message_update", async (/** @type {any} */ e, /** @type {any} */ ctx) => { if (ctx?.agent?.kind !== "sub" && e?.message?.role === "assistant") rt?.noteOutput(false); });
+  pi.on("message_end", async (/** @type {any} */ e, /** @type {any} */ ctx) => {
+    if (ctx?.agent?.kind === "sub") return;
+    const role = e?.message?.role;
+    if (role === "assistant") rt?.noteOutput(true);
+    else if (role !== "toolResult") rt?.noteEntry(); // a tool result is counted by tool_result
+  });
   pi.on("session_shutdown", async () => { rt?.stop(); });
 
   return { get runtime() { return rt; } };
@@ -280,6 +301,30 @@ async function startSession(pi, ctx, deps) {
   const timers = [];
   let stopped = false;
 
+  // ---- the seen record: one line per message admitted into this session's intake ----
+  // Kept in the session's own state directory (docs/OMP-EXTENSION.md § Seen record); the seat's
+  // messenger starts its delivery clock from it. A failed write is reported in the liveness file and
+  // never stops the watch: without a record the clock simply runs from the post.
+  let seenLog = new SeenLog(null);
+  const seenState = { written: 0, lastError: /** @type {string | null} */ (null) };
+  const position = String(cfg.childEnv.AGORA_LABEL ?? env.AGORA_LABEL ?? cfg.role ?? "").trim() || null;
+
+  // ---- the activity record: what this session is doing (docs/OMP-EXTENSION.md § Activity record) ----
+  // Told of turns, tool calls and output by the events omp already delivers and written on the poll
+  // tick it already runs (a turn change at once), so it adds no wake of its own. The messenger reads it
+  // as evidence that a holder is working or idle. A failed write is reported and never stops the watch.
+  let activity = new ActivityTracker({ now });
+  const activityState = { written: 0, lastError: /** @type {string | null} */ (null) };
+  /** @param {boolean} force write now even when nothing is due */
+  function writeActivity(force) {
+    if (!cfg.watchEnabled || !cfg.activity || (!force && !activity.due())) return;
+    try {
+      writeText(cfg.activity, `${JSON.stringify(activity.take({ session: cfg.session, position, intervalMs: cfg.intervalMs }), null, 1)}\n`);
+      activityState.written += 1;
+      activityState.lastError = null;
+    } catch (err) { activityState.lastError = msgOf(err); }
+  }
+
   const stamp = () => new Date(now()).toISOString();
   const key = (/** @type {{ room: string, id: string }} */ m) => `${m.room} ${m.id}`;
   /** @param {unknown} err */
@@ -294,13 +339,21 @@ async function startSession(pi, ctx, deps) {
     try { writeJson(cfg.statePath, { ...dq.snapshot(), inflight }); } catch { /* the room is the record */ }
   }
 
+  /** @param {Array<{ room: string, id: string, cursor: string | null }>} msgs @param {string} readAt */
+  function recordSeen(msgs, readAt) {
+    if (!cfg.watchEnabled || !cfg.seen) return;
+    for (const m of msgs) seenLog.add(seenRecord({ session: cfg.session, position, room: m.room, id: m.id, cursor: m.cursor, readAt, admittedAt: stamp() }));
+    try { writeText(cfg.seen, seenLog.text()); seenState.written += msgs.length; seenState.lastError = null; } catch (err) { seenState.lastError = msgOf(err); }
+  }
+
   function flush() {
     if (!cfg.watchEnabled) return;
     const doc = {
       plugin: "agora-room", harness: "omp", session: cfg.session, bearer: registeredAs ?? cfg.actor ?? null, wake: cfg.wake, intervalMs: cfg.intervalMs, watch: cfg.watchEnabled,
       rooms: [...rooms.entries()].map(([room, s]) => ({ room, ready: s.ready, lastRead: s.lastRead, lastTick: s.lastTick, polls: s.polls, lastError: s.lastError })),
       ticks, errors, lastError, delivered: dq.deliveredCount, dropped: dq.droppedCount, queued: dq.queue.length,
-      inflight, awaiting: awaiting !== null, deferring, updatedAt: stamp(),
+      inflight, awaiting: awaiting !== null, deferring, seen: { path: cfg.seen, written: seenState.written, lastError: seenState.lastError },
+      activity: { path: cfg.activity, written: activityState.written, lastError: activityState.lastError }, updatedAt: stamp(),
     };
     try { writeJson(cfg.liveness, doc); } catch (err) { lastError = `liveness write: ${msgOf(err)}`; }
   }
@@ -350,11 +403,11 @@ async function startSession(pi, ctx, deps) {
     s.lastTick = stamp();
     if (!s.ready) await ensureStart(room);
     const r = await run(["watch", room, "--once", "--json", "--wake", cfg.wake]);
+    const readAt = stamp();
     const { messages, result } = parseWatchOutput(r.stdout, room);
     // Whatever the child printed was already past the saved cursor: queue it even if the exit was not clean.
-    let added = 0;
-    for (const m of messages) if (dq.add(m)) added += 1;
-    if (added) persist();
+    const fresh = messages.filter((m) => dq.add(m));
+    if (fresh.length) { recordSeen(fresh, readAt); persist(); }
     const clean = r.exitCode === 0 || r.exitCode === 42;
     if (clean || result) { s.lastRead = stamp(); s.polls += 1; }
     if (!clean) throw new Error(`agora watch ${room} exit ${r.exitCode}: ${r.stderr.slice(0, 200)}`);
@@ -426,6 +479,7 @@ async function startSession(pi, ctx, deps) {
       ticking = false;
     }
     showStatus();
+    writeActivity(false);
     flush();
     await drain();
   }
@@ -457,6 +511,14 @@ async function startSession(pi, ctx, deps) {
     } catch { /* start clean */ }
   }
 
+  // ---- resume: the seen lines and the activity counters already written, so a reload continues them ----
+  if (cfg.watchEnabled && cfg.seen) {
+    try { if (existsSync(cfg.seen)) seenLog = new SeenLog(readFileSync(cfg.seen, "utf8")); } catch { /* start a fresh file */ }
+  }
+  if (cfg.watchEnabled && cfg.activity) {
+    try { if (existsSync(cfg.activity)) activity = new ActivityTracker({ now, prior: readFileSync(cfg.activity, "utf8") }); } catch { /* start fresh */ }
+  }
+
   // ---- start: the bearer, then the starting point before the first prompt, then the timer ----
   await register();
   if (cfg.watchEnabled) {
@@ -469,6 +531,7 @@ async function startSession(pi, ctx, deps) {
       }
     }
     showStatus();
+    writeActivity(true);
     flush();
     timers.push(ctx.setInterval(() => tick(), cfg.intervalMs));
   }
@@ -482,17 +545,27 @@ async function startSession(pi, ctx, deps) {
     agentStart() {
       if (!acp && awaiting && now() - awaiting.at <= deferAfterMs) deferring = false; // a turn we asked for started
       awaiting = null;
+      if (activity.turnStart()) writeActivity(true);
     },
     agentEnd() {
       if (stopped || !cfg.watchEnabled) return;
+      if (activity.turnEnd()) writeActivity(true);
       // agent_end runs before the session reports idle; the drain runs right after it.
       timers.push(ctx.setTimeout(() => drain(), 0));
     },
+    /** a tool call began or ended in this session */
+    noteTool() { if (!stopped) activity.tool(); },
+    /** assistant output: a streamed chunk, or a finished message when `finished` @param {boolean} finished */
+    noteOutput(finished) { if (!stopped) activity.output(finished); },
+    /** another transcript entry was kept */
+    noteEntry() { if (!stopped) activity.entry(); },
     stop() {
       if (stopped) return;
       stopped = true;
       for (const t of timers) { try { ctx.clearTimer?.(t); } catch { /* cleared on shutdown anyway */ } }
       persist();
+      activity.turnEnd();
+      writeActivity(true);
       flush();
     },
     state: () => ({ queue: dq.queue.length, delivered: dq.deliveredCount, awaiting: awaiting !== null, deferring, registeredAs, lastError, rooms: Object.fromEntries(rooms) }),

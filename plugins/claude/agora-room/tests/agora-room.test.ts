@@ -107,6 +107,72 @@ test('watch: starts at the head, one turn per new message, duplicates dropped, f
   expect(s.statuses[s.statuses.length - 1]).toBe('lab · read 0s ago')
 })
 
+test('watch: one seen line per admitted message in the session\'s own state directory, once however often it is re-read', async ($, on) => {
+  const clock = mock.clock(on)
+  let polls = 0
+  const s = stubs(on, {
+    env: { AGORA_LABEL: 'desk.coding' },
+    script: (a) => {
+      if (a[0] === 'cursor') return { stdout: '{"room":"lab","cursor":"9"}\n' }
+      if (a[0] === 'watch') {
+        polls += 1
+        if (polls === 1) return { exitCode: 42, stdout: [msg('m1', 'first'), msg('m2', 'second', { thread: 'm1' })].join('\n') + '\n' }
+        if (polls === 2) return { exitCode: 42, stdout: msg('m2', 'second again', { thread: 'm1' }) + '\n' } // m2 repeated
+        return { exitCode: 0, stdout: '{"type":"watch-result","exit":0}\n' }
+      }
+      return {}
+    },
+  })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  const file = '/home/u/.agora/state/sessions/k/seen.jsonl'
+  // the kit resolves a written path against the host's filesystem (a drive letter on Windows): match by its tail
+  const written = () => [...s.written].find(([p]) => p.replace(/\\/g, '/').endsWith(file))?.[1] ?? ''
+  const lines = () => written().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+  expect(lines()).toEqual([]) // nothing before the first poll
+  await clock.advance(1000)
+  await clock.settle()
+  expect(lines().map((l) => [l.v, l.type, l.session, l.position, l.room, l.id])).toEqual([
+    [1, 'seen', 'k', 'desk.coding', 'lab', 'm1'],
+    [1, 'seen', 'k', 'desk.coding', 'lab', 'm2'],
+  ])
+  await clock.advance(1000)
+  await clock.settle()
+  expect(lines().length).toBe(2) // m2 read again is not recorded again
+  expect(liveness(s.written).seen).toEqual({ path: file, written: 2, lastError: null })
+})
+
+test('activity: the record follows the main loop\'s turns at once and every row the conversation keeps on the next poll; a subagent\'s turn is not this session\'s', async ($, on) => {
+  const clock = mock.clock(on)
+  const s = stubs(on, {
+    env: { AGORA_LABEL: 'desk.coding' },
+    script: (a) => (a[0] === 'cursor' ? { stdout: '{"room":"lab","cursor":"9"}\n' } : a[0] === 'watch' ? { exitCode: 0, stdout: '{"type":"watch-result","exit":0}\n' } : {}),
+  })
+  on('turn.start', ($: unknown, e: { turnId: string }) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: '' }))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  const file = '/home/u/.agora/state/sessions/k/activity.json'
+  const rec = () => JSON.parse([...s.written].find(([p]) => p.replace(/\\/g, '/').endsWith(file))?.[1] ?? '{}')
+  expect([rec().type, rec().turn, rec().position, rec().progress]).toEqual(['activity', 'idle', 'desk.coding', 0])
+
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  expect(rec().turn).toBe('busy') // written at once
+  await $.session.append({ message: { type: 'user', role: 'user', content: [{ type: 'tool_result', tool_use_id: 'x', content: 'ok' }] }, door: 'tool-result', origin: { kind: 'tool' }, uuid: 'u1' } as never)
+  await $.session.append({ message: { type: 'assistant', role: 'assistant', content: [{ type: 'text', text: 'done' }] }, door: 'response', origin: { kind: 'model' }, uuid: 'u2' } as never)
+  expect(rec().progress).toBe(0) // rows wait for the tick
+  await clock.advance(1000)
+  await clock.settle()
+  expect(rec().progress).toBe(2)
+  expect(rec().lastToolAt).not.toBe(null)
+  expect(rec().lastOutputAt).not.toBe(null)
+
+  await $.turn.start({ text: 'sub', turnId: 't2', agentId: 'a1' })
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't2', agentId: 'a1', reason: 'answer' } as never)
+  expect(rec().turn).toBe('busy') // the subagent's end did not end the main turn
+  await $.turn.complete({ answer: 'done', durationMs: 5, isAborted: false, turnId: 't1', reason: 'answer' } as never)
+  expect(rec().turn).toBe('idle')
+  expect(liveness(s.written).activity.lastError).toBe(null)
+})
+
 test('watch: the delivered text is a short preamble and then the message line', async ($, on) => {
   const clock = mock.clock(on)
   let polls = 0

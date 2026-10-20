@@ -12,7 +12,7 @@ import { promisify } from "node:util";
 import {
   CHECKOUT_BIN, CUSTOM_TYPE, PROJECT_FILE, STATUS_KEY, createAgoraRoom, describePost, modelLabel, ompSessionKey, resolveOmpConfig,
 } from "../plugins/omp/agora-room/index.mjs";
-import { TOOL_NAME, bodyText, deliveryText, formatLine, parseReadOutput } from "../plugins/claude/agora-room/hooks/lib.js";
+import { ACTIVITY_FILE, SEEN_FILE, TOOL_NAME, bodyText, deliveryText, formatLine, parseReadOutput } from "../plugins/claude/agora-room/hooks/lib.js";
 import { tmp } from "./helpers.mjs";
 
 const bin = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "agora.mjs");
@@ -50,6 +50,10 @@ test("config: the Claude plugin's precedence with omp's defaults; a bad key fall
   assert.ok(existsSync(CHECKOUT_BIN));
   assert.equal(d.liveness, path.join(home, ".agora", "omp-room", `${key}.json`));
   assert.equal(d.statePath, path.join(home, ".agora", "omp-room", `${key}.queue.json`));
+  assert.equal(d.seen, `h/ome/.agora/state/sessions/${key}/${SEEN_FILE}`, "the session's own state directory, where the seat's messenger reads it");
+  assert.equal(d.activity, `h/ome/.agora/state/sessions/${key}/${ACTIVITY_FILE}`, "the activity record beside it");
+  assert.equal(resolveOmpConfig({ env: { AGORA_ROOM: "lab", AGORA_STATE: "~/st" }, sessionId: SESSION_ID, home }).seen, `h/ome/st/sessions/${key}/${SEEN_FILE}`, "the state root the CLI would use");
+  assert.equal(resolveOmpConfig({ env: { AGORA_ROOM: "lab" }, file: { env: { AGORA_STATE: "/s/state" } }, sessionId: SESSION_ID, home }).seen, `/s/state/sessions/${key}/${SEEN_FILE}`, "the project file's env counts");
   assert.equal(d.role, null);
 
   const f = resolveOmpConfig({ env: { AGORA_ROLE: "coding" }, file: { rooms: ["a", "b"], session: "lab-omp", role: "desk", modelLabel: "Haiku", wake: "mine" }, sessionId: SESSION_ID, home });
@@ -96,8 +100,8 @@ function stubPi() {
     /** @param {any} def */ registerTool(def) { tools.push(def); },
     /** @param {any} msg @param {any} opts */ sendMessage(msg, opts) { sent.push({ msg, opts }); },
   };
-  /** @param {string} ev @param {any} [ctx] */
-  const emit = async (ev, ctx) => { for (const h of handlers[ev] ?? []) await h({ type: ev }, ctx); };
+  /** @param {string} ev @param {any} [ctx] @param {Record<string, any>} [payload] */
+  const emit = async (ev, ctx, payload = {}) => { for (const h of handlers[ev] ?? []) await h({ type: ev, ...payload }, ctx); };
   return { pi, tools, sent, emit };
 }
 
@@ -245,6 +249,135 @@ test("watch: a message that arrives during a turn is held and starts one turn af
     await turn(s);
     await s.rt.tick();
     assert.equal(s.sent.length, 1, "once");
+  } finally { await r.cleanup(); }
+});
+
+test("seen: one line per admitted message, written when the watch admits it (before any turn); a reload continues the file", async () => {
+  const r = await room();
+  try {
+    const s = await start(r, { env: { AGORA_LABEL: "desk.coding" } });
+    const file = path.join(r.dir, "state", "sessions", s.rt.config.session, SEEN_FILE);
+    assert.equal(path.resolve(s.rt.config.seen), path.resolve(file));
+    s.ctx.idle = false;
+    await s.emit("agent_start", s.ctx);
+    const id1 = await r.say("one");
+    const id2 = await r.say("two");
+    const t0 = Date.now();
+    await s.rt.tick();
+    assert.equal(s.sent.length, 0, "the session is busy: nothing has been delivered yet");
+    const read = async () => (await readFile(file, "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+    let lines = await read();
+    assert.deepEqual(lines.map((l) => [l.v, l.type, l.session, l.position, l.room, l.id]), [
+      [1, "seen", s.rt.config.session, "desk.coding", "lab", id1],
+      [1, "seen", s.rt.config.session, "desk.coding", "lab", id2],
+    ], "admitted, and recorded, before a turn is asked for");
+    for (const l of lines) {
+      assert.ok(Date.parse(l.admittedAt) >= t0 - 1000 && Date.parse(l.readAt) <= Date.parse(l.admittedAt), `${l.readAt} ${l.admittedAt}`);
+      assert.equal(typeof l.cursor, "string");
+    }
+    await s.rt.tick();
+    assert.equal((await read()).length, 2, "a message read once is recorded once");
+    const live = JSON.parse(await readFile(r.liveness, "utf8"));
+    assert.deepEqual(live.seen, { path: s.rt.config.seen, written: 2, lastError: null });
+
+    s.rt.stop();
+    const again = await start(r, { env: { AGORA_LABEL: "desk.coding" } });
+    const id3 = await r.say("three");
+    again.ctx.idle = false;
+    await again.emit("agent_start", again.ctx);
+    await again.rt.tick();
+    lines = await read();
+    assert.deepEqual(lines.map((l) => l.id), [id1, id2, id3], "the new watch continued the file");
+    again.rt.stop();
+  } finally { await r.cleanup(); }
+});
+
+test("activity: the record follows the session's turns, tool calls and output: a turn change is written at once, the rest on the poll tick, and a heartbeat refreshes a quiet one; a reload continues the counters", async () => {
+  const r = await room();
+  try {
+    const base = Date.parse("2026-01-01T10:00:00.000Z");
+    let t = base;
+    const iso = (/** @type {number} */ ms) => new Date(ms).toISOString();
+    const s = await start(r, { env: { AGORA_LABEL: "desk.coding" }, deps: { now: () => t } });
+    const file = path.join(r.dir, "state", "sessions", s.rt.config.session, ACTIVITY_FILE);
+    assert.equal(path.resolve(s.rt.config.activity), path.resolve(file));
+    const read = async () => JSON.parse(await readFile(file, "utf8"));
+    const written = async () => JSON.parse(await readFile(r.liveness, "utf8")).activity.written;
+    let rec = await read();
+    assert.deepEqual([rec.v, rec.type, rec.session, rec.position, rec.turn, rec.since, rec.progress, rec.lastToolAt, rec.intervalMs],
+      [1, "activity", s.rt.config.session, "desk.coding", "idle", iso(base), 0, null, 2000], "written at the start, idle");
+
+    t = base + 5000;
+    await s.emit("agent_start", s.ctx);
+    rec = await read();
+    assert.deepEqual([rec.turn, rec.since], ["busy", iso(base + 5000)], "a turn change is written at once, not on the next tick");
+
+    t = base + 6000;
+    await s.emit("tool_call", s.ctx, { toolName: "bash" });
+    await s.emit("tool_result", s.ctx, { toolName: "bash" });
+    assert.equal((await read()).progress, 0, "a tool call waits for the tick: no write of its own");
+    t = base + 7000;
+    await s.emit("message_update", s.ctx, { message: { role: "assistant" } });
+    await s.emit("message_end", s.ctx, { message: { role: "assistant" } });
+    await s.emit("message_end", s.ctx, { message: { role: "toolResult" } });
+    await s.emit("message_end", s.ctx, { message: { role: "user" } });
+    const sub = { ...s.ctx, agent: { kind: "sub", id: "advisor" } };
+    await s.emit("tool_call", sub, { toolName: "bash" });
+    await s.emit("message_end", sub, { message: { role: "assistant" } });
+    await s.rt.tick();
+    rec = await read();
+    assert.deepEqual([rec.turn, rec.lastToolAt, rec.lastOutputAt, rec.progress, rec.progressAt, rec.updatedAt],
+      ["busy", iso(base + 6000), iso(base + 7000), 4, iso(base + 7000), iso(base + 7000)],
+      "a tool call and its result, a finished assistant message and a user entry count; a tool-result message is not counted twice, a subagent's events are not this session's");
+    const w = await written();
+
+    await s.rt.tick();
+    assert.equal(await written(), w, "nothing changed and the heartbeat is not due: no write (red leg: below)");
+    t = base + 7000 + 31_000;
+    await s.rt.tick();
+    assert.equal(await written(), w + 1, "a quiet watch still refreshes its record");
+    assert.equal((await read()).updatedAt, iso(t));
+
+    t += 1000;
+    await s.emit("agent_end", s.ctx);
+    rec = await read();
+    assert.deepEqual([rec.turn, rec.since, rec.progress], ["idle", iso(t), 4], "the turn ended: idle since now, written at once");
+    await s.runTimeouts();
+    s.rt.stop();
+
+    const again = await start(r, { env: { AGORA_LABEL: "desk.coding" }, deps: { now: () => t } });
+    await again.emit("tool_call", again.ctx, { toolName: "bash" });
+    await again.rt.tick();
+    rec = await read();
+    assert.deepEqual([rec.progress, rec.turn], [5, "idle"], "a reload continued the counter and did not claim a turn");
+    again.rt.stop();
+  } finally { await r.cleanup(); }
+});
+
+test("seen: a record that cannot be written is reported and never stops the watch (red leg: the file is writable)", async () => {
+  const r = await room();
+  try {
+    const key = ompSessionKey(SESSION_ID);
+    // a directory where the file belongs: the rename over it fails
+    await mkdir(path.join(r.dir, "state", "sessions", key, SEEN_FILE), { recursive: true });
+    const s = await start(r);
+    await r.say("still delivered");
+    await s.rt.tick();
+    assert.deepEqual(texts(s.sent), ["still delivered"]);
+    const live = JSON.parse(await readFile(r.liveness, "utf8"));
+    assert.equal(live.seen.written, 0);
+    assert.equal(typeof live.seen.lastError, "string", "said in the liveness file");
+    s.rt.stop();
+
+    const ok = await room();
+    try {
+      const s2 = await start(ok);
+      await ok.say("recorded");
+      await s2.rt.tick();
+      assert.equal(JSON.parse(await readFile(ok.liveness, "utf8")).seen.lastError, null);
+      assert.equal(JSON.parse(await readFile(ok.liveness, "utf8")).seen.written, 1);
+      s2.rt.stop();
+    } finally { await ok.cleanup(); }
   } finally { await r.cleanup(); }
 });
 

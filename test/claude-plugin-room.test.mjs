@@ -10,9 +10,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
-  DeliveryQueue, TO_NOBODY, ago, bodyText, buildSubjects, chooseRoom, childEnvFor, clip, deliveryText, formatLine, isStopReason, normaliseMessage,
+  ACTIVITY_FILE, ACTIVITY_HEARTBEAT_MS, ActivityTracker, DeliveryQueue, SEEN_FILE, SEEN_KEEP, SeenLog, TO_NOBODY, activityPath, ago, bodyText, buildSubjects, chooseRoom, childEnvFor, clip, deliveryText, formatLine, isStopReason, normaliseMessage,
   paneSessionKey, paneTree, parseCommand, parseList, parseReadOutput, parseSwitch, parseWatchOutput, preambleText, presenceLine,
-  postArgs, receiptText, resolveConfig, statusLine, subjectTitle, targetChip, whoRows, MAX_POST_CHARS,
+  postArgs, receiptText, resolveConfig, seenPath, seenRecord, statusLine, subjectTitle, targetChip, whoRows, MAX_POST_CHARS,
 } from "../plugins/claude/agora-room/hooks/lib.js";
 import { tmp } from "./helpers.mjs";
 
@@ -168,6 +168,68 @@ test("DeliveryQueue: the delivered ids are a bounded ring", () => {
   assert.equal(q.delivered.length, 500);
   assert.equal(q.deliveredCount, 700);
   assert.equal(q.add(msg({ id: "m699" })), false);
+});
+
+test("seenPath: the session's own state directory, under the state root the CLI would use", () => {
+  const home = "C:\\Users\\g";
+  assert.equal(SEEN_FILE, "seen.jsonl");
+  assert.equal(seenPath({ home, session: "k" }), "C:/Users/g/.agora/state/sessions/k/seen.jsonl", "the default root, with forward slashes");
+  assert.equal(seenPath({ env: { AGORA_STATE: "/s/state/" }, home, session: "k" }), "/s/state/sessions/k/seen.jsonl");
+  assert.equal(seenPath({ env: { AGORA_STATE: "~/st" }, home, session: "k" }), "C:/Users/g/st/sessions/k/seen.jsonl");
+  assert.equal(seenPath({ env: { AGORA_STATE: "/a" }, childEnv: { AGORA_STATE: "/b" }, home, session: "k" }), "/b/sessions/k/seen.jsonl", "the project file's env is what the child sees, so it wins");
+  assert.equal(seenPath({ env: { AGORA_STATE: "  " }, home, session: "k" }), "C:/Users/g/.agora/state/sessions/k/seen.jsonl", "an empty value does not shadow the default");
+  assert.equal(seenPath({ home: null, session: "k" }), null, "no home and no state: nowhere to write");
+  assert.equal(seenPath({ home, session: "../x" }), null, "a session key is one safe directory name");
+});
+
+test("seen record: the line a messenger reads; the log keeps the newest SEEN_KEEP, continues a file, and drops a torn line", () => {
+  const rec = seenRecord({ session: "k", position: "desk.coding", room: "lab", id: "m1", cursor: "c1", readAt: "2026-10-20T10:00:00.000Z", admittedAt: "2026-10-20T10:00:00.100Z" });
+  assert.deepEqual(rec, { v: 1, type: "seen", session: "k", position: "desk.coding", room: "lab", id: "m1", cursor: "c1", readAt: "2026-10-20T10:00:00.000Z", admittedAt: "2026-10-20T10:00:00.100Z" });
+  const log = new SeenLog(null);
+  assert.equal(log.text(), "");
+  for (let i = 0; i < SEEN_KEEP + 5; i++) log.add({ ...rec, id: `m${i}` });
+  const lines = log.text().trim().split("\n").map((l) => JSON.parse(l));
+  assert.equal(lines.length, SEEN_KEEP);
+  assert.equal(lines[0].id, "m5", "the oldest five aged out");
+  assert.ok(log.text().endsWith("\n"));
+  const resumed = new SeenLog(`${log.text()}{"v":1,"type":"seen","id":"torn\nnot json\n`);
+  assert.equal(resumed.lines.length, SEEN_KEEP, "a torn line and a line that is not JSON are dropped");
+  resumed.add({ ...rec, id: "new" });
+  assert.equal(resumed.lines.length, SEEN_KEEP);
+  assert.equal(JSON.parse(/** @type {string} */ (resumed.lines.at(-1))).id, "new");
+});
+
+test("activityPath: beside the seen record, in the session's own state directory", () => {
+  assert.equal(ACTIVITY_FILE, "activity.json");
+  assert.equal(activityPath({ home: "C:\\Users\\g", session: "k" }), "C:/Users/g/.agora/state/sessions/k/activity.json");
+  assert.equal(activityPath({ env: { AGORA_STATE: "/s/" }, home: null, session: "k" }), "/s/sessions/k/activity.json");
+  assert.equal(activityPath({ home: "/h", session: "../x" }), null);
+  assert.equal(activityPath({ home: "/h", session: "k" })?.replace("activity.json", ""), seenPath({ home: "/h", session: "k" })?.replace("seen.jsonl", ""));
+});
+
+test("activity tracker: a turn change asks for its own write; tool calls and output only mark the record; the heartbeat makes a quiet watch due (red leg: before it)", () => {
+  let now = Date.parse("2026-01-01T10:00:00.000Z");
+  const tr = new ActivityTracker({ now: () => now });
+  assert.equal(tr.due(), true, "a new record is due");
+  const first = tr.take({ session: "k", position: null, intervalMs: 2000 });
+  assert.deepEqual(first, { v: 1, type: "activity", session: "k", position: null, turn: "idle", since: "2026-01-01T10:00:00.000Z", lastToolAt: null, lastOutputAt: null, progress: 0, progressAt: null, intervalMs: 2000, updatedAt: "2026-01-01T10:00:00.000Z" });
+  assert.equal(tr.due(), false);
+  now += 1000;
+  assert.equal(tr.turnStart(), true);
+  assert.equal(tr.turnEnd(), true);
+  assert.equal(tr.turnEnd(), false, "already idle");
+  tr.take({ session: "k", position: null, intervalMs: 2000 });
+  now += 1000;
+  tr.tool();
+  tr.output(false);
+  assert.equal(tr.due(), true, "marked, to be written on the next tick");
+  const rec = tr.take({ session: "k", position: "desk.coding", intervalMs: 2000 });
+  assert.deepEqual([rec.lastToolAt, rec.lastOutputAt, rec.progress, rec.position], ["2026-01-01T10:00:02.000Z", "2026-01-01T10:00:02.000Z", 1, "desk.coding"], "a streamed chunk moves the time and does not count an entry");
+  now += ACTIVITY_HEARTBEAT_MS - 1;
+  assert.equal(tr.due(), false);
+  now += 1;
+  assert.equal(tr.due(), true);
+  assert.equal(new ActivityTracker({ now: () => now, prior: "{not json" }).progress, 0, "a torn file starts from nothing");
 });
 
 test("stop reasons: the two refusals the platform words that way", () => {
