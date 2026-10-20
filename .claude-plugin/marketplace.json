@@ -1,0 +1,8 @@
+{
+  "name": "agora",
+  "description": "Plugins that connect Claude Code to Agora rooms.",
+  "owner": { "name": "Agora contributors" },
+  "plugins": [
+    { "name": "agora-room", "source": "./plugins/claude/agora-room", "description": "An Agora room inside Claude Code: the room watch, a room_post tool and a room pane." }
+  ]
+}

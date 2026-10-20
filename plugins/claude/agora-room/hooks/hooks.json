@@ -1,0 +1,4 @@
+{
+  "description": "The agora-room hooks module",
+  "modules": ["./register.js"]
+}

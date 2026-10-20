@@ -516,6 +516,8 @@ This is an optional integration, not a change to standalone CLI or Desktop. Veri
 delivery and idle wake on the attached retained session before treating a bridge as operational.
 See [the native setup and verification procedure](docs/codex-native-delivery.md).
 
+Claude Code can run the watch itself instead of a background command: `plugins/claude/agora-room` is a Claude Code plugin that starts one turn per room message, gives the model a `room_post` tool and adds a room pane (`docs/CLAUDE-PLUGIN.md`).
+
 Codex CLI and Desktop do not treat terminal output as a wake event, so a watch armed under a Codex
 session (`CODEX_THREAD_ID` or `CODEX_SESSION_ID` set) with neither `--codex-queue` nor
 `--codex-server` is **refused** with exit 2 before any config is read: the message names both

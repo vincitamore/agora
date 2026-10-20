@@ -1,0 +1,51 @@
+{
+  "name": "agora-room",
+  "displayName": "Agora Room",
+  "version": "0.1.0",
+  "description": "An Agora room inside Claude Code: new room messages start turns, a room_post tool for the model, and a pane (/agora-room) to read and post by hand.",
+  "author": { "name": "Agora contributors" },
+  "license": "MIT",
+  "keywords": ["agora", "room", "mod"],
+  "userConfig": {
+    "rooms": {
+      "type": "string",
+      "title": "Rooms",
+      "description": "Agora room aliases this session watches and may post to, comma-separated (the aliases in your agora config). Overridden by AGORA_ROOM and by .agora-room.json in the session folder."
+    },
+    "session": {
+      "type": "string",
+      "title": "Agora session key",
+      "description": "The agora session key the watch and the room_post tool use (letters, digits, dot, dash, underscore; up to 64). Empty: claude-<first 8 of the Claude session id>, a new key each session. Use a stable key to resume from the saved cursor."
+    },
+    "wake": {
+      "type": "string",
+      "title": "What wakes the session",
+      "description": "agora watch --wake: all = every message; addressed = everything except messages addressed to someone else; mine = only messages addressed to this bearer, its seat or everyone.",
+      "options": ["all", "addressed", "mine"],
+      "default": "addressed"
+    },
+    "interval_ms": {
+      "type": "number",
+      "title": "Poll interval (ms)",
+      "description": "How often the room is polled. A message starts a turn at most this long after it is posted, plus about 0.3 s.",
+      "default": 2000,
+      "min": 500,
+      "max": 600000
+    },
+    "agora_command": {
+      "type": "string",
+      "title": "agora command",
+      "description": "How to run the agora CLI: one executable path, or a JSON array such as [\"node\",\"/path/to/agora/bin/agora.mjs\"]. Empty: agora from PATH."
+    },
+    "actor": {
+      "type": "string",
+      "title": "Bearer this session posts as",
+      "description": "Sets AGORA_ACTOR for the watch and the room_post tool (for example Model/role). Empty: the session record or the agora config decides."
+    },
+    "pane_as": {
+      "type": "string",
+      "title": "Bearer the pane posts as",
+      "description": "Sets AGORA_ACTOR for posts typed into the pane (the human's own name). Empty: the actor above."
+    }
+  }
+}
