@@ -342,7 +342,7 @@ export function register(on, options) {
         const text = String(args.text ?? '')
         return 'Post to room ' + (chosen.ok ? chosen.room : '(unknown room)') + (args.thread ? ' in thread ' + args.thread : '') + '? "' + (text.length > 200 ? text.slice(0, 200) + '…' : text) + '"'
       },
-      pane: (els, columns) => { pm.columns = Number(columns) > 0 ? Number(columns) : null; return paneTree(els, pm, actions) },
+      pane: (els, columns, surface) => { pm.columns = Number(columns) > 0 ? Number(columns) : null; pm.surface = typeof surface === 'string' ? surface : null; return paneTree(els, pm, actions) },
       paneOpened() { paneOpen = true; pm.loading = true; refreshPane() },
       paneClosed() { paneOpen = false },
       turnComplete() { if (blocked) { blocked = false; kickDrain() } },
@@ -395,7 +395,7 @@ export function register(on, options) {
 
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     if (e.requestId !== PANE_ID || !api) return next(e)
-    const tree = api.pane($.ui.resolve(e), e.props?.bodyColumns)
+    const tree = api.pane($.ui.resolve(e), e.props?.bodyColumns, e.surface)
     return tree ?? next(e)
   })
 

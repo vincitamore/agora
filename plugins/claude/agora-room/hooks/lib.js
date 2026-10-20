@@ -436,7 +436,7 @@ const DEFAULT_COLUMNS = 40;
  *   subjects: ReturnType<typeof buildSubjects>, thread: string | null, who: ReturnType<typeof whoRows>,
  *   to: string, now: number,
  *   self?: string | null, columns?: number | null, limit?: number, whoOpen?: boolean,
- *   selected?: string | null, earlier?: boolean,
+ *   selected?: string | null, earlier?: boolean, surface?: string | null,
  * }} PaneModel
  * @typedef {{
  *   open(id: string): unknown, back(): unknown, newSubject(): unknown, setTo(v: string): unknown,
@@ -477,26 +477,68 @@ export function subjectMeta(s, now) {
 }
 
 /**
- * The pane's element tree. `els` is what `$.ui.resolve(e)` returned; only Box, Text, Button, Input
- * and Select are used, the five the reference marks as drawing in the terminal and the desktop app.
- * A surface that lacks Input or Select gets the same pane without that control, and says so.
+ * The presence line: a disclosure mark, the count, then whole names, newest first, as many as fit in
+ * `budget` characters and `+N` for the rest. A name is never cut: the expander lists everyone.
+ * @param {ReturnType<typeof whoRows>} who @param {boolean} open @param {number} budget
+ */
+export function presenceLine(who, open, budget) {
+  const head = `${open ? "▾" : "▸"} ${who.length} active`;
+  const names = who.map((w) => w.name);
+  let shown = 0;
+  let line = head;
+  for (let n = names.length; n > 0; n--) {
+    const rest = names.length - n;
+    const candidate = `${head} · ${names.slice(0, n).join(", ")}${rest ? ` +${rest}` : ""}`;
+    if (candidate.length <= budget) { shown = n; line = candidate; break; }
+  }
+  return shown ? line : head;
+}
+
+/** Theme keys of Claude Code's own theme, so the pane follows the app in light and dark. `surface` is a key the theme holds beyond the named set: the row and message background. */
+export const COLOR = Object.freeze({ accent: "suggestion", muted: "inactive", rule: "subtle", border: "promptBorder", error: "error", surface: "userMessageBackground" });
+
+/** Spacing steps, never raw cells: between regions, between rows of a list, inside a row. */
+const SPACE = Object.freeze({ region: "md", row: "sm", tight: "xs" });
+
+/** Columns of the label column in the compose card, so `to` and `message` start their fields at one edge. */
+const FIELD_LABEL_COLUMNS = 8;
+/** Columns a subject row spends beside its title: two of padding, the two-column mark, one gap, one spare. */
+const ROW_CHROME_COLUMNS = 6;
+
+/** Markdown takes tab and newline as its only control characters. @param {string} s */
+const markdownSafe = (s) => s.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "");
+
+/**
+ * The pane's element tree. `els` is what `$.ui.resolve(e)` returned; Box, Text, Button, Input, Select
+ * and Markdown are used, all of which the reference marks as drawing in the terminal and the desktop
+ * app. A surface that lacks Input or Select gets the same pane without that control, and says so;
+ * one that lacks Markdown gets plain wrapped text for message bodies.
  *
- * Reading order, top to bottom, with a rule between regions: the room and a small refresh; who is
+ * Type scale: the room is a heading; section labels footnote and medium; a subject's title body;
+ * metadata caption, in the muted theme colour, with tabular digits for counts and ages. Colours are
+ * theme keys (COLOR). Spacing is the xs..xl steps (SPACE). The terminal ignores size and tabular and
+ * draws a step as whole cells, so it stays compact there.
+ *
+ * Reading order, top to bottom, with a rule under the header: the room and a small refresh; who is
  * active (one line, expandable); the compose card (where it goes, whom it is for, the field); then
  * the subjects, or the open thread. The compose card sits above the list so it stays reachable when
  * the pane scrolls as a whole.
  * @param {Record<string, any>} els @param {PaneModel} m @param {PaneActions} act
  */
 export function paneTree(els, m, act) {
-  const { Box, Text, Button, Input, Select } = els;
+  const { Box, Text, Button, Input, Select, Markdown } = els;
   if (!Box || !Text || !Button) return null;
   const cols = m.columns && m.columns > 0 ? m.columns : DEFAULT_COLUMNS;
   const col = (/** @type {any[]} */ children, /** @type {Record<string, any>} */ extra = {}) => Box({ flexDirection: "column", ...extra, children });
-  const row = (/** @type {any[]} */ children, /** @type {Record<string, any>} */ extra = {}) => Box({ flexDirection: "row", columnGap: 1, ...extra, children });
-  const dim = (/** @type {string} */ s, /** @type {Record<string, any>} */ extra = {}) => Text({ dimColor: true, wrap: "wrap", ...extra, children: [s] });
-  const caption = (/** @type {string} */ s, /** @type {Record<string, any>} */ extra = {}) => dim(s, { size: "caption", ...extra });
-  const rule = () => Text({ dimColor: true, wrap: "truncate", children: ["─".repeat(Math.max(8, Math.min(cols, 80)))] });
-  const label = (/** @type {string} */ s) => Text({ weight: "semibold", wrap: "wrap", children: [s] });
+  const row = (/** @type {any[]} */ children, /** @type {Record<string, any>} */ extra = {}) => Box({ flexDirection: "row", columnGap: SPACE.tight, ...extra, children });
+  /** A box that takes the room left in its row and may shrink below its content, so a truncating Text fills it and cuts at the real width. */
+  const fill = (/** @type {any[]} */ children, /** @type {Record<string, any>} */ extra = {}) => Box({ flexDirection: "column", flexGrow: 1, flexShrink: 1, minWidth: 0, ...extra, children });
+  const text = (/** @type {any[]} */ children, /** @type {Record<string, any>} */ props = {}) => Text({ wrap: "wrap", ...props, children });
+  const muted = (/** @type {string} */ s, /** @type {Record<string, any>} */ props = {}) => text([s], { color: COLOR.muted, ...props });
+  const caption = (/** @type {string} */ s, /** @type {Record<string, any>} */ props = {}) => muted(s, { size: "caption", ...props });
+  const sectionLabel = (/** @type {string} */ s) => text([s], { size: "footnote", weight: "medium", color: COLOR.muted, wrap: "truncate-end" });
+  const rule = () => Text({ color: COLOR.rule, wrap: "truncate", children: ["─".repeat(Math.max(8, Math.min(cols, 80)))] });
+  const body = (/** @type {string} */ s) => (Markdown ? Markdown({ text: markdownSafe(s) }) : text([s]));
 
   /** @type {any[]} */
   const out = [];
@@ -504,18 +546,16 @@ export function paneTree(els, m, act) {
   // ---- header: the room, and a small refresh ----
   const roomTitle = m.rooms.length > 1
     ? row(m.rooms.map((r) => Button({ key: `room-${r}`, label: r === m.room ? `[${r}]` : r, plain: true, dimColor: r !== m.room, onPress: () => act.setRoom(r) })))
-    : Text({ weight: "semibold", wrap: "truncate", children: [m.room ?? "no room configured"] });
-  out.push(row([roomTitle, Button({ key: "refresh", label: m.loading ? "reading…" : "refresh", hotkey: "r", plain: true, dimColor: true, onPress: () => act.refresh() })], { justifyContent: "space-between" }));
-  if (m.error) out.push(Text({ color: "red", wrap: "wrap", children: [m.error] }));
+    : fill([Text({ size: "heading", weight: "semibold", wrap: "truncate-end", children: [m.room ?? "no room configured"] })]);
+  out.push(row([roomTitle, Button({ key: "refresh", label: m.loading ? "reading…" : "refresh", hotkey: "r", plain: true, dimColor: true, onPress: () => act.refresh() })], { justifyContent: "space-between", alignItems: "center" }));
+  if (m.error) out.push(text([m.error], { color: COLOR.error }));
 
   // ---- presence: one line; pressing it lists everyone ----
   if (m.thread === null) {
     if (m.who.length) {
-      const names = m.who.map((w) => w.name);
-      const summary = `${m.whoOpen ? "▾" : "▸"} ${m.who.length} active · ${names.join(", ")}`;
-      out.push(Button({ key: "who", label: clip(summary, Math.max(12, cols - 1)), plain: true, dimColor: true, onPress: () => act.toggleWho?.() }));
+      out.push(Button({ key: "who", label: presenceLine(m.who, !!m.whoOpen, Math.max(12, cols - 1)), plain: true, dimColor: true, onPress: () => act.toggleWho?.() }));
       if (m.whoOpen) {
-        out.push(col(m.who.map((w) => caption(`${w.name} · ${w.count} ${w.count === 1 ? "message" : "messages"} · last ${ago(w.last, m.now)} ago`)), { paddingLeft: 2 }));
+        out.push(col(m.who.map((w) => caption(`${w.name} · ${w.count} ${w.count === 1 ? "message" : "messages"} · last ${ago(w.last, m.now)} ago`, { tabular: true })), { paddingLeft: SPACE.row }));
       }
     } else out.push(caption(m.loading ? "who is here: …" : "nobody has spoken yet"));
   } else {
@@ -524,23 +564,25 @@ export function paneTree(els, m, act) {
   out.push(rule());
 
   // ---- compose card: where it goes, whom it is for, the field ----
+  const field = (/** @type {string} */ name, /** @type {any} */ control) => row([Box({ width: FIELD_LABEL_COLUMNS, flexShrink: 0, children: [sectionLabel(name)] }), fill([control])], { alignItems: "center" });
   /** @type {any[]} */
   const compose = [];
-  compose.push(Text({ weight: "semibold", wrap: "wrap", children: [`Posting to ${targetChip(m, { withTo: !Select })}`] }));
+  compose.push(text([`Posting to ${targetChip(m, { withTo: !Select })}`], { weight: "medium" }));
   /** @type {any[]} */
   const controls = [];
   if (Select) {
     const names = [...new Set(m.who.map((w) => w.name))].slice(0, 20);
     const options = [{ value: TO_NOBODY, label: toLabel(TO_NOBODY) }, { value: "*", label: toLabel("*") }, ...names.map((n) => ({ value: n, label: n }))];
     if (!options.some((o) => o.value === m.to)) options.push({ value: m.to, label: m.to });
-    controls.push(Select({ key: "to", label: "to", options, value: m.to, onSelect: (/** @type {string} */ v) => act.setTo(v) }));
+    controls.push(Select({ key: "to", options, value: m.to, onSelect: (/** @type {string} */ v) => act.setTo(v) }));
   } else controls.push(caption("(this surface has no selector: addressing is not available here)"));
   if (m.thread !== null) controls.push(Button({ key: "new-subject", label: "new subject", hotkey: "n", plain: true, dimColor: true, onPress: () => act.newSubject() }));
-  compose.push(row(controls, { columnGap: 2 }));
+  if (Select) compose.push(field("to", row(controls, { columnGap: SPACE.row, alignItems: "center" })));
+  else compose.push(...controls);
   if (Input) {
-    compose.push(Input({ key: "compose", label: "message", placeholder: "write here, Enter posts", value: "", submitLabel: "post", onSubmit: (/** @type {string} */ v) => act.submit(v) }));
+    compose.push(field("message", Input({ key: "compose", placeholder: "write here, Enter posts", value: "", submitLabel: "post", onSubmit: (/** @type {string} */ v) => act.submit(v) })));
   } else compose.push(caption("(this surface has no text field: post with the room_post tool)"));
-  out.push(col(compose, { borderStyle: "round", paddingX: 1 }));
+  out.push(col(compose, { gap: SPACE.row, borderStyle: "round", borderColor: COLOR.border, paddingX: SPACE.row, paddingY: SPACE.tight }));
 
   // ---- body: subjects, or the open thread ----
   if (m.thread === null) {
@@ -548,20 +590,35 @@ export function paneTree(els, m, act) {
     const unreadSubjects = m.subjects.filter((s) => s.unread > 0).length;
     const limit = m.limit ?? SUBJECTS_PAGE;
     const shown = m.subjects.slice(0, limit);
-    out.push(row([label("Subjects"), caption(total ? `${shown.length} of ${total}${unreadSubjects ? ` · ${unreadSubjects} with new` : ""}` : "")], { marginTop: "sm" }));
-    if (!total) out.push(dim(m.loading ? "reading the room…" : "no messages in the window"));
-    const titleMax = Math.max(12, cols - 4);
+    out.push(row([sectionLabel("Subjects"), caption(total ? `${shown.length} of ${total}${unreadSubjects ? ` · ${unreadSubjects} with new` : ""}` : "", { tabular: true })], { marginTop: SPACE.region, justifyContent: "space-between", alignItems: "center" }));
+    if (!total) out.push(muted(m.loading ? "reading the room…" : "no messages in the window"));
+    /** @type {any[]} */
+    const rows = [];
     for (const s of shown) {
-      const mark = s.unread > 0 ? "●" : s.id === m.selected ? "▸" : " ";
-      /** @type {any[]} */
-      const meta = s.unread > 0
-        ? [Text({ color: "blue", weight: "semibold", size: "caption", wrap: "truncate", children: [`${s.unread} new`] }), caption(`· ${subjectMeta(s, m.now)}`, { wrap: "truncate" })]
-        : [caption(subjectMeta(s, m.now), { wrap: "truncate" })];
-      out.push(col([
-        row([Text({ color: "blue", children: [mark] }), Button({ key: `subject-${s.id}`, label: clip(s.title, titleMax), plain: true, onPress: () => act.open(s.id) })]),
-        row(meta, { paddingLeft: 2 }),
-      ], { marginBottom: "sm" }));
+      const unread = s.unread > 0;
+      // the mark sits in a column of its own, whether or not the row has one, so titles share an edge
+      const mark = unread ? Text({ color: COLOR.accent, children: ["●"] }) : s.id === m.selected ? Text({ color: COLOR.muted, children: ["▸"] }) : Text({ children: [" "] });
+      const meta = Text({
+        size: "caption", color: COLOR.muted, tabular: true, wrap: "truncate-end",
+        children: unread
+          ? [Text({ color: COLOR.accent, weight: "medium", children: [`${s.unread} new`] }), ` · ${subjectMeta(s, m.now)}`]
+          : [subjectMeta(s, m.now)],
+      });
+      // The desktop app truncates a title at the real width. The terminal wraps a Button's children, so
+      // there the label is cut to the columns the row has left (its padding, the mark column and gap).
+      const title = m.surface === "desktop"
+        ? Button({
+          key: `subject-${s.id}`, label: s.title, plain: true, onPress: () => act.open(s.id),
+          children: [Text({ weight: unread ? "semibold" : "regular", wrap: "truncate-end", children: [s.title] })],
+        })
+        : Button({ key: `subject-${s.id}`, label: clip(s.title, Math.max(12, cols - ROW_CHROME_COLUMNS)), plain: true, onPress: () => act.open(s.id) });
+      rows.push(Box({
+        key: `row-${s.id}`, flexDirection: "row", columnGap: SPACE.tight, paddingX: SPACE.tight, paddingY: SPACE.tight,
+        hover: { backgroundColor: COLOR.surface },
+        children: [Box({ width: 2, flexShrink: 0, children: [mark] }), fill([title, meta])],
+      }));
     }
+    out.push(col(rows, { rowGap: SPACE.row }));
     if (total > shown.length) {
       const left = total - shown.length;
       out.push(Button({ key: "more", label: `show ${Math.min(SUBJECTS_PAGE, left)} more (${left} older)`, plain: true, dimColor: true, onPress: () => act.more?.() }));
@@ -570,20 +627,20 @@ export function paneTree(els, m, act) {
     const subject = m.subjects.find((s) => s.id === m.thread);
     const messages = subject?.messages ?? [];
     const hidden = m.earlier ? 0 : Math.max(0, messages.length - THREAD_TAIL);
-    out.push(col([caption(`${messages.length} ${messages.length === 1 ? "message" : "messages"}${subject ? ` · started by ${subject.rootFrom}` : ""}`)], { marginTop: "sm" }));
+    out.push(col([caption(`${messages.length} ${messages.length === 1 ? "message" : "messages"}${subject ? ` · started by ${subject.rootFrom}` : ""}`, { tabular: true })], { marginTop: SPACE.region }));
     out.push(rule());
     if (hidden) out.push(Button({ key: "earlier", label: `show ${hidden} earlier`, plain: true, dimColor: true, onPress: () => act.showEarlier?.() }));
+    /** @type {any[]} */
+    const thread = [];
     for (const msg of messages.slice(hidden)) {
       const mine = m.self !== null && m.self !== undefined && (msg.from === m.self || msg.signedAs === m.self);
-      const head = [Text({ weight: "semibold", ...(mine ? { color: "blue" } : {}), wrap: "wrap", children: [msg.from] })];
+      const head = [Text({ weight: "semibold", ...(mine ? { color: COLOR.accent } : {}), wrap: "truncate-end", children: [msg.from] })];
       if (mine) head.push(caption("you"));
-      head.push(caption(`${ago(msg.ts, m.now)}${msg.to.length ? ` · to ${msg.to.join(", ")}` : ""}`));
-      out.push(col([
-        row(head),
-        Text({ wrap: "wrap", children: [bodyText(msg)] }),
-      ], { marginBottom: "md", ...(mine ? { paddingLeft: 2 } : {}) }));
+      head.push(caption(`${ago(msg.ts, m.now)}${msg.to.length ? ` · to ${msg.to.join(", ")}` : ""}`, { tabular: true }));
+      thread.push(col([row(head, { alignItems: "center" }), body(bodyText(msg))], { gap: SPACE.tight, ...(mine ? { paddingLeft: SPACE.row } : {}) }));
     }
+    out.push(col(thread, { rowGap: SPACE.region, marginTop: SPACE.tight }));
   }
 
-  return col(out);
+  return col(out, { rowGap: SPACE.row });
 }

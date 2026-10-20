@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
   DeliveryQueue, TO_NOBODY, ago, bodyText, buildSubjects, chooseRoom, childEnvFor, clip, deliveryText, formatLine, isStopReason, normaliseMessage,
-  paneSessionKey, paneTree, parseCommand, parseList, parseReadOutput, parseSwitch, parseWatchOutput, preambleText,
+  paneSessionKey, paneTree, parseCommand, parseList, parseReadOutput, parseSwitch, parseWatchOutput, preambleText, presenceLine,
   postArgs, receiptText, resolveConfig, statusLine, subjectTitle, targetChip, whoRows, MAX_POST_CHARS,
 } from "../plugins/claude/agora-room/hooks/lib.js";
 import { tmp } from "./helpers.mjs";
@@ -274,7 +274,7 @@ test("bodyText: the trailer block the CLI parsed is not shown (the header says t
 const fakeEls = (/** @type {string[]} */ without = []) => {
   /** @type {Record<string, any>} */
   const els = {};
-  for (const n of ["Box", "Text", "Button", "Input", "Select"]) if (!without.includes(n)) els[n] = (/** @type {any} */ props) => ({ el: n, ...props });
+  for (const n of ["Box", "Text", "Button", "Input", "Select", "Markdown"]) if (!without.includes(n)) els[n] = (/** @type {any} */ props) => ({ el: n, ...props });
   return els;
 };
 /** @param {any} node @param {any[]} acc */
@@ -286,32 +286,51 @@ const baseModel = () => ({
   who: whoRows([{ type: "who", name: "Ada", last: "2026-10-20T09:10:00.000Z", count: 2 }]), to: TO_NOBODY, now: Date.parse("2026-10-20T09:40:00.000Z"),
   self: "Grace", columns: 40, limit: 20, whoOpen: false, selected: /** @type {string | null} */ (null), earlier: false,
 });
+/** The words of a node: its string children, and those of the inline Text nested in it. @param {any} n @returns {string} */
+const flat = (n) => (typeof n === "string" ? n : (n.children ?? []).map(flat).join(""));
 /** @param {any[]} nodes */
 const textsOf = (nodes) => nodes.filter((n) => n.el === "Text").map((n) => n.children[0]);
+/** @param {any[]} nodes */
+const flatTexts = (nodes) => nodes.filter((n) => n.el === "Text").map(flat);
 
 test("pane: subjects scan as a title line and a meta line, with a visible unread mark and no row hotkeys", () => {
   const nodes = walk(paneTree(fakeEls(), baseModel(), acts), []);
   const rows = nodes.filter((n) => n.el === "Button" && String(n.key).startsWith("subject-"));
   assert.deepEqual(rows.map((n) => n.label), ["tail of an old thread", "Plan the release", "Lunch?"]);
   assert.ok(rows.every((n) => n.hotkey === undefined), "numbers on the first nine rows only was noise");
-  const texts = textsOf(nodes);
-  assert.ok(texts.includes("· Lin · 1 reply · 10m"), "who spoke last, replies, age; after the new count when there is one");
-  assert.ok(texts.includes("· Grace · 2 replies · 20m"));
-  assert.ok(texts.includes("· Ada · 35m"), "no replies: no reply count");
-  assert.equal(nodes.filter((n) => n.el === "Text" && n.children[0] === "●" && n.color === "blue").length, 3, "each unread subject carries a coloured dot");
-  assert.equal(texts.filter((t) => t === "1 new").length, 3);
+  assert.ok(rows.every((n) => n.children === undefined), "the terminal's Button wraps its children, so its title is the label");
+  const desktop = walk(paneTree(fakeEls(), { ...baseModel(), surface: "desktop" }, acts), []).filter((n) => n.el === "Button" && String(n.key).startsWith("subject-"));
+  assert.deepEqual(desktop.map((n) => n.label), ["tail of an old thread", "Plan the release", "Lunch?"]);
+  assert.ok(desktop.every((n) => n.children[0].wrap === "truncate-end" && n.children[0].children[0] === n.label && n.children[0].weight === "semibold"), "on the desktop the title is cut by the surface at the real width, heavier when unread");
+  const texts = flatTexts(nodes);
+  assert.ok(texts.includes("1 new · Lin · 1 reply · 10m"), "the new count and the meta read as one line, with no stray separator");
+  assert.ok(texts.includes("1 new · Grace · 2 replies · 20m"));
+  assert.ok(texts.includes("1 new · Ada · 35m"), "no replies: no reply count");
+  assert.equal(nodes.filter((n) => n.el === "Text" && n.children[0] === "●" && n.color === "suggestion").length, 3, "each unread subject carries a dot in the theme's accent");
+  assert.equal(texts.filter((t) => t.startsWith("1 new · ")).length, 3);
   assert.ok(texts.includes("3 of 3 · 3 with new"));
+  const meta = nodes.find((n) => n.el === "Text" && flat(n) === "1 new · Lin · 1 reply · 10m");
+  assert.deepEqual([meta.size, meta.color, meta.tabular, meta.wrap], ["caption", "inactive", true, "truncate-end"]);
 });
 
-test("pane: a read subject has no dot, the one last opened is marked, titles are cut to the pane's width", () => {
-  const m = { ...baseModel(), subjects: buildSubjects([...ROOM, msg({ id: "r6", text: "A subject with a rather long title indeed\n\n-- Lin", from: "Lin", signedAs: "Lin", ts: "2026-10-20T09:35:00.000Z" })], { self: "Grace", seen: { r1: "r4", old: "r5", r2: "r2", r6: "r6" } }), selected: "r1", columns: 30 };
+test("pane: every row has a mark column of one width, a hover, and a key of its own", () => {
+  const nodes = walk(paneTree(fakeEls(), { ...baseModel(), selected: "r1" }, acts), []);
+  const rows = nodes.filter((n) => n.el === "Box" && String(n.key).startsWith("row-"));
+  assert.equal(rows.length, 3);
+  assert.ok(rows.every((n) => n.hover.backgroundColor === "userMessageBackground" && n.children[0].width === 2 && n.children[0].flexShrink === 0));
+});
+
+test("pane: a read subject has no dot, the one last opened is marked, a long title is cut to the terminal's columns and left whole for the desktop", () => {
+  const long = "A subject with a rather long title indeed";
+  const m = { ...baseModel(), subjects: buildSubjects([...ROOM, msg({ id: "r6", text: `${long}\n\n-- Lin`, from: "Lin", signedAs: "Lin", ts: "2026-10-20T09:35:00.000Z" })], { self: "Grace", seen: { r1: "r4", old: "r5", r2: "r2", r6: "r6" } }), selected: "r1", columns: 30 };
   const nodes = walk(paneTree(fakeEls(), m, acts), []);
   assert.equal(nodes.filter((n) => n.el === "Text" && n.children[0] === "●").length, 0);
   assert.equal(nodes.filter((n) => n.el === "Text" && n.children[0] === "▸").length, 1);
-  const long = nodes.find((n) => n.key === "subject-r6");
-  assert.equal(long.label.length, 26);
-  assert.ok(long.label.endsWith("…"));
-  assert.ok(nodes.every((n) => n.el !== "Text" || !/^\d+ new$/.test(n.children[0])), "nothing is new");
+  const cut = nodes.find((n) => n.key === "subject-r6").label;
+  assert.equal(cut.length, 24, "the columns left once the row's padding, mark and gap are taken");
+  assert.ok(cut.endsWith("…"));
+  assert.equal(walk(paneTree(fakeEls(), { ...m, surface: "desktop" }, acts), []).find((n) => n.key === "subject-r6").label, long, "the title is whole in the desktop tree");
+  assert.ok(nodes.every((n) => n.el !== "Text" || !/^\d+ new/.test(flat(n))), "nothing is new");
 });
 
 test("pane: the target is stated once, as a chip beside the selector and the field; the header is the room and a small refresh", () => {
@@ -323,10 +342,16 @@ test("pane: the target is stated once, as a chip beside the selector and the fie
   assert.equal(nodes.filter((n) => n.el === "Input").length, 1);
   const select = nodes.find((n) => n.el === "Select");
   assert.deepEqual(select.options.map((/** @type {any} */ o) => [o.value, o.label]), [[TO_NOBODY, "the room"], ["*", "everyone (*)"], ["Ada", "Ada"]]);
+  assert.equal(select.label, undefined, "the pane draws the field labels itself, in one column");
+  assert.equal(nodes.find((n) => n.el === "Input").label, undefined);
   const refresh = nodes.find((n) => n.key === "refresh");
   assert.deepEqual([refresh.label, refresh.hotkey, refresh.dimColor], ["refresh", "r", true]);
-  assert.ok(nodes.some((n) => n.el === "Text" && n.weight === "semibold" && n.children[0] === "lab"));
-  assert.equal(nodes.find((n) => n.borderStyle === "round")?.flexDirection, "column", "the compose controls share one card");
+  const room = nodes.find((n) => n.el === "Text" && n.children[0] === "lab");
+  assert.deepEqual([room.size, room.weight, room.wrap], ["heading", "semibold", "truncate-end"]);
+  const card = nodes.find((n) => n.borderStyle === "round");
+  assert.deepEqual([card.flexDirection, card.borderColor], ["column", "promptBorder"], "the compose controls share one card");
+  const labelBoxes = nodes.filter((n) => n.el === "Box" && n.width === 8).map((n) => n.children[0]);
+  assert.deepEqual(labelBoxes.map((t) => [t.children[0], t.size, t.weight]), [["to", "footnote", "medium"], ["message", "footnote", "medium"]], "to and message start their fields at one edge");
   assert.equal(nodes.filter((n) => n.el === "Text" && /^─+$/.test(n.children[0])).length, 1, "one rule, between the header and the compose card");
 });
 
@@ -348,6 +373,15 @@ test("pane: presence is one line with a count; pressing it lists everyone", () =
   assert.ok(textsOf(walk(paneTree(fakeEls(), { ...baseModel(), who: [], loading: true }, acts), [])).includes("who is here: …"));
 });
 
+test("presenceLine: whole names, newest first, then how many more; never a name cut in the middle", () => {
+  const who = ["Lin", "Ada", "Zed", "review/Alpha", "coding/Beta", "Kit", "Mae", "Ola"].map((name) => ({ name, last: null, count: 1 }));
+  assert.equal(presenceLine(who, false, 39), "▸ 8 active · Lin, Ada, Zed +5");
+  assert.equal(presenceLine(who, true, 39), "▾ 8 active · Lin, Ada, Zed +5");
+  assert.equal(presenceLine(who, false, 200), "▸ 8 active · Lin, Ada, Zed, review/Alpha, coding/Beta, Kit, Mae, Ola");
+  assert.equal(presenceLine(who, false, 10), "▸ 8 active", "no name fits: the count alone");
+  assert.equal(presenceLine(who.slice(0, 1), false, 39), "▸ 1 active · Lin");
+});
+
 test("pane: only the most recent subjects are listed; a button shows more", () => {
   const many = Array.from({ length: 25 }, (_, i) => msg({ id: `x${i}`, text: `Subject ${i}\n\n-- Ada`, from: "Ada", signedAs: "Ada", ts: "2026-10-20T09:00:00.000Z" }));
   const subjects = buildSubjects(many, { self: "Grace" });
@@ -365,27 +399,34 @@ test("pane: only the most recent subjects are listed; a button shows more", () =
   assert.equal(all.some((n) => n.key === "more"), false);
 });
 
-test("pane: a thread reads as a conversation: author, age, wrapped text, your own posts marked; a way back; the chip names it", () => {
+test("pane: a thread reads as a conversation: author, age, markdown body, your own posts marked; a way back; the chip names it", () => {
   const m = { ...baseModel(), thread: "r1", to: "Ada" };
   const nodes = walk(paneTree(fakeEls(), m, acts), []);
   const texts = textsOf(nodes);
   assert.ok(texts.includes("Posting to lab › Plan the release"), "the target names the thread; whom it is for is the selector's value");
   assert.equal(nodes.find((n) => n.el === "Select").value, "Ada");
   assert.ok(texts.includes("3 messages · started by Grace"));
-  assert.ok(texts.includes("Plan the release\n\nwith detail"), "bodies lose the signature line");
+  const bodies = nodes.filter((n) => n.el === "Markdown").map((n) => n.text);
+  assert.ok(bodies.includes("Plan the release\n\nwith detail"), "bodies lose the signature line and are drawn as markdown, so code and links render");
+  assert.equal(nodes.filter((n) => n.el === "Markdown").length, 3);
   const grace = nodes.filter((n) => n.el === "Text" && n.children[0] === "Grace" && n.weight === "semibold");
   assert.equal(grace.length, 2);
-  assert.ok(grace.every((n) => n.color === "blue"), "own posts are coloured");
+  assert.ok(grace.every((n) => n.color === "suggestion"), "own posts are in the theme's accent");
   const ada = nodes.find((n) => n.el === "Text" && n.children[0] === "Ada" && n.weight === "semibold");
   assert.equal(ada.color, undefined);
   assert.equal(texts.filter((t) => t === "you").length, 2);
-  assert.ok(texts.includes("40m"), "age");
+  const age = nodes.find((n) => n.el === "Text" && n.children[0] === "40m");
+  assert.deepEqual([age.size, age.tabular], ["caption", true], "age");
   assert.ok(nodes.some((n) => n.key === "back" && n.hotkey === "b"));
   assert.ok(nodes.some((n) => n.key === "new-subject"));
   assert.equal(nodes.some((n) => n.key === "who"), false, "the thread view has no presence line");
   assert.equal(nodes.filter((n) => n.el === "Text" && /Plan the release$/.test(n.children[0])).length, 1, "the title is stated once, in the target (the thread's first message carries it in full below)");
   assert.equal(targetChip({ ...m, to: "*" }), "lab › Plan the release");
   assert.equal(targetChip({ ...m, to: "*" }, { withTo: true }), "lab › Plan the release · to: everyone (*)");
+  const plain = walk(paneTree(fakeEls(["Markdown"]), m, acts), []);
+  assert.ok(textsOf(plain).includes("Plan the release\n\nwith detail"), "a surface without Markdown gets the same body as wrapped text");
+  const dirty = walk(paneTree(fakeEls(), { ...m, subjects: buildSubjects([msg({ id: "z", text: "a\u0007b\r\nc\td\n\n-- Grace" })], { self: "Grace" }), thread: "z" }, acts), []);
+  assert.deepEqual(dirty.filter((n) => n.el === "Markdown").map((n) => n.text), ["ab\nc\td"], "markdown takes tab and newline as its only control characters");
 });
 
 test("pane: a long thread shows its last messages and a way to the earlier ones; addressed posts show to whom", () => {
@@ -393,16 +434,16 @@ test("pane: a long thread shows its last messages and a way to the earlier ones;
   const subjects = buildSubjects(msgs, { self: "Grace" });
   /** @type {string[]} */
   const log = [];
-  const nodes = walk(paneTree(fakeEls(), { ...baseModel(), subjects, thread: "t0" }, { ...acts, showEarlier: () => log.push("earlier") }), []);
+  const nodes = walk(paneTree(fakeEls(["Markdown"]), { ...baseModel(), subjects, thread: "t0" }, { ...acts, showEarlier: () => log.push("earlier") }), []);
   const bodies = textsOf(nodes).filter((t) => /^line \d+$/.test(t));
   assert.equal(bodies.length, 12);
   assert.equal(bodies[0], "line 2");
-  assert.ok(textsOf(nodes).includes("40m · to Ada, Grace"));
+  assert.ok(flatTexts(nodes).includes("40m · to Ada, Grace"));
   const earlier = nodes.find((n) => n.key === "earlier");
   assert.equal(earlier.label, "show 2 earlier");
   earlier.onPress();
   assert.deepEqual(log, ["earlier"]);
-  const full = walk(paneTree(fakeEls(), { ...baseModel(), subjects, thread: "t0", earlier: true }, acts), []);
+  const full = walk(paneTree(fakeEls(["Markdown"]), { ...baseModel(), subjects, thread: "t0", earlier: true }, acts), []);
   assert.equal(textsOf(full).filter((t) => /^line \d+$/.test(t)).length, 13);
   assert.equal(full.some((n) => n.key === "earlier"), false);
 });
@@ -438,7 +479,7 @@ test("pane: a surface without Input or Select gets the pane without them and is 
 test("pane: several rooms get room buttons, one room a title; an error is shown; the width default holds when the surface does not say", () => {
   const multi = walk(paneTree(fakeEls(), { ...baseModel(), rooms: ["lab", "desk"], error: "agora read exit 1", columns: null }, acts), []);
   assert.deepEqual(multi.filter((n) => String(n.key).startsWith("room-")).map((n) => n.label), ["[lab]", "desk"]);
-  assert.ok(multi.some((n) => n.el === "Text" && n.color === "red" && n.children[0] === "agora read exit 1"));
+  assert.ok(multi.some((n) => n.el === "Text" && n.color === "error" && n.children[0] === "agora read exit 1"));
   assert.equal(clip("a  b\nc", 10), "a b c");
   assert.equal(clip("abcdef", 4), "abc…");
 });
