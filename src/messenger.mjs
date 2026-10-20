@@ -140,7 +140,9 @@ export function noticeKey(kind, f, t) {
   switch (kind) {
     case "N1": case "N9": return `route:${f.id}`;
     case "N2": return `N2:${f.id}:${t.to[0] ?? ""}`;
-    case "N3": return `N3:${f.verb}:${f.id}:${f.position}`;
+    // one human line per incident: the position text is not in the key, so a roster change between
+    // ticks (a position forgotten, a holder renamed) cannot raise the same incident twice
+    case "N3": return `N3:${f.verb}:${f.id}`;
     case "N4": return `N4:${f.subject}`;
     case "N5": return `N5:${t.re ?? ""}:${f.addr}`;
     case "N6": return `N6:${f.id}`;

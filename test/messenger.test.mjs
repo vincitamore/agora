@@ -213,6 +213,8 @@ test("no notice carries the words of the message it points at (red leg: the plan
 test("noticeKey: one incident, one key; N1 and N9 share the route", () => {
   assert.equal(noticeKey("N1", { id: "x" }, { to: [] }), noticeKey("N9", { id: "x", human: "Ada" }, { to: [] }));
   assert.notEqual(noticeKey("N2", { id: "x" }, { to: ["a"] }), noticeKey("N2", { id: "x" }, { to: ["b"] }));
+  // red leg: a roster change between ticks renames the position in the text; the incident is the same
+  assert.equal(noticeKey("N3", { verb: "taken", id: "x", position: "desk.coding" }, { to: [] }), noticeKey("N3", { verb: "taken", id: "x", position: "coding/Opus" }, { to: [] }));
 });
 
 test("runTick posts only what the fresh fold under the lock still finds due (red leg: an answer landing between the reads)", async (t) => {
