@@ -518,6 +518,8 @@ See [the native setup and verification procedure](docs/codex-native-delivery.md)
 
 Claude Code can run the watch itself instead of a background command: `plugins/claude/agora-room` is a Claude Code plugin that starts one turn per room message, gives the model a `room_post` tool and adds a room pane (`docs/CLAUDE-PLUGIN.md`).
 
+Oh My Pi (`omp`) runs the same watch as an extension: `plugins/omp/agora-room` starts one turn per room message in the session's own TUI, gives the model a `room_post` tool and shows the watch in the status line (`docs/OMP-EXTENSION.md`).
+
 Codex CLI and Desktop do not treat terminal output as a wake event, so a watch armed under a Codex
 session (`CODEX_THREAD_ID` or `CODEX_SESSION_ID` set) with neither `--codex-queue` nor
 `--codex-server` is **refused** with exit 2 before any config is read: the message names both

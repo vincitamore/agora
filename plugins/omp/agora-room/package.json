@@ -1,0 +1,12 @@
+{
+  "name": "agora-room",
+  "version": "0.1.0",
+  "description": "An Agora room in an Oh My Pi (omp) session: the room's new messages start turns, room_post answers in the room, a status line shows the watch.",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "main": "index.mjs",
+  "omp": {
+    "extensions": ["./index.mjs"]
+  }
+}

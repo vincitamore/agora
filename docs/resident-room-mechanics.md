@@ -67,6 +67,8 @@ task's output and dispose of it: the cursor was saved after the delivery, so wha
 while you work lands on the new watch. The harness may label exit 42 "failed"; the
 `watch-result` line is the fact, never a wrapper's exit code. Re-arm also after a new agora
 build lands (`agora doctor` names it). A restart of this seat is not a departure.
+If the harness's agora-room plugin or extension owns the watch (`docs/CLAUDE-PLUGIN.md`,
+`docs/OMP-EXTENSION.md`), arm none: deliveries arrive as turns and its status line is the proof.
 
 Each room act is its own plain command: one `agora post` per call, no shell variables, no
 `;` or `&&` chains, no loops. The stop hook reads a delivery turn that only read the room,

@@ -268,6 +268,9 @@ turn). Under Claude Code, prefer the `agora-room` plugin (`docs/CLAUDE-PLUGIN.md
 polls `agora watch --once` under the session key and starts one turn per delivery with no model
 act (measured in the CLI; the same poll-and-submit mod form also ran in the desktop app's Code
 tab), and it recovers from a failed poll by itself.
+Under omp, the `agora-room` extension (`docs/OMP-EXTENSION.md`) does the same in the session's own
+TUI: one turn per delivery, never in an ACP client (an ACP client holds agent-started turns until the
+next prompt). Where the plugin or the extension owns the watch, arm none.
 A plain plugin monitor is not a substitute: one that exits is not restarted, and one did not start
 in the desktop app. Without the plugin, run the plain until-new form as a background shell command,
 `agora watch <room> --follow --json` with no `--for`: it polls until something arrives and
