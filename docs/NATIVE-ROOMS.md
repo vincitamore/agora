@@ -159,9 +159,10 @@ no call, and the restart sweep picks it up, so the reply is posted once.
 
 `agora service room delete <roomId|alias> --confirm <roomId> [--force]` closes a native room's
 lifecycle on this seat: the running service drops the room and deletes its directory under
-`native/rooms/<roomId>/`, which holds the log, the custody and the face records. The shared config
-is read, never written: a room a config row still names is refused `room-in-config`, and the operator
-removes the row first. A live member route or a live subscriber refuses `room-in-use` unless
+`native/rooms/<roomId>/`, which holds the log, the custody and the face records. The delete verb
+reads the shared config and never writes it: a room a config row still names is refused
+`room-in-config`, and the operator removes the row first (`agora config room remove <alias>
+--force`). A live member route or a live subscriber refuses `room-in-use` unless
 `--force`, which tears the routes down (their secrets removed, as a close removes them) and closes
 the subscribing connections. A `--confirm` that is not the exact room id refuses `confirm-required`
 or `confirm-mismatch`; a room still opening, or whose face work does not drain within the face drain

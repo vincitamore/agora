@@ -297,45 +297,24 @@ test("a plain run without kits mints both keys apart, configures omp and Tern, a
   assert.equal(existsSync(s.paths.config), false, "the config is written only with a route to name");
 });
 
-/**
- * What the seat's agent does with the row the config step prints: parse exactly the printed text
- * and merge it under "rooms" (or create the file from it when there was none).
- * @param {Awaited<ReturnType<typeof memberSeat>>} s @param {Awaited<ReturnType<typeof setup>>} report
- */
-async function pasteRow(s, report) {
-  const notes = step(report, "config").notes;
-  const printed = String(notes[notes.length - 1]).trim();
-  const before = existsSync(s.paths.config) ? JSON.parse(await readFile(s.paths.config, "utf8")) : null;
-  const next = before ? { ...before, rooms: { ...before.rooms, ...JSON.parse(`{${printed}}`) } } : JSON.parse(printed);
-  await mkdir(path.dirname(s.paths.config), { recursive: true });
-  await writeFile(s.paths.config, JSON.stringify(next, null, 2));
-}
-
-test("with both kits: the config row is printed and waited for; once pasted every step is ok but the first turn, and a second run changes nothing at all", { timeout: 180_000 }, async (t) => {
+test("with both kits: one plain run writes the config through agora config and every step is ok but the first turn; a second run changes nothing at all", { timeout: 180_000 }, async (t) => {
   const s = await memberSeat(t);
   const kits = await hostKits(s.home, { seatKey: await s.key(s.paths.state), humanKey: await s.key(s.paths.humanState), humanName: "Grace" });
   const argv = ["--pin", HEAD, "--kit", /** @type {string} */ (kits.seat), "--human-kit", /** @type {string} */ (kits.human), "--human-name", "Grace"];
 
-  const waiting = await s.run(argv);
-  assert.deepEqual(states(waiting), {
-    node: "ok", checkout: "ok", "seat-key": "ok", route: "ok", config: "wait", doctor: "blocked",
-    "human-key": "ok", "human-route": "ok", omp: "ok", tern: "ok", charter: "blocked", "first-run": "blocked", "extension-turn": "blocked",
-  }, formatReport(waiting));
-  assert.deepEqual(waiting.steps.filter((x) => x.changed).map((x) => x.id), ["route", "human-route", "omp", "tern"]);
-  assert.equal(existsSync(s.paths.config), false, "the seat's config was written");
-  assert.match(step(waiting, "config").notes.join("\n"), /does not exist yet\. Create it with this content/);
-
-  await pasteRow(s, waiting);
   const first = await s.run(argv);
   assert.deepEqual(states(first), {
     node: "ok", checkout: "ok", "seat-key": "ok", route: "ok", config: "ok", doctor: "ok",
     "human-key": "ok", "human-route": "ok", omp: "ok", tern: "ok", charter: "ok", "first-run": "ok", "extension-turn": "wait",
   }, formatReport(first));
   assert.equal(first.ok, true, "a wait is not a failure");
-  assert.deepEqual(first.steps.filter((x) => x.changed).map((x) => x.id), ["charter", "first-run"]);
+  assert.deepEqual(first.steps.filter((x) => x.changed).map((x) => x.id), ["route", "config", "human-route", "omp", "tern", "charter", "first-run"]);
+  const cfgStep = step(first, "config");
+  assert.ok(cfgStep.changes.some((l) => /^\s*--- \/dev\/null$/.test(l)), cfgStep.changes.join("\n"));
+  assert.ok(cfgStep.changes.some((l) => /wrote .*config\.json with agora config/.test(l)), cfgStep.changes.join("\n"));
 
   const cfg = JSON.parse(await readFile(s.paths.config, "utf8"));
-  assert.equal(cfg.actor.kind, "agent");
+  assert.deepEqual(cfg.actor, { name: "agent", kind: "agent" });
   assert.equal(cfg.rooms.partner.transport, "native-remote");
   assert.ok(existsSync(cfg.rooms.partner.descriptor));
   const humanCfg = JSON.parse(await readFile(s.paths.humanConfig, "utf8"));
@@ -371,7 +350,7 @@ test("with both kits: the config row is printed and waited for; once pasted ever
   assert.equal((await s.ompCalls()).filter((a) => a[1] === "set").length, 2, "omp settings were written again");
 });
 
-test("an existing config is never written: the row is printed to merge under \"rooms\", and once merged the step is ok", { timeout: 180_000 }, async (t) => {
+test("an existing config is merged through agora config: --check shows the diff and writes nothing; a plain run adds the row, keeps every other byte and a backup", { timeout: 180_000 }, async (t) => {
   const s = await memberSeat(t);
   const kits = await hostKits(s.home, { seatKey: await s.key(s.paths.state) });
   const mine = { actor: { name: "Ada", kind: "agent" }, sign: false, rooms: { notes: { transport: "local", path: path.join(s.home, "notes.jsonl") } } };
@@ -382,18 +361,27 @@ test("an existing config is never written: the row is printed to merge under \"r
 
   const applied = await s.run(["--pin", HEAD, "--kit", /** @type {string} */ (kits.seat)]);
   const cfgStep = step(applied, "config");
-  assert.equal(cfgStep.state, "wait");
-  assert.equal(cfgStep.changed, false);
-  assert.match(cfgStep.notes.join("\n"), /Add this entry under "rooms" in .*config\.json \(keep everything else there\)/);
-  assert.match(String(cfgStep.notes.at(-1)), /^\s*"partner": \{"transport":"native-remote","descriptor":".*descriptor\.json"\}$/);
-  assert.equal(await readFile(s.paths.config, "utf8"), original, "the config was written");
-  assert.deepEqual((await readdir(path.dirname(s.paths.config))).filter((f) => f.startsWith("config.json.bak-")), []);
-
-  await pasteRow(s, applied);
-  const merged = await s.run(["--pin", HEAD, "--kit", /** @type {string} */ (kits.seat), "--check"]);
-  assert.equal(step(merged, "config").state, "ok", formatReport(merged));
-  const cfg = JSON.parse(await readFile(s.paths.config, "utf8"));
+  assert.equal(cfgStep.state, "ok", formatReport(applied));
+  assert.equal(cfgStep.changed, true);
+  assert.ok(cfgStep.changes.some((l) => /^\s*\+\s+"partner": \{/.test(l)), cfgStep.changes.join("\n"));
+  const written = await readFile(s.paths.config, "utf8");
+  const cfg = JSON.parse(written);
   assert.deepEqual({ ...cfg, rooms: { notes: cfg.rooms.notes } }, mine);
+  assert.equal(cfg.rooms.partner.transport, "native-remote");
+  const notesEnd = original.indexOf("}", original.indexOf('"notes"')) + 1;
+  assert.ok(written.startsWith(original.slice(0, notesEnd)) && written.endsWith(original.slice(notesEnd)), `the untouched entries kept their bytes:\n${written}`);
+  const backups = (await readdir(path.dirname(s.paths.config))).filter((f) => f.startsWith("config.json.bak-"));
+  assert.equal(backups.length, 1);
+  assert.equal(await readFile(path.join(path.dirname(s.paths.config), /** @type {string} */ (backups[0])), "utf8"), original);
+
+  // the row gone again: --check previews the same write with --dry-run and leaves the file as it is
+  await writeFile(s.paths.config, original);
+  const preview = step(await s.run(["--pin", HEAD, "--kit", /** @type {string} */ (kits.seat), "--check"]), "config");
+  assert.equal(preview.state, "todo");
+  assert.match(preview.detail, /has no room partner yet; a plain run writes it with agora config room add/);
+  assert.ok(preview.changes.some((l) => /^\s*\+\s+"partner": \{/.test(l)), preview.changes.join("\n"));
+  assert.equal(await readFile(s.paths.config, "utf8"), original, "--check wrote the config");
+  assert.equal((await readdir(path.dirname(s.paths.config))).filter((f) => f.startsWith("config.json.bak-")).length, 1, "--check made a backup");
 });
 
 test("a room of another transport under the alias fails by name and the config is not touched", { timeout: 180_000 }, async (t) => {

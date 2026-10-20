@@ -253,7 +253,10 @@ room this session already read.
 }
 ```
 
-Read only; nothing here writes the shared config. `residentManifest` names the seat's manifest;
-the `residents` table names residents the manifest does not (a seat whose residents run from
-systemd units, say) for `cycle --all`. The profile and the manifest are the operator's files and
-never travel through agora.
+Only `agora config` writes these keys (`agora config set residentManifest '"~/team/residents.json"'`,
+`agora config resident add support '{"restart":"systemctl --user restart resident-{slug}.service"}'`,
+`agora config resident remove support`); the resident verbs read them and never write the shared
+config. `residentManifest` names the seat's manifest; the `residents` table names residents the
+manifest does not (a seat whose residents run from systemd units, say) for `cycle --all`. A resident
+slug is checked when it is added, as `cycle` checks it. The profile and the manifest are the
+operator's files and never travel through agora.

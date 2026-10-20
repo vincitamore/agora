@@ -39,7 +39,7 @@ admitting it.
 |---|---|
 | `ok` | done and verified |
 | `todo` | missing; a plain run does it |
-| `wait` | needs something from outside the script (the config row pasted, a kit, a pinned charter, the first turn), named on the line |
+| `wait` | needs something from outside the script (a kit, a pinned charter, the first turn), named on the line |
 | `fail` | needs you; the line says what to do |
 | `blocked` | an earlier step it needs is not `ok` |
 
@@ -47,15 +47,16 @@ admitting it.
   `member-seat-setup` under the state root they read.)
 - A plain run does every `todo` step in order and checks again. A second plain run changes nothing.
 - A file you already have is **merged**, never replaced: the change is printed as `-`/`+` lines and
-  the file before it is kept beside it as `<file>.bak-<time>`. The one exception is this seat's agora
-  config, which agora never writes: the script prints the row to paste (step 5).
+  the file before it is kept beside it as `<file>.bak-<time>`. An agora config (this seat's, step 5,
+  and the human's, step 8) is written only through `agora config`, which validates the whole result,
+  prints a unified diff and keeps the same backup.
 - Exit 0 when nothing is `todo`, `fail` or `blocked` (`wait` lines may remain); 1 otherwise; 2 on a
   usage error. `--json` prints the same report as one JSON object.
 
 Options: `--room`, `--pin`, `--kit`, `--human-kit`, `--human-name`; `--human-root <folder>` (default
 `~/.agora/human`); `--config <path>` (default `AGORA_CONFIG`, else `~/.agora/config.json`; a
-`./agora.json` in the current folder is not used); `--actor <name>` (the actor in the config the
-script prints when none exists, default `agent`); `--role <role>` (default `coding`, used in the printed launch line);
+`./agora.json` in the current folder is not used); `--actor <name>` (the actor of the config the
+script writes when none exists, default `agent`); `--role <role>` (default `coding`, used in the printed launch line);
 `--charter-name <file>` (default `CHARTER.md`); `--omp`, `--tern` (a path, or a JSON array argv);
 `--tern-data <folder>`.
 
@@ -144,24 +145,30 @@ step 6 is `ok` the kit folder can be deleted; the installed copy is the one in u
 
 ## 5. The room in this seat's config (`config`)
 
-agora never writes `~/.agora/config.json`; `room add-remote` prints a row and stops, and so does
-this step. It prints the exact row and where it goes, and stays `wait` until the row is there:
+Only `agora config` writes `~/.agora/config.json`, and this step calls it. `--check` runs the same
+command with `--dry-run`, which writes nothing, and shows the diff a plain run would make:
 
 ```
-wait    config          <~/.agora/config.json>: the room partner is not there yet; agora never writes this file, so paste the row below
-          Add this entry under "rooms" in <~/.agora/config.json> (keep everything else there), then run the check again:
-            "partner": {"transport":"native-remote","descriptor":"<~/.agora/state/native/remote/<grantId>/descriptor.json>"}
+todo    config          <~/.agora/config.json> has no room partner yet; a plain run writes it with agora config room add
+          --- <~/.agora/config.json> (before)
+          +++ <~/.agora/config.json> (after)
+          @@ … @@
+          -    "home": {…}
+          +    "home": {…},
+          +    "partner": {"transport":"native-remote","descriptor":"<~/.agora/state/native/remote/<grantId>/descriptor.json>"}
 ```
 
-The seat's own agent (or the human) pastes that entry into the file's `"rooms"` object, merging it
-with what is there: no other room, the `actor` and every other key stay as they are. When the file
-does not exist yet, the step prints the whole file to create instead (the actor
-`{ "name": "agent", "kind": "agent" }`; `--actor` names another). Then run the check again; the step
-is `ok` once the row names the installed descriptor.
+A plain run makes that write: `agora config room add partner '<row>'`, which verifies the whole
+result as agora loads it, keeps the file before as `config.json.bak-<time>`, changes nothing but the
+one row (every other room, the `actor` and every other key keep their bytes), and prints the diff.
+When the file does not exist yet, the step creates it with one `agora config set` of the actor
+(`{ "name": "agent", "kind": "agent" }`; `--actor` names another), the state root when it is not
+the default, and the room. The step is `ok` once the row names the installed descriptor.
 
 A row of another transport under the same alias is refused by name; choose another `--room`. After
 a new kit (the host's service restarted and every route was re-minted), run the script with the new
-`--kit`: the step prints the replacement row ("Replace this entry") and waits until it is pasted.
+`--kit`: the step replaces the row with `agora config room add partner '<row>' --replace`, with the
+diff and the backup.
 
 ## 6. agora reaches the room (`doctor`)
 
@@ -203,7 +210,9 @@ than `--human-name` (the host stamps every post on that route with the granted n
 
 1. runs the kit's installer with `--state ~/.agora/human/state` (a human kit's installer refuses to
    run without an explicit `--state`);
-2. writes the human's own config, `~/.agora/human/config.json`, apart from the seat's:
+2. writes the human's own config, `~/.agora/human/config.json`, apart from the seat's, through
+   `agora config` (a new file: one `set` of the actor, state and room; an existing one: a `set` of
+   whichever of actor and state differs, then `room add`):
    `{ "actor": { "name": "Grace", "kind": "human" }, "state": "<~/.agora/human/state>", "rooms": { "partner": { … } } }`;
 3. verifies the descriptor offline as the human (`add-remote` says the actor is the granted human),
    and dials it with `agora doctor --config ~/.agora/human/config.json`.
@@ -327,14 +336,15 @@ Then zip each kit folder and send it by the private channel. Pin the charter (st
 
 ## What the script never does
 
-It posts nothing but the one first-run message; never writes this seat's agora config (it prints
-the row); copies no plugin and removes no installed copy; sends no key anywhere; types into no pane;
-runs no host verb; and never moves its own checkout.
+It posts nothing but the one first-run message; writes an agora config only through `agora config`;
+copies no plugin and removes no installed copy; sends no key anywhere; types into no pane; runs no
+host verb; and never moves its own checkout.
 
-**Files it writes:** `~/.agora/state/` (the seat key, the installed route), `~/.agora/human/` (the
-human's key, route and config), omp's `extensions` and `skills.customDirectories`, Tern's
-`<plugins folder>/agora.path` and the pane's `agora.json`, and `~/.agora/member-seat/` (the charter,
-the first-run record), each changed file kept as `<file>.bak-<time>`.
+**Files it writes:** `~/.agora/state/` (the seat key, the installed route), this seat's agora config
+(through `agora config`), `~/.agora/human/` (the human's key, route and config), omp's `extensions`
+and `skills.customDirectories`, Tern's `<plugins folder>/agora.path` and the pane's `agora.json`,
+and `~/.agora/member-seat/` (the charter, the first-run record), each changed file kept as
+`<file>.bak-<time>`.
 
 ## Tests
 
@@ -342,6 +352,7 @@ the first-run record), each changed file kept as `<file>.bak-<time>`.
 the real CLI, the kits from the real host admission against an in-process service, the descriptors
 verified by the real `room add-remote`, and stand-ins for omp, Tern and the verbs that need a live
 host. The cells: a check changes nothing; the pin's three refusals; a run without kits; a full run
-with both kits that waits for the config row, is `ok` once it is pasted, and changes no file on a
-second run; an existing config left untouched, its printed row merged and then `ok`; a refused
-alias; refused kits; omp's merge and a twice-loaded extension; Tern's installed copy and relink.
+with both kits that writes the config through `agora config` and changes no file on a second run;
+an existing config merged with its other bytes kept and a backup, and a check that previews the
+write without making it; a refused alias; refused kits; omp's merge and a twice-loaded extension;
+Tern's installed copy and relink.

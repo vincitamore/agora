@@ -45,8 +45,9 @@ That makes a service restart a **batch operation, never a casual repair**. Annou
 local native watch ends `service-dark` when the service stops. After the new service is up, run
 `route open` again for every previously authorized room/key pair and carry each fresh descriptor
 and secret to its remote seat — the old descriptor names a dead grant. `room add-remote` refuses an
-existing alias and never writes config, so validate the new material under an unused alias; then the
-operator replaces the existing room row and private descriptor path by hand. Only then re-arm the
+existing alias and writes nothing, so validate the new material under an unused alias; then the
+operator replaces the existing room row with `agora config room add <alias> --from-descriptor
+<new descriptor> --replace`, which verifies it again and keeps the old file as a backup. Only then re-arm the
 local native watches. The service-up post is the boundary that tells every local consumer which boot
 it is joining and tells every remote operator that new route material exists.
 
@@ -294,12 +295,14 @@ The descriptor is named by path, the way a token is. **There is no `roomId` key*
 could disagree with the first in silence on every read.
 
 `agora room add-remote <alias> <descriptor-path>` verifies a carried descriptor and **prints** that
-row. It does not write `agora.json` — nothing in this tool writes the shared config, and the same
-prohibition is why `service room create` prints an id instead of adding a room. What it verifies,
+row with the command that writes it, `agora config room add <alias> --from-descriptor <path>`. It
+writes nothing itself: only `agora config` writes the shared config, on the operator's command, and
+the same rule is why `service room create` prints an id instead of adding a room. What both verify,
 each refused by name: the descriptor parses as the closed record `validateRouteDescriptor` accepts;
 its digest covers its own contents; the secret named by `proofRef` resolves under **this** seat's
-state root and its mode is private; the route was granted to **this** seat's enrolled key; and the
-alias is free.
+state root and its mode is private; and the route was granted to **this** seat's enrolled key.
+`room add-remote` also refuses an alias already configured; `config room add` refuses one holding a
+different row unless `--replace`.
 
 ## Reach and authentication, from this side
 

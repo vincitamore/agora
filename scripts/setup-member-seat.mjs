@@ -11,11 +11,12 @@
  * records about itself (the session `member-seat-setup` under the state root it reads). A plain run
  * applies the steps that are missing, in order, then reports again. A second plain run changes
  * nothing. A file the user already has is merged, never replaced: the change is printed as a diff
- * and the file before it is kept beside it as `<file>.bak-<time>`. The seat's own agora config is
- * the exception: agora never writes it, so the `config` step prints the room row to paste and waits.
+ * and the file before it is kept beside it as `<file>.bak-<time>`. An agora config (the seat's and
+ * the human's) is written only through `agora config`, the one writer of that file, which does the
+ * same: it validates the whole result, prints the diff and keeps the backup.
  *
- * States: `ok`; `todo` (a plain run does it); `wait` (something from outside this script: the row
- * pasted into the config, the host's kit for the human, a pinned charter, the first turn); `fail`
+ * States: `ok`; `todo` (a plain run does it); `wait` (something from outside this script: the
+ * host's kit for the human, a pinned charter, the first turn); `fail`
  * (the user must act, and the line says how); `blocked` (an earlier step this one needs is not ok).
  * Exit 0 when nothing is todo, fail or blocked; 1 otherwise; 2 on a usage error.
  *
@@ -27,7 +28,7 @@
  *   --human-name <name>     the name the human route posts under (checked against that kit)
  *   --human-root <folder>   the human's own agora folder (default ~/.agora/human)
  *   --config <path>         this seat's agora config (default AGORA_CONFIG, else ~/.agora/config.json)
- *   --actor <name>          actor.name in the config printed when none exists (default "agent")
+ *   --actor <name>          actor.name of the config written when none exists (default "agent")
  *   --role <role>           the role of the first omp session, for the printed launch line (default coding)
  *   --charter-name <name>   the file name of the charter the host pinned in the room (default CHARTER.md)
  *   --omp <path|json argv>  how to run omp (default: omp on PATH)
@@ -228,11 +229,12 @@ export function diffJson(before, after, at = "") {
 }
 
 /**
- * Write `next` as JSON over `file`, keeping the bytes before it as `<file>.bak-<time>`.
- * @param {Ctx} c @param {string} file @param {unknown} next @param {{ mode?: number }} [o] @returns {Promise<string[]>}
+ * Write `next` as JSON over `file`, keeping the bytes before it as `<file>.bak-<time>`. Never an
+ * agora config: that is written only through `agora config` (agoraConfig below).
+ * @param {Ctx} c @param {string} file @param {unknown} next @returns {Promise<string[]>}
  */
-async function writeJsonMerged(c, file, next, o = {}) {
-  await mkdir(path.dirname(file), { recursive: true, ...(o.mode ? { mode: o.mode } : {}) });
+async function writeJsonMerged(c, file, next) {
+  await mkdir(path.dirname(file), { recursive: true });
   /** @type {string[]} */
   const notes = [];
   if (existsSync(file)) {
@@ -309,6 +311,42 @@ async function runInstaller(c, kitDir, state) {
   const r = await c.deps.exec([process.execPath, path.join(kitDir, "install-peer-route.mjs"), "--state", state], { cwd: kitDir, env: c.deps.env, timeoutMs: 30_000 });
   if (r.code !== 0) throw new Error(`the kit's installer failed: ${failText(r)}`);
   return r.stdout.split(/\r?\n/).filter((l) => /^Installed /.test(l)).map((l) => `  ${l}`);
+}
+
+/**
+ * One `agora config` write against `file` (with `dryRun`, the same command with --dry-run, which
+ * writes nothing), and what it reported. agora config is the one writer of an agora config: it
+ * validates the whole result as agora loads it, locks, keeps the file before as a backup, and
+ * prints the diff.
+ * @param {Ctx} c @param {string[]} args the words after `config` @param {{ file: string, state: string, dryRun?: boolean }} o
+ * @returns {Promise<{ path: string, written: boolean, noop?: string, backup?: string, diff: string }>}
+ */
+async function agoraConfig(c, args, o) {
+  const r = await c.deps.agora(["config", ...args, ...(o.dryRun ? ["--dry-run"] : []), "--json", "--config", o.file], { state: o.state, config: o.file });
+  const res = jsonLines(r.stdout).find((x) => x.type === "config");
+  if (r.code !== 0 || !res) throw new Error(`agora config ${args.slice(0, 2).join(" ")} refused: ${failText(r)}`);
+  return res;
+}
+
+/** The diff an `agora config` command printed, as change lines. @param {{ diff: string }} res */
+const diffLines = (res) => (res.diff ? res.diff.split("\n").map((l) => `  ${l}`) : []);
+
+/** What a write reported, as change lines. @param {{ path: string, backup?: string }} res */
+const wroteLines = (res) => [`  wrote ${res.path} with agora config`, ...(res.backup ? [`  backup of the file before: ${res.backup}`] : [])];
+
+/**
+ * The `agora config` words that put `row` under `rooms.<room>` of the config at `file`: room add
+ * (with --replace over another descriptor), or, when the file does not exist yet (or names no
+ * rooms), set with the actor and the state root it lacks, and the rooms.
+ * @param {Ctx} c @param {unknown} before @param {{ transport: string, descriptor: string }} row
+ * @param {{ actor: { name: string, kind: string }, state?: string, replace: boolean }} o
+ */
+function roomConfigArgs(c, before, row, o) {
+  const b = /** @type {any} */ (before);
+  if (b?.rooms && typeof b.rooms === "object" && !Array.isArray(b.rooms))
+    return ["room", "add", c.room, JSON.stringify(row), ...(o.replace ? ["--replace"] : [])];
+  return ["set", ...(b?.actor ? [] : ["actor", JSON.stringify(o.actor)]), ...(o.state && b?.state === undefined ? ["state", JSON.stringify(o.state)] : []),
+    "rooms", JSON.stringify({ [c.room]: row })];
 }
 
 // ---------------------------------------------------------------- keys
@@ -413,8 +451,8 @@ export const STEPS = [
     async apply(c, _s, plan) { return runInstaller(c, plan.kitDir, c.stateRoot); },
   },
   {
-    // agora never writes the shared config (docs/DESIGN.md): this step prints the row and waits for
-    // the seat's agent or human to paste it, then checks it.
+    // agora config is the one writer of this seat's config: a plain run writes the row with it, and
+    // --check runs the same command with --dry-run, which writes nothing, to show the diff.
     id: "config", title: "the room in this seat's config", needs: ["route"],
     async inspect(c, s) {
       if (c.stateFromEnv && !samePath(c.stateFromEnv, c.stateRoot))
@@ -425,12 +463,14 @@ export const STEPS = [
       if (have && have.transport !== "native-remote")
         return { state: "fail", detail: `${c.configPath} already has a ${have.transport} room named ${c.room}; choose another alias with --room` };
       if (have && typeof have.descriptor === "string" && samePath(have.descriptor, row.descriptor)) return { state: "ok", detail: `${c.configPath}: ${c.room} → ${row.descriptor}` };
-      const entry = `${JSON.stringify(c.room)}: ${JSON.stringify(row)}`;
-      const notes = before
-        ? [`  ${have ? "Replace" : "Add"} this entry under "rooms" in ${c.configPath} (keep everything else there), then run the check again:`, `    ${entry}`]
-        : [`  ${c.configPath} does not exist yet. Create it with this content, then run the check again:`,
-          `    ${JSON.stringify({ actor: { name: c.actor, kind: "agent" }, ...(samePath(defaultStateRoot(c), c.stateRoot) ? {} : { state: c.stateRoot }), rooms: { [c.room]: row } })}`];
-      return { state: "wait", detail: `${c.configPath}: the room ${c.room} ${have ? "names another descriptor" : "is not there yet"}; agora never writes this file, so paste the row below`, notes };
+      const args = roomConfigArgs(c, before, row, { actor: { name: c.actor, kind: "agent" }, ...(samePath(defaultStateRoot(c), c.stateRoot) ? {} : { state: c.stateRoot }), replace: Boolean(have) });
+      const preview = await agoraConfig(c, args, { file: c.configPath, state: c.stateRoot, dryRun: true });
+      if (preview.noop) return { state: "ok", detail: `${c.configPath}: ${c.room} → ${row.descriptor}` };
+      const what = !before ? "does not exist yet" : have ? `names another descriptor for ${c.room}` : `has no room ${c.room} yet`;
+      return { state: "todo", detail: `${c.configPath} ${what}; a plain run writes it with agora config ${args[0] === "set" ? "set" : `room add${have ? " --replace" : ""}`}`, changes: diffLines(preview), plan: { args } };
+    },
+    async apply(c, _s, plan) {
+      return wroteLines(await agoraConfig(c, plan.args, { file: c.configPath, state: c.stateRoot }));
     },
   },
   {
@@ -510,7 +550,24 @@ export const STEPS = [
       /** @type {string[]} */
       const out = [];
       if (plan.install) out.push(...await runInstaller(c, plan.install, c.humanState));
-      if (plan.config) out.push(...(await writeJsonMerged(c, c.humanConfig, plan.config, { mode: 0o700 })).map((l) => `  ${l}`));
+      if (plan.config) {
+        // through agora config, as the seat's own: the actor and state the route needs, then the room
+        const o = { file: c.humanConfig, state: c.humanState };
+        const b = /** @type {any} */ (await readJsonIfAny(c.humanConfig));
+        const { actor, state } = plan.config;
+        const row = plan.config.rooms[c.room];
+        if (b?.rooms && typeof b.rooms === "object" && !Array.isArray(b.rooms)) {
+          const set = [
+            ...(JSON.stringify(b.actor) === JSON.stringify(actor) ? [] : ["actor", JSON.stringify(actor)]),
+            ...(b.state === state ? [] : ["state", JSON.stringify(state)]),
+          ];
+          if (set.length) out.push(...wroteLines(await agoraConfig(c, ["set", ...set], o)));
+          const added = await agoraConfig(c, ["room", "add", c.room, JSON.stringify(row), "--replace"], o);
+          if (added.written) out.push(...wroteLines(added));
+        } else {
+          out.push(...wroteLines(await agoraConfig(c, ["set", "actor", JSON.stringify(actor), "state", JSON.stringify(state), "rooms", JSON.stringify({ [c.room]: row })], o)));
+        }
+      }
       return out;
     },
   },

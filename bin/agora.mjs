@@ -95,8 +95,8 @@ import { codexServerURL, deliverCodexServer } from "../src/codex-server.mjs";
 import { codexServerStatus, launchAttachedCodex } from "../src/codex-launch.mjs";
 import { buildLabel, buildPredates, cacheTtls, clearWatchMode, installedBuild, touchWatchMode, watchModeSentinel, watchModuleDelta } from "../src/harness.mjs";
 import { SERVICE_DARK, ServiceDarkError, openNativeSubscription, serviceDescriptorStatus, validateNativeRoomId } from "../src/wake/subscriber.mjs";
-import { assertRemoteDescriptor, openRemoteSubscription, readRemoteDescriptor, resolveSeatIdentity } from "../src/native-remote.mjs";
-import { readRouteSecret } from "../src/native-member.mjs";
+import { openRemoteSubscription } from "../src/native-remote.mjs";
+import { configVerb, verifiedRemoteRow } from "../src/config-write.mjs";
 import { closeServiceRoute, createServiceRoom, listServiceRoutes, openServiceRoute, runService,
   seatAccountId, seatLabel, serviceStatus, startService, stopService,
   readAuthorityInput, writeAuthorityOutput, generateSeatAuthority, publicSeatAuthority, prepareSeatAuthorityEnrollment,
@@ -168,6 +168,17 @@ const SCHEMA = {
   transports: TRANSPORTS,
   verbs: {
     rooms: { args: [], options: {}, does: "list configured rooms" },
+    config: {
+      args: ["show | room add <alias> <row-json>|--from-descriptor <path> | room remove <alias> | resident add <slug> [<row-json>] | resident remove <slug> | set <key> <json> [<key> <json> ...] | unset <key> [...]"],
+      options: {
+        "--from-descriptor <path>": "with room add: verify this route descriptor as room add-remote does and write its native-remote row",
+        "--replace": "with room add or resident add: replace a different row under the same name (without it a conflicting row is refused)",
+        "--force": "with room remove: remove a native room's row though this seat still hosts the room (agora service room delete retires the room itself)",
+        "--dry-run": "print the diff and write nothing",
+        "--json": "show: the parsed config; a write: one object with before, after and the diff",
+      },
+      does: "the only verbs that write the shared config, on the operator's command; every other verb reads it and never writes it. The file is the one every verb reads (--config, AGORA_CONFIG, ./agora.json, ~/.agora/config.json), named on the first line. A write takes a lock beside the file, validates the whole result as every verb loads it, refuses an inline token (a room names its token by tokenEnv or tokenFile), keeps the file before as <file>.bak-<time>, writes a temp file and renames it, prints a unified diff, and leaves untouched entries byte for byte. An identical row is a no-op that says so; a different row under the same name is refused without --replace. room remove refuses a native room this seat still hosts without --force and deletes no state and nothing upstream. set and unset take the top-level keys agora reads: actor, rooms, state, sign, session, residents, residentManifest. show prints the file (it holds token references only) and refuses one holding a credential inline",
+    },
     whoami: { args: ["<room>"], options: {}, does: "the identity this side posts as, per the transport" },
     read: {
       args: ["<room>"],
@@ -231,7 +242,7 @@ const SCHEMA = {
         "--confirm <roomId>": "with upgrade: the exact 32-hex room id, typed again; anything else refuses confirm-mismatch",
         "--prune-backup": "with upgrade: remove the version 2 copy an upgrade kept (upgrade-v2-backup/) instead of upgrading",
       },
-      does: "faces: the face policy of a native room — which transports carry a copy of which of its posts, per author kind, read from and written to the seat's own state (never the shared config), with where the record lives and when it was last written; an unknown transport, selector or mode is refused by name and nothing is written. add-remote: verify a route descriptor the operator carried from another seat's host and PRINT the native-remote room row to paste; it never writes the shared config, and the row carries no roomId because the descriptor's binding is the one source. upgrade: rewrite a version 2 native room of this seat as log version 3, offline (it takes the room's writer lock and refuses room-in-use while the service holds the room), verified record by record before one rename installs it; sequences, cursors and the epoch stay, a reader's earlier checkpoint stays valid, and the version 2 copy is kept until --prune-backup (docs/NATIVE-ROOMS.md). purge: remove the text of the named messages (--message, repeatable) or of a whole thread (--thread <root id>) from a version 2 or 3 native room, with the attachment bytes no remaining message references, and at version 3 their attachment entries; every record keeps its place in the chain (docs/PURGE.md)",
+      does: "faces: the face policy of a native room — which transports carry a copy of which of its posts, per author kind, read from and written to the seat's own state (never the shared config), with where the record lives and when it was last written; an unknown transport, selector or mode is refused by name and nothing is written. add-remote: verify a route descriptor the operator carried from another seat's host and PRINT the native-remote room row with the agora config room add <alias> --from-descriptor <path> command that writes it; it writes nothing itself, and the row carries no roomId because the descriptor's binding is the one source. upgrade: rewrite a version 2 native room of this seat as log version 3, offline (it takes the room's writer lock and refuses room-in-use while the service holds the room), verified record by record before one rename installs it; sequences, cursors and the epoch stay, a reader's earlier checkpoint stays valid, and the version 2 copy is kept until --prune-backup (docs/NATIVE-ROOMS.md). purge: remove the text of the named messages (--message, repeatable) or of a whole thread (--thread <root id>) from a version 2 or 3 native room, with the attachment bytes no remaining message references, and at version 3 their attachment entries; every record keeps its place in the chain (docs/PURGE.md)",
     },
     attachment: {
       args: ["get <room> <attachment id>"],
@@ -590,6 +601,8 @@ const OPTIONS = /** @type {const} */ ({
   plan: { type: "boolean", default: false },
   run: { type: "string" },
   model: { type: "string" },
+  "from-descriptor": { type: "string" },
+  replace: { type: "boolean", default: false },
 });
 
 /**
@@ -1081,6 +1094,10 @@ async function main(argv) {
 
   runArgumentPreflights({ verb, roomAlias, rest, values, env: process.env });
 
+  // Writes the shared config itself: reads no config before its own arguments are refused, and
+  // loads no session, so it registers nothing on the seat.
+  if (verb === "config") return await configVerb({ sub: roomAlias, rest, values });
+
   // Room-less: do not load config. An unknown provider is exit 2 even on a machine with no agora.json.
   if (verb === "usage") {
     const ac = new AbortController();
@@ -1446,7 +1463,7 @@ async function main(argv) {
         }
         const naming = Object.entries(rows).filter(([, row]) => row && row.transport === "native" && row.roomId === roomId).map(([alias]) => alias);
         if (naming.length)
-          throw Object.assign(new AgoraError(`room-in-config: the shared config still names native room ${roomId} (${naming.map((a) => `rooms.${a}`).join(", ")}); remove the row by hand first, then delete; nothing was deleted`, EXIT.error), { code: "room-in-config" });
+          throw Object.assign(new AgoraError(`room-in-config: the shared config still names native room ${roomId} (${naming.map((a) => `rooms.${a}`).join(", ")}); remove the row first (${naming.map((a) => `agora config room remove ${a} --force`).join("; ")}), then delete; nothing was deleted`, EXIT.error), { code: "room-in-config" });
         const copies = await faceCopies(stateRoot, roomId);
         const copyLine = (/** @type {any} */ c) => `  ${c.transport} ${c.where} ${c.file ? `file ${c.file}${c.name ? ` (${c.name})` : ""}` : c.id ?? "(no id recorded)"} ${c.status} (message ${c.message.slice(0, 12)}${c.cursor ? `, cursor ${c.cursor}` : ""})`;
         const copiesNote = copies.length
@@ -1985,37 +2002,34 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
 
   if (verb === "room") {
     // `agora room add-remote <alias> <descriptor-path>`: validates the route descriptor the
-    // operator carried and PRINTS the config row. It does not write agora.json — the tool never
-    // writes the shared config, the same standing prohibition that keeps `service room create`
-    // to printing an id. The row carries no roomId: the room is descriptor.binding.roomId, which
-    // the descriptor's own digest covers, and a second source beside it could disagree in silence.
+    // operator carried and PRINTS the config row with the one command that writes it. It writes
+    // nothing itself: only `agora config` writes the shared config, so a verification (the member
+    // setup runs this against a throwaway config) can never become a write. The row carries no
+    // roomId: the room is descriptor.binding.roomId, which the descriptor's own digest covers, and a
+    // second source beside it could disagree in silence.
     if (roomAlias === "add-remote") {
       const alias = String(rest[0]);
       const file = resolvePath(String(rest[1]));
       const existing = cfg.rooms[alias];
       if (existing)
         throw new AgoraError(`room "${alias}" is already configured as a ${existing.transport} room in ${cfg.path}; choose another alias`);
-      const descriptor = await readRemoteDescriptor(file);
-      const seat = await resolveSeatIdentity(stateRoot);
-      assertRemoteDescriptor(descriptor, { stateRoot, nodeKey: seat.nodeKey });
-      // Resolve the secret too: it is the half that arrives by a git checkout, so it is the half
-      // whose mode is actually wrong, and finding that here beats finding it on the first dial.
-      await readRouteSecret(stateRoot, descriptor.binding, descriptor.proofRef);
-      const row = { transport: "native-remote", descriptor: file };
+      const { row, descriptor } = await verifiedRemoteRow(file, stateRoot);
       // A human route posts as human under its bound name only; the host refuses any other kind or
       // name, so say here whether this config's actor already is that human.
       const author = descriptor.binding.author;
       const actorMatches = author ? cfg.actor.kind === "human" && cfg.actor.name.trim() === author.name : undefined;
+      const apply = ["agora", "config", "room", "add", alias, "--from-descriptor", file, "--config", String(cfg.path)];
       if (json) {
         console.log(JSON.stringify({ type: "room", action: "add-remote", alias, row, config: cfg.path,
           roomId: descriptor.binding.roomId, host: descriptor.binding.host.id, member: descriptor.binding.accountId,
-          ...(author ? { author, actorMatches } : {}), written: false }));
+          ...(author ? { author, actorMatches } : {}), written: false, apply }));
       } else {
         console.log(`descriptor ${file} verified: room ${descriptor.binding.roomId} on host ${descriptor.binding.host.id}, this seat posts as ${descriptor.binding.accountId}`);
         console.log(`the route secret named by ${descriptor.proofRef} resolves and its mode is private`);
-        if (author) console.log(`this is a HUMAN route: the host stamps every post on it as the human ${JSON.stringify(author.name)}; ${actorMatches ? "this config's actor is that human" : `set this config's actor to { "name": ${JSON.stringify(author.name)}, "kind": "human" } or the host refuses its posts`}`);
-        console.log(`\nadd this to "rooms" in ${cfg.path} yourself (agora never writes the shared config):\n`);
+        if (author) console.log(`this is a HUMAN route: the host stamps every post on it as the human ${JSON.stringify(author.name)}; ${actorMatches ? "this config's actor is that human" : `set this config's actor to { "name": ${JSON.stringify(author.name)}, "kind": "human" } (agora config set actor) or the host refuses its posts`}`);
+        console.log(`\nthe row for "rooms" in ${cfg.path}:\n`);
         console.log(`  ${JSON.stringify(alias)}: ${JSON.stringify(row, null, 2).split("\n").join("\n  ")}`);
+        console.log(`\nnothing was written; to write it (verified again, with a diff and a backup):\n\n  ${shellLine(apply)}`);
       }
       return EXIT.ok;
     }
