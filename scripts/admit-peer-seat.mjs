@@ -35,6 +35,13 @@
  *   # --restart as in step 2):
  *   node scripts/admit-peer-seat.mjs --room partner --bootstrap
  *
+ *   # Admit the member seat's HUMAN key (minted in its own state root, docs/MEMBERSHIP.md "A human
+ *   # on a member seat") as that human: its route is opened with the human grant, and its kit is
+ *   # installed on the member seat with `node install-peer-route.mjs --state <human state root>`.
+ *   # One key holds one grant: a key already admitted as an agent key is refused here, and the
+ *   # human's key is never one of the seat's --allow-key keys. `--reopen` reopens it as the human.
+ *   node scripts/admit-peer-seat.mjs --room partner --human-key nodekey:<64hex> --human-name <Name> --out-dir ./kits
+ *
  * A run with nothing to do changes nothing and says so.
  */
 
@@ -85,7 +92,8 @@ const PLACEHOLDER_KEY = `nodekey:${"0".repeat(64)}`;
  * }} Deps
  */
 
-/** @typedef {{ roomId: string, alias?: string, publicNodeKey: string, allowedKeyDigest: string, addedAt: string }} RosterEntry */
+/** `humanName` marks the member seat's human key: its route is opened with that grant (docs/MEMBERSHIP.md).
+ * @typedef {{ roomId: string, alias?: string, publicNodeKey: string, allowedKeyDigest: string, addedAt: string, humanName?: string }} RosterEntry */
 
 /**
  * @param {string} stateRoot
@@ -234,12 +242,15 @@ async function ensureOperatorAuthority(stateRoot, signerRoot, policyEntries, rea
 
 /**
  * Write a peer route kit directory with `descriptor.json`, the `.secret` file, and a 1-command
- * installer script `install-peer-route.mjs` for the remote seat.
+ * installer script `install-peer-route.mjs` for the remote seat. A human route's installer
+ * (`humanName` set) refuses to run without an explicit `--state`: its secret belongs under the
+ * human's own state root, never the seat's default one, which an agent shell's AGORA_STATE also names.
  * @param {string} outDir
  * @param {string} alias
  * @param {{ descriptor?: any, descriptorPath: string, secretRef?: string, secretPath: string, grantId: string }} opened
+ * @param {string} [humanName]
  */
-async function exportPeerKit(outDir, alias, opened) {
+async function exportPeerKit(outDir, alias, opened, humanName) {
   await mkdir(outDir, { recursive: true, mode: 0o700 });
   // A reissued kit replaces the one before it: a secret of an earlier generation left beside the
   // new one would be a live-looking credential for a route that no longer exists.
@@ -256,14 +267,22 @@ async function exportPeerKit(outDir, alias, opened) {
   const installer = `#!/usr/bin/env node
 // One-command peer route installer for Agora native-remote room "${alias}".
 // Run on the peer seat from the directory containing this file:
-//   node install-peer-route.mjs [--state ~/.agora/state]
+${humanName === undefined
+    ? "//   node install-peer-route.mjs [--state ~/.agora/state]"
+    : `//   node install-peer-route.mjs --state <the human's own state root, e.g. ~/.agora/human/state>
+// This is the member seat's HUMAN route for ${JSON.stringify(humanName)}: --state is required.`}
 import { copyFile, chmod, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+const human = ${JSON.stringify(humanName ?? null)};
 const stateIdx = process.argv.indexOf("--state");
+if (human !== null && !(stateIdx !== -1 && process.argv[stateIdx + 1])) {
+  console.error(\`This kit is the member seat's human route for \${JSON.stringify(human)}. Install it under the human's own state root, never the seat's: node install-peer-route.mjs --state <path, e.g. ~/.agora/human/state>\`);
+  process.exit(2);
+}
 const stateRoot = stateIdx !== -1 && process.argv[stateIdx + 1]
   ? path.resolve(process.argv[stateIdx + 1])
   : process.env.AGORA_STATE
@@ -316,6 +335,8 @@ export async function admit(argv, overrides = {}) {
       config: { type: "string" },
       room: { type: "string" },
       "allow-key": { type: "string", multiple: true },
+      "human-key": { type: "string" },
+      "human-name": { type: "string" },
       "out-dir": { type: "string" },
       bootstrap: { type: "boolean", default: false },
       reopen: { type: "boolean", default: false },
@@ -354,6 +375,13 @@ export async function admit(argv, overrides = {}) {
   if (allowKeys.length > 0 && !roomId) {
     throw new AgoraError("--allow-key requires --room <native-room-alias-or-id>", 2);
   }
+  if ((values["human-key"] === undefined) !== (values["human-name"] === undefined))
+    throw new AgoraError("--human-key and --human-name go together: the member seat's human key and the name it posts under", 2);
+  const humanKey = values["human-key"] !== undefined ? validatePublicNodeKey(String(values["human-key"]).trim()) : undefined;
+  const humanName = values["human-name"] !== undefined ? String(values["human-name"]) : undefined;
+  if (humanKey && !roomId) throw new AgoraError("--human-key requires --room <native-room-alias-or-id>", 2);
+  if (humanKey && allowKeys.includes(humanKey))
+    throw new AgoraError("the human's key is never one of the seat's --allow-key keys: mint it in its own state root", 2);
 
   // Who was admitted before this run: only those can hold a kit that a re-minted route strands.
   const previouslyAdmitted = new Set(roster.entries.map((e) => `${e.roomId}:${e.allowedKeyDigest}`));
@@ -361,15 +389,21 @@ export async function admit(argv, overrides = {}) {
   /** @type {RosterEntry[]} */
   const nextEntries = [...roster.entries];
   let rosterChanged = false;
-  for (const key of allowKeys) {
+  /** @type {Array<[string, string | undefined]>} */
+  const wanted = [...allowKeys.map((k) => /** @type {[string, undefined]} */ ([k, undefined])), ...(humanKey ? [/** @type {[string, string | undefined]} */ ([humanKey, humanName])] : [])];
+  for (const [key, name] of wanted) {
     const digest = publicNodeKeyDigest(key);
-    if (!nextEntries.some((e) => e.roomId === roomId && e.allowedKeyDigest === digest)) {
+    const held = nextEntries.find((e) => e.roomId === roomId && e.allowedKeyDigest === digest);
+    if (held && held.humanName !== name)
+      throw new AgoraError(`${key} is already admitted to this room ${held.humanName ? `as the human ${JSON.stringify(held.humanName)}` : "as an agent key"}; one key holds one grant`, 2);
+    if (!held) {
       nextEntries.push({
         roomId,
         alias: roomAlias,
         publicNodeKey: key,
         allowedKeyDigest: digest,
         addedAt: new Date().toISOString(),
+        ...(name !== undefined ? { humanName: name } : {}),
       });
       rosterChanged = true;
     }
@@ -406,7 +440,7 @@ export async function admit(argv, overrides = {}) {
     } else if (missing.length > 0) {
       const first = /** @type {RosterEntry} */ (missing[0]);
       try {
-        probe = await challengeServiceRoute(stateRoot, "room-enroll", first.roomId, first.publicNodeKey);
+        probe = await challengeServiceRoute(stateRoot, "room-enroll", first.roomId, first.publicNodeKey, first.humanName);
       } catch (e) {
         restartReason = `the running service refused a route challenge (${e instanceof Error ? e.message : String(e)})`;
       }
@@ -493,25 +527,25 @@ export async function admit(argv, overrides = {}) {
   const staleRemotes = [];
   let routesOpened = 0;
   for (const entry of admitted) {
-    const named = allowKeys.includes(entry.publicNodeKey) && entry.roomId === roomId;
+    const named = (allowKeys.includes(entry.publicNodeKey) || entry.publicNodeKey === humanKey) && entry.roomId === roomId;
     const already = liveNow.find((/** @type {any} */ r) => r.roomId === entry.roomId && r.allowedKeyDigest === entry.allowedKeyDigest);
     if (already) {
       // Same grant, same generation: whatever kit this peer holds is still valid. A kit is
       // re-exported only when the caller names the key and asks for one.
       let kit = null;
       if (outDir && named) {
-        kit = await exportPeerKit(kitDir(outDir, entry), entry.alias || roomAlias, already);
+        kit = await exportPeerKit(kitDir(outDir, entry), entry.alias || roomAlias, already, entry.humanName);
       }
       openedRoutes.push({
         roomId: entry.roomId, alias: entry.alias, accountId: already.accountId, grantId: already.grantId,
         routeGeneration: already.routeGeneration, descriptorPath: already.descriptorPath, secretPath: already.secretPath,
-        reopened: false, ...(kit ? { kit } : {}),
+        reopened: false, ...(entry.humanName ? { human: entry.humanName } : {}), ...(kit ? { kit } : {}),
       });
       continue;
     }
     const challenge = probe && entry === missing[0] && !started
       ? probe
-      : await challengeServiceRoute(stateRoot, "room-enroll", entry.roomId, entry.publicNodeKey);
+      : await challengeServiceRoute(stateRoot, "room-enroll", entry.roomId, entry.publicNodeKey, entry.humanName);
     const proof = await signSeatRouteAct(signerRoot, challenge, deps.identity);
     const opened = await openServiceRoute(stateRoot, entry.roomId, entry.publicNodeKey, proof);
     routesOpened++;
@@ -521,7 +555,7 @@ export async function admit(argv, overrides = {}) {
     if (outDir) {
       kit = await exportPeerKit(kitDir(outDir, entry), entry.alias || roomAlias, {
         descriptorPath: opened.descriptorPath, secretPath: opened.secretPath, grantId: opened.descriptor.binding.grantId,
-      });
+      }, entry.humanName);
     }
     openedRoutes.push({
       roomId: entry.roomId,
@@ -532,6 +566,7 @@ export async function admit(argv, overrides = {}) {
       descriptorPath: opened.descriptorPath,
       secretPath: opened.secretPath,
       reopened: true,
+      ...(entry.humanName ? { human: entry.humanName } : {}),
       ...(kit ? { kit } : {}),
     });
   }
@@ -566,7 +601,7 @@ function printSummary(summary) {
   }
   console.log(`Host Tailcat nodeKey: ${summary.hostNodeKey}`);
   for (const r of summary.openedRoutes) {
-    console.log(`  route ${r.reopened ? "opened" : "already live"}: room ${r.alias || r.roomId} -> member ${r.accountId}`);
+    console.log(`  route ${r.reopened ? "opened" : "already live"}: room ${r.alias || r.roomId} -> member ${r.accountId}${r.human ? ` (the member seat's human ${JSON.stringify(r.human)})` : ""}`);
     console.log(`    descriptor: ${r.descriptorPath}`);
     console.log(`    secret:     ${r.secretPath}`);
     if (r.kit) console.log(`    exported kit: ${r.kit.installerPath}`);

@@ -3,6 +3,7 @@
 // root. A service restart drops every route, so each cell below counts starts and stops and reads
 // the live route registry (grant id, route generation) rather than trusting the helper's output.
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -19,6 +20,8 @@ const HOST_NODE = `nodekey:${"1".repeat(64)}`;
 const SIGNER_NODE = `nodekey:${"2".repeat(64)}`;
 const ADA = `nodekey:${"a".repeat(64)}`;
 const LIN = `nodekey:${"c".repeat(64)}`;
+/** The member seat's human key: minted in its own state root, never one of the seat's keys. */
+const GRACE_HUMAN = `nodekey:${"d".repeat(64)}`;
 const ADDRESS = `tc${"a".repeat(48)}`;
 
 /** A Tailcat child that never runs. @param {{ exit?: number | null, signal?: AbortSignal }} [options] */
@@ -275,4 +278,91 @@ test("one closed route is the only one re-opened: the other peer's grant, genera
   const linKit = kitsBefore.find((k) => k.grantId === routesBefore[linDigest]?.grantId);
   assert.ok(linKit && kitIsLive(linKit, routesAfter), "the other peer's installed kit stopped working");
   assert.deepEqual(out.staleRemotes.map((r) => r.publicNodeKey), [ADA]);
+});
+
+/** The live route row for a key, as the service's own registry reports it. @param {Awaited<ReturnType<typeof seat>>} s @param {string} key */
+async function routeRow(s, key) {
+  const list = await listServiceRoutes(s.state);
+  return list.find((/** @type {any} */ r) => r.allowedKeyDigest === publicNodeKeyDigest(key));
+}
+
+test("--human-key admits the member seat's human with the human grant: the live route, the kit's descriptor and the roster all name the human", { timeout: 60_000 }, async (t) => {
+  const s = await seat(t);
+  const out = await s.run(["--room", "partner", "--allow-key", ADA, "--human-key", GRACE_HUMAN, "--human-name", "Grace", "--out-dir", s.kits]);
+  assert.equal(out.openedRoutes.length, 2);
+  assert.deepEqual(out.openedRoutes.filter((r) => r.human).map((r) => r.human), ["Grace"]);
+
+  const human = await routeRow(s, GRACE_HUMAN);
+  assert.deepEqual(human?.author, { kind: "human", name: "Grace" }, "the human route carries the human grant");
+  const agent = await routeRow(s, ADA);
+  assert.ok(agent && !("author" in agent), "the agent route carries no author");
+
+  const roster = JSON.parse(await readFile(path.join(s.state, "native", "admitted-peers.json"), "utf8")).entries;
+  assert.deepEqual(roster.map((/** @type {any} */ e) => [e.publicNodeKey, e.humanName]), [[ADA, undefined], [GRACE_HUMAN, "Grace"]]);
+
+  const kits = await kitsIn(s.kits);
+  const humanKit = kits.find((k) => k.grantId === human?.grantId);
+  assert.ok(humanKit, "the human got a kit of its own");
+  const descriptor = JSON.parse(await readFile(path.join(s.kits, humanKit.name, "descriptor.json"), "utf8"));
+  assert.deepEqual(descriptor.binding.author, { kind: "human", name: "Grace" });
+
+  // The human kit's installer refuses to guess a state root; with one named it installs there.
+  const installer = path.join(s.kits, humanKit.name, "install-peer-route.mjs");
+  const env = { ...process.env, AGORA_STATE: path.join(s.home, "seat-state") };
+  const refused = spawnSync(process.execPath, [installer], { cwd: path.dirname(installer), env, encoding: "utf8", timeout: 20_000 });
+  assert.equal(refused.status, 2, refused.stderr);
+  assert.match(refused.stderr, /human route for "Grace".*--state/s);
+  const humanState = path.join(s.home, "human-state");
+  const installed = spawnSync(process.execPath, [installer, "--state", humanState], { cwd: path.dirname(installer), env, encoding: "utf8", timeout: 20_000 });
+  assert.equal(installed.status, 0, installed.stderr);
+  const placed = JSON.parse(await readFile(path.join(humanState, "native", "remote", humanKit.grantId, "descriptor.json"), "utf8"));
+  assert.deepEqual(placed.binding.author, { kind: "human", name: "Grace" });
+});
+
+test("one key holds one grant: a key admitted as an agent is refused as the human, and the human's key is never one of the seat's keys; nothing changes", { timeout: 60_000 }, async (t) => {
+  const s = await seat(t);
+  await s.run(["--room", "partner", "--allow-key", ADA, "--out-dir", s.kits]);
+  const routesBefore = await s.routes();
+  const countsBefore = { ...s.counts };
+
+  await assert.rejects(s.run(["--room", "partner", "--human-key", ADA, "--human-name", "Grace", "--out-dir", s.kits]),
+    /already admitted to this room as an agent key; one key holds one grant/);
+  await assert.rejects(s.run(["--room", "partner", "--allow-key", LIN, "--human-key", LIN, "--human-name", "Grace", "--out-dir", s.kits]),
+    /never one of the seat's --allow-key keys/);
+  await assert.rejects(s.run(["--room", "partner", "--human-key", GRACE_HUMAN, "--out-dir", s.kits]), /--human-key and --human-name go together/);
+  await assert.rejects(s.run(["--human-key", GRACE_HUMAN, "--human-name", "Grace"]), /--human-key requires --room/);
+
+  assert.deepEqual(s.counts, countsBefore);
+  assert.deepEqual(await s.routes(), routesBefore);
+  assert.deepEqual(await s.roster(), [ADA]);
+});
+
+test("one key holds one grant, the other way round: the human's key is refused as an agent key and under another name", { timeout: 60_000 }, async (t) => {
+  const s = await seat(t);
+  await s.run(["--room", "partner", "--human-key", GRACE_HUMAN, "--human-name", "Grace", "--out-dir", s.kits]);
+  const routesBefore = await s.routes();
+  await assert.rejects(s.run(["--room", "partner", "--allow-key", GRACE_HUMAN, "--out-dir", s.kits]),
+    /already admitted to this room as the human "Grace"; one key holds one grant/);
+  await assert.rejects(s.run(["--room", "partner", "--human-key", GRACE_HUMAN, "--human-name", "Ada", "--out-dir", s.kits]),
+    /as the human "Grace"; one key holds one grant/);
+  assert.deepEqual(await s.routes(), routesBefore);
+  assert.deepEqual(await s.roster(), [GRACE_HUMAN]);
+});
+
+test("a re-run naming the human again changes nothing, and a closed human route reopens as the human, not as an agent", { timeout: 60_000 }, async (t) => {
+  const s = await seat(t);
+  await s.run(["--room", "partner", "--allow-key", ADA, "--human-key", GRACE_HUMAN, "--human-name", "Grace", "--out-dir", s.kits]);
+  const again = await s.run(["--room", "partner", "--human-key", GRACE_HUMAN, "--human-name", "Grace"]);
+  assert.equal(again.changed, false);
+  const before = await routeRow(s, GRACE_HUMAN);
+
+  await s.closeRoute(GRACE_HUMAN);
+  assert.equal(await routeRow(s, GRACE_HUMAN), undefined);
+  const reopened = await s.run(["--reopen"]);
+  assert.deepEqual(s.counts, { starts: 1, stops: 0 }, "reopening one route touched the service");
+  const after = await routeRow(s, GRACE_HUMAN);
+  assert.deepEqual(after?.author, { kind: "human", name: "Grace" }, "the reopened route lost the human grant");
+  assert.notEqual(after?.grantId, before?.grantId);
+  assert.deepEqual(reopened.openedRoutes.filter((r) => r.reopened).map((r) => r.human), ["Grace"]);
+  assert.deepEqual(reopened.staleRemotes.map((r) => r.publicNodeKey), [GRACE_HUMAN]);
 });
