@@ -4,7 +4,7 @@
 //
 //   config | rooms                                       what the pane is set up with, the rooms it offers
 //   view --room <alias> [--refresh-remote]               one room; stdin {seen, baselineId, hasBaseline, self}
-//   post --room <alias> [--thread <id>] [--to <who>]...  one post; stdin {text}
+//   post --room <alias> [--thread <id> [--re <id>]] [--to <who>]...   one post, a reply to a message of the thread when --re; stdin {text}
 //   set-name                                             the seat's human; stdin {name}
 //   service-start | service-stop | resident-cycle-dry | prune-sessions-dry
 //
@@ -22,6 +22,7 @@ const { positionals, values } = parseArgs({
     data: { type: "string" },
     room: { type: "string" },
     thread: { type: "string" },
+    re: { type: "string" },
     to: { type: "string", multiple: true },
     "refresh-remote": { type: "boolean" },
   },
@@ -44,6 +45,7 @@ const out = await handle(verb, {
   dataDir,
   room: values.room ?? null,
   thread: values.thread ?? null,
+  replyTo: values.re ?? null,
   to: values.to ?? [],
   refreshRemote: values["refresh-remote"] === true,
   input: ["view", "post", "set-name"].includes(verb) ? await readInput() : {},

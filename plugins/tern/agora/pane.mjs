@@ -18,7 +18,7 @@ import { ClientError, connect, foldAnnotations } from "../../../src/client.mjs";
 import { armedAlive, listArmed, listRecords } from "../../../src/session.mjs";
 import { localTransport } from "../../../src/transports/local.mjs";
 import { readServiceDescriptor } from "../../../src/wake/subscriber.mjs";
-import { parseTrailers, withTrailers } from "../../../src/trailers.mjs";
+import { formatTrailers, parseTrailers, withTrailers } from "../../../src/trailers.mjs";
 import { configuredResidents, matchesResidentRecord } from "../../../src/resident.mjs";
 import { ago, bodyText, buildSubjects, jsonLines, parseCommand, parseList, postArgs, subjectMeta, subjectTitle } from "../../claude/agora-room/hooks/lib.js";
 
@@ -45,6 +45,7 @@ export const REMOTE_CACHE_MS = 90000;
 export const TIMEOUT_MS = 20000;
 /** Variables of the daemon's environment that never reach a CLI child: the pane names its own session, and posts as the person. */
 const SCRUBBED = Object.freeze(["AGORA_ACTOR", "AGORA_SESSION", "AGORA_LABEL"]);
+const MESSAGE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const ROOM_RE = /^[A-Za-z0-9][^\s\u0000-\u001f]{0,127}$/;
 const HUMAN_FILE = path.join("native", "human.json");
 const HUMAN_NAME_MAX = 64;
@@ -301,6 +302,9 @@ export function formatMessage(m, hostAccountId) {
   const signedAs = m.signedAs ? String(m.signedAs) : null;
   const titleText = typeof m.title === "string" ? m.title : typeof m.title?.text === "string" ? m.title.text : null;
   const body = bodyText({ text, signedAs, from: author.name, trailers });
+  // the messages an `re:` names (ids or cursors, comma separated), and the trailers the thread view still states: `to` is in the header and `re` is the indentation
+  const re = trailers.filter((/** @type {{ key: string }} */ t) => t.key === "re").flatMap((/** @type {{ value: string }} */ t) => t.value.split(",").map((/** @type {string} */ v) => v.trim()).filter(Boolean));
+  const noteParts = formatTrailers(trailers.filter((/** @type {{ key: string }} */ t) => t.key !== "to" && t.key !== "re")).split("\n").filter(Boolean).map((/** @type {string} */ l) => l.replace(": ", " "));
   return {
     id: String(m.id || ""),
     thread: m.thread && String(m.thread) !== String(m.id) ? String(m.thread) : null,
@@ -312,6 +316,8 @@ export function formatMessage(m, hostAccountId) {
     rawTs: String(m.ts || ""),
     cursor: String(m.cursor ?? ""),
     derived: redact(trailerLine(d).replace(/\n$/, "").trim()),
+    note: noteParts.length ? `→ ${noteParts.join(" · ")}` : "",
+    re,
     title: titleText === null ? null : redact(titleText),
     body: cut(body, BODY_MAX),
     attachmentText: redact(attachmentLines(d).replace(/^\n/, "")),
@@ -345,15 +351,76 @@ export function pickAddressees(messages, threadId, sender, hostAccountId) {
   return names;
 }
 
+/** How deep a reply is drawn. A reply deeper than this stays at this depth, with a cue naming whom it answers. */
+export const THREAD_DEPTH_CAP = 4;
+
 /**
- * The room's subjects, newest activity first, each with its conversation oldest first: the fold
- * the Claude pane uses (a first open marks nothing unread; your own posts never are), plus whom a
- * reply would be addressed to when the person picks no one.
+ * One subject's messages, oldest first, as a tree by their `re:` trailers, in the order they are
+ * drawn: a message that answers another in the subject sits right under it (children oldest
+ * first, recursively); a plain thread reply (no `re:`, or one that names the subject itself) stays
+ * at depth 0 in time order. An `re:` that names nothing in the subject (a message outside the
+ * window, or in another subject) is an orphan: depth 0 with a cue saying so, never dropped.
+ * `parent` is the message it is under, `rank` counts from the newest (1) so a view that shows only
+ * the latest few can still keep each shown message's ancestors.
+ * @param {PaneMessage[]} messages @param {{ rootId: string, outside?: (name: string) => string | null, cap?: number }} o
+ */
+export function threadTree(messages, { rootId, outside = () => null, cap = THREAD_DEPTH_CAP }) {
+  const n = messages.length;
+  /** @type {Map<string, number>} */
+  const at = new Map();
+  messages.forEach((m, i) => at.set(m.id, i));
+  messages.forEach((m, i) => { if (m.cursor && !at.has(m.cursor)) at.set(m.cursor, i); });
+  /** @type {number[]} */
+  const parent = new Array(n).fill(-1);
+  /** @type {number[]} */
+  const depth = new Array(n).fill(0);
+  /** @type {string[]} */
+  const cue = new Array(n).fill("");
+  for (let i = 0; i < n; i++) {
+    const names = messages[i].re ?? [];
+    if (!names.length || messages[i].id === rootId) continue;
+    let plain = false;
+    for (const name of names) {
+      const j = at.get(name);
+      if (name === rootId || (j !== undefined && j < i && messages[j].id === rootId)) { plain = true; break; }
+      if (j !== undefined && j < i) { parent[i] = j; break; }
+    }
+    if (plain) continue;
+    if (parent[i] >= 0) {
+      depth[i] = depth[parent[i]] + 1;
+      if (depth[i] > cap) cue[i] = `↳ ${messages[parent[i]].speaker}`;
+    } else {
+      const who = outside(names[0]);
+      cue[i] = `↳ reply to ${who ?? "an earlier message"} (not shown)`;
+    }
+  }
+  /** @type {number[][]} */
+  const kids = Array.from({ length: n }, () => []);
+  /** @type {number[]} */
+  const tops = [];
+  for (let i = 0; i < n; i++) (parent[i] < 0 ? tops : kids[parent[i]]).push(i);
+  /** @type {number[]} */
+  const order = [];
+  /** @param {number} i */
+  const walk = (i) => { order.push(i); for (const k of kids[i]) walk(k); };
+  for (const t of tops) walk(t);
+  return order.map((i) => ({ m: messages[i], depth: Math.min(depth[i], cap), parent: parent[i] >= 0 ? messages[parent[i]].id : null, rank: n - i, cue: cue[i] }));
+}
+
+/**
+ * The room's subjects, newest activity first, each with its conversation as a thread tree (see
+ * `threadTree`): the fold the Claude pane uses (a first open marks nothing unread; your own posts
+ * never are), plus whom a reply would be addressed to when the person picks no one.
  * @param {PaneMessage[]} messages ascending
  * @param {{ room: string, self: string | null, seen?: Record<string, string>, baselineId?: string | null, hostAccountId: string, now: number }} o
  */
 export function subjectsOf(messages, { room, self, seen = {}, baselineId = null, hostAccountId, now }) {
   const byId = new Map(messages.map((m) => [m.id, m]));
+  /** the speaker of every message read, by id and by cursor: what an `re:` pointing outside its subject can still say */
+  /** @type {Map<string, string>} */
+  const who = new Map();
+  for (const m of messages) who.set(m.id, m.speaker);
+  for (const m of messages) if (m.cursor && !who.has(m.cursor)) who.set(m.cursor, m.speaker);
   const msgs = messages.map((m) => ({ room, id: m.id, thread: m.thread, from: m.author.name, text: m.body, cursor: m.cursor, ts: m.rawTs || null, to: m.to, title: m.title, signedAs: m.signedAs }));
   return buildSubjects(msgs, { self, seen, baselineId }).map((s) => ({
     id: s.id,
@@ -370,23 +437,25 @@ export function subjectsOf(messages, { room, self, seen = {}, baselineId = null,
     age: ago(s.latestTs, now),
     meta: subjectMeta(s, now),
     autoTo: pickAddressees(messages, s.id, self, hostAccountId),
-    messages: s.messages.map((x) => {
-      const m = /** @type {PaneMessage} */ (byId.get(x.id));
-      return {
-        id: m.id,
-        from: m.speaker,
-        kind: m.author.kind,
-        seat: m.seat,
-        age: ago(m.rawTs || null, now),
-        ts: m.ts,
-        to: m.to,
-        body: m.body,
-        derived: m.derived,
-        attachmentText: m.attachmentText,
-        cursor: m.cursor,
-        mine: self !== null && (m.author.name === self || m.signedAs === self),
-      };
-    }),
+    messages: threadTree(s.messages.map((x) => /** @type {PaneMessage} */ (byId.get(x.id))), { rootId: s.id, outside: (name) => who.get(name) ?? null }).map(({ m, depth, parent, rank, cue }) => ({
+      id: m.id,
+      from: m.speaker,
+      kind: m.author.kind,
+      seat: m.seat,
+      age: ago(m.rawTs || null, now),
+      ts: m.ts,
+      to: m.to,
+      body: m.body,
+      derived: m.derived,
+      note: m.note,
+      attachmentText: m.attachmentText,
+      cursor: m.cursor,
+      mine: self !== null && (m.author.name === self || m.signedAs === self),
+      depth,
+      parent,
+      rank,
+      cue,
+    })),
   }));
 }
 
@@ -664,21 +733,26 @@ export function postingLabel(pc, rc) {
 
 /**
  * One post from the pane, signed as the person: the room and thread are exactly what the compose
- * card stated, and `to` what it said the post is addressed to. A `to:` line typed in the text wins.
- * @param {{ pc: PaneConfig, room: string, text: string, thread?: string | null, to?: string[], env?: Record<string, string | undefined>, run?: Run }} o
+ * card stated, `to` what it said the post is addressed to, and `replyTo` the message it answers (an
+ * `re:` trailer, inside the thread). A `to:` or `re:` line typed in the text wins.
+ * @param {{ pc: PaneConfig, room: string, text: string, thread?: string | null, replyTo?: string | null, to?: string[], env?: Record<string, string | undefined>, run?: Run }} o
  */
-export async function postFromPane({ pc, room, text, thread = null, to = [], env = process.env, run = runProcess }) {
+export async function postFromPane({ pc, room, text, thread = null, replyTo = null, to = [], env = process.env, run = runProcess }) {
   const body = String(text ?? "").replace(/\s+$/, "");
   if (!body.trim()) return { ok: false, error: "nothing to post: the draft is empty" };
   if (redact(body) !== body) return { ok: false, error: "refused: the draft carries a credential shape" };
+  if (replyTo && !thread) return { ok: false, error: "a reply needs the subject it is in" };
+  if (replyTo && !MESSAGE_ID_RE.test(replyTo)) return { ok: false, error: `reply target ${JSON.stringify(replyTo)} is not a message id` };
   const cfg = /** @type {any} */ (await loadConfig(pc.config ?? undefined));
   const offered = offeredRooms(roomRows(cfg, stateDir(cfg)), pc);
   if (!offered.some((r) => r.alias === room)) return { ok: false, error: `room ${JSON.stringify(room)} is not one the pane offers` };
   const stateRoot = stateDir(cfg);
-  const typedTo = parseTrailers(body).to;
+  const typed = parseTrailers(body);
+  const typedTo = typed.to;
   const addressees = typedTo.length ? [] : to.filter(Boolean);
+  const answers = replyTo && !typed.trailers.some((t) => t.key === "re") ? replyTo : null;
 
-  if (pc.post.command) return cliPost({ argv: pc.post.command, env: childEnv(env, pc.post.env), room, body, thread, addressees, typedTo, run });
+  if (pc.post.command) return cliPost({ argv: pc.post.command, env: childEnv(env, pc.post.env), room, body, thread, replyTo: answers, addressees, typedTo, run });
 
   const rc = cfg.rooms[room];
   const human = readHuman(stateRoot);
@@ -688,14 +762,17 @@ export async function postFromPane({ pc, room, text, thread = null, to = [], env
     if (nonce.length >= 8 && body.includes(nonce)) return { ok: false, error: "refused: the draft carries the seat service nonce" };
   } catch { /* no service descriptor */ }
   const actor = { name: human.name, kind: /** @type {const} */ ("human") };
-  // the trailer block goes above the signature (the signature is the last line, or the post reads as unsigned)
-  const signed = sign(addressees.length ? withTrailers(body, addressees.map((a) => ({ key: "to", value: a }))) : body, actor);
+  // the trailer block goes above the signature (the signature is the last line, or the post reads as unsigned);
+  // a block the person typed is extended, never followed by a second one
+  const entries = [...addressees.map((a) => ({ key: "to", value: a })), ...(answers ? [{ key: "re", value: answers }] : [])];
+  const composed = !entries.length ? body : typed.trailers.length ? withTrailers(typed.body, [...typed.trailers, ...entries]) : withTrailers(body, entries);
+  const signed = sign(composed, actor);
   try {
     if (rc.transport === "native") {
       const c = await connect({ state: stateRoot, clientName: "tern-agora" });
       try {
         const receipt = /** @type {any} */ (await c.append({ roomId: rc.roomId }, { text: signed, author: actor, operationId: randomUUID().replaceAll("-", ""), ...(thread ? { thread } : {}) }));
-        return { ok: true, receipt: { id: receipt.id ?? null, cursor: receipt.cursor ?? null, thread }, to: addressees.length ? addressees : typedTo };
+        return { ok: true, receipt: { id: receipt.id ?? null, cursor: receipt.cursor ?? null, thread, re: answers }, to: addressees.length ? addressees : typedTo };
       } finally {
         c.close();
       }
@@ -703,24 +780,24 @@ export async function postFromPane({ pc, room, text, thread = null, to = [], env
     if (rc.transport === "local") {
       const t = localTransport({ transport: "local", path: rc.path }, { actor });
       const receipt = /** @type {any} */ (await t.post(signed, thread ? { thread } : {}));
-      return { ok: true, receipt: { id: receipt.id ?? null, cursor: receipt.cursor ?? null, thread }, to: addressees.length ? addressees : typedTo };
+      return { ok: true, receipt: { id: receipt.id ?? null, cursor: receipt.cursor ?? null, thread, re: answers }, to: addressees.length ? addressees : typedTo };
     }
   } catch (e) {
     return { ok: false, error: said(e) };
   }
-  return cliPost({ argv: [...configCli(pc)], env: childEnv(env), room, body, thread, addressees, typedTo, run, as: human.name });
+  return cliPost({ argv: [...configCli(pc)], env: childEnv(env), room, body, thread, replyTo: answers, addressees, typedTo, run, as: human.name });
 }
 
-/** @param {{ argv: string[], env: Record<string, string>, room: string, body: string, thread: string | null, addressees: string[], typedTo: string[], run: Run, as?: string }} o */
-async function cliPost({ argv, env, room, body, thread, addressees, typedTo, run, as }) {
-  const built = postArgs({ room, text: body, thread, to: addressees });
+/** @param {{ argv: string[], env: Record<string, string>, room: string, body: string, thread: string | null, replyTo: string | null, addressees: string[], typedTo: string[], run: Run, as?: string }} o */
+async function cliPost({ argv, env, room, body, thread, replyTo, addressees, typedTo, run, as }) {
+  const built = postArgs({ room, text: body, thread, replyTo, to: addressees });
   if (!built.ok) return { ok: false, error: built.error };
   const tail = as ? [...built.args.slice(0, -2), "--as", as, ...built.args.slice(-2)] : built.args;
   const r = await run([...argv, ...tail], { env });
   if (r.code !== 0) return { ok: false, error: failure("post", r) };
   const lines = jsonLines(r.stdout);
   const receipt = lines.find((j) => j.id && j.cursor !== undefined) ?? lines[0] ?? null;
-  return { ok: true, receipt: receipt ? { id: receipt.id ?? null, cursor: receipt.cursor ?? null, thread: receipt.thread ?? thread } : null, to: addressees.length ? addressees : typedTo };
+  return { ok: true, receipt: receipt ? { id: receipt.id ?? null, cursor: receipt.cursor ?? null, thread: receipt.thread ?? thread, re: replyTo } : null, to: addressees.length ? addressees : typedTo };
 }
 
 // ---- seat actions ----
@@ -740,9 +817,9 @@ export const SEAT_ACTIONS = Object.freeze({
  * `config` what the pane is set up with; `rooms` the rooms it offers; `view` one room; `post` one
  * post; `set-name` the seat's human; and the seat actions.
  * @param {string} verb
- * @param {{ env?: Record<string, string | undefined>, file?: string | null, dataDir?: string | null, room?: string | null, thread?: string | null, to?: string[], refreshRemote?: boolean, input?: any, run?: Run, now?: number }} o
+ * @param {{ env?: Record<string, string | undefined>, file?: string | null, dataDir?: string | null, room?: string | null, thread?: string | null, replyTo?: string | null, to?: string[], refreshRemote?: boolean, input?: any, run?: Run, now?: number }} o
  */
-export async function handle(verb, { env = process.env, file = null, dataDir = null, room = null, thread = null, to = [], refreshRemote = false, input = {}, run = runProcess, now = Date.now() } = {}) {
+export async function handle(verb, { env = process.env, file = null, dataDir = null, room = null, thread = null, replyTo = null, to = [], refreshRemote = false, input = {}, run = runProcess, now = Date.now() } = {}) {
   const { file: data, problem } = readDataFile(file);
   const pc = resolvePaneConfig({ env, file: data });
   if (problem) pc.problems.push(problem);
@@ -754,7 +831,7 @@ export async function handle(verb, { env = process.env, file = null, dataDir = n
       return { ok: true, rooms: offered.map(({ nativeMeta: _n, ...r }) => r), room: defaultRoom(offered, pc), problems: pc.problems };
     }
     if (verb === "view") return await loadView({ pc, room, input, dataDir, refreshRemote, env, run, now });
-    if (verb === "post") return await postFromPane({ pc, room: String(room ?? ""), text: String(input?.text ?? ""), thread, to, env, run });
+    if (verb === "post") return await postFromPane({ pc, room: String(room ?? ""), text: String(input?.text ?? ""), thread, replyTo, to, env, run });
     if (verb === "set-name") {
       const cfg = /** @type {any} */ (await loadConfig(pc.config ?? undefined));
       return { ok: true, human: writeHuman(stateDir(cfg), String(input?.name ?? "")) };

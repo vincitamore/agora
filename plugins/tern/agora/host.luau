@@ -130,6 +130,7 @@ local function new_state(room: string?, mode: string?): any
 		flash = nil,
 		read_at = nil,
 		thread = nil, -- the subject open: the compose card's target; nil is a new subject
+		reply = nil, -- the id of the message of that subject a post answers (an `re:` trailer); nil answers the subject
 		selected = nil, -- the row the keyboard is on; never a target
 		limit = SUBJECTS_PAGE,
 		earlier = false,
@@ -156,6 +157,18 @@ local function find_subject(state: any, id: string?): any
 	for _, s in ipairs(subjects_of(state)) do
 		if s.id == id then
 			return s
+		end
+	end
+	return nil
+end
+
+local function find_message(subject: any, id: string?): any
+	if subject == nil or id == nil then
+		return nil
+	end
+	for _, m in ipairs(subject.messages or {}) do
+		if m.id == id then
+			return m
 		end
 	end
 	return nil
@@ -236,6 +249,10 @@ local function take_view(state: any, view: any, raw: string?)
 	if state.thread ~= nil and find_subject(state, state.thread) == nil and #(view.subjects or {}) > 0 then
 		-- the subject left the window: back to the list, the target stated again there
 		state.thread = nil
+	end
+	-- the message being answered left the window: the target is the subject again
+	if state.reply ~= nil and find_message(find_subject(state, state.thread), state.reply) == nil then
+		state.reply = nil
 	end
 	if raw ~= nil then
 		pcall(tern.fs.write, LAST_VIEW, raw)
@@ -390,6 +407,11 @@ local function send(state: any, cx: BlockCx)
 		table.insert(args, "--thread")
 		table.insert(args, thread)
 	end
+	local reply: string? = state.reply
+	if thread ~= nil and reply ~= nil then
+		table.insert(args, "--re")
+		table.insert(args, reply)
+	end
 	for _, a in ipairs(addressees(state)) do
 		table.insert(args, "--to")
 		table.insert(args, a)
@@ -405,6 +427,9 @@ local function send(state: any, cx: BlockCx)
 			local to = (type(res.to) == "table" and #res.to > 0) and (" to " .. table.concat(res.to, ", ")) or ""
 			state.flash = "posted to " .. room .. to
 			state.flash_warn = false
+			if state.reply == reply then
+				state.reply = nil
+			end
 			-- a post that opened a subject is that subject's thread from now on
 			if thread == nil and type(res.receipt) == "table" and res.receipt.id ~= nil then
 				state.selected = res.receipt.id
@@ -650,9 +675,14 @@ end
 local function render_compose(state: any): Node
 	local view = state.view
 	local subject = state.thread and find_subject(state, state.thread)
+	local replying = state.thread ~= nil and find_message(subject, state.reply) or nil
 	local where = state.thread == nil and "new subject" or ((subject and (subject.fullTitle or subject.title)) or state.thread)
+	local target = "Posting to " .. tostring(state.room or "?") .. " › " .. tostring(where)
+	if replying ~= nil then
+		target = target .. " › reply to " .. tostring(replying.from)
+	end
 	local kids = {
-		ui.el("div", { key = "target", class = "ag-target", text = "Posting to " .. tostring(state.room or "?") .. " › " .. tostring(where) }),
+		ui.el("div", { key = "target", class = "ag-target", text = target }),
 	}
 
 	-- whom it is for: the thread's agents, the room, everyone, or one of the last to have spoken
@@ -704,6 +734,9 @@ local function render_compose(state: any): Node
 	}
 	if state.thread ~= nil then
 		table.insert(btns, button("new", "New subject", "new", "quiet"))
+	end
+	if replying ~= nil then
+		table.insert(btns, button("unreply", "Reply to the subject", "unreply", "quiet"))
 	end
 	table.insert(kids, ui.el("div", { key = "btns", class = "ag-row" }, btns))
 
@@ -767,50 +800,125 @@ local function render_subjects(state: any): Node
 	return section("subjects", head, with_new > 0 and (tostring(with_new) .. " with new messages") or "newest activity first", rows)
 end
 
+-- One message: who, when, the reply control, then what it says. `m.cue` says where a reply that is not
+-- drawn under what it answers belongs; `m.note` is any trailer other than `to` and `re`.
+local function message_card(state: any, m: any): Node
+	local head = {
+		ui.el("span", { key = "f", class = m.mine and "ag-from mine" or "ag-from", text = tostring(m.from) }),
+	}
+	if m.mine then
+		table.insert(head, ui.el("span", { key = "you", class = "ag-tag accent", text = "you" }))
+	end
+	if m.kind == "human" and not m.mine then
+		table.insert(head, ui.el("span", { key = "hum", class = "ag-tag", text = "human" }))
+	end
+	if m.seat == "member" then
+		table.insert(head, ui.el("span", { key = "seat", class = "ag-tag", text = "member seat" }))
+	end
+	local when = tostring(m.age)
+	if type(m.to) == "table" and #m.to > 0 then
+		when = when .. " · to " .. table.concat(m.to, ", ")
+	end
+	table.insert(head, ui.el("span", { key = "a", class = "ag-caption", text = when }))
+	local target = m.id == state.reply
+	if target then
+		table.insert(head, button("rp", "Cancel reply", "unreply", "quiet reply"))
+	else
+		table.insert(head, button("rp", "Reply", "reply=" .. m.id, "quiet reply"))
+	end
+	local body = {}
+	if type(m.cue) == "string" and m.cue ~= "" then
+		table.insert(body, ui.el("div", { key = "cue", class = "ag-caption", text = m.cue }))
+	end
+	local note = tostring(m.note or "")
+	if note ~= "" then
+		table.insert(body, ui.el("div", { key = "d", class = "ag-caption accent", text = note }))
+	end
+	table.insert(body, ui.md(tostring(m.body or "")))
+	if m.attachmentText and m.attachmentText ~= "" then
+		table.insert(body, ui.el("div", { key = "att", class = "ag-caption mono", text = tostring(m.attachmentText) }))
+	end
+	local cls = m.mine and "ag-msg mine" or "ag-msg"
+	if target then
+		cls = cls .. " target"
+	end
+	return ui.el("div", { key = "m_" .. m.id, class = cls }, {
+		ui.el("div", { key = "h", class = "ag-msg-head" }, head),
+		ui.el("div", { key = "b", class = "ag-msg-body" }, body),
+	})
+end
+
+-- A message with the messages that answer it nested beneath, behind one quiet rule.
+local function thread_node(state: any, e: any): Node
+	local kids = { message_card(state, e.m) }
+	if #e.kids > 0 then
+		local rows = {}
+		for _, k in ipairs(e.kids) do
+			table.insert(rows, thread_node(state, k))
+		end
+		table.insert(kids, ui.el("div", { key = "r", class = "ag-replies" }, rows))
+	end
+	return ui.el("div", { key = "n_" .. e.m.id, class = "ag-node" }, kids)
+end
+
 local function render_thread(state: any): Node
 	local s = find_subject(state, state.thread)
 	if s == nil then
 		return empty("tmissing", "this subject is no longer in the messages read")
 	end
 	local messages = s.messages or {}
-	local hidden = state.earlier and 0 or math.max(0, #messages - THREAD_TAIL)
+	-- the latest THREAD_TAIL messages by time, each with the messages it sits under: an answer is
+	-- never drawn without what it answers
+	local by_id = {}
+	for _, m in ipairs(messages) do
+		by_id[m.id] = m
+	end
+	local shown = {}
+	local hidden = 0
+	if state.earlier then
+		for _, m in ipairs(messages) do
+			shown[m.id] = true
+		end
+	else
+		for _, m in ipairs(messages) do
+			if (tonumber(m.rank) or 1) <= THREAD_TAIL then
+				local cur = m
+				while cur ~= nil and not shown[cur.id] do
+					shown[cur.id] = true
+					cur = (type(cur.parent) == "string") and by_id[cur.parent] or nil
+				end
+			end
+		end
+		for _, m in ipairs(messages) do
+			if not shown[m.id] then
+				hidden += 1
+			end
+		end
+	end
+	-- the messages come in drawing order with their depth: nest each under the nearest one above it
+	-- that is one level shallower
+	local roots = {}
+	local stack = {}
+	for _, m in ipairs(messages) do
+		if shown[m.id] then
+			local d = tonumber(m.depth) or 0
+			if d > 0 and stack[d] == nil then
+				d = 0
+			end
+			local entry = { m = m, kids = {} }
+			table.insert(d == 0 and roots or stack[d].kids, entry)
+			stack[d + 1] = entry
+			for k = #stack, d + 2, -1 do
+				stack[k] = nil
+			end
+		end
+	end
 	local kids = {}
 	if hidden > 0 then
 		table.insert(kids, button("earlier", string.format("Show %d earlier", hidden), "earlier", "quiet wide"))
 	end
-	for i = hidden + 1, #messages do
-		local m = messages[i]
-		local head = {
-			ui.el("span", { key = "f", class = m.mine and "ag-from mine" or "ag-from", text = tostring(m.from) }),
-		}
-		if m.mine then
-			table.insert(head, ui.el("span", { key = "you", class = "ag-tag accent", text = "you" }))
-		end
-		if m.kind == "human" and not m.mine then
-			table.insert(head, ui.el("span", { key = "hum", class = "ag-tag", text = "human" }))
-		end
-		if m.seat == "member" then
-			table.insert(head, ui.el("span", { key = "seat", class = "ag-tag", text = "member seat" }))
-		end
-		local when = tostring(m.age)
-		if type(m.to) == "table" and #m.to > 0 then
-			when = when .. " · to " .. table.concat(m.to, ", ")
-		end
-		table.insert(head, ui.el("span", { key = "a", class = "ag-caption", text = when }))
-		local body = {}
-		local derived = tostring(m.derived or "")
-		-- the `to:` the header already shows; any other trailer (claim, verdict, …) is stated here
-		if derived ~= "" and not string.match(derived, "^to ") then
-			table.insert(body, ui.el("div", { key = "d", class = "ag-caption accent", text = derived }))
-		end
-		table.insert(body, ui.md(tostring(m.body or "")))
-		if m.attachmentText and m.attachmentText ~= "" then
-			table.insert(body, ui.el("div", { key = "att", class = "ag-caption mono", text = tostring(m.attachmentText) }))
-		end
-		table.insert(kids, ui.el("div", { key = "m_" .. m.id, class = m.mine and "ag-msg mine" or "ag-msg" }, {
-			ui.el("div", { key = "h", class = "ag-msg-head" }, head),
-			ui.el("div", { key = "b", class = "ag-msg-body" }, body),
-		}))
+	for _, e in ipairs(roots) do
+		table.insert(kids, thread_node(state, e))
 	end
 	local count = #messages
 	return section("thread", tostring(s.fullTitle or s.title), string.format("%d %s · started by %s", count, count == 1 and "message" or "messages", tostring(s.rootFrom)), kids, "ag-title")
@@ -1140,7 +1248,11 @@ local function render_dock(state: any): Node
 		return ui.col({ keys({ { "Enter", "done" }, { "Esc", "done" } }) })
 	end
 	if state.mode == "room" and state.thread ~= nil then
-		return ui.col({ keys({ { "i", "write" }, { "b", "subjects" }, { "n", "new subject" }, { "e", "earlier" }, { "r", "refresh" }, { "1-5", "tabs" }, { "q", "close" } }) })
+		local legend = { { "i", "write" }, { "b", "subjects" }, { "n", "new subject" }, { "e", "earlier" }, { "r", "refresh" }, { "1-5", "tabs" }, { "q", "close" } }
+		if state.reply ~= nil then
+			table.insert(legend, 2, { "Esc", "reply to the subject" })
+		end
+		return ui.col({ keys(legend) })
 	elseif state.mode == "room" then
 		return ui.col({ keys({ { "j k", "move" }, { "Enter", "open" }, { "i", "write" }, { "n", "new subject" }, { "w", "who" }, { "m", "more" }, { "/", "search" }, { "r", "refresh" }, { "1-5", "tabs" }, { "q", "close" } }) })
 	end
@@ -1164,6 +1276,7 @@ local function switch_room(state: any, room: string, cx: BlockCx)
 	state.error = nil
 	state.flash = nil
 	state.to = "auto"
+	state.reply = nil
 	refresh(state, cx, false)
 end
 
@@ -1178,6 +1291,7 @@ local function open_subject(state: any, id: string)
 	state.earlier = false
 	state.flash = nil
 	state.to = "auto"
+	state.reply = nil
 	mark_seen(state, s)
 end
 
@@ -1186,6 +1300,7 @@ local function back_to_list(state: any)
 	state.earlier = false
 	state.flash = nil
 	state.to = "auto"
+	state.reply = nil
 end
 
 -- A message id from search or the board: the subject it belongs to is opened.
@@ -1327,6 +1442,13 @@ tern.block.define("room", {
 		elseif act == "new" then
 			back_to_list(state)
 			state.typing = true
+		elseif act == "reply" and val ~= "" then
+			if state.thread ~= nil then
+				state.reply = val
+				state.typing = true
+			end
+		elseif act == "unreply" then
+			state.reply = nil
 		elseif act == "to" then
 			state.to = val
 		elseif act == "refresh" then
@@ -1420,6 +1542,8 @@ tern.block.define("room", {
 		elseif k.name == "n" then
 			back_to_list(state)
 			state.typing = true
+		elseif k.name == "escape" and state.reply ~= nil then
+			state.reply = nil
 		elseif k.name == "b" or k.name == "escape" then
 			if state.thread == nil then
 				return false

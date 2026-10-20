@@ -1,9 +1,11 @@
 // @ts-check
 // The plain logic behind plugins/tern/agora (the Tern pane): its settings, the environment a CLI
 // child gets, one room read folded into subjects (latest activity first, the unread baseline, your
-// own posts never unread, whom a thread reply is addressed to), the board, residents, and a post
-// landing where the compose card said it would, in process as the seat's human or through a
-// configured post command. Rooms are local files in a temporary root.
+// own posts never unread, whom a thread reply is addressed to), a subject's replies as a tree by
+// their `re:` trailers, the board, residents, and a post landing where the compose card said it
+// would (a reply carrying its `re:` and its thread), in process as the seat's human, through the
+// CLI, or through a configured post command. Rooms are local files in a temporary root, or a real
+// seat service for the in-process native path.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
@@ -11,10 +13,11 @@ import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  DATA_FILE, ENV, SEAT_ACTIONS, SESSION_KEY, boardOf, childEnv, handle, loadView, pickAddressees, postFromPane, readDataFile,
-  resolvePaneConfig, residentRows, seatKindOf,
+  DATA_FILE, ENV, SEAT_ACTIONS, SESSION_KEY, THREAD_DEPTH_CAP, boardOf, childEnv, formatMessage, handle, loadView, pickAddressees, postFromPane, readDataFile,
+  resolvePaneConfig, residentRows, seatKindOf, threadTree, writeHuman,
 } from "../plugins/tern/agora/pane.mjs";
 import { localTransport } from "../src/transports/local.mjs";
+import { ROOM, seat as nativeSeat } from "./client-fixtures.mjs";
 import { tmp } from "./helpers.mjs";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -72,7 +75,7 @@ test("child environment: the daemon's bearer, session and position never reach a
 
 /** @param {Partial<import('../plugins/tern/agora/pane.mjs').PaneMessage> & { id: string }} p @returns {import('../plugins/tern/agora/pane.mjs').PaneMessage} */
 function pm(p) {
-  return /** @type {any} */ ({ thread: null, author: { id: "", name: "Ada", kind: "agent" }, signedAs: null, speaker: p.author?.name ?? "Ada", seat: "", ts: "", rawTs: "", cursor: p.id, derived: "", title: null, body: "", attachmentText: "", trailers: [], to: [], ...p });
+  return /** @type {any} */ ({ thread: null, author: { id: "", name: "Ada", kind: "agent" }, signedAs: null, speaker: p.author?.name ?? "Ada", seat: "", ts: "", rawTs: "", cursor: p.id, derived: "", note: "", re: [], title: null, body: "", attachmentText: "", trailers: [], to: [], ...p });
 }
 
 test("addressing: a reply goes to the agents on the root author's seat who spoke in the thread, never a human or the sender", () => {
@@ -302,5 +305,177 @@ test("bridge.mjs: one JSON object on stdout for rooms, view, set-name and post, 
     assert.equal(reply.ok, true, JSON.stringify(reply));
     const again = await call(["view", "--room", "ops"], { hasBaseline: true, baselineId: view.baselineId });
     assert.deepEqual(again.subjects[0].messages.map((/** @type {any} */ m) => [m.body, m.to]), [["from the bridge", []], ["a reply", ["Ada"]]]);
+  } finally { await s.cleanup(); }
+});
+
+// ---- threads: replies nested under what they answer ----
+
+/** @param {string} id @param {string} from @param {string[]} [re] @param {string} [cursor] */
+const reply = (id, from, re = [], cursor = id) => pm({ id, cursor, re, author: { id: "", name: from, kind: "agent" } });
+/** @param {ReturnType<typeof threadTree>} tree */
+const shape = (tree) => tree.map((n) => [n.m.id, n.depth, n.parent]);
+
+test("formatMessage: `re` names what a message answers, and the one trailer line leaves out what the header and the indentation already say", () => {
+  const m = formatMessage({ id: "m5", cursor: "5", ts: "2026-01-01T00:00:00Z", author: { id: "a", name: "Ada", kind: "agent" }, text: "hi\n\nto: Bea\nre: m1, m2\nclaim: tidy up" }, "");
+  assert.deepEqual([m.re, m.to, m.note], [["m1", "m2"], ["Bea"], "→ claim tidy up"]);
+  const plain = formatMessage({ id: "m6", cursor: "6", ts: "2026-01-01T00:00:00Z", author: { id: "a", name: "Ada", kind: "agent" }, text: "no block here" }, "");
+  assert.deepEqual([plain.re, plain.note], [[], ""]);
+});
+
+test("thread tree: an answer sits right under what it answers, children and plain replies each in time order", () => {
+  const tree = threadTree([
+    reply("r", "Bea"), reply("a", "Ada"), reply("b", "Lin", ["a"]), reply("c", "Cy"), reply("d", "Di", ["b"]), reply("e", "Ed", ["r"]), reply("f", "Fy", ["a"]),
+  ], { rootId: "r" });
+  assert.deepEqual(shape(tree), [["r", 0, null], ["a", 0, null], ["b", 1, "a"], ["d", 2, "b"], ["f", 1, "a"], ["c", 0, null], ["e", 0, null]], "`re` naming the subject itself is a plain reply");
+  assert.deepEqual(Object.fromEntries(tree.map((n) => [n.m.id, n.rank])), { r: 7, a: 6, b: 5, c: 4, d: 3, e: 2, f: 1 }, "rank counts from the newest message by time, not by drawing order");
+  assert.ok(tree.every((n) => n.cue === ""));
+});
+
+test("thread tree: an `re:` is read by id or by cursor; the subject's own cursor is still the subject", () => {
+  const tree = threadTree([reply("r", "Bea", [], "c1"), reply("a", "Ada", ["c1"], "c2"), reply("b", "Lin", ["c2"], "c3")], { rootId: "r" });
+  assert.deepEqual(shape(tree), [["r", 0, null], ["a", 0, null], ["b", 1, "a"]]);
+});
+
+test("thread tree: an `re:` that names nothing in the subject is an orphan at depth 0 with a cue, never dropped; its own answers still nest under it", () => {
+  const outside = (/** @type {string} */ name) => (name === "elsewhere" ? "Lin" : null);
+  const tree = threadTree([
+    reply("r", "Bea"), reply("o1", "Ada", ["elsewhere"]), reply("p", "Cy", ["o1"]), reply("o2", "Di", ["nowhere"]), reply("q", "Ed", ["later"]), reply("later", "Fy"),
+  ], { rootId: "r", outside });
+  assert.deepEqual(shape(tree), [["r", 0, null], ["o1", 0, null], ["p", 1, "o1"], ["o2", 0, null], ["q", 0, null], ["later", 0, null]], "a forward reference cannot nest: its parent is not yet said");
+  assert.deepEqual(Object.fromEntries(tree.map((n) => [n.m.id, n.cue])), {
+    r: "", o1: "↳ reply to Lin (not shown)", p: "", o2: "↳ reply to an earlier message (not shown)", q: "↳ reply to an earlier message (not shown)", later: "",
+  });
+});
+
+test("thread tree: a subject whose root is outside the window still takes `re:` of that root as a plain reply", () => {
+  const tree = threadTree([reply("a", "Ada", ["gone-root"]), reply("b", "Lin", ["a"])], { rootId: "gone-root" });
+  assert.deepEqual(shape(tree), [["a", 0, null], ["b", 1, "a"]]);
+});
+
+test("thread tree: depth is capped, and a deeper reply stays at the cap with a cue naming whom it answers", () => {
+  assert.equal(THREAD_DEPTH_CAP, 4);
+  const tree = threadTree([
+    reply("r", "Bea"), reply("a", "Ada"), reply("b", "Bea", ["a"]), reply("c", "Cy", ["b"]), reply("d", "Di", ["c"]), reply("e", "Ed", ["d"]), reply("f", "Fy", ["e"]), reply("g", "Gus", ["f"]),
+  ], { rootId: "r" });
+  assert.deepEqual(tree.map((n) => n.depth), [0, 0, 1, 2, 3, 4, 4, 4]);
+  assert.deepEqual(tree.map((n) => n.cue), ["", "", "", "", "", "", "↳ Ed", "↳ Fy"]);
+  assert.deepEqual(tree.map((n) => n.parent), [null, null, "a", "b", "c", "d", "e", "f"], "`parent` is the real one, so a view that shows part of the thread can keep what a message answers");
+  assert.equal(threadTree([reply("r", "Bea"), reply("a", "Ada"), reply("b", "Bea", ["a"]), reply("c", "Cy", ["b"])], { rootId: "r", cap: 1 })[3].depth, 1);
+});
+
+test("view: replies posted as replies nest in the subject; a typed `re:` and a typed trailer block are kept, never doubled", async () => {
+  const s = await seat();
+  try {
+    await handle("set-name", { env: { ...process.env, [ENV.config]: s.config }, input: { name: "Grace" } });
+    const root = await s.other("Bea", "Subject");
+    const plain = await s.other("Lin", "a plain answer", root);
+    const toLin = /** @type {any} */ (await postFromPane({ pc: s.pc, room: "lab", text: "an answer for Lin", thread: root, replyTo: plain, to: ["Lin"] }));
+    assert.equal(toLin.ok, true, JSON.stringify(toLin));
+    assert.deepEqual([toLin.receipt.thread, toLin.receipt.re, toLin.to], [root, plain, ["Lin"]]);
+    const deeper = /** @type {any} */ (await postFromPane({ pc: s.pc, room: "lab", text: "and a claim on that\n\nclaim: tidy up", thread: root, replyTo: toLin.receipt.id }));
+    const typed = /** @type {any} */ (await postFromPane({ pc: s.pc, room: "lab", text: "typed wins\n\nre: somewhere-else", thread: root, replyTo: plain }));
+    assert.equal(typed.receipt.re, null, "a typed `re:` wins over the card's");
+
+    const view = /** @type {any} */ (await loadView({ pc: s.pc }));
+    const messages = view.subjects[0].messages;
+    assert.deepEqual(messages.map((/** @type {any} */ m) => [m.body, m.depth, m.parent, m.cue]), [
+      ["Subject", 0, null, ""],
+      ["a plain answer", 0, null, ""],
+      ["an answer for Lin", 1, plain, ""],
+      ["and a claim on that", 2, toLin.receipt.id, ""],
+      ["typed wins", 0, null, "↳ reply to an earlier message (not shown)"],
+    ]);
+    const claim = messages[3];
+    assert.equal(claim.note, "→ claim tidy up", "one trailer block: the card's `re` joined the typed `claim`");
+    assert.deepEqual([messages[2].to, claim.mine, messages[2].mine], [["Lin"], true, true]);
+    assert.deepEqual(messages.map((/** @type {any} */ m) => m.rank), [5, 4, 3, 2, 1]);
+    assert.ok(deeper.ok);
+  } finally { await s.cleanup(); }
+});
+
+test("post: a reply needs its subject and a message id; no reply, no `re`", async () => {
+  const s = await seat();
+  try {
+    await handle("set-name", { env: { ...process.env, [ENV.config]: s.config }, input: { name: "Grace" } });
+    const root = await s.other("Bea", "Subject");
+    assert.match((/** @type {any} */ (await postFromPane({ pc: s.pc, room: "lab", text: "x", replyTo: root }))).error, /needs the subject it is in/);
+    assert.match((/** @type {any} */ (await postFromPane({ pc: s.pc, room: "lab", text: "x", thread: root, replyTo: "a b\n" }))).error, /not a message id/);
+    const none = /** @type {any} */ (await postFromPane({ pc: s.pc, room: "lab", text: "just a reply", thread: root }));
+    assert.equal(none.receipt.re, null);
+    const view = /** @type {any} */ (await loadView({ pc: s.pc }));
+    assert.deepEqual(view.subjects[0].messages.map((/** @type {any} */ m) => [m.depth, m.cue]), [[0, ""], [0, ""]]);
+  } finally { await s.cleanup(); }
+});
+
+test("post: a reply writes `--thread` and `--re` through a post command and through the CLI", async () => {
+  const s = await seat();
+  try {
+    /** @type {string[][]} */
+    const argvs = [];
+    /** @type {import('../plugins/tern/agora/pane.mjs').Run} */
+    const run = async (argv) => {
+      argvs.push(argv);
+      return { code: 0, stdout: '{"type":"post","id":"m9","cursor":"9","thread":"t1"}\n', stderr: "" };
+    };
+    const viaCommand = resolvePaneConfig({ file: { config: s.config, post: { command: ["agora", "--config", "/human/config.json"] } } });
+    const a = /** @type {any} */ (await postFromPane({ pc: viaCommand, room: "lab", text: "an answer", thread: "t1", replyTo: "m0", to: ["Bea"], run }));
+    assert.deepEqual(argvs[0], ["agora", "--config", "/human/config.json", "post", "lab", "--json", "--thread", "t1", "--re", "m0", "--to", "Bea", "--", "an answer"]);
+    assert.deepEqual([a.ok, a.receipt.re], [true, "m0"]);
+    await postFromPane({ pc: viaCommand, room: "lab", text: "typed\n\nre: m3", thread: "t1", replyTo: "m0", run });
+    assert.ok(!argvs[1].includes("--re"), "a typed `re:` is the person's; no second one is added");
+
+    await handle("set-name", { env: { ...process.env, [ENV.config]: s.config }, input: { name: "Grace" } });
+    await writeFile(s.config, JSON.stringify({ actor: { name: "Config Actor", kind: "agent" }, state: s.state, rooms: { gh: { transport: "github", repo: "acme/widgets", issue: 7 } } }));
+    const cli = resolvePaneConfig({ file: { config: s.config } });
+    const b = /** @type {any} */ (await postFromPane({ pc: cli, room: "gh", text: "an answer", thread: "t1", replyTo: "m0", run }));
+    assert.equal(b.ok, true, JSON.stringify(b));
+    assert.deepEqual(argvs[2].slice(argvs[2].indexOf("post")), ["post", "gh", "--json", "--thread", "t1", "--re", "m0", "--as", "Grace", "--", "an answer"]);
+  } finally { await s.cleanup(); }
+});
+
+test("post: in process on a native room a reply carries `re:` above the signature, in its thread, and nests in the view", { timeout: 30_000 }, async (t) => {
+  const n = await nativeSeat(t);
+  const prior = process.env.AGORA_STATE;
+  process.env.AGORA_STATE = n.root;
+  t.after(() => { if (prior === undefined) delete process.env.AGORA_STATE; else process.env.AGORA_STATE = prior; });
+  writeHuman(n.root, "Grace");
+  const config = path.join(n.root, "pane.json");
+  await writeFile(config, JSON.stringify({ actor: { name: "Config Actor", kind: "agent" }, state: n.root, rooms: { lab: { transport: "native", roomId: ROOM } } }));
+  const pc = resolvePaneConfig({ file: { config, rooms: ["lab"] } });
+  const first = /** @type {any} */ (await postFromPane({ pc, room: "lab", text: "a subject" }));
+  assert.equal(first.ok, true, JSON.stringify(first));
+  const a = /** @type {any} */ (await postFromPane({ pc, room: "lab", text: "a plain answer", thread: first.receipt.id }));
+  const b = /** @type {any} */ (await postFromPane({ pc, room: "lab", text: "an answer to the answer", thread: first.receipt.id, replyTo: a.receipt.id, to: ["Ada"] }));
+  assert.equal(b.ok, true, JSON.stringify(b));
+
+  const app = await n.open();
+  const { messages } = await app.read({ roomId: ROOM });
+  const sent = /** @type {any} */ (messages.find((m) => m.id === b.receipt.id));
+  assert.equal(sent.thread, first.receipt.id);
+  assert.deepEqual(sent.trailers, [{ key: "to", value: "Ada" }, { key: "re", value: a.receipt.id }]);
+  assert.match(sent.text, /\n\nto: Ada\nre: [a-f0-9]{64}\n\n-- Grace$/, "the block is above the signature");
+  assert.ok(!(/** @type {any} */ (messages.find((m) => m.id === a.receipt.id))).trailers?.length, "a plain thread reply carries no `re:`");
+
+  const view = /** @type {any} */ (await loadView({ pc, room: "lab" }));
+  assert.deepEqual(view.subjects[0].messages.map((/** @type {any} */ m) => [m.body, m.depth]), [["a subject", 0], ["a plain answer", 0], ["an answer to the answer", 1]]);
+});
+
+test("bridge.mjs: post --thread --re is a reply the next view nests", async () => {
+  const s = await seat();
+  try {
+    await writeFile(path.join(s.dir, DATA_FILE), JSON.stringify({ config: s.config, rooms: ["lab", "ops"] }));
+    const env = { ...process.env, AGORA_STATE: s.state };
+    /** @param {string[]} args @param {unknown} [input] @returns {Promise<any>} */
+    const call = (args, input) => new Promise((resolve, reject) => {
+      const child = execFile(process.execPath, [bridge, ...args, "--data", s.dir], { env, timeout: 30000 }, (err, stdout, stderr) => (err ? reject(Object.assign(err, { stderr })) : resolve(JSON.parse(stdout.trim()))));
+      child.stdin?.end(input === undefined ? "" : JSON.stringify(input));
+    });
+    await call(["set-name"], { name: "Grace" });
+    const root = await call(["post", "--room", "ops"], { text: "a subject" });
+    const one = await call(["post", "--room", "ops", "--thread", root.receipt.id], { text: "an answer" });
+    const two = await call(["post", "--room", "ops", "--thread", root.receipt.id, "--re", one.receipt.id], { text: "an answer to it" });
+    assert.equal(two.ok, true, JSON.stringify(two));
+    const view = await call(["view", "--room", "ops"], { hasBaseline: false });
+    assert.deepEqual(view.subjects[0].messages.map((/** @type {any} */ m) => [m.body, m.depth, m.parent]), [["a subject", 0, null], ["an answer", 0, null], ["an answer to it", 1, one.receipt.id]]);
   } finally { await s.cleanup(); }
 });
