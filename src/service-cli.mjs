@@ -173,12 +173,16 @@ export async function signSeatRouteAct(root, input, readIdentity = existingAutho
   return { challenge, signature: sign(null, authoritySigningBytes(challenge), key).toString('hex') };
 }
 
-/** @param {string} root @param {string} action @param {unknown} roomId @param {unknown} publicNodeKey */
-export async function challengeServiceRoute(root, action, roomId, publicNodeKey) {
+/** `humanName` admits the key as the member seat's human under that name (docs/MEMBERSHIP.md);
+ * the service validates it and binds it into the act the authority signs.
+ * @param {string} root @param {string} action @param {unknown} roomId @param {unknown} publicNodeKey
+ * @param {string} [humanName] */
+export async function challengeServiceRoute(root, action, roomId, publicNodeKey, humanName) {
   const room = readRouteRoomId(roomId), key = readPublicNodeKey(publicNodeKey, '--allow-key');
   const { client } = await connectSeatService(root);
   try {
-    const result = await client.request('route-challenge', { action, roomId: room, publicNodeKey: key });
+    const result = await client.request('route-challenge', { action, roomId: room, publicNodeKey: key,
+      ...(humanName !== undefined ? { humanName } : {}) });
     return { request: result.request, challenge: result.challenge };
   } finally { client.close(); }
 }

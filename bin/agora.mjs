@@ -344,6 +344,7 @@ const SCHEMA = {
         "--authority <a-64hex>": "with start: load counter-seat authority and policy once; rotation requires restart, a cooperative pin, not OS isolation",
         "--proof-file <path>": "with route open/close: detached proof for a retained challenge; unsigned route effects refuse",
         "--act <room-enroll|room-revoke>": "with route challenge: prepare this act without effects; --out writes a new public challenge file",
+        "--human-name <name>": "with route challenge --act room-enroll: admit this key as the member seat's HUMAN, posting as human under this name only; the grant is in the act the authority signs (docs/MEMBERSHIP.md)",
       },
       does: "the seat-local native room service: start writes native/service.json and binds the endpoint; stop is bounded; status reports the descriptor without the nonce; room create mints a 32-hex id on the running service and prints it; room delete removes a native room the config no longer names and deletes its log, custody and face records, never its faced copies on other transports, which it lists; route open admits one enrolled key over Tailcat and route close revokes it, the service owning the route rather than the verb. Never writes the shared config",
     },
@@ -551,6 +552,7 @@ const OPTIONS = /** @type {const} */ ({
   authority: { type: 'string' },
   'proof-file': { type: 'string' },
   act: { type: 'string' },
+  "human-name": { type: "string" },
   out: { type: "string" },
   until: { type: "string" },
   "keep-watches": { type: "boolean", default: false },
@@ -943,6 +945,10 @@ export const ARGUMENT_PREFLIGHTS = Object.freeze([
       if (sub === 'challenge' && !['room-enroll', 'room-revoke'].includes(String(values.act)))
         return 'route challenge needs --act room-enroll or room-revoke';
       if (sub === 'challenge' && !values.out) return 'route challenge needs --out <new-file>';
+      if (values['human-name'] !== undefined && !(sub === 'challenge' && values.act === 'room-enroll'))
+        return '--human-name goes with route challenge --act room-enroll: the human grant is part of the act the authority signs, and open, close and revoke take it from that act';
+      if (values['human-name'] !== undefined && !/^\S(?:[^]*\S)?$/u.test(String(values['human-name'])))
+        return '--human-name is the name the human posts under: no leading or trailing space';
       if ((sub === 'open' || sub === 'close') && !values['proof-file'])
         return `route ${sub} needs --proof-file <detached-proof>`;
       return undefined;
@@ -1454,9 +1460,11 @@ async function main(argv) {
     if (action === "route") {
       const sub = rest[0];
       if (sub === 'challenge') {
-        const result = await challengeServiceRoute(stateRoot, String(values.act), rest[1], values['allow-key']);
+        const result = await challengeServiceRoute(stateRoot, String(values.act), rest[1], values['allow-key'],
+          values['human-name'] !== undefined ? String(values['human-name']) : undefined);
         await writeAuthorityOutput(String(values.out), result);
-        console.log(JSON.stringify({ operationId: result.request.operationId, file: String(values.out) }));
+        const author = result.request.binding.author;
+        console.log(JSON.stringify({ operationId: result.request.operationId, file: String(values.out), ...(author ? { author } : {}) }));
         return EXIT.ok;
       }
       if (sub === 'act-status') {
@@ -1468,14 +1476,14 @@ async function main(argv) {
         if (values.out !== undefined) await copyFile(opened.descriptorPath, String(values.out));
         const where = values.out !== undefined ? String(values.out) : opened.descriptorPath;
         if (json) console.log(JSON.stringify({ type: "service", action: "route-open", ...opened, descriptorPath: where }));
-        else console.log(`route open ${opened.descriptor.binding.roomId} member ${opened.descriptor.binding.accountId}\ndescriptor ${where}\nsecret ${opened.secretPath} (0600, carry it beside the descriptor; it never travels in the descriptor)`);
+        else console.log(`route open ${opened.descriptor.binding.roomId} member ${opened.descriptor.binding.accountId}${opened.descriptor.binding.author ? ` (the member seat's human ${JSON.stringify(opened.descriptor.binding.author.name)}: posts as human, under that name only)` : ""}\ndescriptor ${where}\nsecret ${opened.secretPath} (0600, carry it beside the descriptor; it never travels in the descriptor)`);
         return EXIT.ok;
       }
       if (sub === "list") {
         const routes = await listServiceRoutes(stateRoot);
         if (json) console.log(JSON.stringify({ type: "service", action: "route-list", routes }));
         else if (!routes.length) console.log("no live member routes on this service");
-        else for (const r of routes) console.log(`${r.roomId} ${r.accountId} generation ${r.routeGeneration} since ${r.openedAt}`);
+        else for (const r of routes) console.log(`${r.roomId} ${r.accountId} generation ${r.routeGeneration} since ${r.openedAt}${r.author ? ` human ${JSON.stringify(r.author.name)}` : ""}`);
         return EXIT.ok;
       }
       if (sub === "close") {
@@ -1892,13 +1900,18 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       // whose mode is actually wrong, and finding that here beats finding it on the first dial.
       await readRouteSecret(stateRoot, descriptor.binding, descriptor.proofRef);
       const row = { transport: "native-remote", descriptor: file };
+      // A human route posts as human under its bound name only; the host refuses any other kind or
+      // name, so say here whether this config's actor already is that human.
+      const author = descriptor.binding.author;
+      const actorMatches = author ? cfg.actor.kind === "human" && cfg.actor.name.trim() === author.name : undefined;
       if (json) {
         console.log(JSON.stringify({ type: "room", action: "add-remote", alias, row, config: cfg.path,
           roomId: descriptor.binding.roomId, host: descriptor.binding.host.id, member: descriptor.binding.accountId,
-          written: false }));
+          ...(author ? { author, actorMatches } : {}), written: false }));
       } else {
         console.log(`descriptor ${file} verified: room ${descriptor.binding.roomId} on host ${descriptor.binding.host.id}, this seat posts as ${descriptor.binding.accountId}`);
         console.log(`the route secret named by ${descriptor.proofRef} resolves and its mode is private`);
+        if (author) console.log(`this is a HUMAN route: the host stamps every post on it as the human ${JSON.stringify(author.name)}; ${actorMatches ? "this config's actor is that human" : `set this config's actor to { "name": ${JSON.stringify(author.name)}, "kind": "human" } or the host refuses its posts`}`);
         console.log(`\nadd this to "rooms" in ${cfg.path} yourself (agora never writes the shared config):\n`);
         console.log(`  ${JSON.stringify(alias)}: ${JSON.stringify(row, null, 2).split("\n").join("\n  ")}`);
       }

@@ -208,8 +208,11 @@ export function descriptorDigest(descriptor) {
 }
 
 /**
+ * `author`, when given, admits this key as the member seat's HUMAN under that name (see
+ * `validateRouteAuthor`); without it the route is an agent route, as every route was before.
  * @param {{ hostAccountId: string, hostAuthority: string, roomId: string, roomEpoch: string,
- *  serviceBootId: string, publicNodeKey: string, membershipRevision?: number }} input
+ *  serviceBootId: string, publicNodeKey: string, membershipRevision?: number,
+ *  author?: { kind: 'human', name: string } }} input
  */
 export function buildRouteBinding(input) {
   const publicKey = validatePublicNodeKey(input.publicNodeKey);
@@ -228,6 +231,7 @@ export function buildRouteBinding(input) {
     grantId: mintRouteId(),
     routeGeneration: mintRouteId(),
     allowedKeyDigest,
+    ...(input.author !== undefined ? { author: input.author } : {}),
   });
 }
 
@@ -293,6 +297,44 @@ export const MEMBER_REQUEST_TYPES = Object.freeze(["status", "read", "subscribe"
 /** @param {string} type */
 export function memberMayRequest(type) {
   return MEMBER_REQUEST_TYPES.includes(type);
+}
+
+/**
+ * The author a member route's operation is committed under, decided by the route's BINDING and
+ * never by the frame. Returns the refusal, or nothing after filling in the bound kind (and, on a
+ * human route, the bound name) where the frame left them out.
+ *
+ * An agent route (no `author` in its binding) is an agent: any other kind is refused. A human
+ * route is the member seat's human under the one name the counter-seat authority signed: another
+ * kind or another name is refused, so the seat's agents, which post through the seat's own key,
+ * cannot reach human authorship by setting a flag, and the human cannot post as anyone else.
+ * A board `break` is refused on a human route: it is the verb that trusts a human label to drop
+ * another seat's holder, and a route's human grant is consent to speak, not to break (on an agent
+ * route the board itself answers a break `not human`, as before).
+ * Absent kind is set rather than left to a downstream default: the board records an omitted kind
+ * as "unknown", and "unknown" is not what a member is.
+ * @param {ReturnType<typeof validateRouteBinding>} binding @param {Record<string, any>} operation
+ * @returns {{ code: string, detail: string } | undefined}
+ */
+export function settleMemberAuthor(binding, operation) {
+  const author = binding.author;
+  if (!author) {
+    if (operation.authorKind !== undefined && operation.authorKind !== "agent")
+      return { code: "member-author-kind-refused", detail: `a member session is an agent; it may not claim ${JSON.stringify(operation.authorKind)}` };
+    if (operation.authorKind === undefined) operation.authorKind = "agent";
+    return undefined;
+  }
+  const bound = JSON.stringify(author.name);
+  if (operation.authorKind !== undefined && operation.authorKind !== "human")
+    return { code: "member-author-kind-refused", detail: `this route admits the human ${bound}; it may not claim ${JSON.stringify(operation.authorKind)}` };
+  if (operation.authorName !== undefined && (typeof operation.authorName !== "string" || operation.authorName.trim() !== author.name))
+    return { code: "member-author-name-refused", detail: `this route admits the human ${bound} and no other name` };
+  const payload = operation.payload;
+  if (operation.kind === "board" && payload && typeof payload === "object" && payload.action === "break")
+    return { code: "member-break-refused", detail: "a break drops another seat's holder and is appended on the host's own connections; a member route may not break" };
+  operation.authorKind = "human";
+  operation.authorName = author.name;
+  return undefined;
 }
 
 /** The registry key for one admitted route. One principal per room per key.

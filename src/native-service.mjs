@@ -11,9 +11,9 @@ import { NativeFrameDecoder, NATIVE_FRAME_MAX, NATIVE_PROTOCOL, encodeNativeFram
 import { NativeRoomStore } from "./native-store.mjs";
 import { assertDurableAttachments, collectReleasedCustody, handleAttachmentFrame, isAttachmentFrame, releaseHolds, withCustodyLock } from "./native-attachments.mjs";
 import { MEMBER_PHASES, buildRouteBinding, buildRouteDescriptor, memberHandshakeProof, memberMayRequest,
-  memberTranscript, mintRouteSecret, removeRouteSecret, routeKey, validatePublicNodeKey,
+  memberTranscript, mintRouteSecret, removeRouteSecret, routeKey, settleMemberAuthor, validatePublicNodeKey,
   verifyMemberHandshakeProof, writeRouteSecret } from "./native-member.mjs";
-import { publicNodeKeyDigest } from "./protocol/route.mjs";
+import { publicNodeKeyDigest, validateRouteAuthor } from "./protocol/route.mjs";
 import { receiveCapabilityOffer, validateCapabilityOffer } from "./protocol/capabilities.mjs";
 import { CLIENT_NAME_PATTERN } from "./protocol/common.mjs";
 import { localTransferIdentity } from "./tailcat.mjs";
@@ -715,18 +715,16 @@ export class NativeRoomService {
       for (const claim of claims)
         if (claim !== undefined && claim !== member.binding.accountId)
           throw codedRefusal("member-actor-mismatch", "this route admits one principal and the frame named another");
-      // A member session is authorKind agent BY CONSTRUCTION. The board's `break` is a human verb
-      // that trusts this label, so a remote claiming human could break a local holder's lease.
+      // The author kind and name are the route's, by BINDING (settleMemberAuthor): an agent route
+      // is an agent, and a human route is the one human its signed grant names. The board's
+      // `break` is a human verb that trusts this label, so a frame's own claim is never taken.
       const operation = /** @type {any} */ (frame.operation);
       // This skips arrays, which is safe ONLY because the append handler below rejects a
       // non-object operation outright. If append ever accepts a batch, this guard stops covering
       // it silently -- the member's author kind would go unchecked for every element.
       if (operation && typeof operation === "object" && !Array.isArray(operation)) {
-        if (operation.authorKind !== undefined && operation.authorKind !== "agent")
-          throw codedRefusal("member-author-kind-refused", `a member session is an agent; it may not claim ${JSON.stringify(operation.authorKind)}`);
-        // Absent is set rather than left to a downstream default: the board records an omitted
-        // kind as "unknown", and "unknown" is not what a member is.
-        if (operation.authorKind === undefined) operation.authorKind = "agent";
+        const refused = settleMemberAuthor(member.binding, operation);
+        if (refused) throw codedRefusal(refused.code, refused.detail);
       }
     }
     if (frame.type === "create-room") {
@@ -769,7 +767,8 @@ export class NativeRoomService {
     }
     if (frame.type === 'route-challenge') {
       const result = await this.createRouteChallenge({ action: requiredString(frame.action, 'route action'),
-        roomId: requiredString(frame.roomId, 'room id'), publicNodeKey: requiredString(frame.publicNodeKey, 'member public node key') });
+        roomId: requiredString(frame.roomId, 'room id'), publicNodeKey: requiredString(frame.publicNodeKey, 'member public node key'),
+        ...(frame.humanName !== undefined ? { humanName: frame.humanName } : {}) });
       sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: 'route-challenge-result', requestId: frame.requestId, ...result });
       return;
     }
@@ -1118,11 +1117,22 @@ export class NativeRoomService {
   }
 
   /** Issuance has no route effect; context is owned by this service.
-   * @param {{action: string, roomId: string, publicNodeKey: string}} input */
+   *
+   * `humanName` admits the key as the member seat's HUMAN under that name: the binding carries
+   * `author: { kind: 'human', name }`, the act's request digest covers it, so the counter-seat
+   * authority's signature is over the grant itself. Only an enroll takes one; a revoke names the
+   * live route's own binding. Refused `route-human-invalid` otherwise.
+   * @param {{action: string, roomId: string, publicNodeKey: string, humanName?: unknown}} input */
   async createRouteChallenge(input) {
     const { authority, journal, target } = this.#authorityContext();
     if (!['room-enroll', 'room-revoke'].includes(input.action)) throw new AuthorityError('operator-action-refused');
     const publicNodeKey = validatePublicNodeKey(input.publicNodeKey);
+    let author;
+    if (input.humanName !== undefined) {
+      if (input.action !== 'room-enroll') throw new AuthorityError('route-human-invalid');
+      try { author = validateRouteAuthor({ kind: 'human', name: input.humanName }); }
+      catch { throw new AuthorityError('route-human-invalid'); }
+    }
     const store = await this.openRoom(input.roomId);
     this.#authorityContext();
     journal.assertAvailable(input.roomId);
@@ -1144,7 +1154,7 @@ export class NativeRoomService {
     if (this.routeChallenges.size >= 1024) throw new AuthorityError('operator-challenge-capacity');
     const binding = input.action === 'room-revoke' && existing ? existing.binding : buildRouteBinding({
       hostAccountId: this.accountId, hostAuthority: this.accountId, roomId: input.roomId,
-      roomEpoch: store.manifest.epoch, serviceBootId: this.bootEpoch, publicNodeKey });
+      roomEpoch: store.manifest.epoch, serviceBootId: this.bootEpoch, publicNodeKey, ...(author ? { author } : {}) });
     const request = validateAuthorityRequest({ action: input.action, binding, targetNodeKeyDigest: target,
       operationId: randomUUID().replaceAll('-', ''),
       revisions: { policy: authority.policy.revision, membership: journal.revision(input.roomId) } });
@@ -1270,7 +1280,8 @@ export class NativeRoomService {
     });
   }
 
-  /** Live routes, read from the service's own registry rather than from files on disk. */
+  /** Live routes, read from the service's own registry rather than from files on disk. A human
+   * route's row carries its `author` grant; an agent route's row is unchanged. */
   listRoutes() {
     return [...this.routes.values()].map((route) => ({
       roomId: route.binding.roomId, accountId: route.binding.accountId,
@@ -1278,6 +1289,7 @@ export class NativeRoomService {
       routeGeneration: route.binding.routeGeneration, endpoint: route.descriptor.endpoint,
       state: route.state ?? "live",
       openedAt: route.openedAt, descriptorPath: route.descriptorPath, secretPath: route.secretPath,
+      ...(route.binding.author ? { author: route.binding.author } : {}),
     }));
   }
 

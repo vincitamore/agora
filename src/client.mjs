@@ -379,7 +379,7 @@ class AgoraClient {
       const row = this.#aliases.get(room);
       if (!row) throw refused("room-unknown", `no room named ${JSON.stringify(room)} in the config`);
       if (row.transport === "native-remote")
-        throw refused("room-transport-unsupported", `${room} is a native-remote room: its member channel admits only agent authors and stamps no client name, so agora/client does not serve it`);
+        throw refused("room-transport-unsupported", `${room} is a native-remote room: its member channel stamps its route's one author and no client name, so agora/client does not serve it`);
       if (row.transport !== "native")
         throw refused("room-transport-unsupported", `${room} is a ${row.transport} room; agora/client serves native rooms on this seat's service`);
       if (!ROOM_ID_RE.test(row.roomId ?? "")) throw refused("room-id-invalid", `${room} names no 32-hex roomId`);

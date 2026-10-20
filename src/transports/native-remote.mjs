@@ -84,8 +84,9 @@ export function nativeRemoteTransport(room, { actor, remote, session }) {
     /**
      * The host's single writer appends this; the member session never takes `writer.lock` and never
      * touches the board directly, so ordering and the one-writer invariant are the host's exactly as
-     * they are for a local caller. `authorKind` is the actor's, and the host refuses anything but
-     * `agent` from a member session — a remote may not claim to be a human.
+     * they are for a local caller. `authorKind` and `authorName` are the actor's, and the host
+     * commits them only when the route's binding grants them: an agent route admits `agent`, and a
+     * human route (`binding.author`) admits only its one human under the bound name.
      */
     async post(text, { thread, face, beforeSend, attachments } = {}) {
       if (face !== undefined) throw new AgoraError("a face is the HOST's policy and is published by the host's own service; a remote seat cannot choose one for it");

@@ -13,12 +13,27 @@ export function publicNodeKeyDigest(value) {
   const text = readString(value, 'nodeKey', { min: 72, max: 72, pattern: /^nodekey:[a-f0-9]{64}$/ });
   return `sha256:${createHash('sha256').update(text, 'utf8').digest('hex')}`;
 }
+/** The display name a human grant binds: what the store stamps as `author.name`, so the same
+ * bounds (1-120 bytes, no control characters) and no leading or trailing space, because the store
+ * trims a posted name and a bound name that trimmed to something else could never be matched. */
+const AUTHOR_NAME = /^\S(?:[^]*\S)?$/u;
+/** A route's author grant: present only on a route admitted for the member seat's HUMAN, absent on
+ * every agent route (whose bindings are byte-for-byte what they were). Because it lives in the
+ * binding it is covered by the descriptor's digest and by the authority act's request digest, so
+ * the counter-seat authority signs it and nothing after the act can add, drop or rename it.
+ * @param {unknown} value */
+export function validateRouteAuthor(value) {
+  const v = readRecord(value, ['kind', 'name'], [], 'author');
+  return { kind: readEnum(v.kind, 'author.kind', ['human']),
+    name: readString(v.name, 'author.name', { min: 1, max: 120, controls: true, pattern: AUTHOR_NAME }) };
+}
 /** @param {unknown} value */
 export function validateRouteBinding(value) {
-  const v = readRecord(value, ['host', 'member', 'accountId', 'serviceBootId', 'roomId', 'roomEpoch', 'membershipRevision', 'grantId', 'routeGeneration', 'allowedKeyDigest']);
+  const v = readRecord(value, ['host', 'member', 'accountId', 'serviceBootId', 'roomId', 'roomEpoch', 'membershipRevision', 'grantId', 'routeGeneration', 'allowedKeyDigest'], ['author']);
   return { host: validateNativeAccountRef(v.host), member: validateAccountRef(v.member), accountId: validateNativeId(v.accountId), serviceBootId: validateNativeId(v.serviceBootId),
     roomId: validateRoomId(v.roomId), roomEpoch: validateEpoch(v.roomEpoch), membershipRevision: readInteger(v.membershipRevision, 'membershipRevision', 1),
-    grantId: validateNativeId(v.grantId), routeGeneration: validateNativeId(v.routeGeneration), allowedKeyDigest: validateDigest(v.allowedKeyDigest) };
+    grantId: validateNativeId(v.grantId), routeGeneration: validateNativeId(v.routeGeneration), allowedKeyDigest: validateDigest(v.allowedKeyDigest),
+    ...(Object.hasOwn(v, 'author') ? { author: validateRouteAuthor(v.author) } : {}) };
 }
 /** @param {unknown} value */
 export function validateRouteDescriptor(value) {
