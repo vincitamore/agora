@@ -33,7 +33,7 @@ Precedence, highest first; each setting is taken whole from the first layer that
 
 1. **environment**: set in your shell, or for the desktop app in the `env` key of `~/.claude/settings.json` (the plugin reads it with `$.env.get`, and the agora CLI children inherit it)
 2. **the project file** `.agora-room.json` in the session's folder
-3. **the plugin's configuration form** (`userConfig`), stored in user settings as `pluginConfigs["agora-room@agora-plugins"].options` (Claude Code ignores project and local settings for these)
+3. **the plugin's configuration form** (`userConfig`), stored in user settings as `pluginConfigs["agora-room@<marketplace>"].options (`agora` or `agora-plugins`)` (Claude Code ignores project and local settings for these)
 4. **defaults**
 
 | Setting | Environment | Project file key | Form key | Default |
@@ -131,11 +131,11 @@ In a short terminal the compose controls are on top and the list scrolls below t
 ## Uninstall
 
 ```sh
-claude plugin uninstall agora-room@agora-plugins
-claude plugin marketplace remove agora-plugins
+claude plugin uninstall agora-room@agora        # or @agora-plugins
+claude plugin marketplace remove agora           # or agora-plugins
 ```
 
-Uninstalling clears the plugin from your settings (including its configuration) but **leaves `~/.claude/plugins/cache/agora-plugins/`**; delete that folder by hand if you want the copy gone. In the desktop app, restart it afterwards so the mod unloads. The plugin's own leftovers: the liveness file, and the agora state of its session keys (`AGORA_SESSION=<key> agora session --forget`).
+Uninstalling clears the plugin from your settings (including its configuration) but **leaves `~/.claude/plugins/cache/<marketplace>/`**; delete that folder by hand if you want the copy gone. In the desktop app, restart it afterwards so the mod unloads. The plugin's own leftovers: the liveness file, and the agora state of its session keys (`AGORA_SESSION=<key> agora session --forget`).
 
 ## Safety
 
