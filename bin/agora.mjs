@@ -66,11 +66,13 @@ import {
   readCursorSeeded,
   readPosted,
   inheritSession,
+  positionOf,
   readRecord,
   releaseDeparture,
   removeArmed,
   removeSession,
   resolveBearer,
+  resolveLabel,
   resolveSession,
   sessionDir,
   sessionScope,
@@ -320,12 +322,12 @@ const SCHEMA = {
     },
     session: {
       args: [],
-      options: { "--as <bearer>": "register this session as this bearer (idempotent)", "--label <name>": "a human label for the record", "--list": "every session with state here, with liveness", "--prune": "remove sessions whose process is gone and whose last write is older than session.staleAfterHours", "--dry-run": "with --prune or --inherit: say what would happen, change nothing", "--forget": "remove this session's record and state", "--inherit <key>": "take over another session's positions, follow set (aliases included) and posted ledger; the source is never touched and its record is not copied, so register with --as afterwards", "--force": "with --inherit: take the source's position in rooms this session already holds one in" },
+      options: { "--as <bearer>": "register this session as this bearer (idempotent)", "--label <position>": "this session's position (coding, desk.messenger: lower-case segments joined by .), kept when the bearer changes with the model; else AGORA_LABEL; else the record's own. resident cycle matches a labelled session by it", "--list": "every session with state here, with liveness", "--prune": "remove sessions whose process is gone and whose last write is older than session.staleAfterHours", "--dry-run": "with --prune or --inherit: say what would happen, change nothing", "--forget": "remove this session's record and state", "--inherit <key>": "take over another session's positions, follow set (aliases included) and posted ledger; the source is never touched and its record is not copied, so register with --as afterwards", "--force": "with --inherit: take the source's position in rooms this session already holds one in" },
       does: "this session's record: who it is, written once, read on every later call",
     },
     join: {
       args: ["<room>"],
-      options: { "--as <bearer>": "register this session as this bearer", "--label <name>": "a human label for this session's record", "--limit <n>": "how many recent messages to show (default 20)" },
+      options: { "--as <bearer>": "register this session as this bearer", "--label <position>": "this session's position, as session --label", "--limit <n>": "how many recent messages to show (default 20)" },
       does: "register, preview the recent messages, and advance this session's cursor through the last one shown",
     },
     enroll: { args: ["[<room>]"], options: {"--local": "mint (if absent) and print this seat's Agora-owned Tailcat nodeKey and fingerprint locally without publishing to a room", "--trust <account-id>": "explicitly replace a peer pin after out-of-band verification", "--fingerprint <hex>": "confirmed peer fingerprint for --trust", "--pages <n>": "enrollment scan depth"}, does: "publish or republish this seat's Agora-owned transfer public key (or with --local, mint and print it offline); never uses an ambient Tailcat identity" },
@@ -391,7 +393,7 @@ const SCHEMA = {
         "--restart <command>": "cycle: run this after writing the marker ({slug} is the resident); else the config row's restart; else the restart is the caller's",
         "--force": "inherit: take the predecessor's position in a room this session already read",
       },
-      does: "standing sessions. prompt prints a profile with the shipped room-mechanics block appended (the resident-sized discipline, so no skill loads at arming). cycle finds the newest live session signing as /<slug>, measures its last real inference and context from the harness transcript (harness-written error entries are skipped), and when it is deaf (no live watch, idle past --deaf), past the ceiling (--max-context, idle past --deaf), or cold (past --idle) AND large (past --min-context) writes <state>/residents/<slug>/inherit.json naming it and restarts the unit: a successor pays its floor, a cold wake pays the whole context. inherit consumes that marker (the same inheritance as session --inherit) and is a no-op without one. Never writes the shared config; docs/RESIDENTS.md",
+      does: "standing sessions. prompt prints a profile with the shipped room-mechanics block appended (the resident-sized discipline, so no skill loads at arming). cycle finds the newest live session holding the position <slug> (its session --label), or for a session with no position the newest signing as /<slug>, measures its last real inference and context from the harness transcript (harness-written error entries are skipped), and when it is deaf (no live watch, idle past --deaf), past the ceiling (--max-context, idle past --deaf), or cold (past --idle) AND large (past --min-context) writes <state>/residents/<slug>/inherit.json naming it and restarts the unit: a successor pays its floor, a cold wake pays the whole context. inherit consumes that marker (the same inheritance as session --inherit) and is a no-op without one. Never writes the shared config; docs/RESIDENTS.md",
     },
     doctor: { args: [], options: { "--offline": "skip the identity check", "--repair-tailcat": "restore the cached runtime from its hash-verified bundled capsule" }, does: "config, token presence per room, identity per room, this session and bearer and where each came from, the harness prompt-cache TTL where this seat can read one, and the reads a minute this seat spends with the arithmetic behind the number; three preflights for a resident bearer warn when a watch is armed against a five-minute TTL (cache-ttl), when a watch polls within half to one and a half times a TTL that was read (interval-near-ttl), and when no live watch in a room wakes on all (no-all-watch). Room and watch reports are derived. Tailcat integrity is verified locally; first use expands the bundled capsule into state, and --repair-tailcat explicitly restores a corrupt cache" },
     schema: { args: [], options: { "--json": "the whole surface as JSON, protocol included" }, does: "this description" },
@@ -706,16 +708,23 @@ function printDigest(msgs, json, alias) {
 }
 
 /**
- * The usual --wake for a role segment: a suggestion join and doctor print once and never apply.
- * `watch`, `messenger` and `router` are the thin front-door readers (`all`): one cheap bearer that
- * reads everything and addresses the rest; every other named role is a working bearer (`mine`).
- * @param {string} name
+ * The usual --wake for a role: a suggestion join and doctor print once and never apply. The role is
+ * the last `.` segment of the session's position when it holds one (`desk.messenger` → messenger),
+ * else the bearer's last `/` segment. `watch`, `messenger` and `router` are the thin front-door
+ * readers (`all`): one cheap bearer that reads everything and addresses the rest; every other named
+ * role is a working bearer (`mine`).
+ * @param {string} name the bearer
+ * @param {string} [position] the session's position (`positionOf` its record)
  * @returns {{ role: string, wake: "all" | "mine" } | undefined}
  */
-function usualWake(name) {
-  const i = String(name).lastIndexOf("/");
-  if (i < 0) return undefined;
-  const role = name.slice(i + 1);
+function usualWake(name, position) {
+  let role;
+  if (position !== undefined) role = position.slice(position.lastIndexOf(".") + 1);
+  else {
+    const i = String(name).lastIndexOf("/");
+    if (i < 0) return undefined;
+    role = name.slice(i + 1);
+  }
   if (!role) return undefined;
   return { role, wake: role === "watch" || role === "messenger" || role === "router" ? "all" : "mine" };
 }
@@ -1170,16 +1179,18 @@ async function main(argv) {
       console.log(JSON.stringify({ type: "identity", bearer: bearer.name, session: session.slug, sources: { bearer: bearer.source, session: session.source } }));
   };
 
-  /** Register this session: write the record with the bearer given, and say so (on stderr when stdout carries messages). */
+  /** Register this session: write the record with the bearer and position given, and say so (on stderr when stdout carries messages). */
   async function register(toStderr = false) {
     if (values.as === undefined) throw new AgoraError(`${verb} needs --as <bearer> (a path like Grace or Grace/watch)`, EXIT.usage);
+    // the position: --label, then the launcher's AGORA_LABEL; neither keeps the record's own
+    const label = resolveLabel({ label: values.label, env: process.env });
     // a bearer already held by a live session on this seat is two lines in the room nobody can tell
     // apart; the remedy is a role segment, and it is worth saying before the first post, not after
     const twin = (await listRecords(stateRoot)).filter((r) => r.slug !== session.slug && r.state === "live" && r.record?.bearer === bearer.name);
     for (const t of twin)
       console.error(`agora: WARNING a live session on this seat already carries the bearer ${bearer.name} (session ${t.slug}, pid ${t.record?.pid ?? "-"}); the room cannot tell them apart. Give each a role segment (${bearer.name}/watch, ${bearer.name}/review).`);
     const hp = harnessPid(cfg, process.env);
-    const rec = await writeRecord(sdir, session, { bearer: bearer.name, label: values.label, build, ...hp });
+    const rec = await writeRecord(sdir, session, { bearer: bearer.name, label, build, ...hp });
     const line = `registered ${rec.bearer} as session ${session.slug} (from ${session.source})${rec.pid ? `  pid ${rec.pid} from ${rec.pidSource}` : `  no harness pid found (looked for ${hp.looked.join(", ")}); liveness unknown`}`;
     if (toStderr) console.error(`agora: ${line}`);
     else if (json) console.log(JSON.stringify({ ...rec, dir: sdir }));
@@ -1525,7 +1536,7 @@ async function main(argv) {
       const marker = await readInheritMarker(stateRoot, slug);
       if (!marker) {
         if (json) console.log(JSON.stringify({ type: "resident-inherit", resident: slug, inherited: false, reason: "no marker" }));
-        else console.log(`no inherit marker for resident ${slug}; nothing to inherit. Register with \`agora session --as <Model>/${slug}\`.`);
+        else console.log(`no inherit marker for resident ${slug}; nothing to inherit. Register with \`agora session --as <bearer> --label ${slug}\` (the bearer your profile gives, e.g. <Model>/${slug}).`);
         return EXIT.ok;
       }
       if (marker.from === session.slug) {
@@ -1542,7 +1553,7 @@ async function main(argv) {
       if (!plan.dryRun) await removeInheritMarker(stateRoot, slug);
       if (json) console.log(JSON.stringify({ type: "resident-inherit", resident: slug, inherited: !plan.dryRun, marker: { at: marker.at, context: marker.context, lastInference: marker.lastInference, by: marker.by }, ...plan }));
       else console.log(`${plan.dryRun ? "would inherit" : "inherited"} resident ${slug} from ${plan.from} (cycled ${marker.at}${marker.context ? ` at ${marker.context} context` : ""}): ${plan.cursors.length} cursor${plan.cursors.length === 1 ? "" : "s"}, ${plan.follow.length} follow set${plan.follow.length === 1 ? "" : "s"}, ${plan.ledger.lines} posted id${plan.ledger.lines === 1 ? "" : "s"}${plan.forced ? `; --force took its position in ${plan.conflicts.join(", ")}` : ""}`);
-      if (!plan.dryRun) console.error(`agora: ${plan.from}'s record was not copied; run \`agora session --as <Model>/${slug}\` so this session signs as itself`);
+      if (!plan.dryRun) console.error(`agora: ${plan.from}'s record was not copied; run \`agora session --as <bearer> --label ${slug}\` (the bearer your profile gives, e.g. <Model>/${slug}) so this session signs as itself and holds the position`);
       return EXIT.ok;
     }
     if (action === "cycle") {
@@ -1797,7 +1808,7 @@ async function main(argv) {
         registered: Boolean(record),
       }));
       console.log(JSON.stringify({ type: "build", build }));
-      const usual = usualWake(bearer.name);
+      const usual = usualWake(bearer.name, positionOf(record));
       if (usual) console.log(JSON.stringify({ type: "suggestion", code: "usual-wake", role: usual.role, wake: usual.wake, applied: false }));
       for (const r of rows) {
         const scope = await sessionScope(r.dir);
@@ -1806,7 +1817,7 @@ async function main(argv) {
     } else {
       console.log(`config  ${cfg.path}\nstate   ${sdir}\nbuild   ${buildLabel(build)}\nsession ${session.slug} (from ${session.source})${record ? "" : "  (unregistered: run `agora session --as <bearer>`)"}\nbearer  ${bearer.name} (${cfg.actor.kind}, from ${bearer.source})`);
       for (const line of envPrefix(session, bearer)) console.log(line);
-      const usual = usualWake(bearer.name);
+      const usual = usualWake(bearer.name, positionOf(record));
       if (usual) console.log(`usual --wake for role ${usual.role} is ${usual.wake} (not applied)`);
       if (rows.length) {
         console.log("\nsessions with state here");
@@ -2079,7 +2090,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       return EXIT.ok;
     }
     case "join": {
-      await register(true);
+      const registered = await register(true);
       const key = cursorKey(roomAlias, thread);
       const limit = positive(values.limit, "limit") ?? 20;
       // Keep the position the caller held before this preview moves it. When the frame forces the
@@ -2122,7 +2133,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         console.error(`agora: newest ${shown} of ${asked} requested shown; ${asked - shown} older omitted; ${recovery} is the first recovery page; repeat from its last returned cursor until the omitted window is reached`);
       }
       for (const line of envPrefix(session, bearer)) console.error(`agora: ${line}`);
-      const usual = usualWake(bearer.name);
+      const usual = usualWake(bearer.name, positionOf(registered));
       if (usual) console.error(`agora: usual --wake for role ${usual.role} is ${usual.wake} (not applied)`);
       printMessages(msgs.slice(-limit), json, roomAlias);
       return EXIT.ok;

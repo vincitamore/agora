@@ -1,21 +1,25 @@
 // @ts-check
 /**
  * S07 · model-swap. `coding/Argon` holds a claim in an open thread; the human and the orchestrator
- * address `to: coding`. Mid-thread the model changes, in two arms, each on its own seat:
+ * address `to: coding`. The resident registers as residents do, with its position as the session
+ * label (`--label coding`) behind the model-bearing bearer. Mid-thread the model changes, in two
+ * arms, each on its own seat:
  *
  *   in-place  the same session re-registers as `coding/Sonnet`;
  *   relaunch  the harness stops and a new session inherits the old one's positions and registers
- *             `coding/Sonnet` (what a swap is when the model is chosen at launch).
+ *             `coding/Sonnet` under the same label (what a swap is when the model is chosen at launch).
  *
  * Then the orchestrator's watch sweeps the seat (where the tool announces departures), the human
  * asks again with `to: coding`, the new bearer's `watch --wake mine` reads, and `resident cycle
  * coding` looks for the resident. One principal: both sessions are on the host seat; the seat axis
  * (who holds the account) is the two-principal arm, not run here.
  *
- * Today: a relaunch with a new bearer string reads as a departure (src/session.mjs `departures`
- * compares bearer strings), nothing in the room says a swap happened, `to: coding` reaches the
- * role-first bearer, and the cycle matches `/<slug>` suffixes or a label, so `coding/Sonnet` with
- * no label is not found.
+ * Today: a relaunch under the same position is a restart, not a departure (src/session.mjs
+ * `departures` keys a gone record on its position), `to: coding` reaches the role-first bearer,
+ * and the cycle finds the swapped session by its position (src/resident.mjs
+ * `matchesResidentRecord`). Nothing in the room says a swap happened. Without the label (the red
+ * legs) the old unlabelled behaviour holds: the relaunch reads as a departure and the cycle, which
+ * matches an unlabelled record by its `/<slug>` bearer suffix, does not find `coding/Sonnet`.
  */
 
 import { DEPART_GRACE_MINUTES } from "../../src/session.mjs";
@@ -26,14 +30,15 @@ import { bodyOf, readRoom } from "./lib/room.mjs";
 const ARMS = /** @type {const} */ (["in-place", "relaunch"]);
 const OLD = "coding/Argon";
 const NEW = "coding/Sonnet";
+const POSITION = "coding";
 
 /** @type {Record<string, { bar: string, redLeg: string }>} */
 const checks = {};
 for (const arm of ARMS) {
   checks[`${arm}:departure-lines`] = {
     bar: "0 departure lines after the swap",
-    redLeg: arm === "in-place" ? "the swap is a relaunch instead: the old harness stops and a new session registers the new bearer"
-      : "the relaunch keeps the old bearer (a plain restart, no model change)",
+    redLeg: arm === "in-place" ? "the swap is a relaunch instead, and the resident registers without its position label"
+      : "the resident registers without its position label (the unlabelled shape)",
   };
   checks[`${arm}:swap-line`] = {
     bar: "exactly one line in the room names the old and the new bearer as a swap (a departure line does not count)",
@@ -45,7 +50,7 @@ for (const arm of ARMS) {
   };
   checks[`${arm}:cycle-match`] = {
     bar: "`resident cycle coding` finds the swapped session",
-    redLeg: "the swap registers with `--label coding`",
+    redLeg: "the resident registers without its position label (the unlabelled shape)",
   };
 }
 
@@ -72,7 +77,9 @@ async function runArm(ctx, arm) {
     client = await openClient(seat);
     const ada = new Human(client, seat.alias, "Ada");
     const orchestrator = await Agent.start(seat, { session: "s07-orch", bearer: "orchestrator/Opus", harness: "omp" });
-    const coding = await Agent.start(seat, { session: "s07-coding-1", bearer: OLD, harness: "omp" });
+    // the position: a resident registers with its label; a red leg that drops it is the unlabelled shape
+    const label = red("cycle-match") || red("departure-lines") ? {} : { label: POSITION };
+    const coding = await Agent.start(seat, { session: "s07-coding-1", bearer: OLD, harness: "omp", ...label });
     const question = await ada.post("Please fix the parser fixture.", { to: ["coding"] });
     await ada.title(question.id, "Parser fixture");
     await orchestrator.watchOnce({ fromStart: true });
@@ -80,9 +87,7 @@ async function runArm(ctx, arm) {
     await coding.post("Taking it.", { thread: question.id, claim: "parser-fixture" });
 
     const relaunch = arm === "relaunch" || red("departure-lines");
-    let bearer = red("to-role-reaches-new-bearer") ? "Sonnet/coding" : NEW;
-    if (arm === "relaunch" && red("departure-lines")) bearer = OLD;
-    const label = red("cycle-match") ? { label: "coding" } : {};
+    const bearer = red("to-role-reaches-new-bearer") ? "Sonnet/coding" : NEW;
     const swapped = relaunch
       ? await behaviours.modelSwapRelaunch(coding, { session: "s07-coding-2", bearer, graceMinutes: DEPART_GRACE_MINUTES, ...label })
       : (await behaviours.modelSwapInPlace(coding, bearer, label), coding);
@@ -98,7 +103,8 @@ async function runArm(ctx, arm) {
     const room = await readRoom(seat);
 
     const departures = room.messages.filter((m) => room.isDeparture(m));
-    const swapLines = room.messages.filter((m) => !room.isDeparture(m) && bodyOf(m).includes(OLD) && bodyOf(m).includes(bearer) && OLD !== bearer);
+    // every leg changes the bearer, so a line naming both the old and the new bearer is a swap line
+    const swapLines = room.messages.filter((m) => !room.isDeparture(m) && bodyOf(m).includes(OLD) && bodyOf(m).includes(bearer));
     const bounds = { DEPART_GRACE_MINUTES };
     ctx.check(`${arm}:departure-lines`, 0, departures.length, { bounds });
     ctx.check(`${arm}:swap-line`, 1, swapLines.length);

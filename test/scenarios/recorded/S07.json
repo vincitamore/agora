@@ -1,7 +1,7 @@
 {
   "scenario": "S07",
-  "recordedOn": "2026-10-19",
-  "build": "eb00daa",
+  "recordedOn": "2026-10-20",
+  "build": "7383b3b",
   "checks": {
     "in-place:departure-lines": {
       "today": "green",
@@ -16,12 +16,12 @@
       "observed": true
     },
     "in-place:cycle-match": {
-      "today": "red",
-      "observed": false
+      "today": "green",
+      "observed": true
     },
     "relaunch:departure-lines": {
-      "today": "red",
-      "observed": 1
+      "today": "green",
+      "observed": 0
     },
     "relaunch:swap-line": {
       "today": "red",
@@ -32,8 +32,8 @@
       "observed": true
     },
     "relaunch:cycle-match": {
-      "today": "red",
-      "observed": false
+      "today": "green",
+      "observed": true
     }
   }
 }

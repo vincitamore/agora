@@ -23,7 +23,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { AgoraError, EXIT, writeFileAtomic } from "./core.mjs";
-import { armedAlive, listArmed, listRecords } from "./session.mjs";
+import { armedAlive, listArmed, listRecords, positionOf } from "./session.mjs";
 
 export const RESIDENT_SLUG_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 export const DEFAULT_IDLE_SECONDS = 3900; // a one-hour prompt-cache TTL plus a margin
@@ -160,20 +160,25 @@ export async function measureOmpTranscript(file) {
 }
 
 /**
- * Does a session record belong to resident `slug`? By the `/<slug>` bearer suffix
- * (`Opus/ncu-command`), or by `session --label <slug>` when the bearer has another shape
- * (`Grace/Haiku/messenger` labelled `desk-messenger`).
+ * Does a session record belong to resident `slug`? A record that holds a position (`session
+ * --label`, or AGORA_LABEL from the launcher) belongs to the resident of that position and to no
+ * other, whatever its bearer says: `coding/Opus` labelled `desk.coding` is `desk.coding`, and the
+ * bearer can change with the model while the position stays. A record without a position is
+ * matched as it always was: by the `/<slug>` bearer suffix (`Opus/code-review`), or by a label
+ * equal to the slug.
  * @param {any} record
  * @param {string} slug
  */
 export function matchesResidentRecord(record, slug) {
   if (!record || typeof record.bearer !== "string") return false;
+  const position = positionOf(record);
+  if (position !== undefined) return position === slug;
   return record.bearer.endsWith("/" + slug) || record.label === slug;
 }
 
 /**
  * The verdict for one resident, pure given its inputs. `sessions` are the seat's records with
- * liveness; the resident's session is the newest live record matching `slug` (`/<slug>` suffix or `--label <slug>`).
+ * liveness; the resident's session is the newest live record matching `slug` (`matchesResidentRecord`: its position, else its `/<slug>` bearer suffix).
  * @param {object} a
  * @param {string} a.slug
  * @param {Array<{ slug: string, state: string, record?: any }>} a.sessions

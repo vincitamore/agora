@@ -9,14 +9,14 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  DEFAULT_DEAF_SECONDS, DEFAULT_IDLE_SECONDS, DEFAULT_MAX_CONTEXT, DEFAULT_MIN_CONTEXT, configuredResidents, cycleVerdict, inheritMarkerPath, measureClaudeTranscript, measureOmpTranscript,
+  DEFAULT_DEAF_SECONDS, DEFAULT_IDLE_SECONDS, DEFAULT_MAX_CONTEXT, DEFAULT_MIN_CONTEXT, configuredResidents, cycleVerdict, inheritMarkerPath, matchesResidentRecord, measureClaudeTranscript, measureOmpTranscript,
   readInheritMarker, renderResidentPrompt, restartCommand, transcriptFor, writeInheritMarker,
 } from "../src/resident.mjs";
 import { writeRecord } from "../src/session.mjs";
 
 const run = promisify(execFile);
 const BIN = fileURLToPath(new URL("../bin/agora.mjs", import.meta.url));
-const CLEARED = ["CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_PID", "OMP_SESSION_ID", "OMP_PID", "GROK_SESSION_ID", "GROK_PID", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "HERMES_SESSION_ID", "AGORA_SESSION_PID", "AGORA_SESSION", "AGORA_ACTOR", "AGORA_CONFIG", "AGORA_STATE"];
+const CLEARED = ["CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_PID", "OMP_SESSION_ID", "OMP_PID", "GROK_SESSION_ID", "GROK_PID", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "HERMES_SESSION_ID", "AGORA_SESSION_PID", "AGORA_SESSION", "AGORA_ACTOR", "AGORA_LABEL", "AGORA_CONFIG", "AGORA_STATE"];
 
 /** @param {string[]} args @param {Record<string, string>} env */
 async function agora(args, env) {
@@ -148,6 +148,36 @@ test("transcriptFor finds the harness transcript by session uuid and refuses oth
   assert.equal(missing.status, "unsupported");
 });
 
+test("matchesResidentRecord: a labelled record matches by its position only; an unlabelled one keeps the /<slug> suffix", async () => {
+  const unlabelled = { bearer: "Opus/code-review" };
+  const roleFirst = { bearer: "coding/Opus", label: "desk.coding" };
+  // a labelled record whose bearer also ends /<slug> for another resident: the position decides
+  const crossed = { bearer: "Opus/code-review", label: "desk.review" };
+  const legacy = { bearer: "Opus/code-review", label: "the watch" }; // free text an older build accepted
+  /** @type {Array<[any, string, boolean]>} */
+  const table = [
+    [unlabelled, "code-review", true], [unlabelled, "coding", false],
+    [roleFirst, "desk.coding", true], [roleFirst, "coding", false], [roleFirst, "Opus", false],
+    [crossed, "desk.review", true], [crossed, "code-review", false],
+    [legacy, "code-review", true], [legacy, "the watch", true], // an older label equal to the slug matched, and still does
+    [{ bearer: "Grace/Haiku/messenger", label: "desk-messenger" }, "desk-messenger", true],
+    [{ bearer: "Grace/Haiku/messenger", label: "desk-messenger" }, "messenger", false],
+    [{}, "coding", false], [null, "coding", false],
+  ];
+  for (const [record, slug, want] of table) assert.equal(matchesResidentRecord(record, slug), want, `${JSON.stringify(record)} as ${slug}`);
+
+  // the cycle: the unlabelled resident's verdict is unchanged, the labelled one is found by position
+  const now = new Date("2026-01-02T00:00:00.000Z");
+  const live = (/** @type {string} */ slug, /** @type {any} */ record) => ({ slug, state: "live", record: { ...record, startedAt: "2026-01-01T00:00:00.000Z", source: "CLAUDE_CODE_SESSION_ID" } });
+  const sessions = [live("u", unlabelled), live("p", roleFirst), live("x", crossed)];
+  const measure = async () => ({ status: /** @type {const} */ ("measured"), lastInference: "2026-01-01T12:00:00.000Z", context: 300_000, file: "t" });
+  const verdict = async (/** @type {string} */ slug) => /** @type {any} */ (await cycleVerdict({ slug, now, sessions, measure }));
+  assert.deepEqual([(await verdict("code-review")).session, (await verdict("code-review")).action], ["u", "cycle"], "the unlabelled resident: same session, same verdict");
+  assert.equal((await verdict("desk.coding")).session, "p");
+  assert.equal((await verdict("desk.review")).session, "x");
+  assert.match(String((await verdict("coding")).reason), /no live session/, "a role-first bearer is not a position");
+});
+
 test("cycleVerdict: cold AND large cycles; warm, small, unsupported and absent each say why", async () => {
   const now = new Date("2026-01-02T00:00:00.000Z");
   const rec = (/** @type {string} */ bearer, /** @type {string} */ startedAt = "2026-01-01T00:00:00.000Z") => ({ slug: `claude-code-${bearer.replace("/", "-")}`, state: "live", record: { bearer, startedAt, source: "CLAUDE_CODE_SESSION_ID" } });
@@ -255,7 +285,7 @@ test("CLI: prompt appends the shipped block; cycle measures the seat, writes the
   assert.deepEqual(irow.cursors, ["room-a"]);
   assert.equal(await readFile(path.join(s.state, "sessions", "claude-code-9999", "room-a.cursor"), "utf8"), "7\n");
   assert.equal(existsSync(inheritMarkerPath(s.state, "r1")), false, "the marker is consumed");
-  assert.match(inh.stderr, /session --as <Model>\/r1/);
+  assert.match(inh.stderr, /session --as <bearer> --label r1` \(the bearer your profile gives, e\.g\. <Model>\/r1\)/);
 
   const again = await agora(["resident", "inherit", "r1", "--json"], succ);
   assert.equal(again.code, 0);

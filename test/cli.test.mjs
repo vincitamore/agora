@@ -38,7 +38,7 @@ async function agora(args, env, opts = {}) {
     // tool reads all three: a test asserting what a watch printed must not depend on which harness
     // ran it. Cleared here, and a test that wants one sets it.
     const clean = { ...process.env };
-    for (const name of ["CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_PID", "GROK_SESSION_ID", "GROK_PID", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "HERMES_SESSION_ID", "AGORA_SESSION_PID", "AGORA_SESSION", "AGORA_ACTOR", "AGORA_CONFIG", "AGORA_STATE"]) delete clean[name];
+    for (const name of ["CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_PID", "OMP_SESSION_ID", "OMP_PID", "GROK_SESSION_ID", "GROK_PID", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "HERMES_SESSION_ID", "AGORA_SESSION_PID", "AGORA_SESSION", "AGORA_ACTOR", "AGORA_LABEL", "AGORA_CONFIG", "AGORA_STATE"]) delete clean[name];
     const child = run(process.execPath, [BIN, ...args], { env: { ...clean, ...env }, windowsHide: true, ...(opts.cwd ? { cwd: opts.cwd } : {}) });
     child.child.stdin?.end(); // an open stdin pipe would make `post --stdin` wait forever
     const { stdout, stderr } = await child;
@@ -225,7 +225,7 @@ test("cli: session --as registers once and every later call signs as the record;
 
     let r = await agora(["session"], A);
     assert.equal(r.code, 2, "registering needs --as");
-    r = await agora(["session", "--as", "Grace/watch", "--label", "the watch"], A);
+    r = await agora(["session", "--as", "Grace/watch", "--label", "desk.watch"], A);
     assert.equal(r.code, 0);
     assert.match(r.stdout, /registered Grace\/watch as session a \(from AGORA_SESSION\)  pid \d+ from CLAUDE_PID/);
     r = await agora(["post", "down", "hello"], A);
@@ -254,6 +254,51 @@ test("cli: session --as registers once and every later call signs as the record;
     assert.deepEqual(r.stdout.trim().split("\n").map((/** @type {string} */ l) => JSON.parse(l).slug), ["a"]);
     r = await agora(["doctor", "--offline"], A);
     assert.match(r.stdout, /sessions with state here/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("cli: the position is --label, then AGORA_LABEL, then the record's own; it must be a position; join and doctor take the role from it", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const cfgPath = path.join(dir, "agora.json");
+    await writeFile(cfgPath, JSON.stringify({
+      actor: { name: "Grace", kind: "agent" },
+      rooms: { down: { transport: "local", path: path.join(dir, "down.ndjson") } },
+    }));
+    const root = path.join(dir, "state");
+    const A = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "a", CLAUDE_PID: "" };
+    const label = async () => JSON.parse(await readFile(path.join(root, "sessions", "a", "session.json"), "utf8")).label;
+
+    let r = await agora(["session", "--as", "Grace/Opus", "--label", "the watch"], A);
+    assert.equal(r.code, 2, "a free-text label is not a position");
+    assert.match(r.stderr, /--label must be a position like coding or desk\.messenger/);
+    r = await agora(["session", "--as", "Grace/Opus"], { ...A, AGORA_LABEL: "Desk.Messenger" });
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /AGORA_LABEL must be a position/);
+    for (const bad of ["desk..messenger", ".desk", "desk.", "-desk", "a".repeat(65)]) {
+      r = await agora(["session", "--as", "Grace/Opus", "--label", bad], A);
+      assert.equal(r.code, 2, bad);
+    }
+
+    r = await agora(["session", "--as", "Grace/Opus"], { ...A, AGORA_LABEL: "desk.messenger" });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(await label(), "desk.messenger", "the launcher's AGORA_LABEL is the position");
+    r = await agora(["session", "--as", "Grace/Opus", "--label", "desk.coding"], { ...A, AGORA_LABEL: "desk.messenger" });
+    assert.equal(await label(), "desk.coding", "--label wins over AGORA_LABEL");
+    r = await agora(["session", "--as", "Grace/Sonnet"], A);
+    assert.equal(await label(), "desk.coding", "neither: the record keeps its position while the bearer changes");
+
+    // the role comes from the position's last segment, not from the bearer
+    r = await agora(["join", "down", "--as", "Grace/Opus", "--label", "desk.messenger"], A);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stderr, /usual --wake for role messenger is all \(not applied\)/);
+    r = await agora(["doctor", "--offline", "--json"], A);
+    const suggestion = r.stdout.trim().split("\n").map((/** @type {string} */ l) => JSON.parse(l)).find((/** @type {any} */ o) => o.type === "suggestion");
+    assert.deepEqual(suggestion, { type: "suggestion", code: "usual-wake", role: "messenger", wake: "all", applied: false });
+    r = await agora(["join", "down", "--as", "messenger/Opus", "--label", "coding"], A);
+    assert.match(r.stderr, /usual --wake for role coding is mine \(not applied\)/, "a single-segment position is the role");
   } finally {
     await cleanup();
   }

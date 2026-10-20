@@ -6,6 +6,7 @@ import { readFile, readdir, writeFile } from "node:fs/promises";
 import { AgoraError, readCursor, readCursorFile, writeCursor } from "../src/core.mjs";
 import {
   BEARER_RE,
+  POSITION_RE,
   DEFAULT_SESSION_FROM,
   appendPosted,
   armedAlive,
@@ -23,12 +24,14 @@ import {
   liveness,
   postedPids,
   readCursorSeeded,
+  positionOf,
   readPosted,
   readArmed,
   readRecord,
   releaseDeparture,
   removeSession,
   resolveBearer,
+  resolveLabel,
   resolveSession,
   sessionDir,
   sessionScope,
@@ -391,6 +394,58 @@ test("departures: a gone session whose bearer is live again on the seat is a res
     await writeRecord(sessionDir(dir, sess("new")), sess("new"), { bearer: "Opus/room-a", pid: 1, pidSource: "TEST", now: ago(10) });
     gone = await departures(dir, { selfSlug: "me", roomKey: "r", kill, boot });
     assert.deepEqual(gone.map((g) => g.slug), ["new"]);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("positions: the label grammar, positionOf, and resolveLabel's order (--label, then AGORA_LABEL, else the record keeps its own)", () => {
+  for (const ok of ["coding", "desk.messenger", "code-review", "desk.coding-2", "a_b.c", "a".repeat(64)]) assert.ok(POSITION_RE.test(ok), ok);
+  for (const bad of ["", "Desk", "desk..x", ".desk", "desk.", "-desk", "desk.-x", "desk x", "desk/x", "a".repeat(65)]) assert.ok(!POSITION_RE.test(bad), bad);
+  assert.equal(positionOf({ label: "desk.coding" }), "desk.coding");
+  assert.equal(positionOf({ label: "the watch" }), undefined, "a free-text label an older build wrote holds no position");
+  assert.equal(positionOf({}), undefined);
+  assert.equal(positionOf(undefined), undefined);
+  assert.equal(resolveLabel({ label: "desk.coding", env: { AGORA_LABEL: "desk.messenger" } }), "desk.coding");
+  assert.equal(resolveLabel({ env: { AGORA_LABEL: " desk.messenger " } }), "desk.messenger");
+  assert.equal(resolveLabel({ env: {} }), undefined, "neither: writeRecord keeps the record's label");
+  assert.throws(() => resolveLabel({ label: "the watch", env: {} }), /--label must be a position/);
+  assert.throws(() => resolveLabel({ env: { AGORA_LABEL: "" } }), /AGORA_LABEL must be a position/);
+});
+
+test("departures: a gone session whose POSITION is held by a live session is a restart even under a new bearer; an unlabelled one is matched by its bearer alone", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const sess = (/** @type {string} */ slug) => ({ slug, source: "x", explicit: true });
+    const dead = () => { const e = /** @type {NodeJS.ErrnoException} */ (new Error("gone")); e.code = "ESRCH"; throw e; };
+    const kill = (/** @type {number} */ pid) => { if (pid !== process.pid) dead(); };
+    const boot = bootEpoch();
+    const ago = (/** @type {number} */ minutes) => new Date(Date.now() - minutes * 60_000);
+    /** @param {string} slug @param {string} bearer @param {string | undefined} label @param {boolean} live */
+    const mk = async (slug, bearer, label, live) => {
+      await writeRecord(sessionDir(dir, sess(slug)), sess(slug), { bearer, ...(label ? { label } : {}), pid: live ? process.pid : 1, pidSource: "TEST", ...(live ? {} : { now: ago(10) }) });
+      await writeCursor(sessionDir(dir, sess(slug)), "r", "1");
+    };
+    // a model swap by relaunch: same position, new bearer
+    await mk("swap-old", "coding/Argon", "desk.coding", false);
+    await mk("swap-new", "coding/Sonnet", "desk.coding", true);
+    // unlabelled, model changed: a departure, exactly as before
+    await mk("bare-old", "review/Argon", undefined, false);
+    await mk("bare-new", "review/Sonnet", undefined, true);
+    // a labelled session whose position nobody holds now, though a live session shares its bearer's
+    // role: the position is the key, the role-first bearer is not
+    await mk("moved-old", "build/Argon", "desk.build", false);
+    await mk("moved-new", "build/Sonnet", "lab.build", true);
+    // a labelled session whose bearer is live again without the label: still a restart (the line
+    // would otherwise name one bearer as both gone and here)
+    await mk("relabel-old", "design/Opus", "desk.design", false);
+    await mk("relabel-new", "design/Opus", undefined, true);
+    const gone = await departures(dir, { selfSlug: "me", roomKey: "r", kill, boot });
+    assert.deepEqual(gone.map((g) => g.slug).sort(), ["bare-old", "moved-old"]);
+    for (const slug of ["swap-old", "relabel-old"]) {
+      const marker = JSON.parse(await readFile(path.join(sessionDir(dir, sess(slug)), "departed", "r.json"), "utf8"));
+      assert.equal(marker.reason, "restarted", slug);
+    }
   } finally {
     await cleanup();
   }

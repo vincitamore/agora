@@ -1,20 +1,22 @@
 // @ts-check
 /**
- * S23 · succession. A resident `coding`, registered in the shape the arming sequence documents
- * (`<Model>/<slug>`: `Opus/coding`), whose Claude Code transcript (fabricated, in the seat's fake
- * home) is cold and large, holds a live armed watch, an open claim, and a last post after its watch
- * stopped. `resident cycle coding` judges it; a successor session runs `resident inherit`, registers
- * the same bearer, and reads the room. A second resident, `review`, is registered role-first
- * (`review/Opus`, the grammar `to: <role>` reaches) and the cycle is asked to find it.
+ * S23 · succession. A resident `coding`, registered in the unlabelled shape older arming sequences
+ * document (`<Model>/<slug>`: `Opus/coding`, no `--label`), whose Claude Code transcript
+ * (fabricated, in the seat's fake home) is cold and large, holds a live armed watch, an open claim,
+ * and a last post after its watch stopped. `resident cycle coding` judges it; a successor session
+ * runs `resident inherit`, registers the same bearer, and reads the room. Keeping this resident
+ * unlabelled pins that an unlabelled resident's succession is unchanged by position keys. A second
+ * resident, `review`, is registered role-first (`review/Opus`, the grammar `to: <role>` reaches)
+ * with its position as the session label (`--label review`), and the cycle is asked to find it.
  *
  * Every bound runs at its configured value: the cycle's defaults (DEFAULT_IDLE_SECONDS,
  * DEFAULT_MIN_CONTEXT, DEFAULT_MAX_CONTEXT, DEFAULT_DEAF_SECONDS) are not overridden, the transcript
  * is built against them, and the departure grace (DEPART_GRACE_MINUTES) is passed by ageing the
  * predecessor's record rather than by a flag.
  *
- * Today: the mechanics hold (verdict, marker, cursors, ledger, no departure); the cycle matches a
- * resident by a `/<slug>` bearer suffix or a `--label`, so a role-first bearer with no label is
- * not found (src/resident.mjs `matchesResidentRecord`).
+ * Today: the mechanics hold (verdict, marker, cursors, ledger, no departure), and the cycle finds
+ * the role-first resident by its position (src/resident.mjs `matchesResidentRecord`). Without the
+ * label (the red leg) it is not found: an unlabelled record is matched by a `/<slug>` bearer suffix.
  */
 
 import { existsSync } from "node:fs";
@@ -43,7 +45,7 @@ export const scenario = {
     "cursors-equal": { bar: "the successor's saved cursor equals the predecessor's", redLeg: "the successor runs `cursor --now` after inheriting" },
     "own-posts-echoed": { bar: "0 of the predecessor's own posts are delivered to the successor", redLeg: "the inherited posted ledger is lost (removed after the inherit)" },
     "departure-lines": { bar: "0 departure lines for the succession", redLeg: "the successor registers another bearer (Sonnet/coding)" },
-    "name-match-role-first": { bar: "the cycle finds a resident registered role-first (review/Opus) by its slug", redLeg: "the resident registers with `--label review`" },
+    "name-match-role-first": { bar: "the cycle finds a resident registered role-first (review/Opus) by its position label", redLeg: "the resident registers without its position label (the unlabelled shape)" },
   },
   async run(ctx) {
     const seat = await openSeat();
@@ -98,7 +100,7 @@ export const scenario = {
       const room = await readRoom(seat);
       ctx.check("departure-lines", 0, room.messages.filter((m) => room.isDeparture(m)).length, { bounds: { DEPART_GRACE_MINUTES } });
 
-      const reviewer = await Agent.start(seat, { session: REVIEWER, bearer: "review/Opus", harness: "claude", ...(ctx.red("name-match-role-first") ? { label: "review" } : {}) });
+      const reviewer = await Agent.start(seat, { session: REVIEWER, bearer: "review/Opus", harness: "claude", ...(ctx.red("name-match-role-first") ? {} : { label: "review" }) });
       const found = await seat.cli(["resident", "cycle", "review", "--dry-run", "--json"]);
       const frow = JSON.parse(found.stdout.trim().split(/\r?\n/).pop() || "{}");
       ctx.check("name-match-role-first", true, frow.session === reviewer.slug, { note: String(frow.reason ?? frow.action ?? "") });

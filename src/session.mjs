@@ -135,6 +135,45 @@ export function resolveBearer(cfg, { as, env, record }) {
 }
 
 /**
+ * A position is what a session is for on its seat, kept across model swaps, restarts and
+ * successions while the bearer changes with the model: the session label. Lower-case segments of
+ * letters, digits, `_` and `-`, joined by `.` (`coding`, `desk.messenger`), at most 64 characters.
+ * `.` is the separator because `-` already sits inside role names (`code-review`). Every position
+ * is a valid resident slug, so `resident cycle <position>` names it.
+ */
+export const POSITION_RE = /^(?=.{1,64}$)[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9][a-z0-9_-]*)*$/;
+
+/**
+ * The position a record holds: its label when the label is a position. A record without a label,
+ * or with a free-text label an older build accepted (`"the watch"`), holds none and is matched by
+ * its bearer as before.
+ * @param {{ label?: unknown } | undefined} record
+ * @returns {string | undefined}
+ */
+export function positionOf(record) {
+  const label = record?.label;
+  return typeof label === "string" && POSITION_RE.test(label) ? label : undefined;
+}
+
+/**
+ * The label a registration writes: --label on the call, then AGORA_LABEL (a launcher's export, the
+ * way AGORA_ACTOR feeds the bearer). Undefined when neither is set, and the record keeps the label
+ * it has. Either source must be a position.
+ * @param {{ label?: string, env: NodeJS.ProcessEnv }} opts
+ * @returns {string | undefined}
+ */
+export function resolveLabel({ label, env }) {
+  const pick = label !== undefined ? { value: label, source: "--label" }
+    : env.AGORA_LABEL !== undefined ? { value: env.AGORA_LABEL, source: "AGORA_LABEL" }
+    : undefined;
+  if (!pick) return undefined;
+  const value = pick.value.trim();
+  if (!POSITION_RE.test(value))
+    throw new AgoraError(`${pick.source} must be a position like coding or desk.messenger (lower-case letters, digits, _ -; segments joined by .; at most 64 characters); ${JSON.stringify(pick.value)} is not one`, EXIT.usage);
+  return value;
+}
+
+/**
  * The saved position for this session. Absent in the session directory: seed once, read-only, from the
  * file of the same name at the state root (the single-session layout), and write it forward. A file
  * that exists but holds null (after `cursor --reset`) is a position, not an absence: it never seeds.
@@ -553,10 +592,12 @@ const departedDir = (/** @type {string} */ dir) => path.join(dir, "departed");
  * minutes are required before anyone is declared gone) and newer than the stale horizon
  * (older than that, the record is pruned, not announced). The caller announces each one
  * after winning `claimDeparture`, so several watchers on the seat post one line, not one each.
- * A gone record whose BEARER is live again under another session on this seat is a restart, not a
- * departure: announcing it produces the self-contradicting line "X is no longer running ... still
- * here: X" (measured 2026-09-09 on a seat whose residents relaunch under systemd), so it is marked
- * as handled for the room and never announced.
+ * A gone record whose POSITION (its label, `positionOf`) is held again by a live session on this
+ * seat is a restart, not a departure: a model swap by relaunch keeps the position and changes the
+ * bearer. So is a gone record whose BEARER is live again under another session: announcing it
+ * produces the self-contradicting line "X is no longer running ... still here: X" (measured
+ * 2026-09-09 on a seat whose residents relaunch under systemd). An unlabelled record is matched by
+ * its bearer alone, as before. Either way it is marked as handled for the room and never announced.
  * @param {string} stateRoot
  * @param {{ selfSlug: string, roomKey: string, graceMinutes?: number, staleHours?: number, now?: Date, kill?: (pid: number, sig: 0) => void, boot?: number }} opts
  */
@@ -567,15 +608,19 @@ export async function departures(stateRoot, opts) {
   /** @type {Array<{ slug: string, dir: string, record: SessionRecord }>} */
   const out = [];
   const records = await listRecords(stateRoot, { kill: opts.kill, boot: opts.boot });
-  const liveBearers = new Set(records.filter((r) => r.state === "live" && r.record).map((r) => /** @type {SessionRecord} */ (r.record).bearer));
+  const live = records.filter((r) => r.state === "live" && r.record).map((r) => /** @type {SessionRecord} */ (r.record));
+  const liveBearers = new Set(live.map((rec) => rec.bearer));
+  const livePositions = new Set(live.map(positionOf).filter((p) => p !== undefined));
   for (const r of records) {
     if (r.slug === opts.selfSlug || !r.record || r.state !== "gone") continue;
     const age = ageHours(r.record, now);
     if (age < grace || age > stale) continue;
     if (existsSync(path.join(departedDir(r.dir), `${opts.roomKey}.json`))) continue;
-    if (liveBearers.has(r.record.bearer)) {
-      // a restart: the bearer answers under a new session; record that this room was not told,
-      // on purpose, so no later poll announces the old session once the successor is gone too
+    const position = positionOf(r.record);
+    if ((position !== undefined && livePositions.has(position)) || liveBearers.has(r.record.bearer)) {
+      // a restart: the position or the bearer answers under a new session; record that this room
+      // was not told, on purpose, so no later poll announces the old session once the successor is
+      // gone too
       await markRestarted(r.dir, opts.roomKey, opts.selfSlug);
       continue;
     }
@@ -633,7 +678,7 @@ export async function sessionScope(dir) {
 }
 
 /**
- * Mark a gone session as superseded by a live successor of the same bearer in one room, so it is
+ * Mark a gone session as superseded by a live successor of the same position or bearer in one room, so it is
  * never announced there. Same file as `claimDeparture` (that is what silences it), with a reason.
  * @param {string} dir the gone session's directory @param {string} roomKey @param {string} by
  */

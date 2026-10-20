@@ -6,6 +6,7 @@ import path from 'node:path';
 import { AgoraError, readCursorFile } from './core.mjs';
 import { readArray, readEnum, readRecord, readString, readTimestamp } from './protocol/common.mjs';
 import { matchesAddress, parseTrailers } from './trailers.mjs';
+import { positionOf } from './session.mjs';
 
 export class CarryCheckError extends AgoraError {
   /** @param {string} code */
@@ -464,6 +465,8 @@ export async function requireCarrySuccessor(stateRoot, successor, boundary, room
 /** Establish durable uncertainty before the watch can deliver. The lifetime
  * sentinel covers failure to write even the first batch sentinel. Only a clean
  * stop removes it; a crash or capture failure cannot claim complete coverage.
+ * `pin` is the registration the guard holds the watch to: the bearer, and the
+ * position when the record holds one (see `prepareCarryBatch`).
  * @param {string} dir */
 export async function armCarryCapture(dir) {
   let record;
@@ -495,7 +498,7 @@ export async function armCarryCapture(dir) {
   let failed = false;
   /** @type {string|undefined} */ let batch;
   return {
-    bearer: record.bearer,
+    pin: { bearer: record.bearer, position: positionOf(record) },
     async begin() {
       batch = path.join(evidence, `${randomUUID()}.pending`);
       try { await persist(batch); } catch { failed = true; }
@@ -513,18 +516,23 @@ export async function armCarryCapture(dir) {
 
 /** Prepared evidence precedes the external delivery. An unregistered watch has no
  * bearer evidence: it writes nothing and later checks refuse unknown coverage.
+ * A guarded arm pins its registration: losing it, or a different bearer, is
+ * incomplete capture. A different bearer under the pinned position is not: that
+ * is a model change, recorded by the registration itself, and the evidence that
+ * follows carries the new bearer. A pin without a position is the bearer alone.
  * @param {string} dir @param {string} room
  * @param {import('./core.mjs').Message[]} messages
  * @param {{id?:string,name?:string}|undefined} seat
- * @param {string} [expectedBearer] Registration pinned by a guarded arm. */
-export async function prepareCarryBatch(dir, room, messages, seat, expectedBearer) {
+ * @param {{bearer:string,position?:string}} [pin] Registration pinned by a guarded arm. */
+export async function prepareCarryBatch(dir, room, messages, seat, pin) {
   let record;
   try { record = JSON.parse(await readFile(path.join(dir, 'session.json'), 'utf8')); }
   catch {
-    if (expectedBearer !== undefined) throw new CarryCheckError('carry-registration-unavailable');
+    if (pin !== undefined) throw new CarryCheckError('carry-registration-unavailable');
     return new Map();
   }
-  if (expectedBearer !== undefined && record?.bearer !== expectedBearer)
+  if (pin !== undefined && record?.bearer !== pin.bearer
+    && !(pin.position !== undefined && typeof record?.bearer === 'string' && positionOf(record) === pin.position))
     throw new CarryCheckError('carry-registration-changed');
   if (typeof record?.bearer !== 'string') return new Map();
   /** @type {Map<string,ReturnType<typeof validateCarryEvent>>} */ const pending = new Map();

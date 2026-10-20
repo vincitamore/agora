@@ -10,7 +10,7 @@ import { writeCursor } from '../src/core.mjs';
 import { inheritSession, readRecord, writeRecord } from '../src/session.mjs';
 import { watch } from '../src/watch.mjs';
 import { NativeRoomService } from '../src/native-service.mjs';
-import { appendCarryEvent, beginCarryPost, captureCarryPost, carryRefKey, checkCarryBoundary, inheritCarryEvidence, mandateDigest, readCarryEvidence, readMandate, recordCarryCursorMove, requireCarrySuccessor, sealCarryBoundary, validateCarryEvent, validateMandate } from '../src/carry-check.mjs';
+import { appendCarryEvent, armCarryCapture, beginCarryPost, captureCarryPost, carryRefKey, checkCarryBoundary, inheritCarryEvidence, mandateDigest, prepareCarryBatch, readCarryEvidence, readMandate, recordCarryCursorMove, requireCarrySuccessor, sealCarryBoundary, validateCarryEvent, validateMandate } from '../src/carry-check.mjs';
 import { tmp } from './helpers.mjs';
 
 const BIN = fileURLToPath(new URL('../bin/agora.mjs', import.meta.url));
@@ -343,6 +343,69 @@ test(`capture ${phase} failure preserves delivery and fresh-process coverage, co
     assert.equal(result.issues.some((/** @type {{code:string}} */ i) => i.code === 'delivery-coverage-unknown'),
       phase.startsWith('prepare') || phase.startsWith('registration-') || phase === 'accept' || phase === 'cursor');
   } finally { await t.cleanup(); }
+});
+
+test('the guard pins the position: a changed bearer under the pinned position is a model change, not incomplete capture; without a position the bearer alone is pinned', async () => {
+  const t = await tmp();
+  try {
+    const s = { slug: 's1', source: 'AGORA_SESSION', explicit: true };
+    const m = { id: 'm1', cursor: '1', room: 'backroom', ts: mandate.issuedAt,
+      author: { id: 'peer', name: 'peer', kind: /** @type {'agent'} */ ('agent') }, text: 'For the coder\n\nto: coding/Sonnet' };
+    const seat = { id: 'seat' };
+    const rereg = (/** @type {string} */ bearer, /** @type {string|undefined} */ label) =>
+      writeFile(path.join(t.dir, 'session.json'), JSON.stringify({ slug: 's1', source: 'AGORA_SESSION', bearer, ...(label ? { label } : {}) }));
+
+    await writeRecord(t.dir, s, { bearer: 'coding/Argon', label: 'desk.coding' });
+    const capture = await armCarryCapture(t.dir);
+    assert.deepEqual(capture?.pin, { bearer: 'coding/Argon', position: 'desk.coding' });
+    await writeRecord(t.dir, s, { bearer: 'coding/Sonnet' }); // the record keeps its label: same position, new model
+    const prepared = await prepareCarryBatch(t.dir, 'backroom', [m], seat, capture?.pin);
+    assert.equal(prepared.get('m1')?.bearer, 'coding/Sonnet', 'the evidence that follows carries the new bearer');
+    // the position moved, or was dropped, with the bearer: incomplete capture, as before
+    await rereg('coding/Sonnet', 'lab.coding');
+    await assert.rejects(prepareCarryBatch(t.dir, 'backroom', [m], seat, capture?.pin), { code: 'carry-registration-changed' });
+    await rereg('coding/Sonnet', undefined);
+    await assert.rejects(prepareCarryBatch(t.dir, 'backroom', [m], seat, capture?.pin), { code: 'carry-registration-changed' });
+    // the same bearer passes whatever its label, as before
+    await rereg('coding/Argon', undefined);
+    await prepareCarryBatch(t.dir, 'backroom', [m], seat, capture?.pin);
+
+    // an unlabelled arm pins the bearer alone: any other bearer is incomplete capture
+    await rereg('coding/Argon', undefined);
+    const bare = await armCarryCapture(t.dir);
+    assert.deepEqual(bare?.pin, { bearer: 'coding/Argon', position: undefined });
+    await rereg('coding/Sonnet', 'desk.coding');
+    await assert.rejects(prepareCarryBatch(t.dir, 'backroom', [m], seat, bare?.pin), { code: 'carry-registration-changed' });
+  } finally { await t.cleanup(); }
+});
+
+test('a watch whose session swaps model under its position mid-watch completes its capture; the same swap without a position leaves it unknown', async () => {
+  for (const label of ['desk.builder', undefined]) {
+    const t = await tmp();
+    try {
+      const dir = path.join(t.dir, 'sessions', 's1');
+      const s = { slug: 's1', source: 'AGORA_SESSION', explicit: true };
+      await writeRecord(dir, s, { bearer: mandate.bearer, ...(label ? { label } : {}) });
+      const transport = /** @type {import('../src/core.mjs').Transport} */ ({ kind: 'local', room: 'backroom', threads: false,
+        read: async () => {
+          await writeRecord(dir, s, { bearer: 'Bruno/uber-wizard-2' }); // relaunch-free swap: the record keeps its label
+          return [{ id: 'required', cursor: '1', room: 'backroom', ts: mandate.issuedAt,
+            author: { id: 'peer', kind: /** @type {'agent'} */ ('agent') }, text: 'Required\n\nto: Bruno/uber-wizard-2' }];
+        } });
+      let delivered = 0;
+      await watch(transport, { stateDir: dir, key: 'backroom', mode: 'once', sleep: async () => {}, seat: { id: 'seat' },
+        onBatch: async (messages, batch) => { delivered += messages.length; await batch.checkpoint(messages[0]); } });
+      assert.equal(delivered, 1);
+      const { events, issues } = await readCarryEvidence(dir);
+      if (label) {
+        assert.deepEqual(issues, [], 'no capture left unknown');
+        assert.deepEqual(events.filter(e => e.kind === 'delivery-prepared').map(e => e.bearer), ['Bruno/uber-wizard-2']);
+      } else {
+        assert.ok(issues.length >= 1, 'an unlabelled bearer change is incomplete capture, as before');
+        for (const issue of issues) assert.match(issue, /^delivery-coverage-unknown:/);
+      }
+    } finally { await t.cleanup(); }
+  }
 });
 
 test('unwritable evidence at arm refuses by name before any read or delivery', async () => {
