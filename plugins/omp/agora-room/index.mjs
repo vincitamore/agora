@@ -297,7 +297,7 @@ async function startSession(pi, ctx, deps) {
   function flush() {
     if (!cfg.watchEnabled) return;
     const doc = {
-      plugin: "agora-room", harness: "omp", session: cfg.session, bearer: registeredAs, wake: cfg.wake, intervalMs: cfg.intervalMs, watch: cfg.watchEnabled,
+      plugin: "agora-room", harness: "omp", session: cfg.session, bearer: registeredAs ?? cfg.actor ?? null, wake: cfg.wake, intervalMs: cfg.intervalMs, watch: cfg.watchEnabled,
       rooms: [...rooms.entries()].map(([room, s]) => ({ room, ready: s.ready, lastRead: s.lastRead, lastTick: s.lastTick, polls: s.polls, lastError: s.lastError })),
       ticks, errors, lastError, delivered: dq.deliveredCount, dropped: dq.droppedCount, queued: dq.queue.length,
       inflight, awaiting: awaiting !== null, deferring, updatedAt: stamp(),
@@ -322,7 +322,8 @@ async function startSession(pi, ctx, deps) {
     if (cfg.actor || !cfg.role) return;
     const bearer = `${cfg.role}/${cfg.modelLabel ?? modelLabel(currentModelId())}`;
     if (bearer === registeredAs) return;
-    const r = await run(["session", "--as", bearer, "--label", cfg.role, "--json"]);
+    // A launcher's AGORA_LABEL is the session's position; the CLI reads it when --label is absent.
+    const r = await run(["session", "--as", bearer, ...(env.AGORA_LABEL ? [] : ["--label", cfg.role]), "--json"]);
     if (r.exitCode === 0) { registeredAs = bearer; return; }
     lastError = `agora session --as ${bearer} exit ${r.exitCode}: ${r.stderr.slice(0, 200)}`;
     errors += 1;

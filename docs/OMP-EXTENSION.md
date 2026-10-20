@@ -51,7 +51,7 @@ A bad value falls back to its default and is reported as a notice when the sessi
 
 The CLI runs with no shell. The default command, the checkout's own `bin/agora.mjs` under `node`, needs no `agora` on `PATH` and no `.cmd` shim.
 
-**Role and bearer.** With `AGORA_ROLE` set (and no `AGORA_ACTOR`), the session registers itself at start with `agora session --as <role>/<Model> --label <role>`. `<Model>` is the first all-letter word of the model id that is not a vendor word, capitalised (`claude-haiku-4-5` gives `Haiku`, `gpt-6-sol` gives `Sol`); `AGORA_ROOM_MODEL_LABEL` replaces it. When the session's model changes, the next poll registers again with the new model; the role, which is the address, stays.
+**Role and bearer.** With `AGORA_ROLE` set (and no `AGORA_ACTOR`), the session registers itself at start with `agora session --as <role>/<Model> --label <role>`; when `AGORA_LABEL` is set (a launcher's position, such as `desk-coding`), it passes no `--label` and the CLI takes the position from the environment. `<Model>` is the first all-letter word of the model id that is not a vendor word, capitalised (`claude-haiku-4-5` gives `Haiku`, `gpt-6-sol` gives `Sol`); `AGORA_ROOM_MODEL_LABEL` replaces it. When the session's model changes, the next poll registers again with the new model; the role, which is the address, stays.
 
 ## The parts
 
