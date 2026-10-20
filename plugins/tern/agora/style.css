@@ -1,0 +1,131 @@
+/* The Agora pane (block agora.room). Colours are Tern's theme tokens only (--t1..--t3 text,
+ * --l1..--l3 lines, --accent, --ok, --warn, --bad, --sf-card-bg, --sans, --mono), so the pane
+ * follows the theme in light and dark. One type scale and one spacing scale, below; glyphs are
+ * monochrome. */
+
+[data-surface="plugin.agora.room"] {
+  --ag-s1: 4px;
+  --ag-s2: 8px;
+  --ag-s3: 12px;
+  --ag-s4: 16px;
+  --ag-caption: 500 11px/1.35 var(--sans);
+  --ag-body: 400 12.5px/1.45 var(--sans);
+  --ag-label: 600 10.5px/1.2 var(--sans);
+  --ag-heading: 650 15px/1.2 var(--sans);
+}
+
+[data-surface="plugin.agora.room"].sf-main {
+  gap: var(--ag-s3);
+  padding: var(--ag-s3) var(--ag-s4) var(--ag-s4);
+  font: var(--ag-body);
+  color: var(--t2);
+}
+
+[data-surface="plugin.agora.room"].sf-dock {
+  padding: var(--ag-s1) var(--ag-s3);
+  box-shadow: inset 0 1px 0 var(--l2);
+}
+
+/* type */
+.ag-heading { font: var(--ag-heading); color: var(--t1); }
+.ag-title { font: 650 13px/1.35 var(--sans); color: var(--t1); white-space: normal; overflow-wrap: anywhere; }
+.ag-label { font: var(--ag-label); letter-spacing: 0.05em; text-transform: uppercase; color: var(--t3); }
+.ag-caption { font: var(--ag-caption); color: var(--t3); font-variant-numeric: tabular-nums; white-space: normal; overflow-wrap: anywhere; }
+.ag-caption.ok { color: var(--ok); }
+.ag-caption.warn { color: var(--warn); }
+.ag-caption.accent { color: var(--accent); }
+.ag-caption.mono { font-family: var(--mono); white-space: pre-wrap; }
+
+/* layout */
+.ag-row { display: flex; flex-direction: row; align-items: center; gap: var(--ag-s2); }
+.ag-row.wrap { flex-wrap: wrap; }
+.ag-chips { display: flex; flex-direction: row; flex-wrap: wrap; align-items: center; gap: var(--ag-s1); }
+.ag-indent { display: flex; flex-direction: column; gap: 2px; padding-left: var(--ag-s4); }
+.ag-section { display: flex; flex-direction: column; gap: var(--ag-s2); }
+.ag-section-head { display: flex; flex-direction: row; align-items: baseline; justify-content: space-between; gap: var(--ag-s2); padding-bottom: var(--ag-s1); border-bottom: 1px solid var(--l1); }
+
+/* header: the room, the tabs, the room chips */
+.ag-head { display: flex; flex-direction: column; gap: var(--ag-s2); padding-bottom: var(--ag-s2); border-bottom: 1px solid var(--l2); }
+.ag-brand { display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: var(--ag-s3); }
+.ag-tabs { display: flex; flex-direction: row; flex-wrap: wrap; gap: 2px; }
+.ag-tab {
+  height: 26px; padding: 0 var(--ag-s2); border: 0; border-radius: 6px; background: transparent;
+  font: 550 12px/1 var(--sans); color: var(--t3); cursor: pointer;
+}
+.ag-tab:hover { background: var(--l1); color: var(--t1); }
+.ag-tab.on { color: var(--t1); background: rgb(from var(--accent) r g b / 14%); box-shadow: inset 0 -2px 0 var(--accent); }
+
+/* controls */
+.ag-btn {
+  height: 24px; padding: 0 var(--ag-s2); border: 0; border-radius: 6px;
+  background: var(--l1); box-shadow: inset 0 0 0 1px var(--l2);
+  font: 550 11.5px/1 var(--sans); color: var(--t2); cursor: pointer;
+}
+.ag-btn:hover { background: var(--l2); color: var(--t1); }
+.ag-btn.primary { color: var(--t1); background: rgb(from var(--accent) r g b / 18%); box-shadow: inset 0 0 0 1px rgb(from var(--accent) r g b / 45%); }
+.ag-btn.warn { color: var(--warn); background: rgb(from var(--warn) r g b / 10%); box-shadow: inset 0 0 0 1px rgb(from var(--warn) r g b / 32%); }
+.ag-btn.quiet { background: transparent; box-shadow: none; color: var(--t3); }
+.ag-btn.quiet:hover { color: var(--t1); background: var(--l1); }
+.ag-btn.wide { height: auto; min-height: 24px; padding: 2px 0; text-align: left; justify-content: flex-start; }
+.ag-chip {
+  height: 22px; padding: 0 var(--ag-s2); border: 0; border-radius: 999px; background: transparent;
+  box-shadow: inset 0 0 0 1px var(--l2); font: 500 11.5px/1 var(--sans); color: var(--t3); cursor: pointer;
+}
+.ag-chip:hover { background: var(--l1); color: var(--t1); }
+.ag-chip.on { color: var(--t1); background: rgb(from var(--accent) r g b / 15%); box-shadow: inset 0 0 0 1px rgb(from var(--accent) r g b / 45%); }
+
+/* alerts */
+.ag-alert {
+  display: flex; flex-direction: row; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--ag-s2);
+  padding: var(--ag-s2) var(--ag-s3); border-radius: 8px; font: 600 12px/1.35 var(--sans); white-space: normal; overflow-wrap: anywhere;
+}
+.ag-alert.bad { color: var(--bad); background: rgb(from var(--bad) r g b / 10%); box-shadow: inset 3px 0 0 var(--bad); }
+.ag-alert.warn { color: var(--warn); background: rgb(from var(--warn) r g b / 10%); box-shadow: inset 3px 0 0 var(--warn); }
+
+/* the compose card: the target stated once, then two fields whose labels share one column */
+.ag-card {
+  display: flex; flex-direction: column; gap: var(--ag-s2); padding: var(--ag-s3);
+  border-radius: 10px; background: var(--sf-card-bg); box-shadow: inset 0 0 0 1px var(--l2);
+}
+.ag-target { font: 600 13px/1.35 var(--sans); color: var(--t1); white-space: normal; overflow-wrap: anywhere; }
+.ag-field { display: flex; flex-direction: row; align-items: flex-start; gap: var(--ag-s2); }
+.ag-field-label { flex: none; width: 60px; padding-top: 4px; font: var(--ag-label); letter-spacing: 0.05em; text-transform: uppercase; color: var(--t3); }
+.ag-field > :last-child { flex: 1 1 auto; min-width: 0; }
+.ag-draft { white-space: pre-wrap; overflow-wrap: anywhere; padding: var(--ag-s1) var(--ag-s2); border-radius: 6px; background: var(--l1); cursor: text; color: var(--t1); }
+.ag-draft.empty { color: var(--t3); }
+
+/* presence */
+.ag-presence { display: flex; flex-direction: column; gap: var(--ag-s1); }
+
+/* subjects: two lines each, the title then who spoke last, replies, age */
+.ag-subject {
+  display: flex; flex-direction: row; align-items: flex-start; gap: var(--ag-s2);
+  padding: 6px var(--ag-s2); border-radius: 8px; cursor: pointer;
+}
+.ag-subject:hover { background: var(--l1); }
+.ag-subject.sel { background: rgb(from var(--accent) r g b / 10%); box-shadow: inset 3px 0 0 var(--accent); }
+.ag-mark { flex: none; width: 10px; color: var(--accent); font: 600 12px/1.45 var(--sans); }
+.ag-subject-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1 1 auto; }
+.ag-subject-title { font: 500 12.5px/1.4 var(--sans); color: var(--t1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ag-subject.unread .ag-subject-title { font-weight: 650; }
+.ag-subject-meta { display: flex; flex-direction: row; gap: 6px; font: var(--ag-caption); color: var(--t3); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ag-new { color: var(--accent); font-weight: 650; }
+
+/* the conversation: your own posts in the accent, indented */
+.ag-msg { display: flex; flex-direction: column; gap: var(--ag-s1); padding: var(--ag-s2) var(--ag-s3); border-radius: 8px; background: var(--l1); }
+.ag-msg.mine { margin-left: var(--ag-s4); background: rgb(from var(--accent) r g b / 8%); box-shadow: inset 3px 0 0 var(--accent); }
+.ag-msg-head { display: flex; flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: var(--ag-s2); }
+.ag-msg-body { display: flex; flex-direction: column; gap: var(--ag-s1); color: var(--t1); overflow-wrap: anywhere; }
+.ag-from { font: 650 12.5px/1.3 var(--sans); color: var(--t1); }
+.ag-from.mine { color: var(--accent); }
+.ag-tag { font: var(--ag-label); padding: 1px 6px; border-radius: 999px; box-shadow: inset 0 0 0 1px var(--l2); color: var(--t3); }
+.ag-tag.accent { color: var(--accent); box-shadow: inset 0 0 0 1px rgb(from var(--accent) r g b / 45%); }
+
+/* tables */
+.ag-table { width: 100%; border-collapse: collapse; font: 12px/1.4 var(--sans); font-variant-numeric: tabular-nums; }
+.ag-th { padding: var(--ag-s1) var(--ag-s2); text-align: left; font: var(--ag-label); letter-spacing: 0.05em; text-transform: uppercase; color: var(--t3); white-space: nowrap; border-bottom: 1px solid var(--l2); }
+.ag-td { padding: 5px var(--ag-s2); vertical-align: top; color: var(--t2); border-bottom: 1px solid var(--l1); }
+.ag-th.end, .ag-td.end { text-align: right; }
+.ag-tr.click { cursor: pointer; }
+.ag-tr.click:hover { background: rgb(from var(--accent) r g b / 8%); }
+.ag-td:first-child { white-space: nowrap; }

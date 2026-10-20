@@ -520,6 +520,8 @@ Claude Code can run the watch itself instead of a background command: `plugins/c
 
 Oh My Pi (`omp`) runs the same watch as an extension: `plugins/omp/agora-room` starts one turn per room message in the session's own TUI, gives the model a `room_post` tool and shows the watch in the status line (`docs/OMP-EXTENSION.md`).
 
+Tern has a pane for the person at the keyboard: `plugins/tern/agora` is a Tern plugin (block `agora.room`, `ctrl+alt+a`) with the room's subjects and unread marks, a conversation view, one compose card that states where a post goes, search, the board, rooms and faces, and this seat's service, residents and sessions (`docs/TERN-PLUGIN.md`).
+
 Codex CLI and Desktop do not treat terminal output as a wake event, so a watch armed under a Codex
 session (`CODEX_THREAD_ID` or `CODEX_SESSION_ID` set) with neither `--codex-queue` nor
 `--codex-server` is **refused** with exit 2 before any config is read: the message names both

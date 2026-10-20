@@ -1,0 +1,27 @@
+schema = 1
+id = "agora"
+name = "Agora"
+version = "0.1.0"
+description = "Agora rooms in Tern: a pane with the room's subjects and unread marks, a conversation view, one compose card that states where a post goes, search, the board of claims and verdicts, rooms and faces, and this seat's service, residents and sessions; lenses for agora's own commands."
+icon = "users"
+host = "host.luau"
+window = "window.luau"
+styles = ["style.css"]
+
+[[blocks]]
+id = "room"
+title = "Agora"
+icon = "users"
+palette = true
+
+[[lenses]]
+id = "rooms"
+match = ["agora rooms*", "agora who*"]
+
+[[lenses]]
+id = "doctor"
+match = ["agora doctor*", "agora service*"]
+
+[[lenses]]
+id = "session"
+match = ["agora session*"]
