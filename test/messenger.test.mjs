@@ -31,7 +31,7 @@ test("the notice set is exactly these nine forms", () => {
     N9: "No role fits {id}; for {human}.",
   });
   assert.ok(Object.isFrozen(NOTICE_TEMPLATES));
-  assert.deepEqual({ ...DEFAULT_BOUNDS }, { R: 900_000, R2: 2_700_000, I: 120_000, Bo: 1_800_000, H: 14_400_000, T: 30_000, G: 600_000, G2: 1_800_000, S: 7_200_000, D: 300_000 });
+  assert.deepEqual({ ...DEFAULT_BOUNDS }, { R: 7_200_000, R2: 14_400_000, I: 3_600_000, Bo: 14_400_000, H: 86_400_000, T: 30_000, G: 600_000, G2: 1_800_000, S: 7_200_000, D: 300_000 });
 });
 
 test("every form reads back as itself; a slot is one token (red leg: a slot with a space is refused)", () => {
@@ -86,13 +86,15 @@ const RECORDS = [
   { slug: "s-coding", state: live, record: /** @type {any} */ ({ bearer: "coding/Opus", label: "desk.coding" }), posted: new Set() },
   { slug: "s-orch", state: live, record: /** @type {any} */ ({ bearer: "orchestrator/Opus", label: "desk.orchestrator" }), posted: new Set() },
 ];
+/** the tight time-only backstops the clock cases below are written against; the defaults are hours (pinned above) */
+const SHORT = { ...DEFAULT_BOUNDS, R: 15 * 60_000, R2: 45 * 60_000, I: 2 * 60_000, Bo: 30 * 60_000, H: 4 * 60 * 60_000 };
 /** an activity record as the reader gives it, quiet and fresh unless said otherwise @param {string} session @param {Partial<import("../src/messenger.mjs").Activity>} [o] @returns {import("../src/messenger.mjs").Activity} */
 const ACT = (session, o = {}) => ({ session, turn: "idle", since: T0, lastToolAt: null, lastOutputAt: null, progressAt: null, progress: 0, updatedAt: T0, intervalMs: 2000, ...o });
 /** @param {any[]} messages @param {{ now: number, board?: any[], records?: any[], titles?: Map<string, string>, pinned?: Set<string>, bounds?: any, seen?: Array<[string, string, number]>, activity?: import("../src/messenger.mjs").Activity[] }} o */
 function runFull(messages, o) {
   const ctx = { seatName: "host", accountId: HOST, records: o.records ?? RECORDS, messages };
   return tick({ now: o.now, messages, titles: o.titles ?? new Map(), pinned: o.pinned ?? new Set(), boardRecords: o.board ?? [], accountId: HOST,
-    resolve: (a) => resolveAddress(a, ctx), human: "Ada", bounds: o.bounds ?? { ...DEFAULT_BOUNDS },
+    resolve: (a) => resolveAddress(a, ctx), human: "Ada", bounds: o.bounds ?? { ...SHORT },
     ...(o.seen ? { seen: new Map(o.seen.map(([slug, id, at]) => [seenKey(slug, id), at])) } : {}),
     ...(o.activity ? { activity: new Map(o.activity.map((a) => [a.session, a])) } : {}) });
 }
@@ -394,7 +396,8 @@ test("no activity record falls back to the time bounds, which are configurable f
   const q = msg({ at: T0, kind: "human", name: "Ada", text: "look please", to: ["coding"] });
   const other = [fresh("s-orch", T0 + 15 * MIN, { turn: "busy", since: T0 })];
   assert.deepEqual(kinds(run([q], { now: T0 + 15 * MIN, activity: other })), ["N2"], "R from the delivery, as before");
-  const hours = { ...DEFAULT_BOUNDS, R: 120 * MIN, R2: 240 * MIN, H: 24 * 60 * MIN };
+  const hours = { ...DEFAULT_BOUNDS };
+  assert.deepEqual(kinds(run([q], { now: T0 + 15 * MIN, bounds: hours })), [], "red leg: the default backstop is not the short one");
   assert.deepEqual(kinds(run([q], { now: T0 + 120 * MIN - 1, bounds: hours })), []);
   assert.deepEqual(kinds(run([q], { now: T0 + 120 * MIN, bounds: hours })), ["N2"]);
   assert.deepEqual(kinds(run([q], { now: T0 + 240 * MIN, bounds: hours })), ["N2", "N3"]);
@@ -477,7 +480,7 @@ test("runTick posts only what the fresh fold under the lock still finds due (red
       return { messages, annotations: [], boardRecords: [], resolve: (/** @type {string} */ a) => resolveAddress(a, ctx) };
     },
     post: async (/** @type {any} */ act) => { posted.push(act); return { id: `p${posted.length}`, cursor: `${EPOCH}:${900 + posted.length}` }; },
-    lock: fileLock(path.join(root, "room.lock")), now: () => T0 + 20 * MIN, accountId: HOST, human: "Ada", bounds: { ...DEFAULT_BOUNDS },
+    lock: fileLock(path.join(root, "room.lock")), now: () => T0 + 20 * MIN, accountId: HOST, human: "Ada", bounds: { ...SHORT },
   });
   const a = await runTick(deps(false));
   assert.deepEqual([a.due.length, a.posted.map((p) => p.kind), a.locked], [1, ["N2"], true]);

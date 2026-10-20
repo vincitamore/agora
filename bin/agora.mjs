@@ -234,7 +234,7 @@ const SCHEMA = {
       args: ["<room>"],
       options: {
         "--human-name <name>": "the host human: the N3 and N9 notices name them (required)",
-        "--bounds <spec>": "R=15m,R2=45m,I=2m,Bo=30m,H=4h,T=30s (any subset; ms, s, m, h): not taken by R → N2; R2 on either clock → N3; lease expiry + I → N4; open subject at Bo → N6; nothing older than H is raised; T is the stream's interval",
+        "--bounds <spec>": "R=2h,R2=4h,I=1h,Bo=4h,H=24h,T=30s,G=10m,G2=30m,S=2h,D=5m (any subset; ms, s, m, h). On evidence (each session's activity record): an idle or dark holder past G → N2 or N4, past G2 → N3; a working holder is held, never pinged; S: a busy turn with no progress is stalled; D: a silent watch is dark. R, R2, I are the time-only backstops for a session with no activity record. Open subject at Bo → N6; nothing older than H is raised; T is the stream's interval",
         "--once": "one tick, then exit (the default without --stream)",
         "--stream": "tick now, on every room event, and every T, until --for or a stop; writes a liveness file",
         "--for <s>": "--stream: stop after this many seconds",
@@ -2850,7 +2850,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
           const { messages, annotations } = await roomRecords();
           const view = await br.readBoard(transport);
           const ctx = await seatContext(messages);
-          return { messages, annotations, boardRecords: view.records, resolve: (a) => br.resolveAddress(a, ctx) };
+          return { messages, annotations, boardRecords: view.records, resolve: (a) => br.resolveAddress(a, ctx), ...(await ms.readEvidence(stateRoot, roomAlias)) };
         },
         post: async (act) => {
           const text = withTrailers(act.text, act.trailers);
@@ -2867,10 +2867,11 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         if (json) {
           console.log(JSON.stringify({ type: "messenger-tick", alias: roomAlias, room: transport.room, at: new Date(deps.now()).toISOString(),
             due: r.due.map((a) => ({ kind: a.kind, key: a.key, text: a.text, thread: a.thread ?? null, trailers: a.trailers })),
-            posted: r.posted.map((p) => ({ kind: p.kind, key: p.key, id: p.id, cursor: p.cursor })), ...(skipped ? { skipped: "another tick held the room's messenger lock" } : {}) }));
+            posted: r.posted.map((p) => ({ kind: p.kind, key: p.key, id: p.id, cursor: p.cursor })), held: r.held, ...(skipped ? { skipped: "another tick held the room's messenger lock" } : {}) }));
           return;
         }
         if (values["dry-run"]) for (const a of r.due) console.log(`due ${a.kind}  ${a.text}  ${a.trailers.map((t) => `${t.key}: ${t.value}`).join("  ")}`);
+        for (const h of r.held) console.log(`held clock ${h.clock}  ${h.id}  ${h.position} is ${h.state}`);
         for (const p of r.posted) console.log(`posted ${p.kind} ${p.id}  ${p.text}`);
         if (skipped) console.error("agora: another tick held the room's messenger lock; nothing posted this tick");
       };

@@ -108,7 +108,7 @@ once on the seat.
 
 **The messenger row (`harness: "agora"`).** The room's supervision in code (docs/MESSENGER.md),
 one row per room: `{ "role": "messenger", "harness": "agora", "rooms": ["<room>"], "host": "tern",
-"args": ["--human-name", "<host human>", "--bounds", "R=15m,R2=45m"] }`. It has no model, no
+"args": ["--human-name", "<host human>"] }`. It has no model, no
 prompt and no profile (a profile, append, skills or model inherited from `defaults` is not read),
 and exactly one room. The program is `agora messenger <room> --stream <args>`, run as the
 position's own session (`AGORA_SESSION` and `AGORA_LABEL` are the slug, `AGORA_ACTOR` the bearer,

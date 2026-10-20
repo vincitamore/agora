@@ -62,7 +62,9 @@ export const scenario = {
     const records = [{ slug: "c", state: /** @type {const} */ ("live"), record: /** @type {any} */ ({ bearer: "coding/Opus", label: "desk.coding" }), posted: new Set() },
       { slug: "o", state: /** @type {const} */ ("live"), record: /** @type {any} */ ({ bearer: "orchestrator/Opus", label: "desk.orchestrator" }), posted: new Set() }];
     const rc = { seatName: "host", accountId: HOST, records, messages };
-    const { acts } = tick({ now: T0 + 50 * MIN, messages, titles: new Map([[open.id, "Open"]]), pinned: new Set(), accountId: HOST, human: "Ada", bounds: { ...DEFAULT_BOUNDS },
+    // past every default bound (the longest is R2 and Bo, hours), so every clock's form is exercised
+    const now = T0 + Math.max(DEFAULT_BOUNDS.R2, DEFAULT_BOUNDS.Bo, DEFAULT_BOUNDS.I) + 10 * MIN;
+    const { acts } = tick({ now, messages, titles: new Map([[open.id, "Open"]]), pinned: new Set(), accountId: HOST, human: "Ada", bounds: { ...DEFAULT_BOUNDS },
       boardRecords: [{ cursor: `${E}:${n - 1}`, accountId: HOST, operationId: "op", board: { action: "claim", subject: "work:parser" }, expiresAt: new Date(T0 + 5 * MIN).toISOString(), leaseMs: 300_000 }],
       resolve: (a) => resolveAddress(a, rc) });
     const byId = new Map(messages.map((x) => [x.id, x]));

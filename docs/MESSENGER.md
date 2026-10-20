@@ -50,7 +50,7 @@ says one of `working`, `idle`, `dark` or `none` for the position:
 |---|---|---|---|
 | delivery → taken | the delivery of a line addressed (`to:`) to a position held on this seat, not `ack: none`, or of the route line (N1) of an unaddressed request: the instant the holder's session admitted it, from its seen record (below), else the post | a board claim of `msg:<id>` by the addressee, or the addressee's post citing the message (`re: <id>`, or a reply in its thread) | evidence: an idle or dark addressee, **G** after it went quiet (not before the delivery) → N2 to the addressee, **G2** → N3 to the host human; none: **R** → N2, **R2** → N3. A busy addressee draws neither: the line waits in its own harness |
 | lease | a claim of this seat's account | a renew or a board release; the holder's `release:` trailer naming the subject; the holder's verdict in the claim's thread | evidence: expiry alone never pings a working holder; an idle or dark holder, **G** after the later of expiry and its going quiet → N4 to the holder, **G2** → N3; none: expiry + **I** → N4, expiry + **R2** → N3 |
-| open subject | a titled, unpinned human root addressed only to people, everyone, the seat or another seat | any claim of `msg:<root>`, or an agent's reply in its thread | **Bo** (30 min) → N6 to the orchestrator position, or the host human when none is stood |
+| open subject | a titled, unpinned human root addressed only to people, everyone, the seat or another seat | any claim of `msg:<root>`, or an agent's reply in its thread | **Bo** (4 h) → N6 to the orchestrator position, or the host human when none is stood |
 
 Two pointers are posted at once, with no clock: an address that names no holder here (N5), and a
 reply posted at top level with `re:` (N7). An address held only by a session whose process is gone
@@ -59,7 +59,7 @@ to read evidence from, so it runs on the time-only bounds.
 
 Delivery is read from the seen record when the holder's session has one for the line, and the N2 then says `since seen`; with none, the clock runs from the post and N2 says `since posted` (the next section). The N3 line's `observe:` token says what the evidence was: `idle`, `silent` (the watch stopped refreshing), `stalled` (a turn with no progress for S), `gone`, or what the resolver can attest (`unknown`, `absent`) when it ran on the backstop.
 
-The bounds, `--bounds R=15m,R2=45m,I=2m,Bo=30m,H=4h,T=30s,G=10m,G2=30m,S=2h,D=5m` (any subset; units `ms`, `s`, `m`, `h`; 0 < R < R2, 0 < G < G2):
+The bounds, `--bounds R=2h,R2=4h,I=1h,Bo=4h,H=24h,T=30s,G=10m,G2=30m,S=2h,D=5m` (any subset; units `ms`, `s`, `m`, `h`; 0 < R < R2, 0 < G < G2):
 
 | Bound | Default | What it bounds |
 |---|---|---|
@@ -67,9 +67,9 @@ The bounds, `--bounds R=15m,R2=45m,I=2m,Bo=30m,H=4h,T=30s,G=10m,G2=30m,S=2h,D=5m
 | **G2** | 30 min | the same, to the human line: N3 |
 | **S** | 2 h | a busy holder with no progress at all this long is stalled, which reads as dark |
 | **D** | 5 min | a watch whose record is older than this (or three of its intervals) is silent, which reads as dark |
-| **R**, **R2**, **I** | 15 min, 45 min, 2 min | the **backstops** for a holder whose session writes no activity record: delivery to N2, delivery to N3, lease expiry to N4. Raise them (`R=2h,R2=4h,I=1h,H=24h`) on a seat where older clients are common, so that a worker that cannot show evidence is not pinged on a short clock |
-| **Bo** | 30 min | an open subject before N6 |
-| **H** | 4 h | the horizon: an incident that began before it is not raised, so a messenger first started on an old room does not flood it |
+| **R**, **R2**, **I** | 2 h, 4 h, 1 h | the **backstops** for a holder whose session writes no activity record: delivery to N2, delivery to N3, lease expiry to N4. They are long on purpose: a worker that cannot show evidence is not pinged on a short clock, and where every session writes a record they are never the clock. Shorten them (`R=15m,R2=45m,I=2m`) only on a seat that wants a tighter bound without a record |
+| **Bo** | 4 h | an open subject before N6 |
+| **H** | 24 h | the horizon: an incident that began before it is not raised, so a messenger first started on an old room does not flood it |
 | **T** | 30 s | the stream's interval |
 
 ## Seen records
@@ -125,7 +125,7 @@ equality (`test/messenger.test.mjs`, scenario S60).
 | N5 | unmatched address | `to: <addr> names no holder here (<kind>); nearest: <suggestion\|none>.` | `re: <id>` |
 | N6 | open subject at Bo | `Open subject <id> unclaimed after <age>.` | `to: orchestrator \| <host human>`, `re: <id>` |
 | N7 | top-level `re:` | `Reply posted at top level; its subject is <root>.` | `re: <id>` |
-| N8 | restore or position fault | `<position>: <verdict> by <attestor> <age>; path <path>; outcome <outcome>.` | posted by the resident tooling that restores, in the Room subject; the tick does not raise it |
+| N8 | restore or position fault | `<position>: <verdict> by <attestor> <age>; path <path>; outcome <outcome>.` | `ack: none`; posted by `agora resident ensure` for each start or stop (docs/RESIDENTS.md, Grants), as the room's messenger position, in the Room subject; the tick does not raise it |
 | N9 | no holder, no orchestrator | `No role fits <id>; for <human>.` | `to: <host human>`, `re: <id>` |
 
 An age reads `42s`, `16m` or `1h05m`. The verdict in N3 is what the evidence says (`idle`, `silent`, `stalled`, `gone`) or, with no activity record, what the resolver can attest: a live process

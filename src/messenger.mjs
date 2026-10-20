@@ -59,16 +59,17 @@ export const NOTICE_TEMPLATES = Object.freeze({
  * not been refreshed for this long (at least three of its own intervals) is silent, which reads as
  * dark. R, R2, I: the time-only backstops for a holder whose session writes no activity record (an
  * older client): R, delivery to taken, then N2; R2, the human line (N3) on either clock; I, the
- * grace after a lease expires before N4. Raise them (hours) where older clients are common. Bo: an
+ * grace after a lease expires before N4. They are long backstops (hours), used only without an
+ * activity record. Bo: an
  * open subject before N6. H: the horizon; an incident that started before it is not raised. T: the
  * stream's interval tick.
  */
-export const DEFAULT_BOUNDS = Object.freeze({ R: 900_000, R2: 2_700_000, I: 120_000, Bo: 1_800_000, H: 14_400_000, T: 30_000, G: 600_000, G2: 1_800_000, S: 7_200_000, D: 300_000 });
+export const DEFAULT_BOUNDS = Object.freeze({ R: 7_200_000, R2: 14_400_000, I: 3_600_000, Bo: 14_400_000, H: 86_400_000, T: 30_000, G: 600_000, G2: 1_800_000, S: 7_200_000, D: 300_000 });
 
 /** @typedef {{ R: number, R2: number, I: number, Bo: number, H: number, T: number, G: number, G2: number, S: number, D: number }} Bounds */
 
 /**
- * `R=15m,R2=45m,I=2m,Bo=30m,H=4h,T=30s,G=10m,G2=30m,S=2h,D=5m` (any subset; the rest are the
+ * `R=2h,R2=4h,I=1h,Bo=4h,H=24h,T=30s,G=10m,G2=30m,S=2h,D=5m` (any subset; the rest are the
  * defaults). Units ms, s, m, h.
  * @param {string | undefined} spec @returns {Bounds}
  */
