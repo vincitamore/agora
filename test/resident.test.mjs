@@ -12,7 +12,11 @@ import {
   DEFAULT_DEAF_SECONDS, DEFAULT_IDLE_SECONDS, DEFAULT_MAX_CONTEXT, DEFAULT_MIN_CONTEXT, configuredResidents, cycleVerdict, inheritMarkerPath, matchesResidentRecord, measureClaudeTranscript, measureOmpTranscript,
   readInheritMarker, renderResidentPrompt, restartCommand, transcriptFor, writeInheritMarker,
 } from "../src/resident.mjs";
-import { writeRecord } from "../src/session.mjs";
+import { readCursorFile, writeCursor } from "../src/core.mjs";
+import { DEFAULT_BOUNDS } from "../src/messenger.mjs";
+import { readPosted, writeRecord } from "../src/session.mjs";
+// the verbs this wave adds, read through the namespace so a build without them fails only their cells
+import * as resident from "../src/resident.mjs";
 
 const run = promisify(execFile);
 const BIN = fileURLToPath(new URL("../bin/agora.mjs", import.meta.url));
@@ -213,6 +217,125 @@ test("the inherit marker round-trips and a foreign file is refused", async (t) =
   await assert.rejects(readInheritMarker(root, "r1"), /not a resident inherit marker/);
 });
 
+/**
+ * A seat holding one omp resident at `lab.review`: its OMP transcript (one assistant turn) in a fake
+ * home, its live session record, and, when given, the activity record its harness-owned watch writes.
+ * @param {import("node:test").TestContext} t @param {{ lastInference: string, activity?: { updatedAt: string, intervalMs?: number } }} a
+ */
+async function ompSeat(t, a) {
+  const root = await mkdtemp(path.join(tmpdir(), "agora-resident-omp-"));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const state = path.join(root, "state");
+  const home = path.join(root, "home");
+  const uuid = "0b7b6b0c-2222-4222-8333-444455556666";
+  const slug = `omp-${uuid}`;
+  const bucket = path.join(home, ".omp", "agent", "sessions", "-work");
+  await mkdir(bucket, { recursive: true });
+  const turn = { type: "message", timestamp: a.lastInference, message: { role: "assistant", stopReason: "stop", usage: { input: 3, cacheRead: 40_000, cacheWrite: 100, output: 5 } } };
+  await writeFile(path.join(bucket, `2026-01-01T00-00-00-000Z_${uuid}.jsonl`), JSON.stringify(turn) + "\n");
+  const dir = path.join(state, "sessions", slug);
+  await mkdir(dir, { recursive: true });
+  await writeRecord(dir, /** @type {any} */ ({ slug, source: "AGORA_SESSION (OMP_SESSION_ID)" }), { bearer: "review/Argon", label: "lab.review", pid: process.pid, pidSource: "OMP_PID" });
+  if (a.activity) {
+    const rec = { v: 1, type: "activity", session: slug, position: "lab.review", turn: "idle", since: a.lastInference, lastToolAt: null, lastOutputAt: a.lastInference, progress: 4, progressAt: a.lastInference, intervalMs: a.activity.intervalMs ?? 2000, updatedAt: a.activity.updatedAt };
+    await writeFile(path.join(dir, "activity.json"), JSON.stringify(rec, null, 1) + "\n");
+  }
+  return { state, home, slug };
+}
+
+test("cycle: a quiet resident whose harness-owned watch keeps its heartbeat is listening, not deaf; a silent heartbeat is deaf (red leg: the heartbeat stops)", async (t) => {
+  const ago = (/** @type {number} */ s) => new Date(Date.now() - s * 1000).toISOString();
+  const quiet = DEFAULT_DEAF_SECONDS + 22; // the trial's 922 s of quiet
+  // the extension wrote no armed record; its activity record was refreshed 10 s ago
+  const armed = await ompSeat(t, { lastInference: ago(quiet), activity: { updatedAt: ago(10) } });
+  for (const pass of [1, 2]) {
+    const v = /** @type {any} */ (await resident.planCycle(armed.state, "lab.review", { home: armed.home }));
+    assert.equal(v.session, armed.slug);
+    assert.equal(v.action, "none", `pass ${pass}: ${v.reason}`);
+    assert.match(String(v.reason), /^warm or working/);
+    assert.equal(v.watching, 1, "the heartbeat is the live watch");
+    assert.equal(typeof v.activityAt, "string");
+  }
+  // a slow poller counts by its own interval: three of them bound the silence, past D
+  const slow = await ompSeat(t, { lastInference: ago(quiet), activity: { updatedAt: ago(DEFAULT_BOUNDS.D / 1000 + 120), intervalMs: 200_000 } });
+  assert.equal((/** @type {any} */ (await resident.planCycle(slow.state, "lab.review", { home: slow.home }))).watching, 1);
+  // red leg: the heartbeat stopped past the silent bound, so the watch is dead and the resident deaf
+  const silent = await ompSeat(t, { lastInference: ago(quiet), activity: { updatedAt: ago(DEFAULT_BOUNDS.D / 1000 + 60) } });
+  const deaf = /** @type {any} */ (await resident.planCycle(silent.state, "lab.review", { home: silent.home }));
+  assert.deepEqual([deaf.action, deaf.watching], ["cycle", 0]);
+  assert.match(String(deaf.reason), /^deaf: no live watch/);
+  // no activity record at all (a watch armed by the model, now dead): deaf as before
+  const none = await ompSeat(t, { lastInference: ago(quiet) });
+  const v = /** @type {any} */ (await resident.planCycle(none.state, "lab.review", { home: none.home }));
+  assert.deepEqual([v.action, v.watching, v.activityAt], ["cycle", 0, null]);
+});
+
+/** A state root with a predecessor and a successor session at `lab.orchestrator`. @param {import("node:test").TestContext} t */
+async function successionSeat(t) {
+  const root = await mkdtemp(path.join(tmpdir(), "agora-resident-i-"));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const state = path.join(root, "state");
+  const pred = path.join(state, "sessions", "omp-pred");
+  await mkdir(pred, { recursive: true });
+  await writeRecord(pred, /** @type {any} */ ({ slug: "omp-pred", source: "AGORA_SESSION" }), { bearer: "orchestrator/Sonnet", label: "lab.orchestrator", now: new Date(Date.now() - 3_600_000) });
+  await writeCursor(pred, "lab", "5");
+  await writeFile(path.join(pred, "posted.jsonl"), JSON.stringify({ id: "own-1", pid: 1 }) + "\n");
+  return { state, pred };
+}
+
+test("inherit: the successor a marker names takes the predecessor's place even after its watch read the room at the head; an older session keeps the refusal; a second call says it already did (red leg: a session older than the marker)", async (t) => {
+  const s = await successionSeat(t);
+  await writeInheritMarker(s.state, "lab.orchestrator", { from: "omp-pred", by: "succeed" });
+  // the successor: started after the marker, and its extension already set its cursor at the head
+  const succ = { slug: "omp-succ", source: "AGORA_SESSION" };
+  const sdir = path.join(s.state, "sessions", succ.slug);
+  await mkdir(sdir, { recursive: true });
+  await writeRecord(sdir, /** @type {any} */ (succ), { bearer: "orchestrator/Haiku", label: "lab.orchestrator" });
+  await writeCursor(sdir, "lab", "9");
+  const record = JSON.parse(await readFile(path.join(sdir, "session.json"), "utf8"));
+  const r = /** @type {any} */ (await resident.inheritResident(s.state, "lab.orchestrator", succ, { record }));
+  assert.deepEqual([r.inherited, r.successor, r.from, r.cursors, r.conflicts], [true, true, "omp-pred", ["lab"], ["lab"]]);
+  assert.equal((await readCursorFile(sdir, "lab")).cursor, "5", "the predecessor's position: what it had not read is owed");
+  assert.ok((await readPosted(sdir)).has("own-1"), "the ledger: its posts are this session's own");
+  assert.equal(existsSync(inheritMarkerPath(s.state, "lab.orchestrator")), false, "the marker is consumed");
+  // the profile's arming step asks again: it already happened, by name
+  const again = /** @type {any} */ (await resident.inheritResident(s.state, "lab.orchestrator", succ, { record }));
+  assert.deepEqual([again.inherited, again.reason, again.from], [false, "already", "omp-pred"]);
+  const fresh = /** @type {any} */ (await resident.inheritResident(s.state, "lab.orchestrator", { slug: "omp-other", source: "AGORA_SESSION" }, {}));
+  assert.deepEqual([fresh.inherited, fresh.reason], [false, "no marker"]);
+
+  // red leg: a session that was running before the marker holds its own position; it is not moved
+  await writeInheritMarker(s.state, "lab.orchestrator", { from: "omp-pred", by: "cycle" });
+  const old = { slug: "omp-old", source: "AGORA_SESSION" };
+  const odir = path.join(s.state, "sessions", old.slug);
+  await mkdir(odir, { recursive: true });
+  await writeRecord(odir, /** @type {any} */ (old), { bearer: "orchestrator/Opus", label: "lab.orchestrator", now: new Date(Date.now() - 600_000) });
+  await writeCursor(odir, "lab", "12");
+  const orecord = JSON.parse(await readFile(path.join(odir, "session.json"), "utf8"));
+  await assert.rejects(resident.inheritResident(s.state, "lab.orchestrator", old, { record: orecord }), /already holds a position in lab/);
+  assert.equal((await readCursorFile(odir, "lab")).cursor, "12");
+  const forced = /** @type {any} */ (await resident.inheritResident(s.state, "lab.orchestrator", old, { record: orecord, force: true }));
+  assert.deepEqual([forced.inherited, forced.successor, forced.forced], [true, false, true]);
+});
+
+test("succession at a start: the newest session that held the position and is gone is named; a pending marker whose predecessor has state is kept (red leg: no session ever held it)", async (t) => {
+  const s = await successionSeat(t);
+  const dead = (/** @type {number} */ pid) => { if (pid === 999_001 || pid === 999_002) throw Object.assign(new Error("gone"), { code: "ESRCH" }); };
+  // the predecessor's record names a pid that is gone; a newer one at the position too (a swap)
+  await writeRecord(s.pred, /** @type {any} */ ({ slug: "omp-pred", source: "AGORA_SESSION" }), { bearer: "orchestrator/Sonnet", label: "lab.orchestrator", pid: 999_001, pidSource: "OMP_PID" });
+  const swap = path.join(s.state, "sessions", "omp-swap");
+  await mkdir(swap, { recursive: true });
+  await writeRecord(swap, /** @type {any} */ ({ slug: "omp-swap", source: "AGORA_SESSION" }), { bearer: "orchestrator/Haiku", label: "lab.orchestrator", pid: 999_002, pidSource: "OMP_PID" });
+  const m = /** @type {any} */ (await resident.markSuccession(s.state, "lab.orchestrator", { kill: dead }));
+  assert.deepEqual([m.written, m.from, m.by], [true, "omp-swap", "start"]);
+  assert.equal((await readInheritMarker(s.state, "lab.orchestrator"))?.from, "omp-swap");
+  await writeInheritMarker(s.state, "lab.orchestrator", { from: "omp-pred", by: "cycle" });
+  const kept = /** @type {any} */ (await resident.markSuccession(s.state, "lab.orchestrator", { kill: dead }));
+  assert.deepEqual([kept.written, kept.from, kept.by], [false, "omp-pred", "cycle"], "a cycle's marker stands until its successor consumes it");
+  assert.equal(await resident.markSuccession(s.state, "lab.review", { kill: dead }), null);
+  assert.equal(existsSync(inheritMarkerPath(s.state, "lab.review")), false);
+});
+
 test("configuredResidents reads the table and nothing else; restartCommand substitutes the slug", () => {
   assert.deepEqual(configuredResidents({}), {});
   assert.deepEqual(configuredResidents({ residents: { a: { restart: "x {slug}" }, b: {}, c: true } }), { a: { restart: "x {slug}" }, b: { restart: undefined }, c: {} });
@@ -289,7 +412,7 @@ test("CLI: prompt appends the shipped block; cycle measures the seat, writes the
 
   const again = await agora(["resident", "inherit", "r1", "--json"], succ);
   assert.equal(again.code, 0);
-  assert.equal(JSON.parse(again.stdout.trim()).reason, "no marker");
+  assert.deepEqual([JSON.parse(again.stdout.trim()).reason, JSON.parse(again.stdout.trim()).from], ["already", s.slug], "a second call names what this session already inherited");
 });
 
 test("CLI: a marker naming a pruned predecessor is removed with a warning; the cycled session itself may not inherit", async (t) => {
@@ -312,4 +435,39 @@ test("CLI: a marker naming a pruned predecessor is removed with a warning; the c
   assert.equal(existsSync(inheritMarkerPath(state, "r1")), false);
   const usage = await agora(["resident", "dance"], env);
   assert.equal(usage.code, 2);
+});
+
+test("CLI: inherit takes the predecessor's place for the successor whose watch already read the room, and says `already` to a second call (red leg: a session older than the marker is refused)", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "agora-resident-c-"));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const state = path.join(root, "state");
+  const cfgPath = path.join(root, "agora.json");
+  await writeFile(cfgPath, JSON.stringify({ actor: { name: "Model", kind: "agent" }, rooms: { r: { transport: "local", path: path.join(root, "room.ndjson") } } }));
+  const base = { AGORA_STATE: state, AGORA_CONFIG: cfgPath };
+  // the room has a message, so a cursor taken at its head is one; the predecessor read the room to 5
+  assert.equal((await agora(["post", "r", "--", "hello"], { ...base, AGORA_SESSION: "omp-ada" })).code, 0);
+  const pred = path.join(state, "sessions", "omp-pred");
+  await mkdir(pred, { recursive: true });
+  await writeCursor(pred, "r", "5");
+  // a session that was running before the marker: refused, as before
+  const old = { ...base, AGORA_SESSION: "omp-old" };
+  assert.equal((await agora(["session", "--as", "orchestrator/Opus", "--label", "lab.orchestrator"], old)).code, 0);
+  assert.equal((await agora(["cursor", "r", "--now"], old)).code, 0);
+  await new Promise((r) => setTimeout(r, 20));
+  await writeInheritMarker(state, "lab.orchestrator", { from: "omp-pred", by: "succeed" });
+  const refused = await agora(["resident", "inherit", "lab.orchestrator"], old);
+  assert.equal(refused.code, 2);
+  assert.match(refused.stderr, /already holds a position in r/);
+  // the successor registered and its watch took the head before the arming step ran
+  const succ = { ...base, AGORA_SESSION: "omp-succ" };
+  assert.equal((await agora(["session", "--as", "orchestrator/Haiku", "--label", "lab.orchestrator"], succ)).code, 0);
+  assert.equal((await agora(["cursor", "r", "--now"], succ)).code, 0);
+  const r = await agora(["resident", "inherit", "lab.orchestrator", "--json"], succ);
+  assert.equal(r.code, 0, r.stderr);
+  const row = JSON.parse(r.stdout.trim());
+  assert.deepEqual([row.inherited, row.successor, row.from, row.conflicts], [true, true, "omp-pred", ["r"]]);
+  assert.equal((await readCursorFile(path.join(state, "sessions", "omp-succ"), "r")).cursor, "5");
+  const again = await agora(["resident", "inherit", "lab.orchestrator"], succ);
+  assert.equal(again.code, 0);
+  assert.match(again.stdout, /already inherited resident lab\.orchestrator from omp-pred/);
 });

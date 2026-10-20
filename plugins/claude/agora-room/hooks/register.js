@@ -10,6 +10,9 @@
 //   tool    room_post: the model posts to a configured room through the same CLI.
 //   pane    /agora-room opens a pane: the room and who is active, a compose card that states where a
 //           post goes, recent subjects with unread marks, and a thread view that reads as a conversation.
+//   inherit a session started at a position (AGORA_LABEL) runs `agora resident inherit <position>`
+//           before its first read, so a successor starts from its predecessor's cursors, follow set
+//           and posted ledger, never the head.
 //
 // A hooks module may not bind, pass or store `$` (claude plugin validate refuses it), so every
 // function that needs the mods API is declared inside the session.start hook, where `$` is in
@@ -85,6 +88,8 @@ export function register(on, options) {
     let seenLog = new SeenLog(null)
     const seenState = { written: 0, lastError: null }
     const position = String(cfg.childEnv.AGORA_LABEL ?? env.AGORA_LABEL ?? '').trim() || null
+    // What `agora resident inherit <position>` did at the start (null when no position was given).
+    let inherited = null
     // The activity record: what this session is doing, written by this watch from the hooks it already
     // has (docs/CLAUDE-PLUGIN.md § Activity record). A turn change is written at once; tool calls and
     // output wait for the poll tick, so it adds no wake of its own.
@@ -122,7 +127,7 @@ export function register(on, options) {
         plugin: 'agora-room', session: key, wake: cfg.wake, intervalMs: cfg.intervalMs, watch: cfg.watchEnabled,
         rooms: [...rooms.entries()].map(([room, s]) => ({ room, ready: s.ready, lastRead: s.lastRead, lastTick: s.lastTick, polls: s.polls, lastError: s.lastError })),
         ticks, errors, lastError, delivered: dq.deliveredCount, dropped: dq.droppedCount, queued: dq.queue.length,
-        inflight, blocked, seen: { path: seenFile, written: seenState.written, lastError: seenState.lastError },
+        inflight, blocked, inherit: inherited, seen: { path: seenFile, written: seenState.written, lastError: seenState.lastError },
         activity: { path: activityFile, written: activityState.written, lastError: activityState.lastError }, updatedAt: stamp(),
       }
       try { await $.fs.write(livenessPath, JSON.stringify(doc, null, 1)) } catch (err) { lastError = 'liveness write: ' + String(err?.message ?? err) }
@@ -131,6 +136,27 @@ export function register(on, options) {
     function showStatus() {
       const rows = [...rooms.entries()].map(([room, s]) => ({ room, lastRead: s.lastRead, failing: s.lastError !== null }))
       $.ui.status(statusLine(rows, Date.now()))
+    }
+
+    // ---- succession: take the predecessor's place before the first read ----
+    // `agora resident inherit <position>` consumes the marker a cycle, a succeed or a start at a vacated
+    // position wrote, and copies the predecessor's cursors, follow set and posted ledger into this
+    // session (docs/RESIDENTS.md § The marker). Run before the first cursor read, so the watch resumes
+    // where the predecessor stopped, never at the head; with no marker it changes nothing. A failure is
+    // reported and never stops the watch.
+    async function inherit() {
+      if (!position) return
+      const r = await run(['resident', 'inherit', position, '--json'])
+      const row = jsonLines(r.stdout).find((j) => j?.type === 'resident-inherit')
+      if (r.exitCode === 0 && row) {
+        inherited = { position, inherited: row.inherited === true, from: row.from ?? null, reason: row.reason ?? null, cursors: row.cursors ?? [], at: stamp() }
+        return
+      }
+      const why = 'agora resident inherit ' + position + ' exit ' + r.exitCode + ': ' + String(r.stderr).slice(0, 200)
+      inherited = { position, inherited: false, error: why, at: stamp() }
+      lastError = why
+      errors += 1
+      $.ui.log(why)
     }
 
     // ---- the watch ----
@@ -418,6 +444,7 @@ export function register(on, options) {
       },
     })
 
+    await inherit()
     if (cfg.watchEnabled) {
       // Take the starting point now, before the first prompt, so nothing posted after the session starts is skipped.
       for (const room of cfg.rooms) {

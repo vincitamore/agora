@@ -13,6 +13,7 @@ import {
   CHECKOUT_BIN, CUSTOM_TYPE, PROJECT_FILE, STATUS_KEY, createAgoraRoom, describePost, modelLabel, ompSessionKey, resolveOmpConfig,
 } from "../plugins/omp/agora-room/index.mjs";
 import { ACTIVITY_FILE, SEEN_FILE, TOOL_NAME, bodyText, deliveryText, formatLine, parseReadOutput } from "../plugins/claude/agora-room/hooks/lib.js";
+import { inheritMarkerPath, writeInheritMarker } from "../src/resident.mjs";
 import { tmp } from "./helpers.mjs";
 
 const bin = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "agora.mjs");
@@ -378,6 +379,48 @@ test("seen: a record that cannot be written is reported and never stops the watc
       assert.equal(JSON.parse(await readFile(ok.liveness, "utf8")).seen.written, 1);
       s2.rt.stop();
     } finally { await ok.cleanup(); }
+  } finally { await r.cleanup(); }
+});
+
+test("inherit: a session started at a position takes its predecessor's place before its first read: the cursor, the ledger, the marker consumed (red leg: a session with no position starts at the head)", async () => {
+  const r = await room();
+  try {
+    const state = path.join(r.dir, "state");
+    // the predecessor at desk.coding: it read the room, then posted once; then a message arrived it never read
+    assert.equal((await r.agora("omp-pred", ["session", "--as", "coding/Sonnet", "--label", "desk.coding"])).code, 0);
+    await r.say("read by the predecessor");
+    assert.equal((await r.agora("omp-pred", ["cursor", "lab", "--now"])).code, 0);
+    const own = await r.agora("omp-pred", ["post", "lab", "--json", "--", "taking it"], "coding/Sonnet");
+    assert.equal(own.code, 0, own.stderr);
+    const ownId = JSON.parse(own.stdout.trim().split("\n").pop() ?? "{}").id;
+    await r.say("arrived after the predecessor stopped");
+    const predCursor = JSON.parse(await readFile(path.join(state, "sessions", "omp-pred", "lab.cursor"), "utf8")).cursor;
+    // the marker a cycle, a succeed or a start at the vacated position writes
+    await writeInheritMarker(state, "desk.coding", { from: "omp-pred", by: "succeed" });
+
+    const s = await start(r, { env: { AGORA_LABEL: "desk.coding", AGORA_ROLE: "coding" } });
+    assert.equal(existsSync(inheritMarkerPath(state, "desk.coding")), false, "consumed before the first read");
+    assert.deepEqual([s.rt.state().inherit?.inherited, s.rt.state().inherit?.from], [true, "omp-pred"]);
+    const key = ompSessionKey(SESSION_ID);
+    assert.equal(JSON.parse(await readFile(path.join(state, "sessions", key, "lab.cursor"), "utf8")).cursor, predCursor, "the watch resumes where the predecessor stopped, not at the head");
+    await s.rt.tick();
+    assert.deepEqual(texts(s.sent), ["arrived after the predecessor stopped"], "what it had not read arrives; its own post does not come back");
+    assert.ok(!s.sent.some((x) => String(x.msg.content).includes(ownId)));
+    assert.equal(JSON.parse(await readFile(r.liveness, "utf8")).inherit.from, "omp-pred", "said in the liveness file");
+    s.rt.stop();
+
+    // red leg: the same room, a session with no position: nothing to inherit, it starts at the head
+    const q = await room();
+    try {
+      await q.say("history");
+      await writeInheritMarker(path.join(q.dir, "state"), "desk.coding", { from: "omp-pred", by: "succeed" });
+      const plain = await start(q);
+      assert.equal(plain.rt.state().inherit, null);
+      assert.equal(existsSync(inheritMarkerPath(path.join(q.dir, "state"), "desk.coding")), true, "a session at no position leaves the marker alone");
+      await plain.rt.tick();
+      assert.equal(plain.sent.length, 0, "history is not replayed");
+      plain.rt.stop();
+    } finally { await q.cleanup(); }
   } finally { await r.cleanup(); }
 });
 

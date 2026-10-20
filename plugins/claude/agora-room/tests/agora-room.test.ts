@@ -219,6 +219,26 @@ test('watch: a saved cursor is resumed, not moved to the head', async ($, on) =>
   expect(s.calls.map((c) => cli(c.argv))).toEqual(['cursor lab'])
 })
 
+test('inherit: a session started at a position takes its predecessor\'s place before its first cursor read, and the liveness file says so; no position, no call', async ($, on) => {
+  mock.clock(on)
+  const inherited = '{"type":"resident-inherit","resident":"desk.coding","inherited":true,"from":"claude-pred","cursors":["lab"]}\n'
+  const s = stubs(on, { env: { AGORA_LABEL: 'desk.coding' }, script: (a) => (a[0] === 'resident' ? { stdout: inherited } : a[0] === 'cursor' ? { stdout: '{"room":"lab","cursor":"4"}\n' } : {}) })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  // the predecessor's cursor is in place before the first read, so the watch resumes from it, not the head
+  expect(s.calls.map((c) => cli(c.argv))).toEqual(['resident inherit desk.coding', 'cursor lab'])
+  expect(s.calls[0].env.AGORA_SESSION).toBe('k')
+  expect(liveness(s.written).inherit).toMatchObject({ position: 'desk.coding', inherited: true, from: 'claude-pred', cursors: ['lab'] })
+})
+
+test('inherit: a failed inherit is reported and the watch starts anyway', async ($, on) => {
+  mock.clock(on)
+  const s = stubs(on, { env: { AGORA_LABEL: 'desk.coding' }, script: (a) => (a[0] === 'resident' ? { exitCode: 2, stderr: 'agora: the marker names this session' } : a[0] === 'cursor' ? { stdout: a.includes('--now') ? '{"room":"lab","cursor":"9"}\n' : '{"room":"lab","cursor":null}\n' } : {}) })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  expect(s.calls.map((c) => cli(c.argv))).toEqual(['resident inherit desk.coding', 'cursor lab', 'cursor lab --now'])
+  expect(liveness(s.written).inherit.error).toContain('exit 2')
+  expect(liveness(s.written).lastError).toContain('agora resident inherit desk.coding exit 2')
+})
+
 test('AGORA_ROOM_WATCH=off: the tool is registered and posts work; nothing is watched', async ($, on) => {
   const clock = mock.clock(on)
   const s = stubs(on, { env: { AGORA_ROOM_WATCH: 'off' }, script: (a) => (a[0] === 'post' ? { stdout: '{"id":"p1","cursor":"3","alias":"lab"}\n' } : {}) })

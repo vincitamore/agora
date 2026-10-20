@@ -12,6 +12,10 @@ import { validateManifest } from "../src/resident-start.mjs";
 import { admitWant, ensure, foldLedger, grantedRow, grantView, readLedger, recordUnwant, recordWant, roomSubject, wantEnding, withGranted } from "../src/resident-grant.mjs";
 import { cycleVerdict, readSucceedRequest, turnState } from "../src/resident.mjs";
 import { parseNotice } from "../src/messenger.mjs";
+import { planResident } from "../src/resident-start.mjs";
+import { writeRecord } from "../src/session.mjs";
+// the names this wave adds, read through the namespace so a build without them fails only their cells
+import * as grants from "../src/resident-grant.mjs";
 
 const run = promisify(execFile);
 const BIN = fileURLToPath(new URL("../bin/agora.mjs", import.meta.url));
@@ -149,6 +153,73 @@ test("a granted row is the base row with the want's model, its own folder, the d
   assert.deepEqual(row.workdir.files.map((f) => f.path), ["NOTE.md"]);
   assert.ok(withGranted(m, foldLedger([w])).residents["lab.coding-2"], "an open want is a row for start, stop and the cycle");
   assert.equal(m.residents["lab.coding-2"], undefined, "the file's manifest is not changed");
+});
+
+test("a granted slot signs as its slot (lab.coding-2 → coding-2/<Model>), so addressing and signatures tell it from the base row (red leg: the base row)", async (t) => {
+  const s = await seat(t);
+  const m = load(s, seedDoc());
+  const w = /** @type {any} */ (await admit(m, foldLedger([]), { model: "sonnet" })).want;
+  const granted = withGranted(m, foldLedger([w]));
+  const ctx = { cfg: { rooms: { lab: {} } }, stateRoot: s.state, checkout: s.root, entry: "agora.mjs", node: "node", env: { PATH: s.root }, exists: () => true };
+  const slot = planResident(granted, "lab.coding-2", /** @type {any} */ (ctx));
+  assert.deepEqual([slot.position, slot.role, slot.bearer, slot.env.AGORA_ROLE], ["lab.coding-2", "coding", "coding-2/Sonnet", "coding-2"]);
+  const base = planResident(granted, "lab.coding", /** @type {any} */ (ctx));
+  assert.deepEqual([base.bearer, base.env.AGORA_ROLE], ["coding/Opus", "coding"]);
+});
+
+test("want --dry-run: admits or refuses exactly as a want would and records nothing, so the grant is not spent (red leg: the real want records)", async (t) => {
+  const s = await seat(t);
+  const m = load(s, seedDoc({ roles: "open", models: ["sonnet", "opus"], maxLive: 1, maxHours: 8 }));
+  const t0 = Date.parse("2026-01-01T00:00:00.000Z");
+  const a = { requester: "lab.orchestrator", session: "orc", position: "lab.coding", because: "a probe", now: t0 };
+  const held = { held: async () => false };
+  const dry = /** @type {any} */ (await recordWant(m, s.state, { ...a, dryRun: true }, held));
+  assert.deepEqual([dry.ok, dry.dryRun, dry.want.position], [true, true, "lab.coding-2"]);
+  assert.deepEqual(await readLedger(s.state), [], "nothing recorded");
+  const refusedDry = /** @type {any} */ (await recordWant(m, s.state, { ...a, model: "haiku", dryRun: true }, held));
+  assert.deepEqual([refusedDry.ok, refusedDry.dryRun], [false, true]);
+  assert.match(refusedDry.reason, /model haiku is outside/);
+  assert.deepEqual(await readLedger(s.state), [], "a refused dry run records nothing either");
+  // the grant is whole: the real want is admitted at the slot the dry run named, and is recorded
+  const real = /** @type {any} */ (await recordWant(m, s.state, a, held));
+  assert.deepEqual([real.ok, real.dryRun, real.want.position], [true, false, "lab.coding-2"]);
+  assert.deepEqual((await readLedger(s.state)).map((e) => e.ev), ["want"]);
+});
+
+test("want: the requester is the position the asking session holds by its own record, never an AGORA_LABEL it sets; a second holder refuses both (red leg: the holder asks)", async (t) => {
+  const s = await seat(t);
+  const register = async (/** @type {string} */ slug, /** @type {string | undefined} */ label, /** @type {number} */ pid) => {
+    const dir = path.join(s.state, "sessions", slug);
+    await mkdir(dir, { recursive: true });
+    await writeRecord(dir, /** @type {any} */ ({ slug, source: "AGORA_SESSION" }), { bearer: `${slug}/Model`, ...(label ? { label } : {}), pid, pidSource: "OMP_PID" });
+  };
+  const gone = (/** @type {number} */ pid) => { if (pid === 999_021) throw Object.assign(new Error("gone"), { code: "ESRCH" }); };
+  await register("orc", "lab.orchestrator", process.pid);
+  await register("probe", undefined, process.pid);
+  // red leg: the holder's own session asks
+  assert.deepEqual(await grants.wantRequester(s.state, { slug: "orc" }, { env: {}, kill: gone }), { ok: true, requester: "lab.orchestrator" });
+  assert.deepEqual(await grants.wantRequester(s.state, { slug: "orc" }, { env: { AGORA_LABEL: "lab.orchestrator" }, kill: gone }), { ok: true, requester: "lab.orchestrator" });
+  // another session that only sets the variable holds nothing
+  const spoof = /** @type {any} */ (await grants.wantRequester(s.state, { slug: "probe" }, { env: { AGORA_LABEL: "lab.orchestrator" }, kill: gone }));
+  assert.equal(spoof.ok, false);
+  assert.match(spoof.reason, /^a want is asked by the session that holds a grant: this session \(probe\) names lab\.orchestrator in AGORA_LABEL but holds no position on this seat/);
+  const unknown = /** @type {any} */ (await grants.wantRequester(s.state, { slug: "stray" }, { env: {}, kill: gone }));
+  assert.match(unknown.reason, /run it from that position's session/);
+  // the refusal reaches the ledger with the asking session, and spends nothing
+  const m = load(s, seedDoc());
+  const r = /** @type {any} */ (await recordWant(m, s.state, { requester: undefined, requesterRefusal: spoof.reason, session: "probe", position: "lab.coding", because: "x", now: Date.now() }, { held: async () => false }));
+  assert.equal(r.ok, false);
+  assert.deepEqual((await readLedger(s.state)).map((e) => [e.ev, e.session, e.reason]), [["refuse", "probe", spoof.reason]]);
+  // a second session registered at the holder's position: neither spends the grant while both stand
+  await register("impostor", "lab.orchestrator", process.pid);
+  for (const slug of ["orc", "impostor"]) {
+    const two = /** @type {any} */ (await grants.wantRequester(s.state, { slug }, { env: {}, kill: gone }));
+    assert.match(String(two.reason), /lab\.orchestrator is held by 2 sessions \(impostor, orc\); a grant is spent by its one holder/);
+  }
+  // once the second is gone, the holder asks again
+  await register("impostor", "lab.orchestrator", 999_021);
+  assert.deepEqual(await grants.wantRequester(s.state, { slug: "orc" }, { env: {}, kill: gone }), { ok: true, requester: "lab.orchestrator" });
+  assert.match(String((/** @type {any} */ (await grants.wantRequester(s.state, { slug: "impostor" }, { env: {}, kill: gone }))).reason), /is gone/);
 });
 
 test("wantEnding: unwanted, revoked by the grant's removal or narrowing, expired by its until or the grant's maxHours", async (t) => {
@@ -332,6 +403,9 @@ async function cliSeat(t) {
   await writeFile(s.manifestFile, JSON.stringify(seedDoc({ roles: "open", models: ["sonnet", "opus"], maxLive: 1, maxHours: 8 })));
   const env = { PATH: bin, PATHEXT: ".COM;.EXE", AGORA_CONFIG: config, AGORA_STATE: s.state };
   const orc = { ...env, AGORA_SESSION: "orc", AGORA_LABEL: "lab.orchestrator" };
+  // the holder registers at its position, as its harness does at launch: a want reads the position from that record
+  const reg = await agora(["session", "--as", "orchestrator/Opus"], orc);
+  assert.equal(reg.code, 0, reg.stderr);
   return { ...s, config, env, orc };
 }
 
@@ -378,4 +452,26 @@ test("CLI: succeed writes the request for this session's position; ensure --dry-
   const dry = await agora(["resident", "ensure", "--dry-run", "--manifest", s.manifestFile], s.env);
   assert.equal(dry.code, 0, dry.stderr);
   assert.equal(existsSync(path.join(s.state, "residents", "grants.jsonl")), false, "a dry run writes no record");
+});
+
+test("CLI: want --dry-run records nothing and starts nothing; a session that only sets AGORA_LABEL to the holder's position is refused (red legs: the real want; the holder)", async (t) => {
+  const s = await cliSeat(t);
+  const m = ["--manifest", s.manifestFile];
+  const dry = await agora(["resident", "want", "lab.coding", "--because", "a probe", "--dry-run", "--json", ...m], s.orc);
+  assert.equal(dry.code, 0, dry.stderr);
+  const lines = String(dry.stdout).trim().split(/\r?\n/).map((/** @type {string} */ l) => JSON.parse(l));
+  assert.deepEqual(lines.map((l) => [l.type, l.action, l.position, l.dryRun]), [["resident-want", "would-want", "lab.coding-2", true]], "no ensure row: nothing started");
+  assert.equal(existsSync(path.join(s.state, "residents", "grants.jsonl")), false, "nothing recorded");
+  // a stray session sets the variable a launcher sets; it holds no position on the seat
+  const spoof = await agora(["resident", "want", "lab.coding", "--because", "x", "--json", ...m], { ...s.env, AGORA_SESSION: "stray", AGORA_LABEL: "lab.orchestrator" });
+  assert.equal(spoof.code, 1);
+  const refused = JSON.parse(String(spoof.stdout).trim());
+  assert.deepEqual([refused.action, refused.by], ["refused", null]);
+  assert.match(refused.reason, /this session \(stray\) names lab\.orchestrator in AGORA_LABEL but holds no position on this seat/);
+  const evs = await readLedger(s.state);
+  assert.deepEqual(evs.map((e) => [e.ev, e.session]), [["refuse", "stray"]], "the refusal is on the record with the asking session; the dry run is not");
+  // red legs: the holder's real want is admitted and recorded
+  const real = await agora(["resident", "want", "lab.coding", "--because", "two units", "--json", ...m], s.orc);
+  assert.equal(JSON.parse(String(real.stdout).trim().split(/\r?\n/)[0]).action, "wanted");
+  assert.deepEqual((await readLedger(s.state)).map((e) => e.ev).slice(0, 2), ["refuse", "want"]);
 });

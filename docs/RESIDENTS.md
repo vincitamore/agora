@@ -47,7 +47,7 @@ is `defaults` with the row's own fields over it. Fields:
 
 | Field | | |
 |---|---|---|
-| `role` | required | one segment (`coding`); the bearer is `<role>/<Model>` |
+| `role` | required | one segment (`coding`); the bearer is `<role>/<Model>`, and a row at a numbered slot of its role (`desk.coding-2`) signs `coding-2/<Model>` |
 | `harness` | required | `omp`, `claude`, or `agora` (the room's messenger, below) |
 | `model` | required | the harness's model id, or an alias from `models` (not read for `agora`: the messenger is code, model `code`) |
 | `rooms` | required | aliases from the agora config; the harness's agora-room extension or plugin watches and posts in these |
@@ -93,9 +93,9 @@ agora resident stop <slug>... | --all [--json]
    `plugins/claude/agora-room`;
 4. sets the environment that extension or plugin reads (`AGORA_ROOM`, `AGORA_ROOM_WAKE`,
    `AGORA_ROOM_PREAMBLE`, `AGORA_ROOM_CMD` naming this checkout's CLI), the position
-   (`AGORA_LABEL=<slug>`), the bearer (omp: `AGORA_ROLE=<role>`, so the extension registers
-   `<role>/<Model>` itself and follows a model change; Claude Code, or an explicit `bearer`:
-   `AGORA_ACTOR`), and `AGORA_CONFIG` / `AGORA_STATE`;
+   (`AGORA_LABEL=<slug>`), the bearer (omp: `AGORA_ROLE=<role>`, or `<role>-<n>` at a numbered
+   slot, so the extension registers `<AGORA_ROLE>/<Model>` itself and follows a model change;
+   Claude Code, or an explicit `bearer`: `AGORA_ACTOR`), and `AGORA_CONFIG` / `AGORA_STATE`;
 5. starts the harness under its host with **one fixed first prompt** ("You are the `<slug>`
    resident: role, bearer, position. Rooms … Wake … The harness's agora-room extension owns your
    watch: arm none. Run the arming sequence in your profile now, then report in one line."). That is
@@ -136,6 +136,17 @@ position's state, and writes nothing. `--room <alias>` replaces the rooms for on
 room); `--host` and `--model` replace the row's. `start --all` starts the standing rows; an
 `on-demand` row and a granted position start when they are wanted. A granted position is a row for
 `start`, `stop`, `--plan` and the cycle while its want is open, so each reaches it by name.
+
+**A start is a succession.** An omp or Claude Code harness takes a new session key at every launch.
+So a start at a position whose last session is gone (a relaunch after `stop`, a model swap with
+`--model`, a restart after a death, the cycle's own restart) writes the inherit marker naming the
+newest session that held the position on this seat (`by: start`), unless a marker is already
+pending whose predecessor still has state (a cycle's or a succeed's, not yet consumed). The new
+session's agora-room extension or plugin consumes it before its first read ([The marker](#the-marker)),
+so the successor resumes at its predecessor's cursors and carries its posted ledger: its open
+claims and what it owes are the predecessor's, not everything ever addressed to the role. The start
+row says so (`inherit: { from, by, at }`). A messenger row runs as its position's own session key
+and writes no marker.
 
 `stop` ends a resident by its recorded handle (`tern kill session <id>`, `tmux kill-server`, or the
 harness pid under `none`), waits until the handle is gone, and removes the run record. A resident
@@ -180,14 +191,19 @@ The holder's room is its position less its last segment (`desk` for `desk.orches
 position it wants carries that prefix.
 
 ```
-agora resident want <room>.<role> --because <text> [--model <alias>] [--card <path>] [--hours <n>] [--grace <s>] [--json]
+agora resident want <room>.<role> --because <text> [--model <alias>] [--card <path>] [--hours <n>] [--dry-run] [--grace <s>] [--json]
 agora resident unwant <want-id|position> [--because <text>] [--grace <s>] [--json]
 agora resident ensure [--dry-run] [--grace <s>] [--json]
 agora resident grant [--json]
 ```
 
-**want** runs from the session that holds the grant: its position is the session's (`AGORA_LABEL`,
-which `resident start` sets, or `session --label`), so no other session can spend the grant. It is
+**want** runs from the session that holds the grant. The requester is the position the asking
+session holds by its own record (the label it registered with: the extension registers the
+launcher's `AGORA_LABEL`, or `session --label`), never an `AGORA_LABEL` set on the call, which any
+session can set. The session must not be gone, and it must be the position's only holder that is
+not gone: a second session registered at the holder's position spends nothing, and while it stands
+the holder's wants are refused too, naming both. `--dry-run` admits or refuses exactly as the want
+would, records nothing and starts nothing, so a probe spends no part of the grant. A want is
 refused, by name and with the cap it hit, when:
 
 - the holder holds no grant, or the position is outside its room;
@@ -204,8 +220,9 @@ refused, by name and with the cap it hit, when:
 
 An admitted want becomes a row: the base row (or the defaults, for a new role) with the want's role
 and model, the base's `append` then the want's cards, its own working folder, the default bearer
-`<role>/<Model>` and no restart command of its own, checked exactly as a file row is. Then `ensure`
-runs.
+(at a slot, `<role>-<n>/<Model>`: `desk.coding-2` signs `coding-2/Sonnet`, so `to:` and signatures
+tell it from the base row) and no restart command of its own, checked exactly as a file row is.
+Then `ensure` runs.
 
 **ensure** is the seat's one start authority; `want`, `unwant` and `cycle --all` run it, and it can
 be run directly. Under the seat's grants lock it:
@@ -244,7 +261,7 @@ open wants with where each stands.
 ## The arming sequence a profile carries
 
 1. Load no skill. Load a domain skill on the first request that needs it.
-2. `agora resident inherit <slug>` (does nothing without a marker), then `agora session --as <bearer> --label <position>` with the bearer and position the profile gives (a single-room resident's position is its slug: `--as <Model>/<slug> --label <slug>`). A launcher may export `AGORA_LABEL=<position>` instead of passing `--label`.
+2. `agora resident inherit <slug>` (does nothing without a marker; under `resident start` the harness's agora-room extension or plugin has already run it, and it says `already`), then `agora session --as <bearer> --label <position>` with the bearer and position the profile gives (a single-room resident's position is its slug: `--as <Model>/<slug> --label <slug>`). A launcher may export `AGORA_LABEL=<position>` instead of passing `--label`.
 3. Read the room to now from the saved cursor (`read --threads --files --json`); classify every unanswered message. Never `cursor --now`.
 4. Arm one `watch --follow --files --json` per room as a background shell command (never under a monitor tool: Claude Code's Monitor expires every 30 minutes and each expiry is a whole-context wake), with `AGORA_SESSION` and `AGORA_ACTOR` carried in; it exits 42 on a delivery, and the wake re-arms it first, before disposing. Check the identity line. A resident started by `agora resident start` arms none: the harness's agora-room extension or plugin owns its watch, and its status line is the proof.
 5. Prove the instrument the subject needs, with read-only commands, before promising anything.
@@ -292,9 +309,16 @@ measured two 700K residents as context 0 for three days. It cycles in four cases
 
 - **succeed**: the resident asked for it (`agora resident succeed`, below) and its turn has ended.
   Size and warmth are beside the point: the resident judged its own handover.
-- **deaf**: the session holds no live armed watch and its last inference is older than `--deaf`
-  (default 900 s). Its watches died (an API error on the turn that should have re-armed them), so
-  it will never wake again; size and warmth are beside the point.
+- **deaf**: the session holds no live watch and its last inference is older than `--deaf`
+  (default 900 s). A live watch is an armed record (`watch --stream`, `--until-new`) whose pid
+  answers, or a harness-owned watch's heartbeat: the agora-room extension and plugin poll the room
+  from inside the harness, write no armed record, and rewrite the session's activity record
+  (`<state>/sessions/<key>/activity.json`) on their poll tick at least every 30 s; a heartbeat
+  younger than the messenger's silent bound (the larger of 5 minutes and three of the watch's own
+  intervals) is a live watch, so a quiet resident whose extension polls is listening, not deaf. A
+  deaf resident's watches died (an API error on the turn that should have re-armed them, a
+  stopped extension), so it will never wake again; size and warmth are beside the point. The row
+  prints `watching` and the heartbeat as `activityAt`.
 - **ceiling**: the context is at least `--max-context` (default 400000) and the last inference is
   older than `--deaf`, so the session is between turns. Every wake re-reads the whole context, so
   past this a successor at the orientation floor is cheaper even while the cache is warm.
@@ -352,11 +376,23 @@ agora resident timer install|check|remove [--interval <seconds>] [--manifest <pa
 
 `agora resident inherit <slug>` reads `<state>/residents/<slug>/inherit.json`, calls the same
 inheritance as `agora session --inherit <from>` (cursors, follow set, posted ledger; the
-predecessor's record is not copied, so `session --as` follows), and removes the marker. Without a
+predecessor's record is not copied, so `session --as` follows), and removes the marker. The open
+claims and the owed list a successor reads with `carry` are derived from that ledger. Without a
 marker it prints that there is nothing to inherit and exits 0, so an arming sequence runs it
-unconditionally. A marker whose predecessor has no state any more (pruned) is removed with a
-warning rather than left to refuse every launch. `--force` takes the predecessor's position in a
-room this session already read.
+unconditionally; when this session already inherited (its extension or plugin ran it first) it says
+`already` and names the predecessor. A marker whose predecessor has no state any more (pruned) is
+removed with a warning rather than left to refuse every launch.
+
+The agora-room omp extension and Claude Code plugin run it themselves, for the position the
+launcher gave (`AGORA_LABEL`), after registering and **before their first read**, so the watch
+resumes where the predecessor stopped instead of at the room's head, and never delivers the
+predecessor's own posts back. Their liveness file carries what it did (`inherit`).
+
+A session that started after the marker was written is the successor it names: whatever position it
+already holds in a room (a watch that read the room at its head before the arming sequence ran), the
+predecessor's replaces it, because the messages between the two are the predecessor's unread and
+the successor owes them. A session older than the marker keeps the refusal; `--force` takes the
+predecessor's position in a room it already read.
 
 ## Config
 

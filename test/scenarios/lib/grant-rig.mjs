@@ -5,8 +5,10 @@
  * `ensure` over `seatEnsureDeps`: the real plan, start, stop and position state) with two stand-ins:
  *
  *   the host   a Tern that answers by the command's words. `new session` starts a stand-in harness
- *              process and registers the position's session under its pid, as the agora-room
- *              extension does when a harness starts; `ls` reports each session live until it died;
+ *              process and acts as the agora-room extension does when a harness starts: it registers
+ *              the position's session under its pid with the bearer the start's run record names
+ *              (`<AGORA_ROLE>/<Model>`, else AGORA_ACTOR), then, for a model harness, runs `resident
+ *              inherit <position>` before anything reads the room; `ls` reports each session live until it died;
  *              `kill session` stops that pid and forgets the session. Whether a position runs is
  *              read from this host's record, never by probing a pid the OS may reuse under load.
  *   the turn   set by the scenario per position (a turn running, or ended at an instant), since a
@@ -20,8 +22,9 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { parseNotice } from "../../../src/messenger.mjs";
-import { ensure, readLedger, recordUnwant, recordWant, roomSubject, seatEnsureDeps } from "../../../src/resident-grant.mjs";
+import { ensure, readLedger, recordUnwant, recordWant, roomSubject, seatEnsureDeps, wantRequester } from "../../../src/resident-grant.mjs";
 import { loadManifest } from "../../../src/resident-start.mjs";
+import { modelLabel } from "../../../plugins/omp/agora-room/index.mjs";
 import { AGORA_DIR, BIN, nodeExecutable } from "./seat.mjs";
 import { Agent, Human } from "./participants.mjs";
 import { readRoom } from "./room.mjs";
@@ -31,19 +34,22 @@ export const HOLDER = "main.orchestrator";
 
 /**
  * The manifest the room seed writes, for the seat's room `main`: messenger, orchestrator, coding
- * (standing, max 3), review, and the orchestrator's grant.
- * @param {Record<string, unknown> | null} grant
+ * (standing, max 3), review, and the orchestrator's grant. `rows` changes fields of a row by slug.
+ * @param {Record<string, unknown> | null} grant @param {Record<string, Record<string, unknown>>} [rows]
  */
-export function grantManifest(grant) {
+export function grantManifest(grant, rows = {}) {
+  /** @type {Record<string, Record<string, unknown>>} */
+  const residents = {
+    [MESSENGER_SESSION]: { role: "messenger", harness: "agora", wake: "all", rooms: ["main"], tenure: "standing", args: ["--human-name", HOST_HUMAN] },
+    [HOLDER]: { role: "orchestrator", tenure: "standing", append: ["orchestrator.md"] },
+    "main.coding": { role: "coding", tenure: "standing", max: 3, append: ["coding.md"] },
+  };
+  for (const [slug, fields] of Object.entries(rows)) residents[slug] = { ...residents[slug], ...fields };
   return {
     version: 1,
     models: { haiku: "vendor/claude-haiku-9:medium", sonnet: "vendor/claude-sonnet-9:high" },
     defaults: { harness: "omp", host: "tern", model: "haiku", rooms: ["main"], wake: "mine", preamble: "off", profile: "PROFILE.md" },
-    residents: {
-      [MESSENGER_SESSION]: { role: "messenger", harness: "agora", wake: "all", rooms: ["main"], tenure: "standing", args: ["--human-name", HOST_HUMAN] },
-      [HOLDER]: { role: "orchestrator", tenure: "standing", append: ["orchestrator.md"] },
-      "main.coding": { role: "coding", tenure: "standing", max: 3, append: ["coding.md"] },
-    },
+    residents,
     ...(grant ? { grants: { [HOLDER]: grant } } : {}),
   };
 }
@@ -52,13 +58,14 @@ export function grantManifest(grant) {
  * @param {import("./seat.mjs").Seat} seat
  * @param {any} client an open client, for the human who opens the Room subject
  * @param {Record<string, unknown> | null} grant
+ * @param {Record<string, Record<string, unknown>>} [rows] row fields changed by slug (a red leg's manifest)
  */
-export async function grantRig(seat, client, grant) {
+export async function grantRig(seat, client, grant, rows = {}) {
   const manifestFile = path.join(seat.root, "residents.json");
   await writeFile(path.join(seat.root, "PROFILE.md"), "# A resident\n\nThe profile.\n");
   for (const f of ["orchestrator.md", "coding.md"]) await writeFile(path.join(seat.root, f), `# ${f}\n`);
   /** @param {Record<string, unknown> | null} g */
-  const writeManifest = async (g) => { await writeFile(manifestFile, JSON.stringify(grantManifest(g), null, 2)); return loadManifest(manifestFile); };
+  const writeManifest = async (g) => { await writeFile(manifestFile, JSON.stringify(grantManifest(g, rows), null, 2)); return loadManifest(manifestFile); };
   let manifest = await writeManifest(grant);
 
   const ada = new Human(client, seat.alias, HOST_HUMAN);
@@ -70,7 +77,7 @@ export async function grantRig(seat, client, grant) {
   // The stand-in host's own record of its sessions. A session ends only by agora's stop through the
   // host (`kill session`, removed) or by a planted death (`die`, marked dead); liveness is read from
   // this record, never by probing a pid, which the OS reuses under load.
-  /** @type {Map<number, { pid: number, position: string, dead: boolean }>} */
+  /** @type {Map<number, { pid: number, position: string, dead: boolean, session: string, bearer: string, inherit: any }>} */
   const sessions = new Map();
   let nextId = 100;
   /** @type {import("../../../src/resident-start.mjs").Runner} */
@@ -79,9 +86,16 @@ export async function grantRig(seat, client, grant) {
       const position = argv[3];
       const pid = await seat.spawnHarness();
       const id = nextId++;
-      sessions.set(id, { pid, position, dead: false });
-      const role = position.slice(position.lastIndexOf(".") + 1).replace(/-\d+$/, "");
-      await new Agent(seat, { session: `granted-${id}`, bearer: `${role}/Haiku`, harness: "omp", harnessPid: pid }).register(`${role}/Haiku`, { label: position });
+      // the bearer and environment the start recorded for the harness, as the extension reads them
+      const runFile = argv[argv.indexOf("--run") + 1];
+      const exec = JSON.parse(await readFile(runFile, "utf8")).exec;
+      const model = exec.argv[exec.argv.indexOf("--model") + 1];
+      const bearer = exec.env.AGORA_ACTOR ?? `${exec.env.AGORA_ROLE}/${modelLabel(model)}`;
+      const agent = new Agent(seat, { session: `granted-${id}`, bearer, harness: "omp", harnessPid: pid });
+      await agent.register(bearer, { label: position });
+      // a model harness's extension takes its predecessor's place before its first read
+      const inherit = exec.env.AGORA_ROOM ? JSON.parse((await agent.ok(["resident", "inherit", position, "--json"])).stdout.trim().split(/\r?\n/).pop() ?? "{}") : null;
+      sessions.set(id, { pid, position, dead: false, session: agent.slug, bearer, inherit });
       return { code: 0, stdout: JSON.stringify({ session: id }), stderr: "" };
     }
     if (argv[1] === "ls") {
@@ -122,6 +136,16 @@ export async function grantRig(seat, client, grant) {
     /** @param {string} position @param {{ model?: string, because?: string }} [opts] */
     want: (position, opts = {}) => recordWant(manifest, seat.state, { requester: HOLDER, session: "orchestrator", position, model: opts.model, cards: [], because: opts.because ?? "parallel units", now: now() },
       { held: async (slot) => (await deps().state(slot)).running }),
+    /**
+     * A want as the CLI asks it: from a session on the seat, its requester read off that session's
+     * own record (`wantRequester`), with whatever AGORA_LABEL the call carries.
+     * @param {string} session @param {Record<string, string>} env @param {string} position
+     */
+    async wantFrom(session, env, position) {
+      const asked = await wantRequester(seat.state, { slug: session }, { env });
+      return recordWant(manifest, seat.state, { requester: asked.ok ? asked.requester : undefined, requesterRefusal: asked.ok ? undefined : asked.reason, session, position, cards: [], because: "parallel units", now: now() },
+        { held: async (slot) => (await deps().state(slot)).running });
+    },
     /** @param {string} target */
     unwant: (target) => recordUnwant(seat.state, { target, by: HOLDER, now: now() }),
     /** @param {{ graceSeconds?: number }} [opts] */
@@ -132,8 +156,10 @@ export async function grantRig(seat, client, grant) {
     async die(position) {
       for (const s of sessions.values()) if (s.position === position && !s.dead) { await seat.kill(s.pid); s.dead = true; }
     },
-    /** Start a manifest row as `resident start` would. @param {string} slug */
-    startRow: (slug) => deps().start(slug, manifest.residents[slug]),
+    /** Start a manifest row as `resident start` would; `overrides` as its flags (`--model`). @param {string} slug @param {Record<string, unknown>} [overrides] */
+    startRow: (slug, overrides = {}) => deps().start(slug, { ...manifest.residents[slug], ...overrides }),
+    /** The sessions the host started for a position, oldest first: session key, bearer, and what its inherit printed. @param {string} position */
+    hosted: (position) => [...sessions.values()].filter((s) => s.position === position),
     /** Stop a position as `resident stop` does: by its recorded handle. @param {string} slug */
     stopByHand: (slug) => deps().stop(slug),
     /** The N8 lines standing in the room: position, verdict, path, outcome, and whether each sits in the Room subject. */

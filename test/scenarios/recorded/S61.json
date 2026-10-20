@@ -1,7 +1,7 @@
 {
   "scenario": "S61",
   "recordedOn": "2026-10-20",
-  "build": "f97007f",
+  "build": "89a57c6",
   "checks": {
     "started-within-caps": {
       "today": "green",
@@ -26,6 +26,17 @@
       "today": "green",
       "observed": "models"
     },
+    "slot-bearer": {
+      "today": "green",
+      "observed": {
+        "position": "main.coding-2",
+        "bearer": "coding-2/Haiku"
+      }
+    },
+    "refused-not-holder": {
+      "today": "green",
+      "observed": "requester"
+    },
     "refused-past-maxlive": {
       "today": "green",
       "observed": {
@@ -39,6 +50,7 @@
         "want",
         "start",
         "refuse:models",
+        "refuse:requester",
         "refuse:maxLive"
       ]
     }

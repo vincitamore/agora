@@ -107,7 +107,7 @@ import { runUsage } from "../src/usage-cli.mjs";
 import { runUsageSessionsCli } from "../src/session-accounting.mjs";
 import { readShadowArgs, runEconomyShadowCli, ShadowInputError } from "../src/economy/shadow.mjs";
 import { clearStandDown, clearWatchStop, completeStandDownAck, declareStandDown, listStandDowns, standDownRequested } from "../src/stand-down.mjs";
-import { DEFAULT_DEAF_SECONDS, DEFAULT_IDLE_SECONDS, DEFAULT_MAX_CONTEXT, DEFAULT_MIN_CONTEXT, ROOM_MECHANICS_DOC, assertResidentSlug, configuredResidents, planCycle, readInheritMarker, removeInheritMarker, removeSucceedRequest, renderResidentPrompt, restartCommand, writeInheritMarker, writeSucceedRequest } from "../src/resident.mjs";
+import { DEFAULT_DEAF_SECONDS, DEFAULT_IDLE_SECONDS, DEFAULT_MAX_CONTEXT, DEFAULT_MIN_CONTEXT, ROOM_MECHANICS_DOC, assertResidentSlug, configuredResidents, inheritResident, planCycle, removeSucceedRequest, renderResidentPrompt, restartCommand, writeInheritMarker, writeSucceedRequest } from "../src/resident.mjs";
 import { nativeRecordArgumentRefusal, nativeRecordVerb, prepareAttachments, readSlackFiles, runNativeRecordVerb } from "../src/cli-native-records.mjs";
 import { NativeRoomStore } from "../src/native-store.mjs";
 import { FACE_ATTACHMENT_MODES, FACE_BUILT, FACE_SELECTORS, appendFaceRecord, faceCopies, facePolicyPath, listFaceRecords, normalizeSelectors, readFacePolicy, selectFaces, writeFacePolicy } from "../src/faces.mjs";
@@ -429,7 +429,7 @@ const SCHEMA = {
         "--model <id>": "start: this model (or an alias from the manifest's models) instead of the row's; want: the alias the wanted resident runs (one of the grant's models; default the row's)",
         "--run <run.json>": "start: run a recorded start in this terminal (the program a tern or tmux host is given; not typed by hand)",
         "--interval <seconds>": "timer: how often the cycle runs, in whole minutes given as seconds (default 900)",
-        "--dry-run": "cycle: print the verdicts, write no marker, restart nothing; ensure: print what it would start and stop, do nothing",
+        "--dry-run": "cycle: print the verdicts, write no marker, restart nothing; ensure: print what it would start and stop, do nothing; want: admit or refuse as the want would, record nothing, start nothing; inherit: say what would be inherited, change nothing",
         "--idle <seconds>": `cycle: the last inference must be older than this (default ${DEFAULT_IDLE_SECONDS}: a one-hour prompt-cache TTL plus a margin)`,
         "--min-context <tokens>": `cycle: the context must be at least this (default ${DEFAULT_MIN_CONTEXT}); keep it above every resident's orientation floor`,
         "--max-context <tokens>": `cycle: past this, cycle even while warm, once idle past --deaf (default ${DEFAULT_MAX_CONTEXT}): every wake re-reads the whole context`,
@@ -1604,27 +1604,15 @@ async function main(argv) {
     if (action === "inherit") {
       const slug = assertResidentSlug(String(rest[0] ?? ""));
       if (rest.length !== 1) throw new AgoraError("agora resident inherit <slug>", EXIT.usage);
-      const marker = await readInheritMarker(stateRoot, slug);
-      if (!marker) {
-        if (json) console.log(JSON.stringify({ type: "resident-inherit", resident: slug, inherited: false, reason: "no marker" }));
-        else console.log(`no inherit marker for resident ${slug}; nothing to inherit. Register with \`agora session --as <bearer> --label ${slug}\` (the bearer your profile gives, e.g. <Model>/${slug}).`);
-        return EXIT.ok;
-      }
-      if (marker.from === session.slug) {
-        await removeInheritMarker(stateRoot, slug);
-        throw new AgoraError(`the marker for ${slug} names this session (${session.slug}) as the predecessor; removed it. The successor runs inherit, not the session that was cycled.`, EXIT.usage);
-      }
-      if (!existsSync(path.join(stateRoot, "sessions", marker.from))) {
-        await removeInheritMarker(stateRoot, slug);
-        console.error(`agora: the marker for ${slug} named ${marker.from}, which has no state here any more (pruned?); removed the marker, nothing inherited`);
-        if (json) console.log(JSON.stringify({ type: "resident-inherit", resident: slug, inherited: false, reason: "predecessor-gone", from: marker.from }));
-        return EXIT.ok;
-      }
-      const plan = await inheritSession(stateRoot, marker.from, session, { force: values.force, dryRun: values["dry-run"] });
-      if (!plan.dryRun) await removeInheritMarker(stateRoot, slug);
-      if (json) console.log(JSON.stringify({ type: "resident-inherit", resident: slug, inherited: !plan.dryRun, marker: { at: marker.at, context: marker.context, lastInference: marker.lastInference, by: marker.by }, ...plan }));
-      else console.log(`${plan.dryRun ? "would inherit" : "inherited"} resident ${slug} from ${plan.from} (cycled ${marker.at}${marker.context ? ` at ${marker.context} context` : ""}): ${plan.cursors.length} cursor${plan.cursors.length === 1 ? "" : "s"}, ${plan.follow.length} follow set${plan.follow.length === 1 ? "" : "s"}, ${plan.ledger.lines} posted id${plan.ledger.lines === 1 ? "" : "s"}${plan.forced ? `; --force took its position in ${plan.conflicts.join(", ")}` : ""}`);
-      if (!plan.dryRun) console.error(`agora: ${plan.from}'s record was not copied; run \`agora session --as <bearer> --label ${slug}\` (the bearer your profile gives, e.g. <Model>/${slug}) so this session signs as itself and holds the position`);
+      // the successor a marker names takes the predecessor's place even after its watch read the room
+      const r = /** @type {any} */ (await inheritResident(stateRoot, slug, session, { record, force: values.force, dryRun: values["dry-run"] }));
+      if (r.reason === "predecessor-gone") console.error(`agora: the marker for ${slug} named ${r.from}, which has no state here any more (pruned?); removed the marker, nothing inherited`);
+      if (json) { console.log(JSON.stringify(r)); if (r.reason) return EXIT.ok; }
+      else if (r.reason === "no marker") { console.log(`no inherit marker for resident ${slug}; nothing to inherit. Register with \`agora session --as <bearer> --label ${slug}\` (the bearer your profile gives, e.g. <Model>/${slug}).`); return EXIT.ok; }
+      else if (r.reason === "already") { console.log(`this session already inherited resident ${slug} from ${r.from} (its agora-room extension or plugin ran inherit before its first read); nothing more to inherit`); return EXIT.ok; }
+      else if (r.reason) return EXIT.ok;
+      else console.log(`${r.dryRun ? "would inherit" : "inherited"} resident ${slug} from ${r.from} (${r.marker.by} ${r.marker.at}${r.marker.context ? ` at ${r.marker.context} context` : ""}): ${r.cursors.length} cursor${r.cursors.length === 1 ? "" : "s"}, ${r.follow.length} follow set${r.follow.length === 1 ? "" : "s"}, ${r.ledger.lines} posted id${r.ledger.lines === 1 ? "" : "s"}${r.conflicts.length && r.successor ? `; as the successor the marker names, took its position in ${r.conflicts.join(", ")}` : r.forced ? `; --force took its position in ${r.conflicts.join(", ")}` : ""}`);
+      if (!r.dryRun) console.error(`agora: ${r.from}'s record was not copied; run \`agora session --as <bearer> --label ${slug}\` (the bearer your profile gives, e.g. <Model>/${slug}) so this session signs as itself and holds the position`);
       return EXIT.ok;
     }
     const manifestArg = values.manifest === undefined ? undefined : String(values.manifest);
@@ -1711,16 +1699,26 @@ async function main(argv) {
       }
       const requester = resolveLabel({ env: process.env }) ?? positionOf(record);
       if (action === "want") {
-        if (rest.length !== 1) throw new AgoraError("agora resident want <room>.<role> --because <text> [--model <alias>] [--card <path>] [--hours <n>]", EXIT.usage);
+        if (rest.length !== 1) throw new AgoraError("agora resident want <room>.<role> --because <text> [--model <alias>] [--card <path>] [--hours <n>] [--dry-run]", EXIT.usage);
         const hours = values.hours === undefined ? undefined : Number(values.hours);
+        // the grant is spent by the session that holds it: its own record's position, never this call's AGORA_LABEL
+        const asked = await rg.wantRequester(stateRoot, session, { env: process.env });
+        const dryRun = Boolean(values["dry-run"]);
         const r = await rg.recordWant(manifest, stateRoot, {
-          requester, session: session.slug, position: String(rest[0]), model: values.model === undefined ? undefined : String(values.model),
-          cards: values.card === undefined ? [] : [resolvePath(String(values.card))], hours, because: String(values.because ?? ""), now,
+          requester: asked.ok ? asked.requester : undefined, requesterRefusal: asked.ok ? undefined : asked.reason,
+          session: session.slug, position: String(rest[0]), model: values.model === undefined ? undefined : String(values.model),
+          cards: values.card === undefined ? [] : [resolvePath(String(values.card))], hours, because: String(values.because ?? ""), now, dryRun,
         }, { held: async (slot) => (await rs.residentState(stateRoot, slot)).running });
         if (!r.ok) {
-          if (json) console.log(JSON.stringify({ type: "resident-want", action: "refused", position: String(rest[0]), by: requester ?? null, reason: r.reason }));
-          else console.error(`agora: want ${rest[0]} refused: ${r.reason}`);
+          if (json) console.log(JSON.stringify({ type: "resident-want", action: "refused", position: String(rest[0]), by: asked.ok ? asked.requester : null, reason: r.reason, ...(dryRun ? { dryRun } : {}) }));
+          else console.error(`agora: want ${rest[0]} refused${dryRun ? " (dry run)" : ""}: ${r.reason}`);
           return EXIT.error;
+        }
+        if (dryRun) {
+          // admitted as the want would be; nothing recorded, so ensure has nothing to start
+          if (json) console.log(JSON.stringify({ ...r.want, type: "resident-want", action: "would-want", dryRun }));
+          else console.log(`would want ${r.want.position} for ${r.want.by}: role ${r.want.role}, model ${r.want.model}, until ${r.want.until} (dry run: nothing recorded, nothing started)`);
+          return EXIT.ok;
         }
         if (json) console.log(JSON.stringify({ ...r.want, type: "resident-want", action: "wanted" }));
         else console.log(`wanted ${r.want.position} (${r.want.id}) for ${r.want.by}: role ${r.want.role}, model ${r.want.model}, until ${r.want.until}`);

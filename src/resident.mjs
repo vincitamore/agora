@@ -11,9 +11,15 @@
  * transcript and, when both hold, writes an inherit marker and (optionally) restarts the unit.
  * (3) The marker: `<state>/residents/<slug>/inherit.json` names the predecessor session; the
  * successor's arming step consumes it through `agora resident inherit <slug>`, which calls the
- * same `inheritSession` as `session --inherit`. (4) The succeed request,
+ * same `inheritSession` as `session --inherit`; the agora-room extension and plugin run that verb
+ * themselves before their first read. (4) The succeed request,
  * `<state>/residents/<slug>/succeed.json`: a resident asks to be handed to a fresh session (at a
  * task's close, past its working size), and the cycle honours it once the session's turn has ended.
+ *
+ * A live watch is either an armed record (`watch --stream`, `--until-new`) whose pid answers, or a
+ * harness-owned watch's activity record (`<state>/sessions/<key>/activity.json`) whose heartbeat is
+ * fresh: the agora-room extension and plugin poll the room from inside the harness and write no
+ * armed record, so their heartbeat is the evidence that a quiet resident is listening.
  *
  * Idle is measured from the last ASSISTANT message, never from the transcript's mtime: hooks and
  * monitors append to the file without an inference. A harness whose transcript this module cannot
@@ -25,7 +31,8 @@ import { homedir } from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { AgoraError, EXIT, writeFileAtomic } from "./core.mjs";
-import { armedAlive, listArmed, listRecords, positionOf } from "./session.mjs";
+import { ACTIVITY_FILE, DEFAULT_BOUNDS, parseActivity } from "./messenger.mjs";
+import { armedAlive, inheritSession, listArmed, listRecords, positionOf } from "./session.mjs";
 
 export const RESIDENT_SLUG_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 export const DEFAULT_IDLE_SECONDS = 3900; // a one-hour prompt-cache TTL plus a margin
@@ -241,10 +248,11 @@ export function matchesResidentRecord(record, slug) {
  * @param {number} [a.minContext]
  * @param {number} [a.maxContext] cycle past this even warm, once idle past `deafSeconds`
  * @param {number} [a.deafSeconds] the grace a resident with no live watch gets before it is deaf
- * @param {number} [a.watching] live watches the session holds; absent = not measured, no deaf verdict
+ * @param {number} [a.watching] live watches the session holds (armed records whose pid answers, plus a fresh harness-owned watch heartbeat); absent = not measured, no deaf verdict
+ * @param {string | null} [a.activityAt] the heartbeat of the session's harness-owned watch, when it keeps an activity record
  * @param {{ at: string, turn: Awaited<ReturnType<typeof positionTurn>> }} [a.succeed] a pending succeed request and the session's turn
  */
-export async function cycleVerdict({ slug, sessions, measure, now = new Date(), idleSeconds = DEFAULT_IDLE_SECONDS, minContext = DEFAULT_MIN_CONTEXT, maxContext = DEFAULT_MAX_CONTEXT, deafSeconds = DEFAULT_DEAF_SECONDS, watching, succeed }) {
+export async function cycleVerdict({ slug, sessions, measure, now = new Date(), idleSeconds = DEFAULT_IDLE_SECONDS, minContext = DEFAULT_MIN_CONTEXT, maxContext = DEFAULT_MAX_CONTEXT, deafSeconds = DEFAULT_DEAF_SECONDS, watching, activityAt, succeed }) {
   assertResidentSlug(slug);
   const live = sessions.filter((s) => s.state === "live" && matchesResidentRecord(s.record, slug));
   /** @type {Record<string, unknown>} */
@@ -273,6 +281,7 @@ export async function cycleVerdict({ slug, sessions, measure, now = new Date(), 
   Object.assign(row, { lastInference: m.lastInference, idleSeconds: idle, context: m.context, transcript: m.file });
   if (!Number.isFinite(idle)) return { ...row, action: "none", reason: "the last inference carries no readable timestamp" };
   if (typeof watching === "number") row.watching = watching;
+  if (activityAt !== undefined) row.activityAt = activityAt;
   // Deaf: no live watch and not working. A resident whose watches died (an API error on the turn
   // that should have re-armed them) never wakes again, so size and warmth are beside the point.
   if (watching === 0 && idle >= deafSeconds) return { ...row, action: "cycle", reason: `deaf: no live watch and idle ${idle}s >= ${deafSeconds}s` };
@@ -297,6 +306,27 @@ export function transcriptMeasure(deps = {}) {
 }
 
 /**
+ * The watch evidence for one session: its armed records whose pid answers, and its harness-owned
+ * watch's heartbeat. The agora-room extension and plugin rewrite the session's activity record on
+ * their poll tick at least every heartbeat, whether or not anything arrived; a record refreshed
+ * within the messenger's silent bound (the larger of D and three of the watch's own intervals) is
+ * a watch that is polling. A resident that is quiet with such a watch is listening, not deaf.
+ * @param {string} stateRoot @param {string} session
+ * @param {{ now?: number, kill?: (pid: number, sig: 0) => void, boot?: number }} [deps]
+ * @returns {Promise<{ armed: number, activityAt: string | null, heard: boolean }>}
+ */
+export async function watchEvidence(stateRoot, session, deps = {}) {
+  const now = deps.now ?? Date.now();
+  const armed = (await listArmed(stateRoot)).filter((a) => a.slug === session && armedAlive(a.armed, deps)).length;
+  let text;
+  try { text = await readFile(path.join(stateRoot, "sessions", session, ACTIVITY_FILE), "utf8"); } catch { return { armed, activityAt: null, heard: false }; }
+  const a = parseActivity(text, session);
+  if (!a) return { armed, activityAt: null, heard: false };
+  const silent = Math.max(DEFAULT_BOUNDS.D, 3 * (a.intervalMs ?? 0));
+  return { armed, activityAt: new Date(a.updatedAt).toISOString(), heard: now - a.updatedAt <= silent };
+}
+
+/**
  * Plan one resident's cycle against the seat's live records.
  * @param {string} stateRoot @param {string} slug
  * @param {{ now?: Date, idleSeconds?: number, minContext?: number, maxContext?: number, deafSeconds?: number, home?: string, kill?: (pid: number, sig: 0) => void, boot?: number }} [opts]
@@ -304,14 +334,14 @@ export function transcriptMeasure(deps = {}) {
 export async function planCycle(stateRoot, slug, opts = {}) {
   const deps = { kill: opts.kill, boot: opts.boot };
   const sessions = await listRecords(stateRoot, deps);
-  const armed = await listArmed(stateRoot);
   // The live watches of the session the verdict will measure (the newest live one for this slug).
   const live = sessions.filter((s) => s.state === "live" && matchesResidentRecord(s.record, slug));
   live.sort((a, b) => String(b.record?.startedAt ?? "").localeCompare(String(a.record?.startedAt ?? "")));
-  const watching = live.length ? armed.filter((a) => a.slug === live[0].slug && armedAlive(a.armed, deps)).length : undefined;
+  const ev = live.length ? await watchEvidence(stateRoot, live[0].slug, { ...deps, now: (opts.now ?? new Date()).getTime() }) : undefined;
+  const watching = ev ? ev.armed + (ev.heard ? 1 : 0) : undefined;
   const request = await readSucceedRequest(stateRoot, slug);
   const succeed = request ? { at: request.at, turn: await positionTurn(stateRoot, slug, { home: opts.home, ...deps }) } : undefined;
-  return cycleVerdict({ slug, sessions, measure: transcriptMeasure({ home: opts.home }), now: opts.now, idleSeconds: opts.idleSeconds, minContext: opts.minContext, maxContext: opts.maxContext, deafSeconds: opts.deafSeconds, watching, succeed });
+  return cycleVerdict({ slug, sessions, measure: transcriptMeasure({ home: opts.home }), now: opts.now, idleSeconds: opts.idleSeconds, minContext: opts.minContext, maxContext: opts.maxContext, deafSeconds: opts.deafSeconds, watching, activityAt: ev?.activityAt, succeed });
 }
 
 /** @param {string} stateRoot @param {string} slug */
@@ -380,6 +410,62 @@ export async function readInheritMarker(stateRoot, slug) {
 /** @param {string} stateRoot @param {string} slug */
 export async function removeInheritMarker(stateRoot, slug) {
   await rm(inheritMarkerPath(stateRoot, slug), { force: true });
+}
+
+/**
+ * A start at a position whose last session is gone is a succession: the new session takes that
+ * session's place, whatever model it runs. Writes the marker naming the newest session that held
+ * `slug` on this seat and is not live, unless a marker is already pending whose predecessor still
+ * has state here (a cycle's, or an earlier start's whose successor never consumed it: that
+ * predecessor still holds what there is to inherit). Null when no session ever held the position.
+ * @param {string} stateRoot @param {string} slug
+ * @param {{ by?: string, kill?: (pid: number, sig: 0) => void, boot?: number }} [deps]
+ */
+export async function markSuccession(stateRoot, slug, deps = {}) {
+  const pending = await readInheritMarker(stateRoot, slug);
+  if (pending && existsSync(path.join(stateRoot, "sessions", pending.from))) return { written: false, ...pending };
+  const held = (await listRecords(stateRoot, deps)).filter((s) => s.state !== "live" && s.record && positionOf(s.record) === slug);
+  if (!held.length) return null;
+  held.sort((a, b) => String(b.record?.startedAt ?? "").localeCompare(String(a.record?.startedAt ?? "")));
+  return { written: true, ...(await writeInheritMarker(stateRoot, slug, { from: held[0].slug, by: deps.by ?? "start" })) };
+}
+
+/**
+ * `agora resident inherit <slug>`: consume the position's marker and take the predecessor's place
+ * (its cursors, follow set and posted ledger, through `inheritSession`; the open claims and the
+ * owed list are derived from that ledger by `carry`).
+ *
+ * A session that started after the marker was written is the successor the marker names. Any
+ * position it already holds in a room it took since it started (a harness-owned watch reads the
+ * room at its head before the arming sequence runs), so the predecessor's position replaces it
+ * there: the messages between the two are the predecessor's unread, and the successor owes them.
+ * A session older than the marker keeps `inheritSession`'s refusal unless `force`.
+ * @param {string} stateRoot @param {string} slug @param {{ slug: string, source?: string }} session
+ * @param {{ record?: { startedAt?: string } | null, force?: boolean, dryRun?: boolean }} [opts]
+ */
+export async function inheritResident(stateRoot, slug, session, opts = {}) {
+  assertResidentSlug(slug);
+  const marker = await readInheritMarker(stateRoot, slug);
+  if (!marker) {
+    // the extension or plugin consumed it before the arming sequence asked: say so, by name
+    let prior = null;
+    try { prior = JSON.parse(await readFile(path.join(stateRoot, "sessions", session.slug, "carry-inherited.json"), "utf8")); } catch { /* none */ }
+    if (prior?.to === session.slug && typeof prior.from === "string") return { type: "resident-inherit", resident: slug, inherited: false, reason: "already", from: prior.from };
+    return { type: "resident-inherit", resident: slug, inherited: false, reason: "no marker" };
+  }
+  if (marker.from === session.slug) {
+    await removeInheritMarker(stateRoot, slug);
+    throw new AgoraError(`the marker for ${slug} names this session (${session.slug}) as the predecessor; removed it. The successor runs inherit, not the session that was cycled.`, EXIT.usage);
+  }
+  if (!existsSync(path.join(stateRoot, "sessions", marker.from))) {
+    await removeInheritMarker(stateRoot, slug);
+    return { type: "resident-inherit", resident: slug, inherited: false, reason: "predecessor-gone", from: marker.from };
+  }
+  const startedAt = opts.record?.startedAt;
+  const successor = typeof startedAt === "string" && Date.parse(startedAt) >= Date.parse(marker.at);
+  const plan = await inheritSession(stateRoot, marker.from, /** @type {any} */ (session), { force: Boolean(opts.force) || successor, dryRun: opts.dryRun });
+  if (!plan.dryRun) await removeInheritMarker(stateRoot, slug);
+  return { type: "resident-inherit", resident: slug, inherited: !plan.dryRun, successor, marker: { at: marker.at, context: marker.context, lastInference: marker.lastInference, by: marker.by }, ...plan };
 }
 
 /**

@@ -14,6 +14,9 @@ import {
 } from "../src/resident-start.mjs";
 import { DEFAULT_BOUNDS, runStream } from "../src/messenger.mjs";
 import { writeRecord } from "../src/session.mjs";
+import { readInheritMarker } from "../src/resident.mjs";
+// the names this wave adds, read through the namespace so a build without them fails only their cells
+import * as residentStart from "../src/resident-start.mjs";
 import { modelLabel } from "../plugins/omp/agora-room/index.mjs";
 
 const run = promisify(execFile);
@@ -342,6 +345,56 @@ test("restart: the cycle's built-in restart stops by the handle and starts again
   const none = await restartResident(m, "desk.coding", ctx, { checkout: CHECKOUT, run: r.fn });
   assert.equal(none.code, 1);
   assert.match(none.err, /host none; give it a restart command/);
+});
+
+test("plan: a numbered slot of a role signs as the slot, so it never shares the base row's bearer (red leg: the base row keeps its role)", async (t) => {
+  const s = await seat(t);
+  const doc = manifestDoc();
+  /** @type {any} */ (doc.residents)["desk.coding-2"] = { role: "coding", wake: "mine" };
+  /** @type {any} */ (doc.residents)["desk.review"] = { role: "review", wake: "mine" };
+  const m = validateManifest(doc, s.manifestFile);
+  const slot = planResident(m, "desk.coding-2", ctxOf(s));
+  const label = modelLabel("vendor/claude-haiku-9:medium");
+  assert.equal(slot.bearer, `coding-2/${label}`);
+  assert.equal(slot.env.AGORA_ROLE, "coding-2", "the extension registers <AGORA_ROLE>/<Model>");
+  assert.equal(slot.role, "coding", "the role is unchanged: the card, the lineage and the grant read it");
+  assert.match(String(slot.firstPrompt), new RegExp(`role coding, bearer coding-2/${label}, position desk\\.coding-2`));
+  // red leg: a row that is not a slot signs as its role
+  const base = planResident(m, "desk.review", ctxOf(s));
+  assert.deepEqual([base.bearer, base.env.AGORA_ROLE], [`review/${label}`, "review"]);
+  const name = residentStart.bearerName;
+  assert.deepEqual([name("desk.coding-2", "coding"), name("desk.coding", "coding"), name("desk.coding-x", "coding"), name("desk.review-2", "coding"), name("coding-3", "coding")],
+    ["coding-2", "coding", "coding", "coding", "coding-3"]);
+});
+
+test("start: a start at a position whose last session is gone writes the inherit marker naming it, so a relaunch or a model swap is a succession; a messenger row writes none (red leg: no session held the position)", async (t) => {
+  const s = await seat(t);
+  const doc = withMessenger();
+  /** @type {any} */ (doc.residents)["desk.orchestrator"] = { role: "orchestrator", wake: "mine" };
+  const m = validateManifest(doc, s.manifestFile);
+  const dead = (/** @type {number} */ pid) => { if (pid === 999_011 || pid === 999_012) throw Object.assign(new Error("gone"), { code: "ESRCH" }); };
+  let session = 60;
+  const r = fakeRunner((argv) => (argv[1] === "new" ? { code: 0, stdout: JSON.stringify({ session: ++session }) } : { code: 0, stdout: ternLs(session, false) }));
+  // red leg first: nothing ever held the position, so the first start writes no marker
+  const first = await startResident(planResident(m, "desk.orchestrator", ctxOf(s)), s.state, { checkout: CHECKOUT, run: r.fn, kill: dead });
+  assert.deepEqual([first.row.action, first.row.inherit], ["started", undefined]);
+  assert.equal(await readInheritMarker(s.state, "desk.orchestrator"), null);
+  // that session ran (its record at the position) and is gone; the relaunch picks another model
+  const old = path.join(s.state, "sessions", "omp-first");
+  await mkdir(old, { recursive: true });
+  await writeRecord(old, /** @type {any} */ ({ slug: "omp-first", source: "AGORA_SESSION" }), { bearer: "orchestrator/Haiku", label: "desk.orchestrator", pid: 999_011, pidSource: "OMP_PID" });
+  const swap = await startResident(planResident(m, "desk.orchestrator", ctxOf(s, { model: "vendor/claude-sonnet-9:high" })), s.state, { checkout: CHECKOUT, run: r.fn, kill: dead });
+  assert.equal(swap.row.action, "started");
+  assert.equal(swap.row.bearer, "orchestrator/Sonnet");
+  assert.deepEqual([/** @type {any} */ (swap.row.inherit)?.from, /** @type {any} */ (swap.row.inherit)?.by], ["omp-first", "start"]);
+  assert.equal((await readInheritMarker(s.state, "desk.orchestrator"))?.from, "omp-first", "the new session's extension consumes it before its first read");
+  // a messenger row keeps its own session key across starts: nothing to inherit
+  const mdir = path.join(s.state, "sessions", "lab.messenger");
+  await mkdir(mdir, { recursive: true });
+  await writeRecord(mdir, /** @type {any} */ ({ slug: "lab.messenger", source: "AGORA_SESSION" }), { bearer: "messenger/Code", label: "lab.messenger", pid: 999_012, pidSource: "agora-messenger" });
+  const msg = await startResident(planResident(m, "lab.messenger", ctxOf(s)), s.state, { checkout: CHECKOUT, run: r.fn, kill: dead });
+  assert.deepEqual([msg.row.action, msg.row.inherit], ["started", undefined]);
+  assert.equal(await readInheritMarker(s.state, "lab.messenger"), null);
 });
 
 test("timer: one spec per OS, and check reads without writing", async (t) => {

@@ -40,7 +40,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { AgoraError, EXIT, expandHome, writeFileAtomic } from "./core.mjs";
-import { ROOM_MECHANICS_DOC, RESIDENT_SLUG_RE, renderResidentPrompt, residentDir } from "./resident.mjs";
+import { ROOM_MECHANICS_DOC, RESIDENT_SLUG_RE, markSuccession, renderResidentPrompt, residentDir } from "./resident.mjs";
 import { POSITION_RE, listRecords, pidAlive, positionOf } from "./session.mjs";
 import { modelLabel } from "../plugins/omp/agora-room/index.mjs";
 import { livenessPath } from "./messenger.mjs";
@@ -405,6 +405,17 @@ export function defaultBearer(role, model) {
 }
 
 /**
+ * The name a position's bearer carries: its role, or the slot when the position is one of the
+ * role's numbered slots (`desk.coding-2` signs `coding-2/<Model>`), so two sessions of one role
+ * never share a bearer, and an address or a signature names exactly one of them.
+ * @param {string} slug @param {string} role
+ */
+export function bearerName(slug, role) {
+  const segment = slug.slice(slug.lastIndexOf(".") + 1);
+  return segment.startsWith(`${role}-`) && /^\d+$/.test(segment.slice(role.length + 1)) ? segment : role;
+}
+
+/**
  * The one first prompt: the spawner's only act.
  * @param {{ slug: string, role: string, bearer: string, rooms: string[], wake: string, harness: string }} p
  */
@@ -444,7 +455,8 @@ export function planResident(manifest, slug, ctx) {
   const messenger = row.harness === "agora";
   const modelKey = messenger ? row.model : ctx.model ?? row.model;
   const model = manifest.models[modelKey] ?? modelKey;
-  const bearer = row.bearer ?? defaultBearer(row.role, model);
+  const signs = bearerName(slug, row.role);
+  const bearer = row.bearer ?? defaultBearer(signs, model);
   const dir = residentDir(ctx.stateRoot, slug);
   const workdir = row.workdir.path ?? path.join(dir, "work");
   const promptFile = path.join(dir, "prompt.md");
@@ -466,10 +478,11 @@ export function planResident(manifest, slug, ctx) {
     };
   if (!ctx.cfg.path) delete harnessEnv.AGORA_CONFIG;
   if (row.preamble && !messenger) harnessEnv.AGORA_ROOM_PREAMBLE = row.preamble;
-  // omp's extension registers `<role>/<Model>` itself and follows a model change; an explicit bearer,
-  // and every Claude Code session, signs through AGORA_ACTOR.
+  // omp's extension registers `<AGORA_ROLE>/<Model>` itself and follows a model change (AGORA_ROLE
+  // carries the slot for a numbered slot); an explicit bearer, and every Claude Code session, signs
+  // through AGORA_ACTOR.
   if (!messenger) {
-    if (row.harness === "omp" && row.bearer === null) harnessEnv.AGORA_ROLE = row.role;
+    if (row.harness === "omp" && row.bearer === null) harnessEnv.AGORA_ROLE = signs;
     else harnessEnv.AGORA_ACTOR = bearer;
   }
 
@@ -860,12 +873,17 @@ export async function execRun(file, slug) {
  */
 
 /**
- * Start one resident unless its position is held. `none` returns an `exec` the caller awaits in the
- * foreground; `tern` and `tmux` return once the host reports its handle.
+ * Start one resident unless its position is held. A model harness takes a new session key at every
+ * launch, so a start at a position whose last session is gone writes the inherit marker naming that
+ * session (`markSuccession`): a relaunch, a model swap or a restart after a death is a succession,
+ * and the new session's agora-room extension or plugin inherits before its first read. `none`
+ * returns an `exec` the caller awaits in the foreground; `tern` and `tmux` return once the host
+ * reports its handle.
  * @param {ResidentPlan} plan @param {string} stateRoot @param {StartDeps} deps
  * @returns {Promise<{ row: Record<string, unknown>, exec?: () => Promise<number> }>}
  */
 export async function startResident(plan, stateRoot, deps) {
+  /** @type {Record<string, unknown>} */
   const base = { type: "resident-start", resident: plan.resident, host: plan.host, bearer: plan.bearer, position: plan.position, rooms: plan.rooms, wake: plan.wake, harness: plan.harness, model: plan.model, workdir: plan.workdir };
   const release = await takeLock(plan.dir);
   let released = false;
@@ -877,6 +895,9 @@ export async function startResident(plan, stateRoot, deps) {
       await hostKill(state.run, deps).catch(() => {}); // a finished host session left behind (an empty Tern session)
       await removeRun(plan.runFile);
     }
+    // a messenger row runs as its position's own session key, so it has nothing to inherit
+    const succession = plan.harness === "agora" ? null : await markSuccession(stateRoot, plan.resident, { kill: deps.kill, boot: deps.boot });
+    if (succession) base.inherit = { from: succession.from, by: succession.by, at: succession.at };
     await prepareRun(plan, { checkout: deps.checkout, home: deps.home });
     /** @type {RunRecord} */
     const run = {

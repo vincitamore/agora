@@ -12,6 +12,9 @@
 //           session is doing (lib.js ACTIVITY_FILE): the delivery and activity evidence the seat's messenger reads.
 //   tool    room_post: the model posts to a configured room through the same CLI.
 //   status  `agora-room: <room> · read Ns ago`, and a liveness file a supervisor can read.
+//   inherit a session started at a position (AGORA_LABEL) runs `agora resident inherit <position>`
+//           before its first read, so a successor (a cycle, a succeed, a relaunch, a model swap)
+//           starts from its predecessor's cursors, follow set and posted ledger, never the head.
 //
 // The plain helpers (configuration, the CLI's output, the delivery queue, post arguments) are the
 // Claude Code plugin's, imported in place, so the two harnesses cannot drift apart. This package
@@ -308,6 +311,10 @@ async function startSession(pi, ctx, deps) {
   let seenLog = new SeenLog(null);
   const seenState = { written: 0, lastError: /** @type {string | null} */ (null) };
   const position = String(cfg.childEnv.AGORA_LABEL ?? env.AGORA_LABEL ?? cfg.role ?? "").trim() || null;
+  // The position the launcher gave this session: the one it inherits at, before its first read.
+  const launched = String(cfg.childEnv.AGORA_LABEL ?? env.AGORA_LABEL ?? "").trim() || null;
+  /** @type {Record<string, unknown> | null} */
+  let inherited = null;
 
   // ---- the activity record: what this session is doing (docs/OMP-EXTENSION.md § Activity record) ----
   // Told of turns, tool calls and output by the events omp already delivers and written on the poll
@@ -352,7 +359,7 @@ async function startSession(pi, ctx, deps) {
       plugin: "agora-room", harness: "omp", session: cfg.session, bearer: registeredAs ?? cfg.actor ?? null, wake: cfg.wake, intervalMs: cfg.intervalMs, watch: cfg.watchEnabled,
       rooms: [...rooms.entries()].map(([room, s]) => ({ room, ready: s.ready, lastRead: s.lastRead, lastTick: s.lastTick, polls: s.polls, lastError: s.lastError })),
       ticks, errors, lastError, delivered: dq.deliveredCount, dropped: dq.droppedCount, queued: dq.queue.length,
-      inflight, awaiting: awaiting !== null, deferring, seen: { path: cfg.seen, written: seenState.written, lastError: seenState.lastError },
+      inflight, awaiting: awaiting !== null, deferring, inherit: inherited, seen: { path: cfg.seen, written: seenState.written, lastError: seenState.lastError },
       activity: { path: cfg.activity, written: activityState.written, lastError: activityState.lastError }, updatedAt: stamp(),
     };
     try { writeJson(cfg.liveness, doc); } catch (err) { lastError = `liveness write: ${msgOf(err)}`; }
@@ -381,6 +388,28 @@ async function startSession(pi, ctx, deps) {
     lastError = `agora session --as ${bearer} exit ${r.exitCode}: ${r.stderr.slice(0, 200)}`;
     errors += 1;
     if (!registerWarned) { registerWarned = true; notify(lastError, "warning"); } // say it once; try again each tick
+  }
+
+  // ---- succession: take the predecessor's place before the first read ----
+  // `agora resident inherit <position>` consumes the marker a cycle, a succeed or a start at a
+  // vacated position wrote, and copies the predecessor's cursors, follow set and posted ledger into
+  // this session; the open claims and the owed list follow from that ledger. Run before the first
+  // cursor read, so the watch resumes where the predecessor stopped (never at the head, which would
+  // skip what it had not read) and never delivers the predecessor's own posts back. With no marker
+  // it changes nothing. A failure is reported and never stops the watch.
+  async function inherit() {
+    if (!launched) return;
+    const r = await run(["resident", "inherit", launched, "--json"]);
+    const row = jsonLines(r.stdout).find((j) => j?.type === "resident-inherit");
+    if (r.exitCode === 0 && row) {
+      inherited = { position: launched, inherited: row.inherited === true, from: row.from ?? null, reason: row.reason ?? null, cursors: row.cursors ?? [], at: stamp() };
+      return;
+    }
+    const why = `agora resident inherit ${launched} exit ${r.exitCode}: ${r.stderr.slice(0, 200)}`;
+    inherited = { position: launched, inherited: false, error: why, at: stamp() };
+    lastError = why;
+    errors += 1;
+    notify(why, "warning");
   }
 
   // ---- the watch ----
@@ -519,8 +548,9 @@ async function startSession(pi, ctx, deps) {
     try { if (existsSync(cfg.activity)) activity = new ActivityTracker({ now, prior: readFileSync(cfg.activity, "utf8") }); } catch { /* start fresh */ }
   }
 
-  // ---- start: the bearer, then the starting point before the first prompt, then the timer ----
+  // ---- start: the bearer, the predecessor's place, then the starting point before the first prompt, then the timer ----
   await register();
+  await inherit();
   if (cfg.watchEnabled) {
     for (const room of cfg.rooms) {
       try { await ensureStart(room); } catch (err) {
@@ -568,7 +598,7 @@ async function startSession(pi, ctx, deps) {
       writeActivity(true);
       flush();
     },
-    state: () => ({ queue: dq.queue.length, delivered: dq.deliveredCount, awaiting: awaiting !== null, deferring, registeredAs, lastError, rooms: Object.fromEntries(rooms) }),
+    state: () => ({ queue: dq.queue.length, delivered: dq.deliveredCount, awaiting: awaiting !== null, deferring, registeredAs, inherit: inherited, lastError, rooms: Object.fromEntries(rooms) }),
   };
 }
 

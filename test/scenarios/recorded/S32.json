@@ -1,0 +1,67 @@
+{
+  "scenario": "S32",
+  "recordedOn": "2026-10-20",
+  "build": "97624a3",
+  "checks": {
+    "succeed:marker-consumed": {
+      "today": "green",
+      "observed": {
+        "written": true,
+        "namesPredecessor": true,
+        "consumed": true
+      }
+    },
+    "succeed:resumes-at-predecessor-cursor": {
+      "today": "green",
+      "observed": {
+        "cursorEqual": true,
+        "delivered": [
+          "R3"
+        ]
+      }
+    },
+    "succeed:owed": {
+      "today": "green",
+      "observed": [
+        "R2",
+        "R3"
+      ]
+    },
+    "succeed:claims": {
+      "today": "green",
+      "observed": [
+        "fix-median"
+      ]
+    },
+    "relaunch:marker-consumed": {
+      "today": "green",
+      "observed": {
+        "written": true,
+        "namesPredecessor": true,
+        "consumed": true
+      }
+    },
+    "relaunch:resumes-at-predecessor-cursor": {
+      "today": "green",
+      "observed": {
+        "cursorEqual": true,
+        "delivered": [
+          "R3"
+        ]
+      }
+    },
+    "relaunch:owed": {
+      "today": "green",
+      "observed": [
+        "R2",
+        "R3"
+      ]
+    },
+    "relaunch:claims": {
+      "today": "green",
+      "observed": [
+        "fix-median"
+      ]
+    }
+  }
+}

@@ -30,7 +30,7 @@ import { AgoraError, EXIT } from "./core.mjs";
 import { fileLock, formatAge, formatNotice } from "./messenger.mjs";
 import { positionTurn, readInheritMarker, RESIDENT_SLUG_RE } from "./resident.mjs";
 import { manifestRow, planResident, residentState, startResident, stopResident } from "./resident-start.mjs";
-import { POSITION_RE } from "./session.mjs";
+import { POSITION_RE, listRecords, positionOf } from "./session.mjs";
 import { withTrailers } from "./trailers.mjs";
 
 /** A granted position whose want ended stops once its turn has ended and been quiet this long. */
@@ -154,7 +154,7 @@ export function withGranted(manifest, fold) {
 /**
  * Admit or refuse one want. Pure but for `held` (is a slot's position running?) and the card files'
  * existence.
- * @param {{ manifest: Manifest, fold: Map<string, WantState>, requester: string | undefined, session?: string | null,
+ * @param {{ manifest: Manifest, fold: Map<string, WantState>, requester: string | undefined, requesterRefusal?: string, session?: string | null,
  *   position: string, model?: string, cards?: string[], hours?: number, because: string, now: number, held: (slot: string) => Promise<boolean> }} a
  * @returns {Promise<{ ok: true, want: Want } | { ok: false, reason: string }>}
  */
@@ -162,7 +162,7 @@ export async function admitWant(a) {
   /** @param {string} reason */
   const refuse = (reason) => /** @type {{ ok: false, reason: string }} */ ({ ok: false, reason });
   if (!a.because || !a.because.trim()) return refuse("a want says why: --because <text>");
-  if (!a.requester) return refuse("a want is asked by the session that holds a grant: run it from that position's session (its AGORA_LABEL, or session --label)");
+  if (!a.requester) return refuse(a.requesterRefusal ?? "a want is asked by the session that holds a grant: run it from that position's session (its AGORA_LABEL, or session --label)");
   const grants = a.manifest.grants;
   const g = grants[a.requester];
   if (!g) return refuse(`${a.requester} holds no grant in ${a.manifest.file} (grants: ${Object.keys(grants).join(", ") || "none"})`);
@@ -230,18 +230,48 @@ export async function withGrantsLock(stateRoot, fn) {
 }
 
 /**
- * Admit and record one want (or its refusal), under the grants lock.
+ * Admit and record one want (or its refusal), under the grants lock. A dry run admits or refuses
+ * exactly as a want would and records nothing, so it spends no part of the grant.
  * @param {Manifest} manifest @param {string} stateRoot
- * @param {Omit<Parameters<typeof admitWant>[0], 'manifest' | 'fold' | 'held'>} a @param {{ held: (slot: string) => Promise<boolean> }} deps
+ * @param {Omit<Parameters<typeof admitWant>[0], 'manifest' | 'fold' | 'held'> & { dryRun?: boolean }} a @param {{ held: (slot: string) => Promise<boolean> }} deps
  */
 export async function recordWant(manifest, stateRoot, a, deps) {
   return withGrantsLock(stateRoot, async () => {
     const fold = foldLedger(await readLedger(stateRoot));
     const r = await admitWant({ ...a, manifest, fold, held: deps.held });
+    if (a.dryRun) return { ...r, dryRun: true };
     if (r.ok) await appendLedger(stateRoot, r.want);
     else await appendLedger(stateRoot, { ev: "refuse", at: new Date(a.now).toISOString(), by: a.requester ?? null, session: a.session ?? null, position: a.position, model: a.model ?? null, reason: r.reason });
-    return r;
+    return { ...r, dryRun: false };
   });
+}
+
+/**
+ * Who asks a want: the position the asking session holds, read from its own session record (the
+ * label it registered with), never from the call's environment, which any session can set. That
+ * session must not be gone, and it must be the position's only holder that is not gone: a second
+ * session that registers itself at the holder's position can neither spend the grant nor, while it
+ * stands, let the holder spend it unnoticed. A refusal carries its reason for `admitWant`.
+ * @param {string} stateRoot @param {{ slug: string }} session
+ * @param {{ env?: Record<string, string | undefined>, kill?: (pid: number, sig: 0) => void, boot?: number }} [deps]
+ * @returns {Promise<{ ok: true, requester: string } | { ok: false, reason: string }>}
+ */
+export async function wantRequester(stateRoot, session, deps = {}) {
+  const lead = "a want is asked by the session that holds a grant";
+  const records = await listRecords(stateRoot, { kill: deps.kill, boot: deps.boot });
+  const mine = records.find((r) => r.slug === session.slug);
+  const position = positionOf(mine?.record);
+  const claimed = String(deps.env?.AGORA_LABEL ?? "").trim() || undefined;
+  if (!position) {
+    return { ok: false, reason: claimed
+      ? `${lead}: this session (${session.slug}) names ${claimed} in AGORA_LABEL but holds no position on this seat; the holder's own session asks`
+      : `${lead}: run it from that position's session (its AGORA_LABEL, or session --label)` };
+  }
+  if (claimed && claimed !== position) return { ok: false, reason: `${lead}: this session (${session.slug}) holds ${position}, not ${claimed}` };
+  if (mine?.state === "gone") return { ok: false, reason: `${lead}: this session (${session.slug}) is gone (its process no longer runs)` };
+  const holders = records.filter((r) => r.state !== "gone" && positionOf(r.record) === position).map((r) => r.slug);
+  if (holders.length > 1) return { ok: false, reason: `${lead}: ${position} is held by ${holders.length} sessions (${holders.join(", ")}); a grant is spent by its one holder` };
+  return { ok: true, requester: position };
 }
 
 /**

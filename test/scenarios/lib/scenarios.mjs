@@ -44,6 +44,7 @@ export const SCENARIO_FILES = Object.freeze({
   S20: "../s20-unowned.mjs",
   S23: "../s23-succession.mjs",
   S29: "../s29-absent-ensure.mjs",
+  S32: "../s32-owed-after-succession.mjs",
   S34: "../s34-succeed-live-child.mjs",
   S60: "../s60-notice-set.mjs",
   S61: "../s61-grant.mjs",
