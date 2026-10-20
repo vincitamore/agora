@@ -33,7 +33,7 @@ Precedence, highest first; each setting is taken whole from the first layer that
 
 1. **environment**: set in your shell, or for the desktop app in the `env` key of `~/.claude/settings.json` (the plugin reads it with `$.env.get`, and the agora CLI children inherit it)
 2. **the project file** `.agora-room.json` in the session's folder
-3. **the plugin's configuration form** (`userConfig`), stored in user settings as `pluginConfigs["agora-room@<marketplace>"].options (`agora` or `agora-plugins`)` (Claude Code ignores project and local settings for these)
+3. **the plugin's configuration form** (`userConfig`), stored in user settings as `pluginConfigs["agora-room@<marketplace>"].options`, where the marketplace is `agora` or `agora-plugins` (Claude Code ignores project and local settings for these)
 4. **defaults**
 
 | Setting | Environment | Project file key | Form key | Default |
