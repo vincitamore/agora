@@ -156,6 +156,8 @@ default 3600, cap 86400). Renew extends under the holder's lease id. A retried
 operation id is a duplicate. Slack `--claim` stays a trailer.
 `agora contest <room> <subject> --because` records a contest on a native board and does
 not take the subject; the receipt names the holder's expiry beside its cursor.
+`agora board <room>` reads the board (holders, lapsed leases, contests); the messenger
+(`docs/MESSENGER.md`) pings an untaken `to:` after its receipt bound and a lapsed lease after its grace.
 `agora break <room> <subject>` force-drops a holder. The human label is cooperative:
 the native service forwards the caller's authorKind, as it does for chat, and the
 store refuses only an agent-labelled request. The event records the requesting
