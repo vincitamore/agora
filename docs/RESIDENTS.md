@@ -64,12 +64,15 @@ is `defaults` with the row's own fields over it. Fields:
 | `bearer` | | an explicit bearer instead of `<role>/<Model>` |
 | `restart` | | the cycle's restart command for this resident (`{slug}` is the position) |
 | `command` | | the harness executable and leading arguments, when it is not `omp` or `claude` on `PATH` |
+| `tenure` | | `standing` (default): `start --all` starts it; `on-demand`: started only when a grant holder wants it ([Grants](#grants)) |
+| `max` | | how many positions of this row may run (default 1): the row's own and, by a want, `-2` .. `-<max>` |
 
 `vars` are text, or `{ "path": ... }` for an absolute path (forward slashes) resolved against the
 manifest. An unknown key, a missing required field, a bad value, a working-folder file outside the
 folder or a skill name with a separator is refused with the file and the field named. One wake mode
 covers all of a row's rooms: the extension and the plugin take one `AGORA_ROOM_WAKE`, so a
-different wake per room needs a per-room form of that setting in both.
+different wake per room needs a per-room form of that setting in both. The manifest's top-level
+`grants` is described under [Grants](#grants).
 
 ## Start and stop
 
@@ -130,12 +133,14 @@ and the session's registration), is not started again: `start` reports `running`
 record whose handle is gone is cleared, with the empty host session it left, and the start goes
 ahead. `--plan` prints the whole plan (files, overlay, environment, argv, host command) and the
 position's state, and writes nothing. `--room <alias>` replaces the rooms for one run (a test
-room); `--host` and `--model` replace the row's.
+room); `--host` and `--model` replace the row's. `start --all` starts the standing rows; an
+`on-demand` row and a granted position start when they are wanted. A granted position is a row for
+`start`, `stop`, `--plan` and the cycle while its want is open, so each reaches it by name.
 
 `stop` ends a resident by its recorded handle (`tern kill session <id>`, `tmux kill-server`, or the
 harness pid under `none`), waits until the handle is gone, and removes the run record. A resident
 no start recorded is reported as `none`. The session's agora state is kept: the next start at the
-position is a restart, not a departure.
+position is a restart, not a departure. `stop --all` also stops every granted position.
 
 Under systemd, the unit owns the process and the tmux server; `--host none` runs the resident in
 it:
@@ -150,6 +155,91 @@ Restart=on-failure
 
 A shared tmux server reads as dead to the second unit, and the login shell gives the start the
 user's `PATH`. Such a resident's manifest row carries `restart: "systemctl --user restart resident-{slug}.service"`.
+
+## Grants
+
+The operator may let one position stand residents up within caps: the manifest's `grants`, keyed by
+the position that holds the grant (in practice the room's orchestrator). agora reads it and never
+writes it; a grant changes only by the operator's edit of the manifest.
+
+```json
+"grants": {
+  "desk.orchestrator": { "roles": "open", "models": ["small", "large"], "maxLive": 2, "maxHours": 8, "card": "roles/ad-hoc.md" }
+}
+```
+
+| Field | | |
+|---|---|---|
+| `roles` | required | `"open"` (the holder may name a new role) or a list of role names it may want |
+| `models` | required | aliases from `models`; a want for any other is refused |
+| `maxLive` | required | how many wants of this holder may be open at once (0 or more) |
+| `maxHours` | required | the longest a want lasts, in hours; it cuts a running want too |
+| `card` | | the card a new role wears (a path relative to the manifest), before the want's own |
+
+The holder's room is its position less its last segment (`desk` for `desk.orchestrator`); every
+position it wants carries that prefix.
+
+```
+agora resident want <room>.<role> --because <text> [--model <alias>] [--card <path>] [--hours <n>] [--grace <s>] [--json]
+agora resident unwant <want-id|position> [--because <text>] [--grace <s>] [--json]
+agora resident ensure [--dry-run] [--grace <s>] [--json]
+agora resident grant [--json]
+```
+
+**want** runs from the session that holds the grant: its position is the session's (`AGORA_LABEL`,
+which `resident start` sets, or `session --label`), so no other session can spend the grant. It is
+refused, by name and with the cap it hit, when:
+
+- the holder holds no grant, or the position is outside its room;
+- the role is outside `roles` (when it is a list), or names a messenger row, the holder's own
+  position, or a slot (`coding-2`: want `coding`, and the seat picks the slot);
+- the model (`--model`, else the row's, else the defaults') is outside `models`;
+- `--hours` is past `maxHours`, or `maxLive` wants are already open;
+- the role is new (no row) and neither the grant nor `--card` gives it a card, or a card does not
+  exist;
+- every slot is held: a row's slots are the row itself when it is `on-demand`, then `-2` .. `-<max>`
+  (so a standing row with no `max` cannot be granted at all); a new role's are `<role>`, `-2` ..
+  `-<maxLive>`;
+- the row runs on host `none`, which has no handle a supervisor can start into.
+
+An admitted want becomes a row: the base row (or the defaults, for a new role) with the want's role
+and model, the base's `append` then the want's cards, its own working folder, the default bearer
+`<role>/<Model>` and no restart command of its own, checked exactly as a file row is. Then `ensure`
+runs.
+
+**ensure** is the seat's one start authority; `want`, `unwant` and `cycle --all` run it, and it can
+be run directly. Under the seat's grants lock it:
+
+- starts each open want that is not running, through the row's host;
+- restarts a granted position whose host died (a run record is left and nothing runs) and ends a
+  want whose position was stopped by hand (no run record and no succession pending): a death is the
+  supervisor's to repair, a stop is the operator's;
+- stops a granted position whose want ended (unwanted, expired, or revoked: the grant removed, or
+  narrowed past the want's role or model, or its base row gone) at its next idle: its harness
+  transcript's last entry is an assistant message that called no tool, and has been quiet for
+  `--grace` seconds (default 60). While a turn runs it is held and says so; a turn it cannot read
+  holds it too;
+- restarts a messenger row (`harness: "agora"`) whose host died; one with no run record was stopped
+  by its operator and is left.
+
+Each start or stop posts one N8 line, the messenger's fixed form (docs/MESSENGER.md), with the
+trailer `ack: none`, as the room's messenger position when the manifest has one for the room (else
+as the session running ensure), in the room's Room subject (the titled, pinned root; the earliest
+pinned root when none is titled; top level when the room pins none):
+
+```
+desk.coding-2: wanted by desk.orchestrator 4s; path grant; outcome started.
+desk.coding-2: revoked by manifest 2m; path grant; outcome stopped.
+desk.coding-2: unwanted by desk.orchestrator 0s; path grant; outcome stopped.
+desk.coding-2: expired by clock 1m; path grant; outcome stopped.
+desk.messenger: absent by host 0s; path restart; outcome started.
+```
+
+The age is from the want to its start, or from the end of the want (first seen, for a revocation) to
+the stop. **The record** is `<state>/residents/grants.jsonl`, append-only: every want, refusal,
+unwant, ending (when a revocation or expiry was first seen), start, stop and end, one JSON line
+each. What is open is a fold over it; nothing else is kept. `grant` prints each grant's caps and its
+open wants with where each stands.
 
 ## The arming sequence a profile carries
 
@@ -198,8 +288,10 @@ is the guard and the act. Per resident it finds the newest live session that hol
 usage: context = input + cache read + cache creation, last inference = its timestamp. An entry the
 harness wrote itself is not an inference and is skipped: Claude Code logs an API error (a 529, a
 spend limit) as model `<synthetic>` with all-zero usage, and reading that as the newest message
-measured two 700K residents as context 0 for three days. It cycles in three cases, and says which:
+measured two 700K residents as context 0 for three days. It cycles in four cases, and says which:
 
+- **succeed**: the resident asked for it (`agora resident succeed`, below) and its turn has ended.
+  Size and warmth are beside the point: the resident judged its own handover.
 - **deaf**: the session holds no live armed watch and its last inference is older than `--deaf`
   (default 900 s). Its watches died (an API error on the turn that should have re-armed them), so
   it will never wake again; size and warmth are beside the point.
@@ -211,13 +303,22 @@ measured two 700K residents as context 0 for three days. It cycles in three case
   150000: a small cold read is not worth a floor).
 
 The act writes
-`<state>/residents/<slug>/inherit.json` naming the predecessor and then restarts it: `--restart`
+`<state>/residents/<slug>/inherit.json` naming the predecessor (`by: succeed` or `by: cycle`) and
+then restarts it: `--restart`
 on the call, else `restart` on the manifest's row, else `restart` on the config's
 `residents.<slug>` row (`{slug}` in a command is the resident); else, for a manifest resident,
 `stop` by its recorded handle and `start` again; else none (the marker is written and the restart
 is the caller's). A manifest resident on host `none` has no handle a timer can start into and
-needs a `restart` command. `--all` takes the slugs from the config's `residents` table and the
-manifest.
+needs a `restart` command. `--all` first runs one `ensure` pass ([Grants](#grants)), then takes the
+slugs from the config's `residents` table, the manifest and the open wants.
+
+**Succeed.** `agora resident succeed [<position>]` (default: this session's position) writes
+`<state>/residents/<position>/succeed.json`, a request to be handed to a fresh session. A resident
+makes it when a piece of work closes past its working size. The next cycle honours it only between
+turns: the transcript's last entry is an assistant message that called no tool, so no tool call,
+child job or delivery in flight is cut off; a turn it cannot read defers it. Honoured, the request
+is removed; a request older than the session that now holds the position was already honoured and
+is cleared.
 
 Idle is the age of the last **assistant** message, never the transcript's mtime: hooks and
 monitors append without an inference. A session from a harness whose transcript this cannot read

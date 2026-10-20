@@ -12,7 +12,7 @@ import {
   RESERVED_ENV, cycleMessenger, defaultBearer, firstPrompt, hostAlive, ompOverlay, parseTaskXml, planResident, readRun, residentState, restartResident,
   runFilePath, runTimer, startResident, stopResident, substituteVars, timerSpec, validateManifest, which,
 } from "../src/resident-start.mjs";
-import { runStream } from "../src/messenger.mjs";
+import { DEFAULT_BOUNDS, runStream } from "../src/messenger.mjs";
 import { writeRecord } from "../src/session.mjs";
 import { modelLabel } from "../plugins/omp/agora-room/index.mjs";
 
@@ -536,7 +536,7 @@ test("stream: the liveness file is rewritten after every tick in the extension's
   const deps = (/** @type {boolean} */ failing) => ({
     gather: async () => { ticks++; if (failing) throw new Error("seat service dark"); return { messages: [], annotations: [], boardRecords: [], resolve: () => /** @type {any} */ ({ kind: "none", holders: [] }) }; },
     post: async () => ({ id: "x", cursor: "c" }), lock: async (/** @type {any} */ fn) => fn(), now: () => Date.now(), accountId: null, human: "Ada",
-    bounds: { R: 1000, R2: 2000, I: 1000, Bo: 1000, H: 3_600_000, T: 1000 },
+    bounds: { ...DEFAULT_BOUNDS, R: 1000, R2: 2000, I: 1000, Bo: 1000, H: 3_600_000, T: 1000 },
     wait: async () => {}, until: null, stopped: () => ticks >= 3, liveness: { file, base: { session: "lab.messenger", bearer: "messenger/Code", position: "lab.messenger", room: "lab" } },
   });
   const stats = await runStream(deps(false));

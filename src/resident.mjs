@@ -11,7 +11,9 @@
  * transcript and, when both hold, writes an inherit marker and (optionally) restarts the unit.
  * (3) The marker: `<state>/residents/<slug>/inherit.json` names the predecessor session; the
  * successor's arming step consumes it through `agora resident inherit <slug>`, which calls the
- * same `inheritSession` as `session --inherit`.
+ * same `inheritSession` as `session --inherit`. (4) The succeed request,
+ * `<state>/residents/<slug>/succeed.json`: a resident asks to be handed to a fresh session (at a
+ * task's close, past its working size), and the cycle honours it once the session's turn has ended.
  *
  * Idle is measured from the last ASSISTANT message, never from the transcript's mtime: hooks and
  * monitors append to the file without an inference. A harness whose transcript this module cannot
@@ -160,6 +162,57 @@ export async function measureOmpTranscript(file) {
 }
 
 /**
+ * Where the session's turn stands, from its transcript's last conversational entry: an assistant
+ * message that called no tool ends a turn; anything after it (a delivered line, a prompt, a tool's
+ * result) or an assistant message that called a tool means a turn is running. Null when the
+ * transcript holds no such entry. A harness error entry (Claude Code's `<synthetic>`) ends the turn
+ * it broke.
+ * @param {string} file @param {'claude-code' | 'omp'} harness
+ * @returns {Promise<{ at: string, turnEnded: boolean } | null>}
+ */
+export async function turnState(file, harness) {
+  /** @type {{ at: string, turnEnded: boolean } | null} */
+  let last = null;
+  const rl = readline.createInterface({ input: createReadStream(file, { encoding: "utf8" }), crlfDelay: Infinity });
+  for await (const line of rl) {
+    /** @type {any} */
+    let o;
+    try { o = JSON.parse(line); } catch { continue; }
+    if (typeof o?.timestamp !== "string") continue;
+    if (harness === "omp") {
+      if (o.type !== "message" || typeof o.message?.role !== "string") continue;
+      last = { at: o.timestamp, turnEnded: o.message.role === "assistant" && o.message.stopReason !== "toolUse" };
+    } else {
+      if (o.type === "user") last = { at: o.timestamp, turnEnded: false };
+      else if (o.type === "assistant") {
+        const content = Array.isArray(o.message?.content) ? o.message.content : [];
+        last = { at: o.timestamp, turnEnded: !content.some((/** @type {any} */ c) => c?.type === "tool_use") };
+      }
+    }
+  }
+  return last;
+}
+
+/**
+ * The turn of the newest live session holding `position` on this seat: `none` when no live session
+ * holds it, `unsupported` when its transcript cannot be read.
+ * @param {string} stateRoot @param {string} position
+ * @param {{ home?: string, kill?: (pid: number, sig: 0) => void, boot?: number }} [deps]
+ * @returns {Promise<{ status: 'none' } | { status: 'unsupported', reason: string, session: string } | { status: 'read', session: string, startedAt: string | null, at: string, turnEnded: boolean }>}
+ */
+export async function positionTurn(stateRoot, position, deps = {}) {
+  const live = (await listRecords(stateRoot, { kill: deps.kill, boot: deps.boot })).filter((s) => s.state === "live" && matchesResidentRecord(s.record, position));
+  if (!live.length) return { status: "none" };
+  live.sort((a, b) => String(b.record?.startedAt ?? "").localeCompare(String(a.record?.startedAt ?? "")));
+  const s = live[0];
+  const t = transcriptFor({ slug: s.slug, source: s.record?.source }, { home: deps.home });
+  if (t.status !== "found") return { status: "unsupported", reason: t.reason, session: s.slug };
+  const turn = await turnState(t.file, t.harness);
+  if (!turn) return { status: "unsupported", reason: `${t.file} holds no conversational entry yet`, session: s.slug };
+  return { status: "read", session: s.slug, startedAt: s.record?.startedAt ?? null, ...turn };
+}
+
+/**
  * Does a session record belong to resident `slug`? A record that holds a position (`session
  * --label`, or AGORA_LABEL from the launcher) belongs to the resident of that position and to no
  * other, whatever its bearer says: `coding/Opus` labelled `desk.coding` is `desk.coding`, and the
@@ -189,8 +242,9 @@ export function matchesResidentRecord(record, slug) {
  * @param {number} [a.maxContext] cycle past this even warm, once idle past `deafSeconds`
  * @param {number} [a.deafSeconds] the grace a resident with no live watch gets before it is deaf
  * @param {number} [a.watching] live watches the session holds; absent = not measured, no deaf verdict
+ * @param {{ at: string, turn: Awaited<ReturnType<typeof positionTurn>> }} [a.succeed] a pending succeed request and the session's turn
  */
-export async function cycleVerdict({ slug, sessions, measure, now = new Date(), idleSeconds = DEFAULT_IDLE_SECONDS, minContext = DEFAULT_MIN_CONTEXT, maxContext = DEFAULT_MAX_CONTEXT, deafSeconds = DEFAULT_DEAF_SECONDS, watching }) {
+export async function cycleVerdict({ slug, sessions, measure, now = new Date(), idleSeconds = DEFAULT_IDLE_SECONDS, minContext = DEFAULT_MIN_CONTEXT, maxContext = DEFAULT_MAX_CONTEXT, deafSeconds = DEFAULT_DEAF_SECONDS, watching, succeed }) {
   assertResidentSlug(slug);
   const live = sessions.filter((s) => s.state === "live" && matchesResidentRecord(s.record, slug));
   /** @type {Record<string, unknown>} */
@@ -201,6 +255,19 @@ export async function cycleVerdict({ slug, sessions, measure, now = new Date(), 
   row.session = s.slug;
   row.bearer = s.record.bearer;
   const m = await measure({ slug: s.slug, ...s.record });
+  // Succeed: the resident asked to be handed to a fresh session. Honoured only between turns, so no
+  // tool call, child job or delivery in flight is cut off; a request older than the session that
+  // holds the position now was already honoured.
+  if (succeed) {
+    row.succeed = succeed.at;
+    if (m.status === "measured") Object.assign(row, { lastInference: m.lastInference, context: m.context, transcript: m.file });
+    if (s.record.startedAt && Date.parse(succeed.at) < Date.parse(s.record.startedAt))
+      return { ...row, action: "none", stale: true, reason: `the succeed request of ${succeed.at} predates this session (started ${s.record.startedAt}): it was honoured` };
+    const t = succeed.turn;
+    if (t.status !== "read") return { ...row, action: "none", reason: `succeed requested ${succeed.at}; its turn cannot be read (${t.status === "unsupported" ? t.reason : "no live session"}), so it waits` };
+    if (!t.turnEnded) return { ...row, action: "none", reason: `succeed requested ${succeed.at}; waits for the running turn to end` };
+    return { ...row, action: "cycle", reason: `succeed: requested ${succeed.at}; the turn ended ${Math.max(0, Math.floor((now.getTime() - Date.parse(t.at)) / 1000))}s ago` };
+  }
   if (m.status !== "measured") return { ...row, action: "none", reason: m.reason };
   const idle = Math.floor((now.getTime() - new Date(m.lastInference).getTime()) / 1000);
   Object.assign(row, { lastInference: m.lastInference, idleSeconds: idle, context: m.context, transcript: m.file });
@@ -242,7 +309,45 @@ export async function planCycle(stateRoot, slug, opts = {}) {
   const live = sessions.filter((s) => s.state === "live" && matchesResidentRecord(s.record, slug));
   live.sort((a, b) => String(b.record?.startedAt ?? "").localeCompare(String(a.record?.startedAt ?? "")));
   const watching = live.length ? armed.filter((a) => a.slug === live[0].slug && armedAlive(a.armed, deps)).length : undefined;
-  return cycleVerdict({ slug, sessions, measure: transcriptMeasure({ home: opts.home }), now: opts.now, idleSeconds: opts.idleSeconds, minContext: opts.minContext, maxContext: opts.maxContext, deafSeconds: opts.deafSeconds, watching });
+  const request = await readSucceedRequest(stateRoot, slug);
+  const succeed = request ? { at: request.at, turn: await positionTurn(stateRoot, slug, { home: opts.home, ...deps }) } : undefined;
+  return cycleVerdict({ slug, sessions, measure: transcriptMeasure({ home: opts.home }), now: opts.now, idleSeconds: opts.idleSeconds, minContext: opts.minContext, maxContext: opts.maxContext, deafSeconds: opts.deafSeconds, watching, succeed });
+}
+
+/** @param {string} stateRoot @param {string} slug */
+export function succeedRequestPath(stateRoot, slug) {
+  return path.join(residentDir(stateRoot, slug), "succeed.json");
+}
+
+/**
+ * Ask the cycle to hand `slug` to a fresh session at its next tick between turns. A second request
+ * replaces the first.
+ * @param {string} stateRoot @param {string} slug @param {{ by: string, now?: Date }} fields
+ */
+export async function writeSucceedRequest(stateRoot, slug, fields) {
+  const file = succeedRequestPath(stateRoot, slug);
+  const rec = { type: "resident-succeed", slug, at: (fields.now ?? new Date()).toISOString(), by: fields.by };
+  await writeFileAtomic(file, JSON.stringify(rec) + "\n");
+  return { file, ...rec };
+}
+
+/** @param {string} stateRoot @param {string} slug
+ * @returns {Promise<{ file: string, slug: string, at: string, by: string } | null>} */
+export async function readSucceedRequest(stateRoot, slug) {
+  const file = succeedRequestPath(stateRoot, slug);
+  try {
+    const rec = JSON.parse(await readFile(file, "utf8"));
+    if (rec?.type !== "resident-succeed" || typeof rec.at !== "string") throw new AgoraError(`${file} is not a resident succeed request; remove it by hand`, EXIT.error);
+    return { file, ...rec };
+  } catch (e) {
+    if (/** @type {NodeJS.ErrnoException} */ (e).code === "ENOENT") return null;
+    throw e;
+  }
+}
+
+/** @param {string} stateRoot @param {string} slug */
+export async function removeSucceedRequest(stateRoot, slug) {
+  await rm(succeedRequestPath(stateRoot, slug), { force: true });
 }
 
 /**

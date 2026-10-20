@@ -49,9 +49,13 @@ export const MANIFEST_VERSION = 1;
 export const HARNESSES = Object.freeze(["omp", "claude", "agora"]);
 export const HOSTS = Object.freeze(["tern", "tmux", "none"]);
 export const WAKES = Object.freeze(["all", "addressed", "mine"]);
-const TOP_KEYS = new Set(["version", "models", "vars", "defaults", "residents"]);
-const ROW_KEYS = new Set(["role", "harness", "model", "thinking", "rooms", "wake", "profile", "append", "workdir", "skills", "host", "env", "args", "preamble", "bearer", "restart", "command"]);
+const TOP_KEYS = new Set(["version", "models", "vars", "defaults", "residents", "grants"]);
+const ROW_KEYS = new Set(["role", "harness", "model", "thinking", "rooms", "wake", "profile", "append", "workdir", "skills", "host", "env", "args", "preamble", "bearer", "restart", "command", "tenure", "max"]);
 const REQUIRED = ["role", "harness", "model", "rooms", "profile", "host"];
+/** `standing`: started by `start --all` and kept; `on-demand`: started only when a grant holder wants it. */
+export const TENURES = Object.freeze(["standing", "on-demand"]);
+/** The fields of one grant; `card` is the only optional one. */
+export const GRANT_KEYS = Object.freeze(["roles", "models", "maxLive", "maxHours", "card"]);
 /** A messenger row runs code, not a model: it names no model and no profile. */
 const NOT_REQUIRED_FOR_AGORA = new Set(["model", "profile"]);
 /** The model a messenger row records when it names none: its bearer is `<role>/Code`. */
@@ -79,10 +83,20 @@ export const DEFAULT_TIMER_SECONDS = 900;
  *   workdir: { path: string | null, files: Array<{ path: string, parts: FilePart[] }> },
  *   skills: { dir: string, names: string[] } | null, host: 'tern' | 'tmux' | 'none',
  *   env: Record<string, string>, args: string[], preamble: 'on' | 'off' | null, bearer: string | null,
- *   restart: string | null, command: string[] | null,
+ *   restart: string | null, command: string[] | null, tenure: 'standing' | 'on-demand', max: number,
  * }} ManifestResident
  */
-/** @typedef {{ file: string, dir: string, models: Record<string, string>, vars: Record<string, string>, residents: Record<string, ManifestResident> }} Manifest */
+/**
+ * What a grant holder (a position, the key) may stand up: `roles` "open" or a list of role names,
+ * `models` the aliases a want may name, `maxLive` the wants live at once, `maxHours` the longest a
+ * want lasts, `card` the card a new role wears when the want names none. `room` is the holder's
+ * position less its last segment: the prefix every granted position carries.
+ * @typedef {{ holder: string, room: string, roles: 'open' | string[], models: string[], maxLive: number, maxHours: number, card: string | null }} Grant
+ */
+/**
+ * @typedef {{ file: string, dir: string, models: Record<string, string>, vars: Record<string, string>,
+ *   raw: Record<string, any>, residents: Record<string, ManifestResident>, grants: Record<string, Grant> }} Manifest
+ */
 
 // ---------------------------------------------------------------------------------------------
 // The manifest
@@ -237,15 +251,66 @@ export function validateManifest(raw, file) {
       command = strList("command", null);
       if (!command.length) bad(`${at}.command`, "must be a non-empty argv prefix");
     }
+    const tenure = /** @type {'standing' | 'on-demand'} */ (oneOf("tenure", TENURES, "standing"));
+    let max = 1;
+    if (row.max !== undefined) {
+      if (!Number.isInteger(row.max) || /** @type {number} */ (row.max) < 1) bad(`${at}.max`, "must be a whole number of positions, at least 1 (the row's own and -2, -3, ... for wants)");
+      if (agoraRow && row.max !== 1) bad(`${at}.max`, "a messenger row (harness agora) is one per room");
+      max = /** @type {number} */ (row.max);
+    }
 
     residents[slug] = {
       slug, role, harness, model: agoraRow ? MESSENGER_MODEL : str("model"), thinking: agoraRow ? null : optStr("thinking"), rooms: [...new Set(rooms)], wake,
       // a messenger row has no prompt: a profile or an append inherited from defaults is not read
       profile: agoraRow ? "" : resolveIn(str("profile")), append: agoraRow ? [] : strList("append", null).map(resolveIn), workdir, skills: agoraRow ? null : skills, host, env,
-      args: strList("args", null), preamble, bearer, restart: optStr("restart"), command,
+      args: strList("args", null), preamble, bearer, restart: optStr("restart"), command, tenure, max,
     };
   }
-  return { file: path.resolve(file), dir, models, vars, residents };
+
+  /** @type {Record<string, Grant>} */
+  const grants = {};
+  if (top.grants !== undefined) {
+    if (!isObj(top.grants)) bad("grants", "must be an object of <holder position>: { roles, models, maxLive, maxHours }");
+    for (const [holder, gRaw] of Object.entries(/** @type {Record<string, unknown>} */ (top.grants))) {
+      const at = `grants.${holder}`;
+      if (!residents[holder]) bad(at, `a grant's key is the position that holds it, and names a resident row (have: ${Object.keys(residents).join(", ")})`);
+      if (residents[holder].harness === "agora") bad(at, "a messenger row (harness agora) runs code and wants nothing");
+      if (!isObj(gRaw)) bad(at, "must be an object { roles, models, maxLive, maxHours }");
+      const g = /** @type {Record<string, unknown>} */ (gRaw);
+      for (const k of Object.keys(g)) if (!GRANT_KEYS.includes(k)) bad(`${at}.${k}`, `unknown field (have: ${GRANT_KEYS.join(", ")})`);
+      for (const k of GRANT_KEYS) if (k !== "card" && g[k] === undefined) bad(`${at}.${k}`, "is required");
+      /** @type {'open' | string[]} */
+      let roles;
+      if (g.roles === "open") roles = "open";
+      else if (Array.isArray(g.roles) && g.roles.length && g.roles.every((r) => typeof r === "string" && ROLE_RE.test(r))) roles = [...new Set(/** @type {string[]} */ (g.roles))];
+      else bad(`${at}.roles`, `must be "open" or a non-empty list of role names (${ROLE_RE})`);
+      if (!Array.isArray(g.models) || !g.models.length || g.models.some((m) => typeof m !== "string")) bad(`${at}.models`, "must be a non-empty list of model aliases");
+      for (const m of /** @type {string[]} */ (g.models)) if (!Object.hasOwn(models, m)) bad(`${at}.models`, `${JSON.stringify(m)} is not an alias in models (have: ${Object.keys(models).join(", ") || "none"})`);
+      if (!Number.isInteger(g.maxLive) || /** @type {number} */ (g.maxLive) < 0) bad(`${at}.maxLive`, "must be a whole number, 0 or more");
+      if (!Number.isInteger(g.maxHours) || /** @type {number} */ (g.maxHours) < 1) bad(`${at}.maxHours`, "must be a whole number of hours, at least 1");
+      let card = null;
+      if (g.card !== undefined) {
+        if (typeof g.card !== "string" || !g.card.trim()) bad(`${at}.card`, "must be a path (relative to the manifest)");
+        card = resolveIn(/** @type {string} */ (g.card).trim());
+      }
+      const dot = holder.lastIndexOf(".");
+      grants[holder] = { holder, room: dot < 0 ? "" : holder.slice(0, dot), roles: /** @type {'open' | string[]} */ (roles), models: [...new Set(/** @type {string[]} */ (g.models))],
+        maxLive: /** @type {number} */ (g.maxLive), maxHours: /** @type {number} */ (g.maxHours), card };
+    }
+  }
+  return { file: path.resolve(file), dir, models, vars, raw: top, residents, grants };
+}
+
+/**
+ * One more row of a validated manifest, from fields as a manifest row would carry them over the
+ * manifest's own defaults, checked exactly as the file's rows are. The way a granted position
+ * becomes a row: nothing about it is accepted that the file itself would refuse.
+ * @param {Manifest} manifest @param {string} slug @param {Record<string, unknown>} fields
+ * @returns {ManifestResident}
+ */
+export function manifestRow(manifest, slug, fields) {
+  const { grants: _g, residents: _r, ...rest } = manifest.raw;
+  return validateManifest({ ...rest, residents: { [slug]: fields } }, manifest.file).residents[slug];
 }
 
 /** @param {string} file @returns {Promise<Manifest>} */

@@ -1,0 +1,46 @@
+{
+  "scenario": "S61",
+  "recordedOn": "2026-10-20",
+  "build": "f97007f",
+  "checks": {
+    "started-within-caps": {
+      "today": "green",
+      "observed": {
+        "position": "main.coding-2",
+        "started": true,
+        "held": true
+      }
+    },
+    "one-n8-in-room-subject": {
+      "today": "green",
+      "observed": [
+        {
+          "verdict": "wanted",
+          "path": "grant",
+          "outcome": "started",
+          "inRoomSubject": true
+        }
+      ]
+    },
+    "refused-outside-models": {
+      "today": "green",
+      "observed": "models"
+    },
+    "refused-past-maxlive": {
+      "today": "green",
+      "observed": {
+        "cap": "maxLive",
+        "started": false
+      }
+    },
+    "record-kept": {
+      "today": "green",
+      "observed": [
+        "want",
+        "start",
+        "refuse:models",
+        "refuse:maxLive"
+      ]
+    }
+  }
+}

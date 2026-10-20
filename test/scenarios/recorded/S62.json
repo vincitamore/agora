@@ -1,0 +1,42 @@
+{
+  "scenario": "S62",
+  "recordedOn": "2026-10-20",
+  "build": "f97007f",
+  "checks": {
+    "held-while-working": {
+      "today": "green",
+      "observed": {
+        "action": "held",
+        "running": true
+      }
+    },
+    "stopped-at-idle": {
+      "today": "green",
+      "observed": {
+        "running": false,
+        "lines": [
+          {
+            "verdict": "revoked",
+            "attestor": "manifest",
+            "outcome": "stopped",
+            "inRoomSubject": true
+          }
+        ]
+      }
+    },
+    "record-kept": {
+      "today": "green",
+      "observed": [
+        "want",
+        "start",
+        "ending:revoked",
+        "stop",
+        "end"
+      ]
+    },
+    "refused-without-grant": {
+      "today": "green",
+      "observed": "no grant"
+    }
+  }
+}

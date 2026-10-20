@@ -1,0 +1,28 @@
+{
+  "scenario": "S34",
+  "recordedOn": "2026-10-20",
+  "build": "f97007f",
+  "checks": {
+    "deferred-mid-turn": {
+      "today": "green",
+      "observed": {
+        "action": "none",
+        "requestKept": true
+      }
+    },
+    "honoured-between-turns": {
+      "today": "green",
+      "observed": {
+        "action": "cycle",
+        "reason": "succeed:"
+      }
+    },
+    "marker-and-request": {
+      "today": "green",
+      "observed": {
+        "markerBy": "succeed",
+        "requestCleared": true
+      }
+    }
+  }
+}

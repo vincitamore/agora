@@ -107,7 +107,7 @@ import { runUsage } from "../src/usage-cli.mjs";
 import { runUsageSessionsCli } from "../src/session-accounting.mjs";
 import { readShadowArgs, runEconomyShadowCli, ShadowInputError } from "../src/economy/shadow.mjs";
 import { clearStandDown, clearWatchStop, completeStandDownAck, declareStandDown, listStandDowns, standDownRequested } from "../src/stand-down.mjs";
-import { DEFAULT_DEAF_SECONDS, DEFAULT_IDLE_SECONDS, DEFAULT_MAX_CONTEXT, DEFAULT_MIN_CONTEXT, ROOM_MECHANICS_DOC, assertResidentSlug, configuredResidents, planCycle, readInheritMarker, removeInheritMarker, renderResidentPrompt, restartCommand, writeInheritMarker } from "../src/resident.mjs";
+import { DEFAULT_DEAF_SECONDS, DEFAULT_IDLE_SECONDS, DEFAULT_MAX_CONTEXT, DEFAULT_MIN_CONTEXT, ROOM_MECHANICS_DOC, assertResidentSlug, configuredResidents, planCycle, readInheritMarker, removeInheritMarker, removeSucceedRequest, renderResidentPrompt, restartCommand, writeInheritMarker, writeSucceedRequest } from "../src/resident.mjs";
 import { nativeRecordArgumentRefusal, nativeRecordVerb, prepareAttachments, readSlackFiles, runNativeRecordVerb } from "../src/cli-native-records.mjs";
 import { NativeRoomStore } from "../src/native-store.mjs";
 import { FACE_ATTACHMENT_MODES, FACE_BUILT, FACE_SELECTORS, appendFaceRecord, faceCopies, facePolicyPath, listFaceRecords, normalizeSelectors, readFacePolicy, selectFaces, writeFacePolicy } from "../src/faces.mjs";
@@ -419,25 +419,29 @@ const SCHEMA = {
       does: "clear this session's stand-down record. This verb does not start a session or re-arm watches; a live session re-arms them itself. agora codex is the separate attached-session launcher",
     },
     resident: {
-      args: ["<prompt <profile-path> | start <slug>...|--all | stop <slug>...|--all | timer install|check|remove | cycle <slug>...|--all | inherit <slug>>"],
+      args: ["<prompt <profile-path> | start <slug>...|--all | stop <slug>...|--all | timer install|check|remove | cycle <slug>...|--all | inherit <slug> | succeed [<position>] | want <room>.<role> --because <text> | unwant <want-id|position> | ensure | grant>"],
       options: {
-        "--all": "start, stop: every resident in the manifest; cycle: every slug in the config's residents table and the manifest",
+        "--all": "start: every standing resident in the manifest (an on-demand row starts only when wanted); stop: every resident in the manifest and every granted position; cycle: every slug in the config's residents table, the manifest and the open wants, after one ensure pass",
         "--manifest <path>": "the resident manifest (default: the config's residentManifest, else <state>/residents.json); agora reads it and never writes it",
         "--plan": "start: print what it would do (prompt, working folder, overlay, harness argv and environment, host command) and whether the position is already held; do nothing",
         "--host <tern|tmux|none>": "start: the host instead of the manifest's; none runs the harness in this terminal (one resident)",
         "--room <alias>": "start: watch and post in this one room instead of the manifest's rooms (a test run)",
-        "--model <id>": "start: this model (or an alias from the manifest's models) instead of the row's",
+        "--model <id>": "start: this model (or an alias from the manifest's models) instead of the row's; want: the alias the wanted resident runs (one of the grant's models; default the row's)",
         "--run <run.json>": "start: run a recorded start in this terminal (the program a tern or tmux host is given; not typed by hand)",
         "--interval <seconds>": "timer: how often the cycle runs, in whole minutes given as seconds (default 900)",
-        "--dry-run": "cycle: print the verdicts, write no marker, restart nothing",
+        "--dry-run": "cycle: print the verdicts, write no marker, restart nothing; ensure: print what it would start and stop, do nothing",
         "--idle <seconds>": `cycle: the last inference must be older than this (default ${DEFAULT_IDLE_SECONDS}: a one-hour prompt-cache TTL plus a margin)`,
         "--min-context <tokens>": `cycle: the context must be at least this (default ${DEFAULT_MIN_CONTEXT}); keep it above every resident's orientation floor`,
         "--max-context <tokens>": `cycle: past this, cycle even while warm, once idle past --deaf (default ${DEFAULT_MAX_CONTEXT}): every wake re-reads the whole context`,
         "--deaf <seconds>": `cycle: a resident with no live watch and no inference for this long is deaf and is cycled whatever its size (default ${DEFAULT_DEAF_SECONDS}); also the between-turns grace for --max-context`,
         "--restart <command>": "cycle: run this after writing the marker ({slug} is the resident); else the config row's restart; else the restart is the caller's",
         "--force": "inherit: take the predecessor's position in a room this session already read",
+        "--because <text>": "want, unwant: why, recorded in the grants ledger",
+        "--card <path>": "want: a card (a brief) appended after the row's own; a new role wears the grant's card, then this",
+        "--hours <n>": "want: how long the want lasts (default and cap: the grant's maxHours)",
+        "--grace <seconds>": "ensure, want, unwant, cycle --all: a granted position whose want ended stops once its turn has ended and been quiet this long (default 60)",
       },
-      does: "standing sessions. prompt prints a profile with the shipped room-mechanics block appended (the resident-sized discipline, so no skill loads at arming). start reads one row of the resident manifest, renders the prompt, builds the working folder, writes the harness overlay (omp: the checkout's agora-room extension; claude: its plugin dir) and starts the harness under its host with one fixed first prompt; a position that already holds a live session, or whose last start is still running under its host, is not started twice. stop ends a resident by the host handle its start recorded (<state>/residents/<slug>/run.json). timer install|check|remove the OS scheduler entry that runs cycle --all (Windows Task Scheduler, systemd user timer, launchd); check changes nothing. cycle finds the newest live session holding the position <slug> (its session --label), or for a session with no position the newest signing as /<slug>, measures its last real inference and context from the harness transcript (harness-written error entries are skipped), and when it is deaf (no live watch, idle past --deaf), past the ceiling (--max-context, idle past --deaf), or cold (past --idle) AND large (past --min-context) writes <state>/residents/<slug>/inherit.json naming it and restarts the unit (--restart, the manifest row's restart, the config row's restart, else for a manifest resident stop and start): a successor pays its floor, a cold wake pays the whole context. inherit consumes that marker (the same inheritance as session --inherit) and is a no-op without one. Never writes the shared config; docs/RESIDENTS.md",
+      does: "standing sessions. prompt prints a profile with the shipped room-mechanics block appended (the resident-sized discipline, so no skill loads at arming). start reads one row of the resident manifest, renders the prompt, builds the working folder, writes the harness overlay (omp: the checkout's agora-room extension; claude: its plugin dir) and starts the harness under its host with one fixed first prompt; a position that already holds a live session, or whose last start is still running under its host, is not started twice. stop ends a resident by the host handle its start recorded (<state>/residents/<slug>/run.json). timer install|check|remove the OS scheduler entry that runs cycle --all (Windows Task Scheduler, systemd user timer, launchd); check changes nothing. cycle finds the newest live session holding the position <slug> (its session --label), or for a session with no position the newest signing as /<slug>, measures its last real inference and context from the harness transcript (harness-written error entries are skipped), and when it is deaf (no live watch, idle past --deaf), past the ceiling (--max-context, idle past --deaf), cold (past --idle) AND large (past --min-context), or asked to succeed and between turns, writes <state>/residents/<slug>/inherit.json naming it and restarts the unit (--restart, the manifest row's restart, the config row's restart, else for a manifest resident stop and start): a successor pays its floor, a cold wake pays the whole context. inherit consumes that marker (the same inheritance as session --inherit) and is a no-op without one. succeed asks the cycle to hand a position (default: this session's) to a fresh session once its turn ends. want, from the session holding a grant (the manifest's grants[<position>]), asks for a resident at <room>.<role>: refused by name past maxLive, outside the grant's models or roles, for a new role with no card, or when every slot is held; admitted, it is recorded and ensure runs. ensure (also run by want, unwant and cycle --all) starts admitted wants, restarts a granted position or messenger row whose host died, and stops a granted position whose want ended (unwanted, expired, the grant removed or narrowed) at its next idle, posting one N8 line per start or stop in the room's Room subject; every want, refusal, start and stop is kept in <state>/residents/grants.jsonl. grant prints the grants and their open wants. Never writes the shared config or the manifest; docs/RESIDENTS.md",
     },
     doctor: { args: [], options: { "--offline": "skip the identity check", "--repair-tailcat": "restore the cached runtime from its hash-verified bundled capsule" }, does: "config, token presence per room, identity per room, this session and bearer and where each came from, the harness prompt-cache TTL where this seat can read one, and the reads a minute this seat spends with the arithmetic behind the number; three preflights for a resident bearer warn when a watch is armed against a five-minute TTL (cache-ttl), when a watch polls within half to one and a half times a TTL that was read (interval-near-ttl), and when no live watch in a room wakes on all (no-all-watch). Room and watch reports are derived. Tailcat integrity is verified locally; first use expands the bundled capsule into state, and --repair-tailcat explicitly restores a corrupt cache" },
     schema: { args: [], options: { "--json": "the whole surface as JSON, protocol included" }, does: "this description" },
@@ -625,6 +629,9 @@ const OPTIONS = /** @type {const} */ ({
   plan: { type: "boolean", default: false },
   run: { type: "string" },
   model: { type: "string" },
+  card: { type: "string" },
+  hours: { type: "string" },
+  grace: { type: "string" },
   "from-descriptor": { type: "string" },
   replace: { type: "boolean", default: false },
   bounds: { type: "string" },
@@ -1620,6 +1627,116 @@ async function main(argv) {
       if (!plan.dryRun) console.error(`agora: ${plan.from}'s record was not copied; run \`agora session --as <bearer> --label ${slug}\` (the bearer your profile gives, e.g. <Model>/${slug}) so this session signs as itself and holds the position`);
       return EXIT.ok;
     }
+    const manifestArg = values.manifest === undefined ? undefined : String(values.manifest);
+    /** A non-negative whole-number option, or its default. @param {string} name @param {number} dflt */
+    const wholeOpt = (name, dflt) => {
+      const raw = /** @type {any} */ (values)[name];
+      if (raw === undefined) return dflt;
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 0) throw new AgoraError(`--${name} takes a non-negative integer, not ${JSON.stringify(raw)}`, EXIT.usage);
+      return n;
+    };
+    /**
+     * The supervisor's line: posted as the room's messenger position when the manifest has one for
+     * the room (else as this session), in the room's Room subject when the room pins one.
+     * @param {import("../src/resident-start.mjs").Manifest} manifest
+     * @returns {(alias: string, text: string) => Promise<{ id: string }>}
+     */
+    const supervisorPost = (manifest) => async (alias, text) => {
+      const rs = await import("../src/resident-start.mjs");
+      const rg = await import("../src/resident-grant.mjs");
+      const roomCfg = cfg.rooms[alias];
+      if (!roomCfg) throw new AgoraError(`room ${alias} is not in the agora config`, EXIT.usage);
+      const mrow = Object.values(manifest.residents).find((x) => x.harness === "agora" && x.rooms[0] === alias);
+      const poster = mrow ? { slug: mrow.slug, source: "AGORA_SESSION" } : session;
+      const posterBearer = mrow ? mrow.bearer ?? rs.defaultBearer(mrow.role, rs.MESSENGER_MODEL) : bearer.name;
+      const pdir = sessionDir(stateRoot, /** @type {any} */ (poster));
+      const pcfg = { ...cfg, actor: { ...cfg.actor, name: posterBearer } };
+      const t = await createTransport(alias, roomCfg, pcfg, { cache: etagCache(pdir), session: poster.slug });
+      try {
+        /** @type {string | null} */
+        let thread = null;
+        if (roomCfg.transport === "native" || roomCfg.transport === "native-remote") {
+          const msgs = await readWithinFrame(t, { limit: 1000, annotations: true }, () => {});
+          thread = rg.roomSubject([...msgs], /** @type {any} */ (msgs).annotations ?? []);
+        }
+        const body = pcfg.sign !== false ? sign(text, pcfg.actor) : text;
+        const r = await recordedPost(t, pdir, body, thread ? { thread } : {}, { session: /** @type {any} */ (poster), bearer: posterBearer });
+        return { id: r.id };
+      } finally {
+        await t.close?.();
+      }
+    };
+    /** One supervisor pass. @param {import("../src/resident-start.mjs").Manifest} manifest @param {boolean} dryRun */
+    const runEnsure = async (manifest, dryRun) => {
+      const rs = await import("../src/resident-start.mjs");
+      const rg = await import("../src/resident-grant.mjs");
+      const ctx = { cfg, stateRoot, checkout: projectRoot, entry: entryFile, node: process.versions.bun ? rs.which("node") ?? "node" : process.execPath };
+      return rg.ensure(manifest, stateRoot, rg.seatEnsureDeps({ manifest, ctx, post: supervisorPost(manifest) }), { graceSeconds: wholeOpt("grace", rg.DEFAULT_STOP_GRACE_SECONDS), dryRun });
+    };
+    /** @param {Record<string, any>[]} rows */
+    const printEnsure = (rows) => {
+      /** @type {number} */ let rc = EXIT.ok;
+      for (const r of rows) {
+        if (r.action === "failed" || r.postError) rc = EXIT.error;
+        if (json) { console.log(JSON.stringify(r)); continue; }
+        console.log(`${String(r.position).padEnd(24)} ${String(r.action ?? "-").padEnd(12)} ${r.reason ?? r.note ?? ""}${r.notice ? `  ${r.posted ? "posted" : "NOT posted"}: ${r.notice}${r.postError ? ` (${r.postError})` : ""}` : ""}`);
+      }
+      return rc;
+    };
+    if (action === "succeed") {
+      if (rest.length > 1) throw new AgoraError("agora resident succeed [<position>]", EXIT.usage);
+      const position = rest.length ? String(rest[0]) : resolveLabel({ env: process.env }) ?? positionOf(record);
+      if (!position) throw new AgoraError("succeed names a position, or runs from a session that holds one (AGORA_LABEL, or session --label)", EXIT.usage);
+      const req = await writeSucceedRequest(stateRoot, assertResidentSlug(position), { by: session.slug });
+      if (json) console.log(JSON.stringify(req));
+      else console.log(`succeed requested for ${position}: the next cycle hands it to a fresh session once its turn has ended (${req.file})`);
+      return EXIT.ok;
+    }
+    if (action === "want" || action === "unwant" || action === "ensure" || action === "grant") {
+      const rs = await import("../src/resident-start.mjs");
+      const rg = await import("../src/resident-grant.mjs");
+      const manifest = /** @type {import("../src/resident-start.mjs").Manifest} */ (await rs.findManifest(cfg, stateRoot, manifestArg, { required: true }));
+      const now = Date.now();
+      if (action === "grant") {
+        if (rest.length) throw new AgoraError("agora resident grant [--json]", EXIT.usage);
+        const views = rg.grantView(manifest, rg.foldLedger(await rg.readLedger(stateRoot)), now);
+        if (!views.length) console.error(`agora: ${manifest.file} grants nothing`);
+        for (const v of views) {
+          if (json) { console.log(JSON.stringify(v)); continue; }
+          console.log(`${v.holder}: roles ${v.roles === "open" ? "open" : v.roles.join(",")}, models ${v.models.join(",")}, maxLive ${v.maxLive}, maxHours ${v.maxHours}${v.card ? `, card ${v.card}` : ""}`);
+          for (const w of v.wants) console.log(`  ${w.id} ${w.position.padEnd(24)} ${w.model.padEnd(8)} ${w.state}${w.started ? "" : " (not started)"} until ${w.until}  because: ${w.because}`);
+        }
+        return EXIT.ok;
+      }
+      const requester = resolveLabel({ env: process.env }) ?? positionOf(record);
+      if (action === "want") {
+        if (rest.length !== 1) throw new AgoraError("agora resident want <room>.<role> --because <text> [--model <alias>] [--card <path>] [--hours <n>]", EXIT.usage);
+        const hours = values.hours === undefined ? undefined : Number(values.hours);
+        const r = await rg.recordWant(manifest, stateRoot, {
+          requester, session: session.slug, position: String(rest[0]), model: values.model === undefined ? undefined : String(values.model),
+          cards: values.card === undefined ? [] : [resolvePath(String(values.card))], hours, because: String(values.because ?? ""), now,
+        }, { held: async (slot) => (await rs.residentState(stateRoot, slot)).running });
+        if (!r.ok) {
+          if (json) console.log(JSON.stringify({ type: "resident-want", action: "refused", position: String(rest[0]), by: requester ?? null, reason: r.reason }));
+          else console.error(`agora: want ${rest[0]} refused: ${r.reason}`);
+          return EXIT.error;
+        }
+        if (json) console.log(JSON.stringify({ ...r.want, type: "resident-want", action: "wanted" }));
+        else console.log(`wanted ${r.want.position} (${r.want.id}) for ${r.want.by}: role ${r.want.role}, model ${r.want.model}, until ${r.want.until}`);
+      } else if (action === "unwant") {
+        if (rest.length !== 1) throw new AgoraError("agora resident unwant <want-id|position> [--because <text>]", EXIT.usage);
+        const r = await rg.recordUnwant(stateRoot, { target: String(rest[0]), by: requester ?? session.slug, because: values.because === undefined ? undefined : String(values.because), now });
+        if (!r.ok || !r.want) {
+          if (json) console.log(JSON.stringify({ type: "resident-unwant", action: "refused", target: String(rest[0]), reason: r.reason }));
+          else console.error(`agora: unwant ${rest[0]} refused: ${r.reason}`);
+          return EXIT.error;
+        }
+        if (json) console.log(JSON.stringify({ type: "resident-unwant", action: r.already ? "already" : "unwanted", want: r.want.id, position: r.want.position }));
+        else console.log(`unwanted ${r.want.position} (${r.want.id})${r.already ? ", already" : ""}: it stops at its next idle`);
+      } else if (rest.length) throw new AgoraError("agora resident ensure [--dry-run] [--grace <seconds>]", EXIT.usage);
+      return printEnsure(await runEnsure(manifest, Boolean(values["dry-run"])));
+    }
     if (action === "start" || action === "stop" || action === "timer") {
       const rs = await import("../src/resident-start.mjs");
       const nodeExe = process.versions.bun ? rs.which("node") ?? "node" : process.execPath;
@@ -1646,9 +1763,15 @@ async function main(argv) {
         if (rest.length !== 1 || values.all) throw new AgoraError("agora resident start <slug> --run <run.json>", EXIT.usage);
         return await rs.execRun(resolvePath(String(values.run)), assertResidentSlug(String(rest[0])));
       }
-      const manifest = await rs.findManifest(cfg, stateRoot, values.manifest === undefined ? undefined : String(values.manifest), { required: action === "start" || values.all });
+      const fileManifest = await rs.findManifest(cfg, stateRoot, manifestArg, { required: action === "start" || values.all });
+      const rg = await import("../src/resident-grant.mjs");
+      // granted positions are rows too, so start, stop and --plan reach them by name
+      const manifest = fileManifest ? rg.withGranted(fileManifest, rg.foldLedger(await rg.readLedger(stateRoot))) : null;
       if (values.all && rest.length) throw new AgoraError(`agora resident ${action} takes slugs or --all, not both`, EXIT.usage);
-      const slugs = values.all ? Object.keys(manifest?.residents ?? {}) : rest.map((r) => assertResidentSlug(String(r)));
+      // start --all starts the standing rows; an on-demand row and a granted position start when wanted
+      const slugs = values.all
+        ? Object.values((action === "start" ? fileManifest?.residents : manifest?.residents) ?? {}).filter((r) => action !== "start" || r.tenure !== "on-demand").map((r) => r.slug)
+        : rest.map((r) => assertResidentSlug(String(r)));
       if (!slugs.length) throw new AgoraError(`agora resident ${action} <slug>... | --all`, EXIT.usage);
       if (action === "stop") {
         /** @type {number} */ let rc = EXIT.ok;
@@ -1704,22 +1827,20 @@ async function main(argv) {
     if (action === "cycle") {
       const table = configuredResidents(cfg);
       const rs = await import("../src/resident-start.mjs");
-      const manifest = await rs.findManifest(cfg, stateRoot, values.manifest === undefined ? undefined : String(values.manifest));
-      const slugs = [...new Set([...rest.map((r) => assertResidentSlug(String(r))), ...(values.all ? [...Object.keys(table), ...Object.keys(manifest?.residents ?? {})] : [])])];
-      if (!slugs.length) throw new AgoraError(values.all ? "--all found no residents in the config's residents table or a resident manifest; name the slugs, add residents: { <slug>: { restart?: <command> } }, or write a manifest (docs/RESIDENTS.md)" : "agora resident cycle <slug>... | --all", EXIT.usage);
-      const num = (/** @type {string} */ name, /** @type {number} */ dflt) => {
-        const raw = /** @type {any} */ (values)[name];
-        if (raw === undefined) return dflt;
-        const n = Number(raw);
-        if (!Number.isInteger(n) || n < 0) throw new AgoraError(`--${name} takes a non-negative integer, not ${JSON.stringify(raw)}`, EXIT.usage);
-        return n;
-      };
-      const idleSeconds = num("idle", DEFAULT_IDLE_SECONDS);
-      const minContext = num("min-context", DEFAULT_MIN_CONTEXT);
-      const maxContext = num("max-context", DEFAULT_MAX_CONTEXT);
-      const deafSeconds = num("deaf", DEFAULT_DEAF_SECONDS);
+      const rg = await import("../src/resident-grant.mjs");
+      const fileManifest = await rs.findManifest(cfg, stateRoot, manifestArg);
       /** @type {number} */
       let rc = EXIT.ok;
+      // the timer's pass: the supervisor first (wants started, ended wants stopped at idle, dead hosts
+      // restarted), then every resident's cycle, granted positions included
+      if (fileManifest && values.all) rc = printEnsure(await runEnsure(fileManifest, Boolean(values["dry-run"])));
+      const manifest = fileManifest ? rg.withGranted(fileManifest, rg.foldLedger(await rg.readLedger(stateRoot))) : null;
+      const slugs = [...new Set([...rest.map((r) => assertResidentSlug(String(r))), ...(values.all ? [...Object.keys(table), ...Object.keys(manifest?.residents ?? {})] : [])])];
+      if (!slugs.length) throw new AgoraError(values.all ? "--all found no residents in the config's residents table or a resident manifest; name the slugs, add residents: { <slug>: { restart?: <command> } }, or write a manifest (docs/RESIDENTS.md)" : "agora resident cycle <slug>... | --all", EXIT.usage);
+      const idleSeconds = wholeOpt("idle", DEFAULT_IDLE_SECONDS);
+      const minContext = wholeOpt("min-context", DEFAULT_MIN_CONTEXT);
+      const maxContext = wholeOpt("max-context", DEFAULT_MAX_CONTEXT);
+      const deafSeconds = wholeOpt("deaf", DEFAULT_DEAF_SECONDS);
       for (const slug of slugs) {
         if (manifest?.residents[slug]?.harness === "agora") {
           // a messenger has no context to measure: the cycle's act is one backstop tick
@@ -1733,11 +1854,14 @@ async function main(argv) {
           continue;
         }
         const row = /** @type {any} */ (await planCycle(stateRoot, slug, { idleSeconds, minContext, maxContext, deafSeconds }));
+        // a request the session that holds the position now outlived was honoured: clear it
+        if (row.stale && !values["dry-run"]) await removeSucceedRequest(stateRoot, slug);
         if (row.action === "cycle") {
           if (values["dry-run"]) row.action = "would-cycle";
           else {
-            const marker = await writeInheritMarker(stateRoot, slug, { from: row.session, context: row.context, lastInference: row.lastInference, by: "cycle" });
+            const marker = await writeInheritMarker(stateRoot, slug, { from: row.session, context: row.context, lastInference: row.lastInference, by: row.succeed ? "succeed" : "cycle" });
             row.marker = marker.file;
+            if (row.succeed) await removeSucceedRequest(stateRoot, slug);
             const template = values.restart !== undefined ? String(values.restart) : manifest?.residents[slug]?.restart ?? table[slug]?.restart;
             if (template) {
               const cmd = restartCommand(template, slug);

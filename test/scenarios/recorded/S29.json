@@ -1,0 +1,30 @@
+{
+  "scenario": "S29",
+  "recordedOn": "2026-10-20",
+  "build": "f97007f",
+  "checks": {
+    "restarted-after-death": {
+      "today": "green",
+      "observed": {
+        "action": "restarted",
+        "running": true
+      }
+    },
+    "one-n8-for-restart": {
+      "today": "green",
+      "observed": [
+        {
+          "verdict": "absent",
+          "attestor": "host",
+          "path": "restart",
+          "outcome": "started",
+          "inRoomSubject": true
+        }
+      ]
+    },
+    "operator-stop-left": {
+      "today": "green",
+      "observed": false
+    }
+  }
+}
