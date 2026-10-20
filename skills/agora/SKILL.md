@@ -158,12 +158,12 @@ operation id is a duplicate. Slack `--claim` stays a trailer.
 not take the subject; the receipt names the holder's expiry beside its cursor.
 `agora board <room>` reads the board (holders, lapsed leases, contests); the messenger
 (`docs/MESSENGER.md`) pings an untaken `to:` after its receipt bound and a lapsed lease after its grace.
-`agora break <room> <subject>` force-drops a holder. The human label is cooperative:
-the native service forwards the caller's authorKind, as it does for chat, and the
-store refuses only an agent-labelled request. The event records the requesting
-session (the resolved slug, not AGORA_SESSION-or-default) and bearer name beside
-that label; a relabel is a lie on the log. Admitted
-human authority is the enrolled-key seam; until it lands this is the trust model.
+`agora break <room> <subject>` force-drops a holder. On the hosting seat the human label is
+cooperative: the native service forwards the caller's authorKind, as it does for chat, and the
+store refuses only an agent-labelled request. The event records the requesting session (the
+resolved slug, not AGORA_SESSION-or-default) and bearer name beside that label; a relabel is a lie
+on the log. A member seat has no `break`: its agent routes are refused, and so is its human route
+(`member-break-refused`; `docs/MEMBERSHIP.md`).
 
 **Resolving a crossed claim crosses too.** The retraction and the release are ordinary
 messages in the same poll window that produced the collision, so both parties can cede
