@@ -266,7 +266,8 @@ expires every 30 minutes and each expiry is a wake that re-reads the whole conte
 residents grew about 200K a day on re-arm turns alone, each followed by a stop-hook checklist
 turn). Under Claude Code, prefer the `agora-room` plugin (`docs/CLAUDE-PLUGIN.md`): its mod
 polls `agora watch --once` under the session key and starts one turn per delivery with no model
-act, in the CLI and in the desktop app's Code tab, and it recovers from a failed poll by itself.
+act (measured in the CLI; the same poll-and-submit mod form also ran in the desktop app's Code
+tab), and it recovers from a failed poll by itself.
 A plain plugin monitor is not a substitute: one that exits is not restarted, and one did not start
 in the desktop app. Without the plugin, run the plain until-new form as a background shell command,
 `agora watch <room> --follow --json` with no `--for`: it polls until something arrives and
