@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { AgoraError, redact } from "../core.mjs";
 import { nativeMessageId, parseNativeCursor } from "../native-protocol.mjs";
 import { ServiceDarkError, requireThreads } from "../wake/subscriber.mjs";
-import { nativeReadResult, validateNativeThread } from "./native.mjs";
+import { boardView, nativeReadResult, requireBoards, validateNativeThread } from "./native.mjs";
 
 /**
  * One line an operator can act on, or nothing. Redacted, because a teardown error can carry a path
@@ -139,5 +139,14 @@ export function nativeRemoteTransport(room, { actor, remote, session }) {
       transport.closeFailed = describeCloseFailure(error);
     }
   };
-  return Object.assign(transport, { remote });
+  /** boards-v1 over the member channel: the bound room's board view, read-only; refused by name
+   * when the host's member welcome did not offer it. */
+  const boardRead = async () => {
+    let client;
+    try { client = await remote.client(); }
+    catch (e) { throw new ServiceDarkError(`the member channel is dark: ${e instanceof Error ? e.message : String(e)}`); }
+    requireBoards(client, `the host of ${roomId}`);
+    return boardView(await client.request("board", { roomId }));
+  };
+  return Object.assign(transport, { remote, boardRead });
 }

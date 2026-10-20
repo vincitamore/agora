@@ -14,6 +14,25 @@ export function validateNativeThread(id) {
   return /^[a-f0-9]{64}$/.test(id) ? undefined : "a native thread id is its root message's id: 64 lowercase hexadecimal characters (the id `read --json` prints)";
 }
 
+/** The capability a service offers when it serves the board view. */
+export const BOARDS_CAPABILITY = "boards-v1";
+
+/**
+ * Refuse a board read to a service that does not offer boards-v1, by name.
+ * @param {{ capabilities?: Set<string> }} client @param {string} where
+ */
+export function requireBoards(client, where) {
+  if (client.capabilities?.has(BOARDS_CAPABILITY)) return;
+  throw Object.assign(new AgoraError(`boards-unsupported: ${where} does not offer ${BOARDS_CAPABILITY}, so it cannot serve the board view; nothing was read`), { code: "boards-unsupported" });
+}
+
+/** @typedef {{ records: any[], holders: any[], checkpoint: any }} BoardView */
+
+/** A `board-result` frame as the board-read consumer takes it. @param {any} r @returns {BoardView} */
+export function boardView(r) {
+  return { records: Array.isArray(r?.records) ? r.records : [], holders: Array.isArray(r?.holders) ? r.holders : [], checkpoint: r?.checkpoint ?? null };
+}
+
 /**
  * What a `read-batch-refused` names when the host could fit part of the page in one frame: how
  * many messages it selected and the largest limit that fits. Nothing for any other error, or for
@@ -76,7 +95,21 @@ export function nativeTransport(room, { actor, stateRoot, session, connect }) {
     }
     return connecting;
   };
-  return {
+  /**
+   * boards-v1: the room's board records in log order and the host's live holders, read-only.
+   * A service that does not offer boards-v1 is refused by name: an older one would answer an
+   * unknown frame with a generic error, which a caller could not tell from a dark service.
+   * Attached beside the Transport (as native-remote attaches its channel), so the shared type does
+   * not grow a field only the native transports have; `src/board-read.mjs` is its one consumer.
+   * @returns {Promise<BoardView>}
+   */
+  const boardRead = async () => {
+    const c = await client();
+    requireBoards(c, "this seat's service");
+    return boardView(await c.request("board", { roomId }));
+  };
+  /** @type {import('../core.mjs').Transport} */
+  const transport = {
     kind: "native",
     room: roomId,
     threads: true,
@@ -152,4 +185,5 @@ export function nativeTransport(room, { actor, stateRoot, session, connect }) {
         authorKind: actor.kind, authorName: actor.name, session: session ?? "default" } });
     },
   };
+  return Object.assign(transport, { boardRead });
 }

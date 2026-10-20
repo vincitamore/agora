@@ -3,7 +3,7 @@
 /**
  * Run one leg of one scenario and print its observation lines on stdout.
  *
- *   node test/scenarios/run.mjs <S00|S07|S13|S14|S23> [--leg normal|red:<check>] [--record]
+ *   node test/scenarios/run.mjs <S00|S01|S03|S04|S07|S13|S14|S19|S20|S23|S60> [--leg normal|red:<check>] [--record]
  *   node test/scenarios/run.mjs S00 --fixture <path> [--from read-json] [--detail]
  *
  * `--leg red:<check>` plants the variation the scenario names for that check. `--record` (normal

@@ -1846,6 +1846,25 @@ export class NativeRoomStore {
   }
 
   /**
+   * Every board record the log holds, in log order, as a reader is shown it (boards-v1): the act
+   * as it was appended (`board`), the account it was appended under, its cursor, and what the
+   * store decided at commit (a claim's or renew's `expiresAt` and `leaseMs`, a break's `broken`
+   * holder and `actor`). Every record here was admitted by the kernel, so a fold over them in order
+   * rebuilds `board()` at any instant without judging anything again (test/board-read.test.mjs).
+   * A claim's lease id is its operation id, served as `operationId`; a release still needs the
+   * holder's own account.
+   * @returns {Array<{ id: string, cursor: string, accountId: string, operationId: string, board: any, expiresAt?: string, leaseMs?: number, broken?: any, actor?: any }>}
+   */
+  boardRecords() {
+    if (this.closed) throw new AgoraError("native room store is closed");
+    return this.records.filter((r) => r.kind === "board" && r.board).map((r) => ({
+      id: r.boardId, cursor: r.cursor, accountId: r.accountId, operationId: r.operationId, board: structuredClone(r.board),
+      ...(r.expiresAt ? { expiresAt: r.expiresAt, leaseMs: r.leaseMs } : {}),
+      ...(r.broken ? { broken: structuredClone(r.broken), actor: structuredClone(r.actor) } : {}),
+    }));
+  }
+
+  /**
    * A checkpoint belongs outside the fetched replica. Comparing it on resume detects
    * truncation or replacement of a prefix that an internally valid hash chain cannot.
    * @param {number} [sequence]

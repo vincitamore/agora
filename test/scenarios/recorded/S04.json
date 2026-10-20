@@ -1,0 +1,26 @@
+{
+  "scenario": "S04",
+  "recordedOn": "2026-10-20",
+  "build": "df835fe",
+  "checks": {
+    "board-shows-lapse": {
+      "today": "green",
+      "observed": {
+        "state": "lapsed",
+        "by": "coding/Opus"
+      }
+    },
+    "one-n4-within-i": {
+      "today": "green",
+      "observed": {
+        "count": 1,
+        "inWindow": true,
+        "to": "coding/Opus"
+      }
+    },
+    "release-control-quiet": {
+      "today": "green",
+      "observed": 0
+    }
+  }
+}

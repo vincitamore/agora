@@ -1,0 +1,29 @@
+{
+  "scenario": "S03",
+  "recordedOn": "2026-10-20",
+  "build": "df835fe",
+  "checks": {
+    "one-n2-in-window": {
+      "today": "green",
+      "observed": {
+        "count": 1,
+        "inWindow": true,
+        "to": "coding",
+        "inThread": true
+      }
+    },
+    "one-n3-at-r2": {
+      "today": "green",
+      "observed": {
+        "count": 1,
+        "atR2": true,
+        "to": "Ada",
+        "position": "desk.coding"
+      }
+    },
+    "taken-control-quiet": {
+      "today": "green",
+      "observed": 0
+    }
+  }
+}

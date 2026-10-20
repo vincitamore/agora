@@ -1,0 +1,23 @@
+{
+  "scenario": "S01",
+  "recordedOn": "2026-10-20",
+  "build": "df835fe",
+  "checks": {
+    "pointer-per-incident": {
+      "today": "green",
+      "observed": {
+        "pointers": 3,
+        "inItsThread": 3,
+        "retired": 3
+      }
+    },
+    "nearest-is-holder": {
+      "today": "green",
+      "observed": {
+        "named": 3,
+        "of": 3,
+        "nearest": "desk.coding"
+      }
+    }
+  }
+}

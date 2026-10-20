@@ -1441,7 +1441,7 @@ test("a remote seat replies in a thread, reads it, and subscribes to it; the hos
   await transport.post("elsewhere");
   await transport.post("reply", { thread: root.id });
   const client = await room.client();
-  assert.deepEqual([...client.capabilities].sort(), ["annotations-v1", "attachments-v1", "purge-v1", "threads-v1", "titles-v1"], "a member is offered threads, attachments, annotations, purges and titles, never a client name");
+  assert.deepEqual([...client.capabilities].sort(), ["annotations-v1", "attachments-v1", "boards-v1", "purge-v1", "threads-v1", "titles-v1"], "a member is offered threads, attachments, annotations, purges, titles and the board view, never a client name");
   const thread = await transport.read({ thread: root.id });
   assert.deepEqual(thread.map((m) => m.text), ["root", "reply"]);
   assert.deepEqual((await transport.read({})).map((m) => [m.text, m.thread ?? null]), [["root", null], ["elsewhere", null], ["reply", root.id]]);

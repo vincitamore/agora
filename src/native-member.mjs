@@ -290,9 +290,10 @@ export function memberTranscript(binding, base) {
 
 /** Request types a member session may send. Everything else is refused by name.
  *
- * Board operations admitted through the host protocol under the remote principal are allowed;
+ * Board operations admitted through the host protocol under the remote principal are allowed, and
+ * so is the read-only `board` view (boards-v1), fenced to the route's room like every room frame;
  * direct store or control access is not, which is why create-room and spawn are absent. */
-export const MEMBER_REQUEST_TYPES = Object.freeze(["status", "read", "subscribe", "append", "attachment-begin", "attachment-chunk", "attachment-commit", "attachment-read"]);
+export const MEMBER_REQUEST_TYPES = Object.freeze(["status", "read", "subscribe", "append", "board", "attachment-begin", "attachment-chunk", "attachment-commit", "attachment-read"]);
 
 /** @param {string} type */
 export function memberMayRequest(type) {

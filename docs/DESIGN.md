@@ -416,10 +416,9 @@ seat keeps one watch on `all` so an unaddressed request reaches someone. The fil
 because an agent that holds one long-lived watch for a whole session pays a turn per wake, and
 waking on everything was the measured cost. `watch --coalesce` holds a burst and delivers one envelope (one `codex queue` call) per window; a message addressed to this bearer flushes immediately. `watch --digest` is rendering only. `session_wakes` and `bytes_delivered` on `watch-result` count this process's own IO, never a tally about content. `join` and `doctor` print the usual `--wake` for a role once and apply nothing. `post --fyi` emits `ack: none`; the tool never filters, suppresses or delays on an incoming `ack:` — honouring it is a judgement.
 
-One piece of this section is **deferred until a working day with several agents has been
-counted** (see the flip conditions): a `claims <room>` view that folds `claim:` and `release:`
-over a bounded read and prints them with the horizon it read to. The emitter and the parser ship
-first, because the counts come from the room's own history.
+The board view shipped as `agora board <room>` (see "The board view (closed)" under the flip
+conditions): a fold over the board records the host serves, joined to the `claim:` trailer that
+names who took each subject. On a room with no board the trailers are still the only record.
 
 ### Lanes
 
@@ -783,8 +782,7 @@ than re-deriving the argument.
 
 | Deferred | Trigger |
 |---|---|
-| The `claims` view | One working day with several agents on a seat, counted from the room's own history: subjects worked by more than one agent with claims visible; the fraction of received messages carrying a `to:` naming another agent (which also says whether `--wake addressed` or `mine` is worth recommending); work items that spanned two transports. Any hit on the first means advisory claims are insufficient and the authorship gate belongs on the pull request. |
-| The desk room | The same day: under roughly fifteen desk messages, or under a third of what crossed, the room is deleted from the config and the transport kept. |
+| The desk room | One working day with several agents on a seat, counted from the room's own history: under roughly fifteen desk messages, or under a third of what crossed, the room is deleted from the config and the transport kept. |
 | A single reader with local fan-out | A transport's read tier drops to roughly one poll per minute per app, **or** more than roughly twelve concurrent watches per method. The chat transport's restricted tier applies to apps commercially distributed outside its marketplace; an app installed only in its own workspace keeps the higher tier, and the checkable fact is the app's distribution status. Cheapest correct build: one `watch --stream --json` piped into a writer that appends verbatim records to a local room, plus an append-a-foreign-message primitive and a heartbeat record. |
 | A platform push socket | The read tier drops **and** the resulting cadence proves too slow for live work. |
 | A broadcast option on a threaded post | A message that needed a human's eyes demonstrably failed to reach them from inside a thread. |
@@ -793,6 +791,20 @@ than re-deriving the argument.
 | A `type` discriminator on message objects in `--json` | A consumer needs to tell a message from the final summary line without inspecting fields. |
 | A name lease | Own-post detection ever again depends on the signature. |
 | `agora/client` on a `native-remote` room, refused `room-transport-unsupported` | An app needs a room hosted on another seat, and the member route can carry what an app's post needs: a non-agent author and a client name stamped as `via`. Until then a member channel would post the app's people as agents with no `via`, so the client refuses by name. |
+
+### The board view (closed)
+
+The `claims` view was deferred until a counted working day showed advisory claims needed reading
+back. A consumer pulled it first: the messenger (docs/MESSENGER.md) needs a claim's holder and its
+lease to run its clocks, and no client could read the board (readers were carried past board
+records). It ships as `agora board <room>` over boards-v1: the host serves its board records in
+log order and its live holders, read-only, and a member reads only the room its route binds. The
+view is a fold over those records, never a second judgement: every served record was admitted by
+the kernel, and `test/board-read.test.mjs` requires the fold to equal the store's own holders,
+expiries and contest receipts under seeded random acts. The board names accounts; the bearer who
+claimed is the one whose message carried the `claim:` trailer. The day's counts (subjects worked
+by more than one agent, the `to:` fraction, work spanning two transports) are still the evidence
+for an authorship gate on the pull request, and are now readable from the room and its board.
 
 ### The face thread map (closed)
 

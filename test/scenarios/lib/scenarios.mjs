@@ -34,10 +34,16 @@
 /** @type {Record<string, string>} */
 export const SCENARIO_FILES = Object.freeze({
   S00: "../s00-baseline-replay.mjs",
+  S01: "../s01-retired-name.mjs",
+  S03: "../s03-never-taken.mjs",
+  S04: "../s04-lease-lapse.mjs",
   S07: "../s07-model-swap.mjs",
   S13: "../s13-audiences.mjs",
   S14: "../s14-subjects.mjs",
+  S19: "../s19-messenger-deaf.mjs",
+  S20: "../s20-unowned.mjs",
   S23: "../s23-succession.mjs",
+  S60: "../s60-notice-set.mjs",
 });
 
 /** @param {string} id @returns {Promise<Scenario>} */

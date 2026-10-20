@@ -1,0 +1,36 @@
+{
+  "scenario": "S60",
+  "recordedOn": "2026-10-20",
+  "build": "df835fe",
+  "checks": {
+    "form-set-pinned": {
+      "today": "green",
+      "observed": {
+        "N1": "Routed: unaddressed request {id}.",
+        "N2": "Not taken {age} since {since}: {id}.",
+        "N3": "{position} has not {verb} {id} after {age}; observe: {verdict}.",
+        "N4": "Lease on {subject} expired {age} ago without renew or release.",
+        "N5": "to: {addr} names no holder here ({kind}); nearest: {nearest}.",
+        "N6": "Open subject {id} unclaimed after {age}.",
+        "N7": "Reply posted at top level; its subject is {root}.",
+        "N8": "{position}: {verdict} by {attestor} {age}; path {path}; outcome {outcome}.",
+        "N9": "No role fits {id}; for {human}."
+      }
+    },
+    "no-words-carried": {
+      "today": "green",
+      "observed": {
+        "carrying": 0,
+        "kinds": [
+          "N1",
+          "N2",
+          "N3",
+          "N4",
+          "N5",
+          "N6",
+          "N7"
+        ]
+      }
+    }
+  }
+}

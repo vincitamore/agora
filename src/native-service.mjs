@@ -41,8 +41,8 @@ function codedRefusal(code, detail) {
  * older service ignores a field it does not know and would answer the whole room.
  * `client-name-v1` is local-only: a member session cannot declare a client name.
  */
-const LOCAL_OFFER = validateCapabilityOffer({ advertised: ["threads-v1", "client-name-v1", "attachments-v1", "annotations-v1", "purge-v1", "titles-v1"], required: [] });
-const MEMBER_OFFER = validateCapabilityOffer({ advertised: ["threads-v1", "attachments-v1", "annotations-v1", "purge-v1", "titles-v1"], required: [] });
+const LOCAL_OFFER = validateCapabilityOffer({ advertised: ["threads-v1", "client-name-v1", "attachments-v1", "annotations-v1", "purge-v1", "titles-v1", "boards-v1"], required: [] });
+const MEMBER_OFFER = validateCapabilityOffer({ advertised: ["threads-v1", "attachments-v1", "annotations-v1", "purge-v1", "titles-v1", "boards-v1"], required: [] });
 
 const MAX_PENDING_WRITE = 2 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -812,6 +812,18 @@ export class NativeRoomService {
     const store = await this.openRoom(roomId);
     if (frame.type === "status") {
       sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "status-result", requestId: frame.requestId, status: store.status() });
+      return;
+    }
+    // boards-v1: the board records in log order and the live holders as the store judges them
+    // now. Read-only, and reached after the member fence above, so a member reads only the room
+    // its route binds.
+    if (frame.type === "board") {
+      const result = { protocol: NATIVE_PROTOCOL, type: "board-result", requestId: frame.requestId, roomId,
+        records: store.boardRecords(), holders: store.board(), checkpoint: store.checkpoint() };
+      const bytes = nativeFramePayloadBytes(result);
+      if (bytes > NATIVE_FRAME_MAX)
+        throw codedRefusal("read-batch-refused", `${result.records.length} board records encode to ${bytes} bytes and one native protocol frame holds ${NATIVE_FRAME_MAX}; this protocol cannot deliver the board in one frame`);
+      sendFrame(socket, result);
       return;
     }
     if (frame.type === "read" || frame.type === "subscribe") {

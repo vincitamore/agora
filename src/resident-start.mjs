@@ -25,6 +25,13 @@
  * The timer half writes one OS scheduler entry that runs `agora resident cycle --all` on an interval:
  * a Windows scheduled task, a systemd user timer, or a launchd agent; `check` reports and changes
  * nothing.
+ *
+ * Harness `agora` is the room's messenger (docs/MESSENGER.md): no model and no prompt; the row's
+ * program is `agora messenger <room> --stream <args>`, run as the position's own session (it
+ * registers itself with its own pid, so liveness and the departure sweep read it like any
+ * resident) and writing a liveness file beside its session. The cycle runs one `--once` tick for
+ * such a row as a backstop: the messenger's own posts are its incident record, so a tick after a
+ * dead stream posts every line that came due while it was down, once.
  */
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -36,14 +43,19 @@ import { AgoraError, EXIT, expandHome, writeFileAtomic } from "./core.mjs";
 import { ROOM_MECHANICS_DOC, RESIDENT_SLUG_RE, renderResidentPrompt, residentDir } from "./resident.mjs";
 import { POSITION_RE, listRecords, pidAlive, positionOf } from "./session.mjs";
 import { modelLabel } from "../plugins/omp/agora-room/index.mjs";
+import { livenessPath } from "./messenger.mjs";
 
 export const MANIFEST_VERSION = 1;
-export const HARNESSES = Object.freeze(["omp", "claude"]);
+export const HARNESSES = Object.freeze(["omp", "claude", "agora"]);
 export const HOSTS = Object.freeze(["tern", "tmux", "none"]);
 export const WAKES = Object.freeze(["all", "addressed", "mine"]);
 const TOP_KEYS = new Set(["version", "models", "vars", "defaults", "residents"]);
 const ROW_KEYS = new Set(["role", "harness", "model", "thinking", "rooms", "wake", "profile", "append", "workdir", "skills", "host", "env", "args", "preamble", "bearer", "restart", "command"]);
 const REQUIRED = ["role", "harness", "model", "rooms", "profile", "host"];
+/** A messenger row runs code, not a model: it names no model and no profile. */
+const NOT_REQUIRED_FOR_AGORA = new Set(["model", "profile"]);
+/** The model a messenger row records when it names none: its bearer is `<role>/Code`. */
+export const MESSENGER_MODEL = "code";
 /** What the verb itself sets for the harness; a manifest may not set these. */
 export const RESERVED_ENV = Object.freeze(["AGORA_CONFIG", "AGORA_STATE", "AGORA_SESSION", "AGORA_LABEL", "AGORA_ACTOR", "AGORA_ROLE", "AGORA_ROOM", "AGORA_ROOM_WAKE", "AGORA_ROOM_PREAMBLE", "AGORA_ROOM_CMD"]);
 /** A manifest names paths and switches, never a credential. */
@@ -62,7 +74,7 @@ export const DEFAULT_TIMER_SECONDS = 900;
 /** @typedef {{ file: string } | { text: string }} FilePart */
 /**
  * @typedef {{
- *   slug: string, role: string, harness: 'omp' | 'claude', model: string, thinking: string | null,
+ *   slug: string, role: string, harness: 'omp' | 'claude' | 'agora', model: string, thinking: string | null,
  *   rooms: string[], wake: 'all' | 'addressed' | 'mine', profile: string, append: string[],
  *   workdir: { path: string | null, files: Array<{ path: string, parts: FilePart[] }> },
  *   skills: { dir: string, names: string[] } | null, host: 'tern' | 'tmux' | 'none',
@@ -131,7 +143,8 @@ export function validateManifest(raw, file) {
     if (!isObj(rowRaw)) bad(at, "must be an object");
     const row = { ...defaults, .../** @type {object} */ (rowRaw) };
     for (const k of Object.keys(row)) if (!ROW_KEYS.has(k)) bad(`${at}.${k}`, `unknown field (have: ${[...ROW_KEYS].join(", ")})`);
-    for (const k of REQUIRED) if (row[k] === undefined) bad(`${at}.${k}`, "is required (here or in defaults)");
+    const agoraRow = row.harness === "agora";
+    for (const k of REQUIRED) if (row[k] === undefined && !(agoraRow && NOT_REQUIRED_FOR_AGORA.has(k))) bad(`${at}.${k}`, "is required (here or in defaults)");
     const str = (/** @type {string} */ k) => {
       const v = row[k];
       if (typeof v !== "string" || !v.trim()) bad(`${at}.${k}`, "must be a non-empty string");
@@ -155,12 +168,13 @@ export function validateManifest(raw, file) {
 
     const role = str("role");
     if (!ROLE_RE.test(role)) bad(`${at}.role`, `a role is one segment of lower-case letters, digits, _ and - (${ROLE_RE})`);
-    const harness = /** @type {'omp' | 'claude'} */ (oneOf("harness", HARNESSES, null));
+    const harness = /** @type {'omp' | 'claude' | 'agora'} */ (oneOf("harness", HARNESSES, null));
     const host = /** @type {'tern' | 'tmux' | 'none'} */ (oneOf("host", HOSTS, null));
     const wake = /** @type {'all' | 'addressed' | 'mine'} */ (oneOf("wake", WAKES, "addressed"));
     const preamble = /** @type {'on' | 'off' | null} */ (oneOf("preamble", ["on", "off"], null));
     const rooms = strList("rooms", /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/);
     if (!rooms.length) bad(`${at}.rooms`, "must name at least one room alias from the agora config");
+    if (agoraRow && rooms.length !== 1) bad(`${at}.rooms`, "a messenger row (harness agora) watches one room; give each room its own row");
     const bearer = optStr("bearer");
     if (bearer !== null && !BEARER_RE.test(bearer)) bad(`${at}.bearer`, "a bearer is letters, digits, . _ - in segments joined by /");
 
@@ -225,8 +239,9 @@ export function validateManifest(raw, file) {
     }
 
     residents[slug] = {
-      slug, role, harness, model: str("model"), thinking: optStr("thinking"), rooms: [...new Set(rooms)], wake,
-      profile: resolveIn(str("profile")), append: strList("append", null).map(resolveIn), workdir, skills, host, env,
+      slug, role, harness, model: agoraRow ? MESSENGER_MODEL : str("model"), thinking: agoraRow ? null : optStr("thinking"), rooms: [...new Set(rooms)], wake,
+      // a messenger row has no prompt: a profile or an append inherited from defaults is not read
+      profile: agoraRow ? "" : resolveIn(str("profile")), append: agoraRow ? [] : strList("append", null).map(resolveIn), workdir, skills: agoraRow ? null : skills, host, env,
       args: strList("args", null), preamble, bearer, restart: optStr("restart"), command,
     };
   }
@@ -361,7 +376,8 @@ export function planResident(manifest, slug, ctx) {
   const rooms = ctx.room ? [ctx.room] : row.rooms;
   const known = Object.keys(ctx.cfg.rooms ?? {});
   for (const r of rooms) if (!known.includes(r)) throw new AgoraError(`resident ${slug}: room ${JSON.stringify(r)} is not in the agora config (have: ${known.join(", ")})`, EXIT.usage);
-  const modelKey = ctx.model ?? row.model;
+  const messenger = row.harness === "agora";
+  const modelKey = messenger ? row.model : ctx.model ?? row.model;
   const model = manifest.models[modelKey] ?? modelKey;
   const bearer = row.bearer ?? defaultBearer(row.role, model);
   const dir = residentDir(ctx.stateRoot, slug);
@@ -371,39 +387,47 @@ export function planResident(manifest, slug, ctx) {
   const fwd = (/** @type {string} */ p) => p.replace(/\\/g, "/");
 
   /** @type {Record<string, string>} */
-  const harnessEnv = {
-    ...row.env,
-    AGORA_CONFIG: ctx.cfg.path ?? "",
-    AGORA_STATE: ctx.stateRoot,
-    AGORA_LABEL: slug,
-    AGORA_ROOM: rooms.join(","),
-    AGORA_ROOM_WAKE: row.wake,
-    AGORA_ROOM_CMD: JSON.stringify([ctx.node, ctx.entry]),
-  };
+  const harnessEnv = messenger
+    // the messenger is its own session under its position, signing as its bearer
+    ? { ...row.env, AGORA_CONFIG: ctx.cfg.path ?? "", AGORA_STATE: ctx.stateRoot, AGORA_LABEL: slug, AGORA_SESSION: slug, AGORA_ACTOR: bearer }
+    : {
+      ...row.env,
+      AGORA_CONFIG: ctx.cfg.path ?? "",
+      AGORA_STATE: ctx.stateRoot,
+      AGORA_LABEL: slug,
+      AGORA_ROOM: rooms.join(","),
+      AGORA_ROOM_WAKE: row.wake,
+      AGORA_ROOM_CMD: JSON.stringify([ctx.node, ctx.entry]),
+    };
   if (!ctx.cfg.path) delete harnessEnv.AGORA_CONFIG;
-  if (row.preamble) harnessEnv.AGORA_ROOM_PREAMBLE = row.preamble;
+  if (row.preamble && !messenger) harnessEnv.AGORA_ROOM_PREAMBLE = row.preamble;
   // omp's extension registers `<role>/<Model>` itself and follows a model change; an explicit bearer,
   // and every Claude Code session, signs through AGORA_ACTOR.
-  if (row.harness === "omp" && row.bearer === null) harnessEnv.AGORA_ROLE = row.role;
-  else harnessEnv.AGORA_ACTOR = bearer;
+  if (!messenger) {
+    if (row.harness === "omp" && row.bearer === null) harnessEnv.AGORA_ROLE = row.role;
+    else harnessEnv.AGORA_ACTOR = bearer;
+  }
 
-  const prompt = firstPrompt({ slug, role: row.role, bearer, rooms, wake: row.wake, harness: row.harness });
-  const exeName = row.command ? row.command[0] : row.harness;
-  const exe = which(exeName, deps) ?? (existsSync(exeName) ? exeName : null);
-  if (!exe) throw new AgoraError(`resident ${slug}: ${exeName} is not on PATH; install ${row.harness} or set "command" in the manifest`, EXIT.error);
-  if (platform === "win32" && /\.(cmd|bat)$/i.test(exe)) throw new AgoraError(`resident ${slug}: ${exe} is a batch shim, which cannot be started without a shell; set "command" in the manifest to the executable it runs`, EXIT.error);
-  const prefix = [exe, ...(row.command ? row.command.slice(1) : [])];
+  const prompt = messenger ? null : firstPrompt({ slug, role: row.role, bearer, rooms, wake: row.wake, harness: row.harness });
   /** @type {string[]} */
   let argv;
-  if (row.harness === "omp") {
-    argv = [...prefix, "--append-system-prompt", promptFile, "--config", /** @type {string} */ (overlay), "--approval-mode", "yolo", "--model", model];
-    if (row.thinking) argv.push("--thinking", row.thinking);
-    if (row.skills?.names.length) argv.push("--skills", row.skills.names.join(","));
-  } else {
-    argv = [...prefix, "--system-prompt", ".", "--append-system-prompt-file", promptFile, "--plugin-dir", path.join(ctx.checkout, "plugins", "claude", "agora-room"), "--dangerously-skip-permissions", "--model", model];
-    if (row.thinking) argv.push("--effort", row.thinking);
+  if (messenger) argv = messengerArgv(ctx, rooms[0], "--stream", row.args);
+  else {
+    const exeName = row.command ? row.command[0] : row.harness;
+    const exe = which(exeName, deps) ?? (existsSync(exeName) ? exeName : null);
+    if (!exe) throw new AgoraError(`resident ${slug}: ${exeName} is not on PATH; install ${row.harness} or set "command" in the manifest`, EXIT.error);
+    if (platform === "win32" && /\.(cmd|bat)$/i.test(exe)) throw new AgoraError(`resident ${slug}: ${exe} is a batch shim, which cannot be started without a shell; set "command" in the manifest to the executable it runs`, EXIT.error);
+    const prefix = [exe, ...(row.command ? row.command.slice(1) : [])];
+    if (row.harness === "omp") {
+      argv = [...prefix, "--append-system-prompt", promptFile, "--config", /** @type {string} */ (overlay), "--approval-mode", "yolo", "--model", model];
+      if (row.thinking) argv.push("--thinking", row.thinking);
+      if (row.skills?.names.length) argv.push("--skills", row.skills.names.join(","));
+    } else {
+      argv = [...prefix, "--system-prompt", ".", "--append-system-prompt-file", promptFile, "--plugin-dir", path.join(ctx.checkout, "plugins", "claude", "agora-room"), "--dangerously-skip-permissions", "--model", model];
+      if (row.thinking) argv.push("--effort", row.thinking);
+    }
+    argv.push(...row.args, /** @type {string} */ (prompt));
   }
-  argv.push(...row.args, prompt);
 
   const runFile = runFilePath(ctx.stateRoot, slug);
   const name = ctx.room ? `${slug} (${ctx.room})` : slug;
@@ -432,15 +456,52 @@ export function planResident(manifest, slug, ctx) {
     rooms, wake: row.wake, host, manifest: manifest.file, dir, workdir,
     files: row.workdir.files.map((f) => ({ path: path.join(workdir, f.path), parts: f.parts })),
     skills: row.skills ? { dir: row.skills.dir, names: row.skills.names, mode: row.harness === "omp" ? "overlay" : "copy" } : null,
-    prompt: { file: promptFile, profile: row.profile, append: row.append },
+    prompt: messenger ? null : { file: promptFile, profile: row.profile, append: row.append },
     overlay, overlayText: overlay ? ompOverlay(fwd(path.join(ctx.checkout, "plugins", "omp", "agora-room")), row.skills ? fwd(row.skills.dir) : null) : null,
     trust: row.harness === "claude" ? workdir : null,
     vars: manifest.vars, argv, env: harnessEnv, firstPrompt: prompt, hostArgv, hostInfo, runFile, name,
     restart: row.restart,
+    // where the messenger's stream keeps its liveness (docs/MESSENGER.md); null for a model harness
+    liveness: messenger ? livenessPath(ctx.stateRoot, slug, rooms[0]) : null,
   };
 }
 
 /** @typedef {ReturnType<typeof planResident>} ResidentPlan */
+
+/**
+ * The messenger's argv: `agora messenger <room> <mode> [--config] <row args>` on this checkout's
+ * own CLI, run by this node.
+ * @param {{ node: string, entry: string, cfg: { path?: string } }} ctx @param {string} room
+ * @param {'--stream' | '--once'} mode @param {string[]} args
+ */
+export function messengerArgv(ctx, room, mode, args) {
+  return [ctx.node, ctx.entry, "messenger", room, mode, ...(mode === "--once" ? ["--json"] : []), ...(ctx.cfg.path ? ["--config", ctx.cfg.path] : []), ...args];
+}
+
+/**
+ * The cycle's backstop for a messenger row: one `--once` tick as the position's own session, and
+ * whether its stream is holding the position. A tick while the stream lives is harmless (the room's
+ * messenger lock serialises them, and its own posts are the record); after a dead stream it posts
+ * every line that came due meanwhile, once.
+ * @param {Manifest} manifest @param {string} slug @param {PlanContext} ctx
+ * @param {{ run?: (argv: string[], opts?: { timeoutMs?: number, env?: Record<string, string> }) => Promise<{ code: number, stdout: string, stderr: string }>, kill?: (pid: number, sig: 0) => void, boot?: number }} [deps]
+ */
+export async function cycleMessenger(manifest, slug, ctx, deps = {}) {
+  const plan = planResident(manifest, slug, ctx);
+  const base = { type: "resident-cycle", resident: slug, harness: "agora", position: slug, room: plan.rooms[0] };
+  const state = await residentState(ctx.stateRoot, slug, deps);
+  const stream = state.running ? "live" : "gone";
+  const argv = messengerArgv(ctx, plan.rooms[0], "--once", manifest.residents[slug].args);
+  const r = await (deps.run ?? runCommand)(argv, { timeoutMs: 60_000, env: plan.env });
+  const line = r.stdout.split(/\r?\n/).find((l) => l.includes('"messenger-tick"'));
+  /** @type {any} */
+  let tick = null;
+  try { tick = line ? JSON.parse(line) : null; } catch { tick = null; }
+  if (r.code !== 0 || !tick)
+    return { ...base, action: "failed", stream, reason: `the backstop tick exited ${r.code}: ${(r.stderr || r.stdout).trim().slice(0, 400)}` };
+  return { ...base, action: "tick", stream, due: tick.due.length, posted: tick.posted.length,
+    reason: `backstop tick posted ${tick.posted.length} of ${tick.due.length} due; the stream is ${stream}${state.reason ? ` (${state.reason})` : ""}` };
+}
 
 /** The per-run omp settings overlay (JSON strings are YAML strings). @param {string} extension @param {string | null} skillsDir */
 export function ompOverlay(extension, skillsDir) {
@@ -503,10 +564,13 @@ export async function prepareRun(plan, deps) {
     try { return await readFile(f, "utf8"); }
     catch (e) { throw new AgoraError(`resident ${plan.resident}: cannot read ${what} ${f}: ${/** @type {any} */ (e).code ?? /** @type {any} */ (e).message}`, EXIT.error); }
   };
-  const block = await read(path.join(deps.checkout, ROOM_MECHANICS_DOC), "the room-mechanics block");
-  const parts = [renderResidentPrompt(await read(plan.prompt.profile, "the profile"), block)];
-  for (const f of plan.prompt.append) parts.push(await read(f, "an appended file"));
-  await writeFileAtomic(plan.prompt.file, joinParts(parts));
+  // a messenger row has no prompt: nothing to render
+  if (plan.prompt) {
+    const block = await read(path.join(deps.checkout, ROOM_MECHANICS_DOC), "the room-mechanics block");
+    const parts = [renderResidentPrompt(await read(plan.prompt.profile, "the profile"), block)];
+    for (const f of plan.prompt.append) parts.push(await read(f, "an appended file"));
+    await writeFileAtomic(plan.prompt.file, joinParts(parts));
+  }
   if (plan.overlay && plan.overlayText) await writeFileAtomic(plan.overlay, plan.overlayText);
 
   await mkdir(plan.workdir, { recursive: true });
@@ -535,14 +599,14 @@ export async function prepareRun(plan, deps) {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * @typedef {(argv: string[], opts?: { timeoutMs?: number }) => Promise<{ code: number, stdout: string, stderr: string }>} Runner
+ * @typedef {(argv: string[], opts?: { timeoutMs?: number, env?: Record<string, string> }) => Promise<{ code: number, stdout: string, stderr: string }>} Runner
  */
 
-/** Run a command with no shell, killed by its own pid at the deadline. @type {Runner} */
+/** Run a command with no shell, killed by its own pid at the deadline; `env` is added to this process's. @type {Runner} */
 export const runCommand = (argv, opts = {}) => new Promise((resolve) => {
   /** @type {import("node:child_process").ChildProcess} */
   let child;
-  try { child = spawn(argv[0], argv.slice(1), { shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }); }
+  try { child = spawn(argv[0], argv.slice(1), { shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], ...(opts.env ? { env: { ...process.env, ...opts.env } } : {}) }); }
   catch (e) { resolve({ code: -1, stdout: "", stderr: String(/** @type {any} */ (e)?.message ?? e) }); return; }
   let stdout = "", stderr = "";
   const timer = setTimeout(() => { try { if (child.pid) process.kill(child.pid); } catch { /* gone */ } }, opts.timeoutMs ?? 30_000);

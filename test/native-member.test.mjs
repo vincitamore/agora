@@ -1060,7 +1060,7 @@ test("a member declaring a client name is refused by name, and a greeted member 
   accept(hostSide);
   const welcome = await greet(clientSide, secret);
   assert.equal(welcome.type, "member-welcome", `handshake refused: ${welcome.message ?? ""}`);
-  assert.deepEqual(welcome.capabilities, { advertised: ["threads-v1", "attachments-v1", "annotations-v1", "purge-v1", "titles-v1"], required: [] }, "a member is never offered client-name-v1");
+  assert.deepEqual(welcome.capabilities, { advertised: ["threads-v1", "attachments-v1", "annotations-v1", "purge-v1", "titles-v1", "boards-v1"], required: [] }, "a member is never offered client-name-v1");
 });
 
 test("a member replies in a thread and reads it, and its authorRef and an operation via are refused by name", async (t) => {
@@ -1091,4 +1091,30 @@ test("a member replies in a thread and reads it, and its authorRef and an operat
   const stored = /** @type {any} */ ((await service.openRoom(ROOM)).read().at(-1));
   assert.equal(stored.text, "reply", "no refused operation committed");
   assert.equal("via" in stored, false, "a member's message carries no via");
+});
+
+test("a member reads its own room's board (boards-v1), and another room's board is refused by name", async (t) => {
+  const { service } = await memberFixture(t);
+  const { descriptor, accept } = await openFakedRoute(service);
+  const secret = await readRouteSecret(service.root, descriptor.binding, descriptor.proofRef);
+  const { hostSide, clientSide } = loopback();
+  accept(hostSide);
+  assert.equal((await greet(clientSide, secret)).type, "member-welcome");
+  /** @param {Record<string, unknown>} frame */
+  const ask = (frame) => {
+    const requestId = randomUUID().replaceAll("-", "");
+    clientSide.write(encodeNativeFrame({ protocol: NATIVE_PROTOCOL, requestId, roomId: ROOM, ...frame }));
+    return collect(clientSide, (f) => (f.requestId === requestId ? f : undefined));
+  };
+  const claimed = await ask({ type: "append", operation: { kind: "board", operationId: randomUUID().replaceAll("-", ""),
+    authorKind: "agent", authorName: "remote-bearer", payload: { action: "claim", subject: "work:unit-9" } } });
+  assert.equal(claimed.type, "append-ack", claimed.message);
+  const board = await ask({ type: "board" });
+  assert.equal(board.type, "board-result", board.message);
+  assert.deepEqual(board.records.map((/** @type {any} */ r) => [r.board.action, r.board.subject, r.accountId]), [["claim", "work:unit-9", descriptor.binding.accountId]]);
+  assert.deepEqual(board.holders.map((/** @type {any} */ h) => h.subject), ["work:unit-9"]);
+  await service.createRoom({ roomId: "1".repeat(32), epoch: "2".repeat(32) });
+  const strayed = await ask({ type: "board", roomId: "1".repeat(32) });
+  assert.equal(strayed.type, "error");
+  assert.match(strayed.message, /member-room-refused/);
 });

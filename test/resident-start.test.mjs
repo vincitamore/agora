@@ -9,9 +9,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  RESERVED_ENV, defaultBearer, firstPrompt, hostAlive, ompOverlay, parseTaskXml, planResident, readRun, residentState, restartResident,
+  RESERVED_ENV, cycleMessenger, defaultBearer, firstPrompt, hostAlive, ompOverlay, parseTaskXml, planResident, readRun, residentState, restartResident,
   runFilePath, runTimer, startResident, stopResident, substituteVars, timerSpec, validateManifest, which,
 } from "../src/resident-start.mjs";
+import { runStream } from "../src/messenger.mjs";
 import { writeRecord } from "../src/session.mjs";
 import { modelLabel } from "../plugins/omp/agora-room/index.mjs";
 
@@ -193,7 +194,7 @@ test("plan: claude under none signs through AGORA_ACTOR, loads the plugin dir, c
   assert.equal(p.skills?.mode, "copy");
   assert.equal(p.trust, p.workdir);
   assert.deepEqual(p.argv.slice(1, -1), ["--system-prompt", ".", "--append-system-prompt-file", path.join(p.dir, "prompt.md"), "--plugin-dir", path.join(CHECKOUT, "plugins", "claude", "agora-room"), "--dangerously-skip-permissions", "--model", "claude-sonnet-9"]);
-  assert.match(p.firstPrompt, /agora-room plugin owns your watch/);
+  assert.match(String(p.firstPrompt), /agora-room plugin owns your watch/);
 });
 
 test("plan: overrides, tmux, an explicit bearer, and the named refusals", async (t) => {
@@ -238,7 +239,7 @@ test("start: renders, builds the folder, records the tern handle; a second start
   assert.equal(first.exec, undefined);
   assert.deepEqual(r.calls.map((c) => c[1]), ["new"], "one host call, the start");
 
-  const prompt = await readFile(p.prompt.file, "utf8");
+  const prompt = await readFile(String(p.prompt?.file), "utf8");
   assert.ok(prompt.startsWith("# Ada\n\nThe profile.\n"), "the profile first");
   assert.match(prompt, /## Room mechanics/, "the room-mechanics block appended");
   assert.ok(prompt.endsWith("\n\nExtra layer.\n"), "the appended file last, LF endings");
@@ -461,4 +462,90 @@ test("cli: start --run runs the recorded harness with its environment and folder
   r = await agora(["resident", "start", "desk.other", "--run", file, "--config", s.config], env);
   assert.equal(r.code, 2);
   assert.match(r.stderr, /records resident desk\.alpha, not desk\.other/);
+});
+
+// ---- harness agora: the messenger as a manifest row ----
+
+/** @param {Record<string, unknown>} [row] */
+const withMessenger = (row = {}) => {
+  const d = manifestDoc();
+  /** @type {any} */ (d.residents)["lab.messenger"] = { role: "messenger", harness: "agora", wake: "all", rooms: ["lab"], args: ["--human-name", "Ada", "--bounds", "R=90s,R2=270s"], ...row };
+  return d;
+};
+
+test("manifest: a messenger row (harness agora) needs no model and no profile, reads none from defaults, and watches one room (red leg: two rooms)", async (t) => {
+  const s = await seat(t);
+  const m = validateManifest(withMessenger(), s.manifestFile);
+  const row = m.residents["lab.messenger"];
+  assert.deepEqual([row.harness, row.model, row.profile, row.append, row.skills, row.thinking], ["agora", "code", "", [], null, null], "the defaults' model, profile, append and skills are not the messenger's");
+  const bare = manifestDoc();
+  bare.defaults = /** @type {any} */ ({ host: "none" });
+  bare.residents = /** @type {any} */ ({ "lab.messenger": { role: "messenger", harness: "agora", rooms: ["lab"] } });
+  assert.equal(validateManifest(bare, s.manifestFile).residents["lab.messenger"].model, "code");
+  assert.throws(() => validateManifest(withMessenger({ rooms: ["lab", "other"] }), s.manifestFile), /lab\.messenger\.rooms: a messenger row \(harness agora\) watches one room/);
+  const noModel = manifestDoc();
+  delete /** @type {any} */ (noModel.defaults).model;
+  assert.throws(() => validateManifest(noModel, s.manifestFile), /desk\.messenger\.model: is required/, "a model harness still needs its model");
+});
+
+test("plan: a messenger row runs `agora messenger <room> --stream` as its own session, with no prompt, and names its liveness file", async (t) => {
+  const s = await seat(t);
+  const m = validateManifest(withMessenger(), s.manifestFile);
+  const p = planResident(m, "lab.messenger", ctxOf(s, { host: "none", env: { PATH: path.join(s.root, "empty") } }));
+  assert.deepEqual(p.argv, ["node-bin", BIN, "messenger", "lab", "--stream", "--config", s.config, "--human-name", "Ada", "--bounds", "R=90s,R2=270s"], "no harness binary is looked up");
+  assert.equal(p.bearer, "messenger/Code");
+  assert.deepEqual(Object.keys(p.env).sort(), ["AGORA_ACTOR", "AGORA_CONFIG", "AGORA_LABEL", "AGORA_SESSION", "AGORA_STATE", "SEAT_MARKER"]);
+  assert.deepEqual([p.env.AGORA_SESSION, p.env.AGORA_LABEL, p.env.AGORA_ACTOR], ["lab.messenger", "lab.messenger", "messenger/Code"]);
+  assert.deepEqual([p.prompt, p.firstPrompt, p.overlay, p.trust, p.skills], [null, null, null, null, null]);
+  assert.equal(p.liveness, path.join(s.state, "messenger", "lab.messenger.lab.json"));
+  assert.equal(planResident(m, "desk.coding", ctxOf(s)).liveness, null, "a model harness has no messenger liveness");
+  // the start renders nothing and records the host handle like any row
+  const pt = planResident(m, "lab.messenger", ctxOf(s));
+  const r = fakeRunner((argv) => (argv[1] === "new" ? { code: 0, stdout: JSON.stringify({ session: 7, tab: 8, block: 9 }) } : { code: 0 }));
+  const started = await startResident(pt, s.state, { checkout: CHECKOUT, run: r.fn, home: s.home });
+  assert.equal(started.row.action, "started");
+  assert.equal(existsSync(path.join(p.dir, "prompt.md")), false, "no prompt is written for a messenger");
+  assert.deepEqual((await readRun(s.state, "lab.messenger"))?.exec.argv, pt.argv);
+});
+
+test("cycle: a messenger row's backstop is one --once tick as its session; a failed tick is named (red leg: the tick exits non-zero)", async (t) => {
+  const s = await seat(t);
+  const m = validateManifest(withMessenger(), s.manifestFile);
+  /** @type {Array<{ argv: string[], env?: Record<string, string> }>} */
+  const calls = [];
+  const tickLine = JSON.stringify({ type: "messenger-tick", due: [{ kind: "N2" }, { kind: "N5" }], posted: [{ kind: "N2" }, { kind: "N5" }] });
+  /** @param {number} code */
+  const runner = (code) => /** @type {any} */ (async (/** @type {string[]} */ argv, /** @type {any} */ opts) => { calls.push({ argv, env: opts?.env }); return { code, stdout: code === 0 ? `${tickLine}\n` : "", stderr: code === 0 ? "" : "seat service dark" }; });
+  const ok = /** @type {any} */ (await cycleMessenger(m, "lab.messenger", ctxOf(s), { run: runner(0) }));
+  assert.deepEqual([ok.action, ok.stream, ok.posted, ok.due], ["tick", "gone", 2, 2]);
+  assert.deepEqual(calls[0].argv, ["node-bin", BIN, "messenger", "lab", "--once", "--json", "--config", s.config, "--human-name", "Ada", "--bounds", "R=90s,R2=270s"]);
+  assert.deepEqual([calls[0].env?.AGORA_SESSION, calls[0].env?.AGORA_ACTOR, calls[0].env?.AGORA_LABEL], ["lab.messenger", "messenger/Code", "lab.messenger"]);
+  // the stream holding the position: the tick still runs (its own posts are the record)
+  const pid = process.pid;
+  await writeRecord(path.join(s.state, "sessions", "lab.messenger"), /** @type {any} */ ({ slug: "lab.messenger", source: "AGORA_SESSION" }), { bearer: "messenger/Code", label: "lab.messenger", pid, pidSource: "agora-messenger" });
+  assert.equal((await cycleMessenger(m, "lab.messenger", ctxOf(s), { run: runner(0) })).stream, "live");
+  const failed = await cycleMessenger(m, "lab.messenger", ctxOf(s), { run: runner(1) });
+  assert.equal(failed.action, "failed");
+  assert.match(String(failed.reason), /backstop tick exited 1: seat service dark/);
+});
+
+test("stream: the liveness file is rewritten after every tick in the extension's shape (red leg: a failing tick is not ready)", async (t) => {
+  const s = await seat(t);
+  const file = path.join(s.state, "messenger", "lab.messenger.lab.json");
+  let ticks = 0;
+  const deps = (/** @type {boolean} */ failing) => ({
+    gather: async () => { ticks++; if (failing) throw new Error("seat service dark"); return { messages: [], annotations: [], boardRecords: [], resolve: () => /** @type {any} */ ({ kind: "none", holders: [] }) }; },
+    post: async () => ({ id: "x", cursor: "c" }), lock: async (/** @type {any} */ fn) => fn(), now: () => Date.now(), accountId: null, human: "Ada",
+    bounds: { R: 1000, R2: 2000, I: 1000, Bo: 1000, H: 3_600_000, T: 1000 },
+    wait: async () => {}, until: null, stopped: () => ticks >= 3, liveness: { file, base: { session: "lab.messenger", bearer: "messenger/Code", position: "lab.messenger", room: "lab" } },
+  });
+  const stats = await runStream(deps(false));
+  assert.equal(stats.ticks, 3);
+  const live = JSON.parse(await readFile(file, "utf8"));
+  assert.deepEqual([live.harness, live.session, live.position, live.room, live.ready, live.ticks, live.errors, live.intervalMs, live.pid], ["agora", "lab.messenger", "lab.messenger", "lab", true, 3, 0, 1000, process.pid]);
+  assert.ok(Date.parse(live.updatedAt) > 0 && Date.parse(live.lastTick) > 0);
+  ticks = 0;
+  await runStream(deps(true));
+  const dark = JSON.parse(await readFile(file, "utf8"));
+  assert.deepEqual([dark.ready, dark.errors, dark.lastError], [false, 3, "seat service dark"]);
 });

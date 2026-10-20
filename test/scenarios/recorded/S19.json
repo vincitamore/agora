@@ -1,0 +1,26 @@
+{
+  "scenario": "S19",
+  "recordedOn": "2026-10-20",
+  "build": "df835fe",
+  "checks": {
+    "stream-posts-while-up": {
+      "today": "green",
+      "observed": 1
+    },
+    "backstop-sees-stream-gone": {
+      "today": "green",
+      "observed": "gone"
+    },
+    "handled-after-restart": {
+      "today": "green",
+      "observed": {
+        "raised": 3,
+        "handled": 3
+      }
+    },
+    "no-duplicates": {
+      "today": "green",
+      "observed": 0
+    }
+  }
+}

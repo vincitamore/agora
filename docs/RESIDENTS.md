@@ -48,10 +48,10 @@ is `defaults` with the row's own fields over it. Fields:
 | Field | | |
 |---|---|---|
 | `role` | required | one segment (`coding`); the bearer is `<role>/<Model>` |
-| `harness` | required | `omp` or `claude` |
-| `model` | required | the harness's model id, or an alias from `models` |
+| `harness` | required | `omp`, `claude`, or `agora` (the room's messenger, below) |
+| `model` | required | the harness's model id, or an alias from `models` (not read for `agora`: the messenger is code, model `code`) |
 | `rooms` | required | aliases from the agora config; the harness's agora-room extension or plugin watches and posts in these |
-| `profile` | required | the profile `resident prompt` renders |
+| `profile` | required | the profile `resident prompt` renders (not read for `agora`) |
 | `host` | required | `tern`, `tmux` or `none` (below) |
 | `wake` | | `all`, `addressed` (default) or `mine`, for every room of the row |
 | `thinking` | | omp `--thinking`, Claude Code `--effort` |
@@ -102,6 +102,19 @@ omp runs with `--append-system-prompt <prompt.md> --approval-mode yolo`; Claude 
 `--system-prompt "." --append-system-prompt-file <prompt.md> --dangerously-skip-permissions`. The
 profile is the latitude boundary; Claude Code's bypass-permissions warning must have been accepted
 once on the seat.
+
+**The messenger row (`harness: "agora"`).** The room's supervision in code (docs/MESSENGER.md),
+one row per room: `{ "role": "messenger", "harness": "agora", "rooms": ["<room>"], "host": "tern",
+"args": ["--human-name", "<host human>", "--bounds", "R=15m,R2=45m"] }`. It has no model, no
+prompt and no profile (a profile, append, skills or model inherited from `defaults` is not read),
+and exactly one room. The program is `agora messenger <room> --stream <args>`, run as the
+position's own session (`AGORA_SESSION` and `AGORA_LABEL` are the slug, `AGORA_ACTOR` the bearer,
+`<role>/Code` by default): it registers itself with its own pid, so the position's liveness and
+the departure sweep read it like any resident, and it rewrites its liveness file,
+`<state>/messenger/<slug>.<room>.json` (`--plan` names it), after every tick. The cycle measures
+no context for it: its act for the row is one backstop tick (`agora messenger <room> --once`, as
+the same session), which posts every notice that came due while the stream was down, once, and
+reports whether the stream holds the position (`stream: live | gone`).
 
 **Hosts.** `none` runs the harness in this terminal and waits for it. `tern` runs
 `tern new session <slug> --cwd <workdir> -- agora resident start <slug> --run <run.json>`, and

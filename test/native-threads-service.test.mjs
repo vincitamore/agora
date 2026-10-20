@@ -46,7 +46,7 @@ const refusedAs = (p, code) => assert.rejects(p, (e) => { assert.equal(/** @type
 test("the welcome offers threads-v1, client-name-v1, attachments-v1, annotations-v1, purge-v1 and titles-v1, and echoes the client name the service took", async (t) => {
   const { connect } = await fixture(t);
   const plain = await connect();
-  assert.deepEqual([...plain.capabilities].sort(), ["annotations-v1", "attachments-v1", "client-name-v1", "purge-v1", "threads-v1", "titles-v1"]);
+  assert.deepEqual([...plain.capabilities].sort(), ["annotations-v1", "attachments-v1", "boards-v1", "client-name-v1", "purge-v1", "threads-v1", "titles-v1"]);
   assert.equal(plain.clientName, undefined);
   const named = await connect("review-app");
   assert.equal(named.clientName, "review-app");

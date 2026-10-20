@@ -220,6 +220,30 @@ const SCHEMA = {
       options: {},
       does: "force-drop a native board holder. The human label is cooperative (the caller supplies authorKind; the store refuses an agent label; the event records session and bearer). Slack and other transports have no board",
     },
+    board: {
+      args: ["<room>"],
+      options: { "--json": "one board-subject line per subject, then one board-read line naming the cursor the board was read through" },
+      does: "read a native room's board (boards-v1): per subject its live holder (account, the bearer whose post carried the claim, the lease's expiry), a lapsed lease (expired, not yet released), and its contests. Read-only; a fold over the board records the host serves",
+    },
+    resolve: {
+      args: ["<room>", "<address>"],
+      options: { "--json": "one resolve object" },
+      does: "what a to: address names here: its kind (person | seat | role | position | everyone | none), the holders (seat, position, role, model, bearer, session, verdict), and for none why (retired | half-name | unknown) and the nearest live holder. A live process is verdict unknown, never ready; a person never resolves to agents; half a segment is none",
+    },
+    messenger: {
+      args: ["<room>"],
+      options: {
+        "--human-name <name>": "the host human: the N3 and N9 notices name them (required)",
+        "--bounds <spec>": "R=15m,R2=45m,I=2m,Bo=30m,H=4h,T=30s (any subset; ms, s, m, h): not taken by R → N2; R2 on either clock → N3; lease expiry + I → N4; open subject at Bo → N6; nothing older than H is raised; T is the stream's interval",
+        "--once": "one tick, then exit (the default without --stream)",
+        "--stream": "tick now, on every room event, and every T, until --for or a stop; writes a liveness file",
+        "--for <s>": "--stream: stop after this many seconds",
+        "--at <iso>": "--once: fold as if now were this instant (a replay; posts what would be due then)",
+        "--dry-run": "print the due notices and post nothing",
+        "--json": "one messenger-tick line per tick (due, posted)",
+      },
+      does: "the room's supervision in code (docs/MESSENGER.md): a fold over the room, the board and this seat's sessions that posts fixed-form notices (N1 routed, N2 not taken, N3 to the host human, N4 lease lapsed, N5 unmatched address, N6 open subject, N7 top-level reply, N9 no role fits). Its own posts are its incident record: a restart duplicates nothing. No model; it never answers, claims or quotes",
+    },
     room: {
       args: ["faces <room> | add-remote <alias> <descriptor-path> | upgrade <room> | purge <room>"],
       options: {
@@ -603,6 +627,8 @@ const OPTIONS = /** @type {const} */ ({
   model: { type: "string" },
   "from-descriptor": { type: "string" },
   replace: { type: "boolean", default: false },
+  bounds: { type: "string" },
+  at: { type: "string" },
 });
 
 /**
@@ -1644,7 +1670,8 @@ async function main(argv) {
           if (json) { console.log(JSON.stringify(view)); continue; }
           console.log(`${p.resident}: ${view.state}${st.reason ? ` (${st.reason})` : ""}`);
           console.log(`  ${p.harness} ${p.model} as ${p.bearer}, position ${p.position}, rooms ${p.rooms.join(",")} (wake ${p.wake}), host ${p.host}`);
-          console.log(`  writes   ${[p.prompt.file, ...(p.overlay ? [p.overlay] : []), ...view.files, p.runFile].join("\n           ")}`);
+          console.log(`  writes   ${[...(p.prompt ? [p.prompt.file] : []), ...(p.overlay ? [p.overlay] : []), ...view.files, p.runFile].join("\n           ")}`);
+          if (p.liveness) console.log(`  liveness ${p.liveness}`);
           if (p.skills) console.log(`  skills   ${p.skills.names.join(", ")} from ${p.skills.dir} (${p.skills.mode})`);
           if (p.trust) console.log(`  trusts   ${p.trust} in ~/.claude.json`);
           console.log(`  cwd      ${p.workdir}`);
@@ -1694,6 +1721,17 @@ async function main(argv) {
       /** @type {number} */
       let rc = EXIT.ok;
       for (const slug of slugs) {
+        if (manifest?.residents[slug]?.harness === "agora") {
+          // a messenger has no context to measure: the cycle's act is one backstop tick
+          const nodeExe = process.versions.bun ? rs.which("node") ?? "node" : process.execPath;
+          const row = values["dry-run"]
+            ? { type: "resident-cycle", resident: slug, harness: "agora", action: "would-tick", reason: "dry run: no backstop tick" }
+            : await rs.cycleMessenger(manifest, slug, { cfg, stateRoot, checkout: projectRoot, entry: entryFile, node: nodeExe });
+          if (row.action === "failed") rc = EXIT.error;
+          if (json) console.log(JSON.stringify(row));
+          else console.log(`${slug.padEnd(14)} ${String(row.action).padEnd(12)} ${row.reason}`);
+          continue;
+        }
         const row = /** @type {any} */ (await planCycle(stateRoot, slug, { idleSeconds, minContext, maxContext, deafSeconds }));
         if (row.action === "cycle") {
           if (values["dry-run"]) row.action = "would-cycle";
@@ -2616,6 +2654,140 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         return EXIT.ok;
       }
       console.log(json ? JSON.stringify({ ...r, alias: roomAlias, room: transport.room, thread, ...(ids.length > 1 ? { ids } : {}) }) : `posted ${ids.join(" ")}${r.url ? `  ${r.url}` : ""}  cursor ${r.cursor}${r.files?.length ? `  files ${r.files.join(" ")}` : ""}`);
+      return EXIT.ok;
+    }
+    case "board":
+    case "resolve":
+    case "messenger": {
+      if (room.transport !== "native" && room.transport !== "native-remote") throw new AgoraError(`${verb} belongs to a native room; "${roomAlias}" is ${room.transport}, which has no board`, EXIT.usage);
+      const br = await import("../src/board-read.mjs");
+      /** The room as one read sees it (messages and their annotations, newest 1000). */
+      const roomRecords = async () => {
+        const msgs = await readWithinFrame(transport, { limit: 1000, annotations: true }, (shown, asked) =>
+          console.error(`agora: requested ${asked} entries (messages and annotations); the host fit and returned ${shown} in one native frame`));
+        return { messages: [...msgs], annotations: /** @type {any} */ (msgs).annotations ?? [] };
+      };
+      /** This seat's context for resolving an address: its account, its label, its sessions and their ledgers. @param {any[]} messages */
+      const seatContext = async (messages) => {
+        /** @type {string | null} */ let accountId = null;
+        try { accountId = (await transport.whoami()).id; } catch { accountId = null; }
+        const seatName = room.transport === "native" ? (await serviceDescriptorStatus(stateRoot)).seatLabel ?? "" : "";
+        const records = await Promise.all((await listRecords(stateRoot)).map(async (r) => ({ ...r, posted: await readPosted(r.dir) })));
+        return { seatName, accountId, records, messages };
+      };
+      if (verb === "resolve") {
+        const address = String(rest[0] ?? "").trim();
+        if (!address) throw new AgoraError("agora resolve <room> <address>", EXIT.usage);
+        const { messages } = await roomRecords();
+        const r = br.resolveAddress(address, await seatContext(messages));
+        if (json) console.log(JSON.stringify({ ...r, alias: roomAlias, room: transport.room }));
+        else {
+          console.log(`${r.address}: ${r.kind}${r.why ? ` (${r.why}; nearest ${r.nearest ?? "none"})` : ""}  context ${r.context}`);
+          for (const h of r.holders) console.log(`  ${(h.position ?? "-").padEnd(24)} ${h.bearer.padEnd(20)} seat ${h.seat || "-"}  session ${h.session ?? "-"}  ${h.process}  verdict ${h.verdict}`);
+        }
+        return EXIT.ok;
+      }
+      if (verb === "board") {
+        const view = await br.readBoard(transport);
+        const { messages } = await roomRecords();
+        const fold = br.foldBoard(view.records, Date.now());
+        const authors = br.claimAuthors(fold, messages);
+        for (const s of fold.subjects) {
+          const by = authors.get(s.subject) ?? null;
+          if (json) { console.log(JSON.stringify({ type: "board-subject", alias: roomAlias, room: transport.room, ...s, claimedBy: by })); continue; }
+          const h = s.holder ?? s.lapsed;
+          const who = by ? `${by.bearer} (account ${h?.accountId})` : `account ${h?.accountId}`;
+          console.log(s.holder ? `${s.subject}  held by ${who} until ${s.holder.expiresAt}  fence ${s.holder.fence}`
+            : s.lapsed ? `${s.subject}  LAPSED ${s.lapsed.expiresAt}, held by ${who}, never released`
+            : `${s.subject}  free (last act ${s.last})`);
+          for (const c of s.contests) console.log(`  contest ${c.cursor} by account ${c.accountId}${c.because ? `: ${c.because}` : ""}`);
+          for (const b of s.breaks) console.log(`  break ${b.cursor} by ${b.actor?.name ?? "unknown"} (${b.actor?.kind ?? "unknown"})`);
+        }
+        const through = view.checkpoint && typeof view.checkpoint.epoch === "string" ? `${view.checkpoint.epoch}:${view.checkpoint.sequence}` : null;
+        if (json) console.log(JSON.stringify({ type: "board-read", alias: roomAlias, room: transport.room, through, records: view.records.length, subjects: fold.subjects.length }));
+        else console.error(`agora: board of ${roomAlias}: ${fold.subjects.length} subject${fold.subjects.length === 1 ? "" : "s"} from ${view.records.length} board record${view.records.length === 1 ? "" : "s"}, read through ${through ?? "nothing"}`);
+        return EXIT.ok;
+      }
+      // messenger
+      const ms = await import("../src/messenger.mjs");
+      const bounds = ms.parseBounds(values.bounds === undefined ? undefined : String(values.bounds));
+      const host = values["human-name"] === undefined ? "" : String(values["human-name"]).trim();
+      if (!host || /\s/.test(host)) throw new AgoraError("messenger needs --human-name <name>: the host human its N3 and N9 lines name (one word)", EXIT.usage);
+      if (values.stream && (values.once || values.at !== undefined)) throw new AgoraError("--stream runs on the clock; --once and --at belong to a single tick", EXIT.usage);
+      const at = values.at === undefined ? undefined : Date.parse(String(values.at));
+      if (at !== undefined && !Number.isFinite(at)) throw new AgoraError(`--at takes an ISO instant, not ${JSON.stringify(values.at)}`, EXIT.usage);
+      await identity();
+      /** @type {string | null} */ let accountId = null;
+      try { accountId = (await transport.whoami()).id; } catch { accountId = null; }
+      const signIt = cfg.sign !== false && !values["no-sign"];
+      /** @type {import("../src/messenger.mjs").TickDeps} */
+      const deps = {
+        gather: async () => {
+          const { messages, annotations } = await roomRecords();
+          const view = await br.readBoard(transport);
+          const ctx = await seatContext(messages);
+          return { messages, annotations, boardRecords: view.records, resolve: (a) => br.resolveAddress(a, ctx) };
+        },
+        post: async (act) => {
+          const text = withTrailers(act.text, act.trailers);
+          const r = await recordedPost(transport, sdir, signIt ? sign(text, cfg.actor) : text, act.thread ? { thread: act.thread } : {}, { session, bearer: bearer.name });
+          return { id: r.id, cursor: r.cursor };
+        },
+        lock: ms.fileLock(path.join(stateRoot, "messenger", `${transport.room}.lock`)),
+        now: () => at ?? Date.now(),
+        accountId, human: host, bounds, dryRun: Boolean(values["dry-run"]),
+      };
+      /** @param {Awaited<ReturnType<typeof ms.runTick>>} r */
+      const report = (r) => {
+        const skipped = r.due.length && !values["dry-run"] && !r.locked;
+        if (json) {
+          console.log(JSON.stringify({ type: "messenger-tick", alias: roomAlias, room: transport.room, at: new Date(deps.now()).toISOString(),
+            due: r.due.map((a) => ({ kind: a.kind, key: a.key, text: a.text, thread: a.thread ?? null, trailers: a.trailers })),
+            posted: r.posted.map((p) => ({ kind: p.kind, key: p.key, id: p.id, cursor: p.cursor })), ...(skipped ? { skipped: "another tick held the room's messenger lock" } : {}) }));
+          return;
+        }
+        if (values["dry-run"]) for (const a of r.due) console.log(`due ${a.kind}  ${a.text}  ${a.trailers.map((t) => `${t.key}: ${t.value}`).join("  ")}`);
+        for (const p of r.posted) console.log(`posted ${p.kind} ${p.id}  ${p.text}`);
+        if (skipped) console.error("agora: another tick held the room's messenger lock; nothing posted this tick");
+      };
+      if (!values.stream) {
+        report(await ms.runTick(deps));
+        return EXIT.ok;
+      }
+      // the stream: a host-launched messenger (AGORA_LABEL) holds its position in its own record,
+      // with its own pid, so the seat's liveness and departure sweep read it like any resident
+      const label = resolveLabel({ env: process.env });
+      if (label !== undefined) await writeRecord(sdir, session, { bearer: bearer.name, label, build, pid: process.pid, pidSource: "agora-messenger" });
+      const forSeconds = values.for === undefined ? undefined : Number(values.for);
+      if (forSeconds !== undefined && !(Number.isFinite(forSeconds) && forSeconds > 0)) throw new AgoraError(`--for takes seconds, not ${JSON.stringify(values.for)}`, EXIT.usage);
+      let stopped = false;
+      const stop = () => { stopped = true; };
+      process.once("SIGINT", stop);
+      process.once("SIGTERM", stop);
+      /** room events wake the stream on a native room; elsewhere it runs on the interval */
+      /** @type {Awaited<ReturnType<typeof openNativeSubscription>> | null} */
+      let sub = null;
+      if (room.transport === "native") {
+        try {
+          const st = /** @type {any} */ (await transport.read({ limit: 1 }));
+          sub = await openNativeSubscription({ stateRoot, roomId: transport.room, ...(st.length ? { since: st.at(-1).cursor } : {}) });
+        } catch (e) { console.error(`agora: no room subscription (${e instanceof Error ? e.message : String(e)}); ticking on the interval only`); }
+      }
+      const sleep = (/** @type {number} */ ms2) => new Promise((r) => setTimeout(r, ms2));
+      const stats = await ms.runStream({
+        ...deps, until: forSeconds === undefined ? null : Date.now() + forSeconds * 1000, stopped: () => stopped,
+        wait: async (ms2) => {
+          if (!sub) return sleep(ms2);
+          await sub.wait(ms2);
+          try { await sub.read(); } catch { sub.close(); sub = null; }
+        },
+        liveness: { file: ms.livenessPath(stateRoot, session.slug, roomAlias), base: { session: session.slug, bearer: bearer.name, position: label ?? null, room: roomAlias, roomId: transport.room, bounds } },
+        onTick: report,
+      });
+      sub?.close();
+      process.off("SIGINT", stop);
+      process.off("SIGTERM", stop);
+      console.error(`agora: messenger on ${roomAlias} stopped after ${stats.ticks} tick${stats.ticks === 1 ? "" : "s"}, ${stats.posted} notice${stats.posted === 1 ? "" : "s"} posted${stats.lastError ? `; last error: ${stats.lastError}` : ""}`);
       return EXIT.ok;
     }
     case "contest": {

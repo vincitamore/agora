@@ -1,0 +1,20 @@
+{
+  "scenario": "S20",
+  "recordedOn": "2026-10-20",
+  "build": "df835fe",
+  "checks": {
+    "one-n6-at-bo": {
+      "today": "green",
+      "observed": {
+        "count": 1,
+        "to": "orchestrator",
+        "atBo": true,
+        "inThread": true
+      }
+    },
+    "claimed-control-quiet": {
+      "today": "green",
+      "observed": 0
+    }
+  }
+}
