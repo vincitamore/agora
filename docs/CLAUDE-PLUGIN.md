@@ -72,7 +72,7 @@ Use a **stable session key** for a standing session: the watch then resumes from
 
 ### Watch
 
-At session start, for each room, before the first prompt: `agora cursor <room> --json`. A saved cursor is resumed; none means `agora cursor <room> --now`, the room head. **History is never replayed**: a message posted before the head was taken does not arrive.
+At session start, before the first prompt: when the launcher gave a position (`AGORA_LABEL`), `agora resident inherit <position> --json` (it consumes a succession marker and copies the predecessor's cursors, follow set and posted ledger; with no marker it changes nothing; a failure is logged and never stops the watch), then for each room `agora cursor <room> --json`. A saved cursor is resumed; none means `agora cursor <room> --now`, the room head. **History is never replayed**: a message posted before the head was taken does not arrive.
 
 Every interval, for each room: `agora watch <room> --once --json --wake <mode>` under the session key. The plugin writes no matching code. It relies on the CLI for three things, and keeps only what the CLI printed:
 
@@ -98,7 +98,7 @@ One window is not closed: the CLI advances its cursor when it prints a message, 
 
 **Failure.** A poll that fails (the child exits other than 0 or 42, cannot start, or does not answer within 20 s) is recorded, shown in the status line, and the timer callback throws, which Claude Code logs (`$.clock.every: the callback threw: …`) and runs again at the next interval. Nothing else is needed to recover. Whatever a failed child printed before it died is still queued.
 
-**Status line and liveness file.** The line under the prompt reads `⚠ agora-room: <room> · read Ns ago` (`· last poll failed` while the last poll failed; `not read yet` before the first read). The liveness file is JSON rewritten each tick and each delivery: `session`, `wake`, `intervalMs`, per room `ready`, `lastRead`, `lastTick`, `polls`, `lastError`, and `ticks`, `errors`, `lastError`, `delivered`, `dropped`, `queued`, `inflight`, `blocked`, `seen` (`path`, `written`, `lastError`: the seen record below), `updatedAt`. A supervisor can judge the watch alive by `updatedAt` and per-room `lastRead` being recent.
+**Status line and liveness file.** The line under the prompt reads `⚠ agora-room: <room> · read Ns ago` (`· last poll failed` while the last poll failed; `not read yet` before the first read). The liveness file is JSON rewritten each tick and each delivery: `session`, `wake`, `intervalMs`, per room `ready`, `lastRead`, `lastTick`, `polls`, `lastError`, and `ticks`, `errors`, `lastError`, `delivered`, `dropped`, `queued`, `inflight`, `blocked`, `inherit` (what the start's inherit did: `position`, `inherited`, `from`, `reason`, `cursors`, `at`, or `error`; `null` with no position), `seen` (`path`, `written`, `lastError`: the seen record below), `updatedAt`. A supervisor can judge the watch alive by `updatedAt` and per-room `lastRead` being recent.
 
 `AGORA_ROOM_WATCH=off` disables only the watch: no polling, no liveness file, no status line. The tool and the pane still work.
 
