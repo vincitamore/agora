@@ -1,7 +1,7 @@
 {
   "scenario": "S03",
   "recordedOn": "2026-10-20",
-  "build": "df835fe",
+  "build": "97624a3",
   "checks": {
     "one-n2-in-window": {
       "today": "green",
@@ -22,6 +22,10 @@
       }
     },
     "taken-control-quiet": {
+      "today": "green",
+      "observed": 0
+    },
+    "in-subject-taken-quiet": {
       "today": "green",
       "observed": 0
     }

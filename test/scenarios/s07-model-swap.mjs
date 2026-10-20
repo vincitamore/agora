@@ -15,11 +15,13 @@
  * (who holds the account) is the two-principal arm, not run here.
  *
  * Today: a relaunch under the same position is a restart, not a departure (src/session.mjs
- * `departures` keys a gone record on its position), `to: coding` reaches the role-first bearer,
- * and the cycle finds the swapped session by its position (src/resident.mjs
+ * `departures` keys a gone record on its position), `to: coding` reaches the swapped session
+ * (by its role-first bearer, and by the position it holds, which the watch's wake filter matches as
+ * the resolver does), and the cycle finds the swapped session by its position (src/resident.mjs
  * `matchesResidentRecord`). Nothing in the room says a swap happened. Without the label (the red
- * legs) the old unlabelled behaviour holds: the relaunch reads as a departure and the cycle, which
- * matches an unlabelled record by its `/<slug>` bearer suffix, does not find `coding/Sonnet`.
+ * legs) the old unlabelled behaviour holds: the relaunch reads as a departure, the cycle, which
+ * matches an unlabelled record by its `/<slug>` bearer suffix, does not find `coding/Sonnet`, and a
+ * model-first bearer is not reached by its role.
  */
 
 import { DEPART_GRACE_MINUTES } from "../../src/session.mjs";
@@ -46,7 +48,7 @@ for (const arm of ARMS) {
   };
   checks[`${arm}:to-role-reaches-new-bearer`] = {
     bar: "the next `to: coding` is delivered to the new bearer's `watch --wake mine`",
-    redLeg: "the new bearer is registered model-first (Sonnet/coding)",
+    redLeg: "the new bearer is registered model-first (Sonnet/coding) and holds no position label",
   };
   checks[`${arm}:cycle-match`] = {
     bar: "`resident cycle coding` finds the swapped session",
@@ -78,7 +80,7 @@ async function runArm(ctx, arm) {
     const ada = new Human(client, seat.alias, "Ada");
     const orchestrator = await Agent.start(seat, { session: "s07-orch", bearer: "orchestrator/Opus", harness: "omp" });
     // the position: a resident registers with its label; a red leg that drops it is the unlabelled shape
-    const label = red("cycle-match") || red("departure-lines") ? {} : { label: POSITION };
+    const label = red("cycle-match") || red("departure-lines") || red("to-role-reaches-new-bearer") ? {} : { label: POSITION };
     const coding = await Agent.start(seat, { session: "s07-coding-1", bearer: OLD, harness: "omp", ...label });
     const question = await ada.post("Please fix the parser fixture.", { to: ["coding"] });
     await ada.title(question.id, "Parser fixture");

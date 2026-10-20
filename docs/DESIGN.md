@@ -384,6 +384,14 @@ platform mention resolves to the **bot user**, so it addresses the whole seat an
 one bearer. Bearer addressing is textual because the platform's own mechanism is unavailable,
 not because textual is nicer.
 
+A session that holds a **position** (its `--label`, `<room>.<role>`) is also addressed by it: the
+whole position (`main.coding`) or its role alone (`coding`) reaches that session whatever its
+bearer, and never a part of it (`main`, `main.cod`). The position is matched beside the bearer,
+never instead of it, so a bearer whose first segment carries a dot (`Grok-4.6/forge`) keeps its
+address; a collision needs a bearer whose first segment spells a position, which no resident row
+mints. `resolve`, the messenger and `watch --wake mine` apply the same rule, so a `to:` that
+resolves to a holder also wakes it.
+
 `post --trailer "<key>: <value>"` is the primitive, repeatable. `--to`, `--re`, `--claim`,
 `--release`, `--verdict`, `--exhibit`, `--because` are sugar on top of it, emitted in a fixed
 order through one emitter, so the parser and the emitter round-trip by construction.

@@ -204,3 +204,32 @@ test("an address matches a bearer by whole segments, from the left", () => {
   assert.equal(matchesAddress("example_bot", "Grace/watch", seat), true, "the seat's own name reaches whoever holds it");
   assert.equal(matchesAddress("example_bot", "Grace/watch", undefined), false);
 });
+
+// A session's position (`<room>.<role>`, its label) is an address of its own: matched whole, or by
+// its role when the address is one bare segment. Pinned whole: a position row that grows a prefix
+// or a half-segment match is a red bar here, not drift.
+test("an address reaches a position whole, or by its role as one bare segment, and never by part of it", () => {
+  const table = [
+    // [address, bearer, position, reaches]
+    ["main.coding", "coding/Sonnet", "main.coding", true],
+    ["MAIN.CODING", "coding/Sonnet", "main.coding", true],
+    ["main.coding-2", "coding/Sonnet", "main.coding-2", true],
+    ["coding-2", "coding/Sonnet", "main.coding-2", true],
+    ["main.coding", "coding/Sonnet", "main.coding-2", false],
+    ["main.coding-2", "coding/Sonnet", "main.coding", false],
+    ["main", "coding/Sonnet", "main.coding", false],
+    ["other.coding", "coding/Sonnet", "main.coding", false],
+    ["main.cod", "coding/Sonnet", "main.coding", false],
+    ["main.coding/x", "coding/Sonnet", "main.coding", false],
+    ["coding", "Sonnet/coder", "main.coding", true],
+    ["coding", "Sonnet/coder", null, false],
+    ["main.coding", "coding/Sonnet", null, false],
+    ["main.coding", "coding/Sonnet", undefined, false],
+    // a bearer whose first segment carries a dot is still a bearer: matched by segment, as before
+    ["grok-4.6", "Grok-4.6/forge", null, true],
+    ["grok-4.6", "Grok-4.6/forge", "main.forge", true],
+  ];
+  /** @type {Array<[string, boolean]>} */
+  const got = table.map(([address, bearer, position]) => [`${address} -> ${bearer} @ ${position}`, matchesAddress(String(address), String(bearer), undefined, /** @type {any} */ (position))]);
+  assert.deepEqual(got, table.map(([address, bearer, position, want]) => [`${address} -> ${bearer} @ ${position}`, want]));
+});

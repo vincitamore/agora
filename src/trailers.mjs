@@ -134,9 +134,16 @@ export function formatTrailers(entries) {
  * token matches when its id is the seat's: the platform's own mechanism resolves to the bot user,
  * so it addresses the whole seat and cannot pick out one bearer, which is why bearer addressing is
  * textual at all.
+ *
+ * A session that holds a position (its label, `<room>.<role>`) is also named by it: the whole
+ * position (`main.coding`), or its role when the address is one bare segment (`coding`, as the
+ * resolver reads it). Never by a part of the position: `main` and `main.cod` reach nothing. The
+ * position is matched beside the bearer, never instead of it, so a bearer whose first segment
+ * carries a dot (`Grok-4.6/forge`) is addressed by it as before.
  * @param {string} address @param {string} bearer @param {{ id?: string, name?: string }} [seat]
+ * @param {string | null} [position] this session's position, when it holds one
  */
-export function matchesAddress(address, bearer, seat) {
+export function matchesAddress(address, bearer, seat, position) {
   const a = address.trim();
   if (!a) return false;
   if (a === "*") return true;
@@ -144,6 +151,10 @@ export function matchesAddress(address, bearer, seat) {
   if (mention) return Boolean(seat?.id) && mention[1] === seat?.id;
   const lower = a.toLowerCase();
   if (seat?.name && lower === seat.name.toLowerCase()) return true;
+  if (position) {
+    const p = position.toLowerCase();
+    if (lower === p || (!/[./]/.test(lower) && lower === p.slice(p.lastIndexOf(".") + 1))) return true;
+  }
   const want = lower.split("/").filter(Boolean);
   const have = bearer.toLowerCase().split("/").filter(Boolean);
   if (!want.length || want.length > have.length) return false;

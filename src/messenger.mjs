@@ -9,10 +9,12 @@
  * decides whether a notice is due at all; the time bounds are backstops (see `evidenceOf`).
  * The shell (`runTick`) gathers the records, asks `tick`, and when anything
  * is due takes the room's messenger lock, gathers again and posts what the fresh fold still says
- * is due. Nothing else is kept: **its own posts are its incident record**. Every notice is one of
- * a fixed set of one-line forms (`NOTICE_TEMPLATES`), and `tick` skips an act whose form already
- * stands in the room for that incident, so a restart duplicates nothing and an interval missed
- * while it was down is caught by the next tick.
+ * is due. **Its own posts are its incident record**: every notice is one of a fixed set of one-line
+ * forms (`NOTICE_TEMPLATES`), and `tick` skips an act whose form already stands in the room for
+ * that incident, so a restart duplicates nothing and an interval missed while it was down is caught
+ * by the next tick. The one other thing kept is where it started in the room (`messengerStart`):
+ * an incident older than its first start, less a short look-back, is not raised, so a first start
+ * on a room with history does not flood it.
  *
  * The notices carry ids, ages and names, never a message's text: a pointer, never a paraphrase.
  *
@@ -27,7 +29,7 @@ import path from "node:path";
 import { AgoraError, EXIT, writeFileAtomic } from "./core.mjs";
 import { claimAuthors, foldBoard, safeSubject } from "./board-read.mjs";
 import { parseNativeCursor } from "./native-protocol.mjs";
-import { listSessions, pidAlive } from "./session.mjs";
+import { listSessions, pidAlive, positionOf } from "./session.mjs";
 import { matchesAddress, parseTrailers } from "./trailers.mjs";
 
 /**
@@ -61,15 +63,16 @@ export const NOTICE_TEMPLATES = Object.freeze({
  * older client): R, delivery to taken, then N2; R2, the human line (N3) on either clock; I, the
  * grace after a lease expires before N4. They are long backstops (hours), used only without an
  * activity record. Bo: an
- * open subject before N6. H: the horizon; an incident that started before it is not raised. T: the
- * stream's interval tick.
+ * open subject before N6. H: the horizon; an incident that started before it is not raised. L: the
+ * look-back of a first start; an incident that started before the messenger's first start in the
+ * room less L is not raised (`messengerStart`). T: the stream's interval tick.
  */
-export const DEFAULT_BOUNDS = Object.freeze({ R: 7_200_000, R2: 14_400_000, I: 3_600_000, Bo: 14_400_000, H: 86_400_000, T: 30_000, G: 600_000, G2: 1_800_000, S: 7_200_000, D: 300_000 });
+export const DEFAULT_BOUNDS = Object.freeze({ R: 7_200_000, R2: 14_400_000, I: 3_600_000, Bo: 14_400_000, H: 86_400_000, L: 600_000, T: 30_000, G: 600_000, G2: 1_800_000, S: 7_200_000, D: 300_000 });
 
-/** @typedef {{ R: number, R2: number, I: number, Bo: number, H: number, T: number, G: number, G2: number, S: number, D: number }} Bounds */
+/** @typedef {{ R: number, R2: number, I: number, Bo: number, H: number, L: number, T: number, G: number, G2: number, S: number, D: number }} Bounds */
 
 /**
- * `R=2h,R2=4h,I=1h,Bo=4h,H=24h,T=30s,G=10m,G2=30m,S=2h,D=5m` (any subset; the rest are the
+ * `R=2h,R2=4h,I=1h,Bo=4h,H=24h,L=10m,T=30s,G=10m,G2=30m,S=2h,D=5m` (any subset; the rest are the
  * defaults). Units ms, s, m, h.
  * @param {string | undefined} spec @returns {Bounds}
  */
@@ -78,14 +81,15 @@ export function parseBounds(spec) {
   const b = { ...DEFAULT_BOUNDS };
   if (spec !== undefined && spec.trim()) {
     for (const part of spec.split(",")) {
-      const m = /^\s*(R2|R|I|Bo|H|T|G2|G|S|D)\s*=\s*(\d+)(ms|s|m|h)\s*$/.exec(part);
-      if (!m) throw new AgoraError(`--bounds takes NAME=<n><ms|s|m|h> joined by commas (names R, R2, I, Bo, H, T, G, G2, S, D), not ${JSON.stringify(part)}`, EXIT.usage);
+      const m = /^\s*(R2|R|I|Bo|H|L|T|G2|G|S|D)\s*=\s*(\d+)(ms|s|m|h)\s*$/.exec(part);
+      if (!m) throw new AgoraError(`--bounds takes NAME=<n><ms|s|m|h> joined by commas (names R, R2, I, Bo, H, L, T, G, G2, S, D), not ${JSON.stringify(part)}`, EXIT.usage);
       b[/** @type {keyof Bounds} */ (m[1])] = Number(m[2]) * { ms: 1, s: 1000, m: 60_000, h: 3_600_000 }[/** @type {'ms' | 's' | 'm' | 'h'} */ (m[3])];
     }
   }
   if (!(b.R > 0 && b.R < b.R2)) throw new AgoraError(`--bounds needs 0 < R < R2 (R ${b.R} ms, R2 ${b.R2} ms)`, EXIT.usage);
   if (!(b.G > 0 && b.G < b.G2)) throw new AgoraError(`--bounds needs 0 < G < G2 (G ${b.G} ms, G2 ${b.G2} ms)`, EXIT.usage);
   if (!(b.S > 0 && b.D > 0)) throw new AgoraError("--bounds needs S and D above 0", EXIT.usage);
+  if (!(b.L <= b.H)) throw new AgoraError(`--bounds needs L <= H (L ${b.L} ms, H ${b.H} ms): the look-back of a first start never reaches past the horizon`, EXIT.usage);
   if (!(b.T >= 1000)) throw new AgoraError("--bounds T is at least 1s", EXIT.usage);
   return b;
 }
@@ -177,10 +181,14 @@ export function noticeKey(kind, f, t) {
  * @typedef {{
  *   now: number, messages: any[], titles: Map<string, string>, pinned: Set<string>, boardRecords: any[],
  *   accountId: string | null, resolve: (address: string) => Resolution, human: string, bounds: Bounds,
- *   seen?: Map<string, number>, activity?: Map<string, Activity>,
+ *   seen?: Map<string, number>, activity?: Map<string, Activity>, records?: import('./board-read.mjs').SeatRecord[], since?: number,
  * }} TickInput
  * `seen` is `readSeen`'s map: when each of this seat's sessions admitted each line into its intake.
  * `activity` is `readActivity`'s: what each of this seat's sessions is doing now.
+ * `records` are this seat's session records with their posted ledgers (the resolver's): who posted
+ * a line from which position, and when a session that has ended was last seen alive.
+ * `since` is the messenger's starting point in the room (`messengerStart`): nothing that began
+ * before it is raised.
  * @typedef {{ clock: 1 | 2, id: string, position: string, state: "working" }} Held
  */
 
@@ -247,7 +255,7 @@ export function tick(input) {
   }
   const board = foldBoard(input.boardRecords, now);
   const authors = claimAuthors(board, input.messages);
-  const horizon = now - bounds.H;
+  const horizon = Math.max(now - bounds.H, input.since ?? -Infinity);
   /** @type {Act[]} */
   const acts = [];
   /** @param {NoticeKind} kind @param {number} after @param {Record<string, string>} fields @param {Array<{ key: string, value: string }>} trailers @param {string | undefined} thread */
@@ -276,16 +284,40 @@ export function tick(input) {
   };
   /** any claim of msg:<id> on the board, at or after the message @param {string} id */
   const claimedSubject = (id) => board.subjects.find((x) => x.subject === safeSubject(`msg:${id}`) && x.claimedAt !== null);
-  /** has the addressee taken the message: a claim of msg:<id>, or its post that cites it (re:, or a reply in its thread)
+  /** line id -> the position of the session on this seat that posted it, from the posted ledgers */
+  const postedFrom = new Map();
+  for (const r of input.records ?? []) {
+    const p = positionOf(r.record);
+    if (p && r.posted) for (const id of r.posted) postedFrom.set(id, p);
+  }
+  /** is this post (or claim) the addressee's: a holder's bearer, or a bearer or position the address names
+   * @param {string} addr @param {import('./board-read.mjs').ResolvedHolder[]} holders @param {{ bearer: string, id: string }} post */
+  const byAddressee = (addr, holders, post) => holders.some((h) => h.bearer === post.bearer) || matchesAddress(addr, post.bearer, undefined, postedFrom.get(post.id) ?? null);
+  /** has the addressee taken the message: a claim of msg:<id>, or a later post of its that cites it
+   * (re:) or stands in the same subject (a reply in its thread, or, for a line that is itself a
+   * reply, a later reply in that thread: native threads are one level deep)
    * @param {typeof ms[number]} m @param {string} addr @param {import('./board-read.mjs').ResolvedHolder[]} holders */
   const taken = (m, addr, holders) => {
-    const named = (/** @type {string} */ bearer) => holders.some((h) => h.bearer === bearer) || matchesAddress(addr, bearer);
     const claim = claimedSubject(m.id);
     if (claim) {
-      const who = authors.get(claim.subject)?.bearer;
-      if (who === undefined || named(who)) return true;
+      const who = authors.get(claim.subject);
+      if (who === undefined || byAddressee(addr, holders, who)) return true;
     }
-    return ms.some((x) => x.seq > m.seq && !x.notice && named(x.bearer) && (trailer(x, "re") === m.id || trailer(x, "re") === m.cursor || x.thread === m.id));
+    return ms.some((x) => x.seq > m.seq && !x.notice && byAddressee(addr, holders, x)
+      && (trailer(x, "re") === m.id || trailer(x, "re") === m.cursor || x.root === m.root));
+  };
+  /** was the address held when the line was posted: a session that has since ended and held it was
+   * seen alive at or after the post (its record's last write, its watch's last refresh), a holder of
+   * it posted after the line (an answer, or any line it signed: a notice too), or its clock already
+   * ran (an N2 for it stands)
+   * @param {typeof ms[number]} m @param {string} addr */
+  const heldWhenPosted = (m, addr) => {
+    for (const r of input.records ?? []) {
+      if (r.state !== "gone" || !r.record || !matchesAddress(addr, r.record.bearer, undefined, positionOf(r.record) ?? null)) continue;
+      if ((Date.parse(r.record.lastSeen ?? "") || -Infinity) >= m.ts || (input.activity?.get(r.slug)?.updatedAt ?? -Infinity) >= m.ts) return true;
+    }
+    return ms.some((x) => x.seq > m.seq && !x.human && byAddressee(addr, [], x))
+      || done.has(noticeKey("N2", { id: m.id }, { to: [addr] }));
   };
   /**
    * Where clock 1 starts for a delivery: the earliest instant (not after `now`, not before the post) at
@@ -340,7 +372,9 @@ export function tick(input) {
         const r = resolve(addr);
         if (r.kind === "everyone" || r.kind === "seat" || r.kind === "person") continue;
         if (r.kind === "none") {
-          emit("N5", m.seq, { addr, kind: r.why ?? "unknown", nearest: r.nearest ?? "none" }, [{ key: "re", value: m.id }], m.root);
+          // a pointer for an address that named no one when the line was posted: never for a line its
+          // addressee answered, nor after the fact for one posted while a holder lived
+          if (!heldWhenPosted(m, addr)) emit("N5", m.seq, { addr, kind: r.why ?? "unknown", nearest: r.nearest ?? "none" }, [{ key: "re", value: m.id }], m.root);
           continue;
         }
         const local = localOf(r);
@@ -419,12 +453,13 @@ export function tick(input) {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * @typedef {{ messages: any[], annotations: any[], boardRecords: any[], resolve: (a: string) => Resolution, seen?: Map<string, number>, activity?: Map<string, Activity> }} Snapshot
+ * @typedef {{ messages: any[], annotations: any[], boardRecords: any[], resolve: (a: string) => Resolution, seen?: Map<string, number>, activity?: Map<string, Activity>, records?: import('./board-read.mjs').SeatRecord[] }} Snapshot
  * @typedef {{
  *   gather: () => Promise<Snapshot>, post: (act: Act) => Promise<{ id: string, cursor: string }>,
  *   lock: <T>(fn: () => Promise<T>) => Promise<T | undefined>, now: () => number,
- *   accountId: string | null, human: string, bounds: Bounds, dryRun?: boolean,
+ *   accountId: string | null, human: string, bounds: Bounds, dryRun?: boolean, since?: number,
  * }} TickDeps
+ * `since` is the starting point `messengerStart` gives for the room.
  */
 
 /** Titles and pins folded from a read's annotations, in log order. @param {any[]} annotations */
@@ -443,7 +478,58 @@ export function annotationState(annotations) {
 function fold(snap, deps, now) {
   const { titles, pinned } = annotationState(snap.annotations);
   return tick({ now, messages: snap.messages, titles, pinned, boardRecords: snap.boardRecords, accountId: deps.accountId,
-    resolve: snap.resolve, human: deps.human, bounds: deps.bounds, ...(snap.seen ? { seen: snap.seen } : {}), ...(snap.activity ? { activity: snap.activity } : {}) });
+    resolve: snap.resolve, human: deps.human, bounds: deps.bounds, ...(snap.seen ? { seen: snap.seen } : {}), ...(snap.activity ? { activity: snap.activity } : {}),
+    ...(snap.records ? { records: snap.records } : {}), ...(deps.since !== undefined ? { since: deps.since } : {}) });
+}
+
+// ---------------------------------------------------------------------------------------------
+// The starting point
+// ---------------------------------------------------------------------------------------------
+
+/** Where a room's messenger keeps its starting point: beside the room's lock, one file per room. @param {string} stateRoot @param {string} roomId */
+export function startPath(stateRoot, roomId) {
+  return path.join(stateRoot, "messenger", `${roomId}.start.json`);
+}
+
+/**
+ * The messenger's starting point in a room: the first start's instant less the look-back L
+ * (`--bounds L=`, default 10 min; `L=0s` is the room head), recorded once and kept across restarts,
+ * so a first start on a room with history raises only what began in the last L, and a restart
+ * raises everything that came due while it was down. `record: false` (a dry run) reads a recorded
+ * point and writes none. A torn record is a first start again: the conservative floor, never a flood.
+ * The record: `{"v":1,"type":"messenger-start","since":"<iso>","startedAt":"<iso>","lookBackMs":<n>}`.
+ * @param {string} file @param {{ now: number, lookBackMs: number, record: boolean }} o
+ * @returns {Promise<{ since: number, startedAt: number, recorded: boolean, created: boolean }>}
+ */
+export async function messengerStart(file, o) {
+  /** @returns {Promise<{ since: number, startedAt: number } | null | undefined>} undefined: no file; null: unreadable */
+  const read = async () => {
+    let text;
+    try { text = await readFile(file, "utf8"); }
+    catch (e) { if (/** @type {any} */ (e).code === "ENOENT") return undefined; throw e; }
+    try {
+      const j = JSON.parse(text);
+      const since = Date.parse(j?.since);
+      const startedAt = Date.parse(j?.startedAt);
+      return j?.v === 1 && j?.type === "messenger-start" && Number.isFinite(since) && Number.isFinite(startedAt) ? { since, startedAt } : null;
+    } catch { return null; }
+  };
+  const held = await read();
+  if (held) return { ...held, recorded: true, created: false };
+  const fresh = { since: o.now - o.lookBackMs, startedAt: o.now };
+  if (!o.record) return { ...fresh, recorded: false, created: false };
+  if (held === null) await rm(file, { force: true });
+  await mkdir(path.dirname(file), { recursive: true });
+  const text = JSON.stringify({ v: 1, type: "messenger-start", since: new Date(fresh.since).toISOString(), startedAt: new Date(fresh.startedAt).toISOString(), lookBackMs: o.lookBackMs }) + "\n";
+  try {
+    await writeFile(file, text, { flag: "wx" });
+    return { ...fresh, recorded: true, created: true };
+  } catch (e) {
+    if (/** @type {any} */ (e).code !== "EEXIST") throw e;
+    // another tick on the seat started first: its point stands
+    const won = await read();
+    return won ? { ...won, recorded: true, created: false } : { ...fresh, recorded: false, created: false };
+  }
 }
 
 // ---------------------------------------------------------------------------------------------

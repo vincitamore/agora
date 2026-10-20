@@ -1,12 +1,16 @@
 // @ts-check
 /**
  * S03 · never-taken. A human addresses a question to a position on this seat and nobody takes it;
- * a second question to the same position is answered in its thread (the control). The messenger
- * ticks at fixed instants around its bounds (`--at`, so the clock runs at its configured value):
- * just before R, inside [R, R+I] twice, just after R2, and once more after it.
+ * a second question to the same position is answered in its thread (the control). A third line to
+ * the position is itself a reply inside a titled subject, and the position later posts in that
+ * subject without citing it (the in-subject control: native threads are one level, so a reply's
+ * own thread can never be answered into). The messenger ticks at fixed instants around its bounds
+ * (`--at`, so the clock runs at its configured value): just before R, inside [R, R+I] twice, just
+ * after R2, and once more after it.
  *
  * Bars: exactly one N2 to the addressee, posted by a tick inside [R, R+I]; exactly one N3 naming
- * the host human, at or after R2; the answered control draws nothing. Counted from the room.
+ * the host human, at or after R2; the answered control and the in-subject control draw nothing.
+ * Counted from the room.
  */
 
 import { DEFAULT_BOUNDS } from "../../src/messenger.mjs";
@@ -33,6 +37,10 @@ export const scenario = {
       bar: "0 notices for the question its addressee answered in its thread",
       redLeg: "the control is answered by another position, not its addressee",
     },
+    "in-subject-taken-quiet": {
+      bar: "0 notices for a line posted as a reply in a subject when its addressee later posts in that subject",
+      redLeg: "the later post in the subject is another position's, not the addressee's",
+    },
   },
   async run(ctx) {
     const seat = await openSeat();
@@ -48,6 +56,10 @@ export const scenario = {
       await ada.title(q.id, "Parser test failure");
       const control = await ada.post("Is the lint config current?", { to: ["coding"] });
       await (ctx.red("taken-control-quiet") ? review : coding).post("Checked: it is current.", { thread: control.id });
+      const release = await ada.post("Release checklist for this week.", { to: ["*"] });
+      await ada.title(release.id, "Release checklist");
+      const inner = await ada.post("Can you cut the build for it?", { to: ["coding"], thread: release.id });
+      await (ctx.red("in-subject-taken-quiet") ? review : coding).post("Build cut.", { thread: release.id });
       const extra = ctx.red("one-n3-at-r2") ? await ada.post("And the docs build, can you check it?", { to: ["coding"] }) : undefined;
       const t0 = await postedTs(seat, q.id);
       const offsets = ctx.red("one-n2-in-window") ? [R - 1000, R + 3 * I, R2 + 1000, R2 + I] : [R - 1000, R + I / 2, R + I, R2 + 1000, R2 + I];
@@ -68,6 +80,8 @@ export const scenario = {
         { bounds: { R2 }, ...(extra ? { note: "two untaken questions" } : {}) });
       const forControl = notices.filter((n) => n.fields.id === control.id || n.re === control.id);
       ctx.check("taken-control-quiet", 0, forControl.length);
+      const forInner = notices.filter((n) => n.fields.id === inner.id || n.re === inner.id);
+      ctx.check("in-subject-taken-quiet", 0, forInner.length);
     } finally {
       client?.close();
       await seat.close();

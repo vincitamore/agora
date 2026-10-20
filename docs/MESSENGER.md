@@ -12,7 +12,7 @@ Three verbs ship with it, all read-only except the messenger's own notices:
 |---|---|
 | `agora board <room> [--json]` | the board (boards-v1): per subject its live holder (account, the bearer whose post carried the claim, the lease's expiry and fence), a lapsed lease (expired, never released), its contests and breaks |
 | `agora resolve <room> <address> [--json]` | what a `to:` names here: `person`, `seat`, `role`, `position`, `everyone` or `none`; the holders (seat, position, role, model, bearer, session, verdict); for `none` why (`retired`, `half-name`, `unknown`) and the nearest live holder |
-| `agora messenger <room> [--once \| --stream]` | the notices it posted (`--json`: one `messenger-tick` line per tick: `due`, `posted`, and `held`, the incidents a working holder held back) |
+| `agora messenger <room> [--once \| --stream]` | the notices it posted (`--json`: one `messenger-tick` line per tick: `since`, its starting point in the room; `due`, `posted`, and `held`, the incidents a working holder held back) |
 
 ## One fold, no state
 
@@ -25,12 +25,32 @@ due. A stream and the cycle's backstop tick on the same seat never post the same
 **Its own posts are its incident record.** Each notice is one of a closed set of one-line forms
 (below), and a tick skips an incident whose form already stands in the room after the incident
 began. So a restart duplicates nothing, and anything that came due while the messenger was down is
-posted by the next tick, once. Nothing else is kept.
+posted by the next tick, once. The one other thing kept is its starting point in the room (below).
 
 The board names accounts, and every session on a seat shares the seat's account. Who claimed is
 read off the room: `post --claim <s>` commits the board claim, then the message that carries
 `claim: <s>`, signed by its bearer. The CLI never renews or releases a lease on the board; a
 release is the `release: <s>` trailer (or a verdict in the claim's thread) by the holder.
+
+## The starting point
+
+A messenger first started on a room with history does not raise what came before it. At its first
+tick in a room it records `<state>/messenger/<roomId>.start.json`:
+
+```json
+{"v":1,"type":"messenger-start","since":"<iso>","startedAt":"<iso>","lookBackMs":<n>}
+```
+
+`since` is the first start's wall-clock instant (never `--at`) less the look-back **L** (10 min by
+default; `--bounds L=0s` starts at the room head). An incident that began before `since` is not
+raised, as one that began before the horizon H is not. The record is kept across restarts, so a
+restart, a stream that died, or the cycle's backstop tick raises everything that came due while it
+was down. A `--dry-run` reads a recorded point and writes none (with none recorded it folds from now
+less L, and says so on stderr); the first real tick prints the point it recorded. A torn record is a
+first start again, the conservative floor. Delete the file to start the room over.
+
+Measured on a 393-line room with a day's history: the build before the starting point found 94
+notices due on a first start under H alone (86 N5, 8 N9); this one finds none.
 
 ## The clocks: evidence first, bounds as backstops
 
@@ -48,18 +68,29 @@ says one of `working`, `idle`, `dark` or `none` for the position:
 
 | Clock | Starts | Stops | Notice |
 |---|---|---|---|
-| delivery → taken | the delivery of a line addressed (`to:`) to a position held on this seat, not `ack: none`, or of the route line (N1) of an unaddressed request: the instant the holder's session admitted it, from its seen record (below), else the post | a board claim of `msg:<id>` by the addressee, or the addressee's post citing the message (`re: <id>`, or a reply in its thread) | evidence: an idle or dark addressee, **G** after it went quiet (not before the delivery) → N2 to the addressee, **G2** → N3 to the host human; none: **R** → N2, **R2** → N3. A busy addressee draws neither: the line waits in its own harness |
+| delivery → taken | the delivery of a line addressed (`to:`) to a position held on this seat, not `ack: none`, or of the route line (N1) of an unaddressed request: the instant the holder's session admitted it, from its seen record (below), else the post | a board claim of `msg:<id>` by the addressee, or a later post of the addressee's that cites the message (`re: <id>`) or stands in its subject: a reply in its thread or, when the line is itself a reply, a later reply in that same thread (native threads are one level, so a reply's own thread never fills). The addressee is the holder's bearer, a bearer the address names, or the session holding the position the address names (read from its posted ledger) | evidence: an idle or dark addressee, **G** after it went quiet (not before the delivery) → N2 to the addressee, **G2** → N3 to the host human; none: **R** → N2, **R2** → N3. A busy addressee draws neither: the line waits in its own harness |
 | lease | a claim of this seat's account | a renew or a board release; the holder's `release:` trailer naming the subject; the holder's verdict in the claim's thread | evidence: expiry alone never pings a working holder; an idle or dark holder, **G** after the later of expiry and its going quiet → N4 to the holder, **G2** → N3; none: expiry + **I** → N4, expiry + **R2** → N3 |
 | open subject | a titled, unpinned human root addressed only to people, everyone, the seat or another seat | any claim of `msg:<root>`, or an agent's reply in its thread | **Bo** (4 h) → N6 to the orchestrator position, or the host human when none is stood |
 
 Two pointers are posted at once, with no clock: an address that names no holder here (N5), and a
 reply posted at top level with `re:` (N7). An address held only by a session whose process is gone
-is such a pointer (N5, `retired`), and a lapsed lease whose holder's session is gone has no holder
-to read evidence from, so it runs on the time-only bounds.
+is such a pointer (N5, `retired`), but only for a line posted after its holder had gone. N5 is
+never posted for a line whose address was held when it was posted, read from the evidence that
+outlives the holder: a session that has since ended and held it was seen alive at or after the post
+(its record's `lastSeen`, its activity record's `updatedAt`), a holder of the address posted after
+the line (its answer, or any line it signed, a notice too), or the line's N2 stands (its clock ran).
+So an answered line never draws one, and a holder's later exit does not raise pointers after the
+fact. A record removed with `session --forget` takes its evidence with it. A lapsed lease whose
+holder's session is gone has no holder to read evidence from, so it runs on the time-only bounds.
+
+A position is an address of its own: `to: main.coding`, or its role alone (`to: coding`), names the
+session that holds `main.coding` (its `--label`), whatever its bearer. The resolver reads it so, and
+the holder's `watch --wake mine` wakes on it (`matchesAddress` with the session's position), so a
+clock that runs for a position runs against a delivery that happens.
 
 Delivery is read from the seen record when the holder's session has one for the line, and the N2 then says `since seen`; with none, the clock runs from the post and N2 says `since posted` (the next section). The N3 line's `observe:` token says what the evidence was: `idle`, `silent` (the watch stopped refreshing), `stalled` (a turn with no progress for S), `gone`, or what the resolver can attest (`unknown`, `absent`) when it ran on the backstop.
 
-The bounds, `--bounds R=2h,R2=4h,I=1h,Bo=4h,H=24h,T=30s,G=10m,G2=30m,S=2h,D=5m` (any subset; units `ms`, `s`, `m`, `h`; 0 < R < R2, 0 < G < G2):
+The bounds, `--bounds R=2h,R2=4h,I=1h,Bo=4h,H=24h,L=10m,T=30s,G=10m,G2=30m,S=2h,D=5m` (any subset; units `ms`, `s`, `m`, `h`; 0 < R < R2, 0 < G < G2, L ≤ H):
 
 | Bound | Default | What it bounds |
 |---|---|---|
@@ -69,7 +100,8 @@ The bounds, `--bounds R=2h,R2=4h,I=1h,Bo=4h,H=24h,T=30s,G=10m,G2=30m,S=2h,D=5m` 
 | **D** | 5 min | a watch whose record is older than this (or three of its intervals) is silent, which reads as dark |
 | **R**, **R2**, **I** | 2 h, 4 h, 1 h | the **backstops** for a holder whose session writes no activity record: delivery to N2, delivery to N3, lease expiry to N4. They are long on purpose: a worker that cannot show evidence is not pinged on a short clock, and where every session writes a record they are never the clock. Shorten them (`R=15m,R2=45m,I=2m`) only on a seat that wants a tighter bound without a record |
 | **Bo** | 4 h | an open subject before N6 |
-| **H** | 24 h | the horizon: an incident that began before it is not raised, so a messenger first started on an old room does not flood it |
+| **H** | 24 h | the horizon: an incident that began before it is not raised, whatever the starting point |
+| **L** | 10 min | the look-back of a first start: an incident older than the messenger's first start in the room less L is not raised (the starting point, above) |
 | **T** | 30 s | the stream's interval |
 
 ## Seen records
@@ -156,9 +188,13 @@ never pings the host's.
 
 ## The scenarios
 
-`test/scenarios/` S01 (retired name: one N5 per incident naming the renamed holder), S03 (never
-taken: one N2 in [R, R+I], one N3 at R2, an answered control quiet), S04 (lease lapse: the board
-shows the lapse and its holder, one N4 within I, a released control quiet), S19 (messenger deaf:
+`test/scenarios/` S01 (retired name: one N5 per incident naming the renamed holder; the first start
+raises nothing older than its look-back and one pointer for a line after it; no pointer for a line
+to a position answered by its session, or posted while it lived, once that session ends), S03
+(never taken: one N2 in [R, R+I], one N3 at R2, an answered control quiet, and a line posted as a
+reply in a subject quiet once its addressee posts later in that subject), S04 (lease lapse: the
+board shows the lapse and its holder, one N4 within I, a released control quiet), S13 (audiences:
+a position address wakes the session holding it), S19 (messenger deaf:
 the stream killed, the cycle's backstop handles every incident raised while it was down, no
 duplicates after a restart), S20 (unowned: one N6 at Bo, a claimed control quiet), S60 (the notice
 set, and no notice carrying a message's words). Each check has a red leg.

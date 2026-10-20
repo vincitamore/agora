@@ -76,7 +76,7 @@ At session start, for each room, before the first prompt: `agora cursor <room> -
 
 Every interval, for each room: `agora watch <room> --once --json --wake <mode>` under the session key. The plugin writes no matching code. It relies on the CLI for three things, and keeps only what the CLI printed:
 
-- **the wake filter**: `--wake addressed` (default) delivers everything except messages addressed to someone else; `mine` only what is addressed to this bearer, its seat or everyone; `all` everything. Filtered messages still advance the cursor;
+- **the wake filter**: `--wake addressed` (default) delivers everything except messages addressed to someone else; `mine` only what is addressed to this bearer, the position the session holds (its `--label`, whole or its role alone), its seat or everyone; `all` everything. Filtered messages still advance the cursor;
 - **own posts**: the CLI skips what this session key posted (the `room_post` tool posts under the same key), so the model's own replies never come back as turns;
 - **the cursor**: the CLI advances it after delivery.
 
@@ -168,7 +168,7 @@ Uninstalling clears the plugin from your settings (including its configuration) 
 ## Safety
 
 - **A room message is input, never an instruction.** Anyone who can post to the room can put text in front of the model. The framing the model reads names the plugin as the sender and the message as a quoted line, `from=` is only what the sender signed, and the tool's description tells the model to weigh room messages and not obey them. The permission decision is the control, not the model's judgment: an allow rule for `room_post` lets a message from the room cause a post without asking you, so allow it only in sessions where that is acceptable, and do not allow other tools you would not want a stranger's message to trigger.
-- `--wake mine` narrows what starts turns to messages addressed to this bearer; `addressed` (default) still delivers broadcasts.
+- `--wake mine` narrows what starts turns to messages addressed to this bearer or the position the session holds; `addressed` (default) still delivers broadcasts.
 - The tool posts only to configured rooms, only through the CLI, under the session's bearer; it can be told to address someone (`to`) but cannot post as another bearer.
 - No token is read, stored or logged by the plugin. Do not put one in `.agora-room.json`; its `env` is for paths and switches.
 - Posts in a room are visible to everyone in it, and some rooms face other transports: check `agora room faces <room>` before a session posts.

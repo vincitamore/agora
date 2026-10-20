@@ -2,10 +2,11 @@
 /**
  * S13 · audiences. Six bearers stand for two seats: the host's `Grace/Haiku/messenger` (the
  * owner-first shape a resident row documents), `orchestrator/Opus` and `coding/Opus`; the
- * member's `messenger/Haiku`, `coding/Argon` and `review/Sonnet`. Grace is the host's person, Lin the
- * member's; the config names the seat `host`. Grace posts one top-level message per address form,
- * and every bearer's `watch --wake mine` (the real CLI, from the start) reports what it was handed:
- * the reach matrix, one check per address, each against the audience the address means.
+ * member's `messenger/Haiku`, `coding/Argon` and `review/Sonnet`. The host's `coding/Opus` holds the
+ * position `main.coding` (its `--label`). Grace is the host's person, Lin the member's; the config
+ * names the seat `host`. Grace posts one top-level message per address form, and every bearer's
+ * `watch --wake mine` (the real CLI, from the start) reports what it was handed: the reach matrix,
+ * one check per address, each against the audience the address means.
  *
  * One principal: the member's bearers are sessions on the host seat, so the seat axis of an address
  * (`@member`) has nothing to resolve against and this run says what the matcher does with the
@@ -37,6 +38,7 @@ const CELLS = {
   "*": { audience: ALL, bar: "* reaches every bearer", redLeg: "the post writes `all` where it means `*`" },
   "Grace": { audience: [], bar: "a person's name wakes no agent, even where a bearer starts with it", redLeg: "the host's messenger is registered role-first as desk/Haiku" },
   "host": { audience: [], bar: "a bare seat name wakes no agent (only @host addresses a seat)", redLeg: "the host's orchestrator is registered seat-first as host/orchestrator" },
+  "main.coding": { audience: ["coding/Opus"], bar: "a position reaches the session holding it, and no other bearer of the role", redLeg: "the host's coding session registers with no position" },
 };
 
 /** @type {Record<string, { bar: string, redLeg: string }>} */
@@ -60,6 +62,9 @@ export const scenario = {
     /** @type {Record<string, string[]>} */
     const posted = {};
     for (const address of Object.keys(CELLS)) posted[address] = [address];
+    /** the positions the readers hold (their `--label`), by the bearer each stands for */
+    /** @type {Record<string, string>} */
+    const positions = red("main.coding") ? {} : { "coding/Opus": "main.coding" };
     if (red("@member")) posted["@member"] = [...MEMBER_BEARERS];
     if (red("@member/coding")) posted["@member/coding"] = ["coding/Argon"];
     if (red("*")) posted["*"] = ["all"];
@@ -73,7 +78,7 @@ export const scenario = {
       /** @type {Array<{ meant: string, agent: Agent }>} */
       const readers = [];
       let n = 0;
-      for (const meant of ALL) readers.push({ meant, agent: await Agent.start(seat, { session: `s13-reader-${++n}`, bearer: rename[meant] ?? meant }) });
+      for (const meant of ALL) readers.push({ meant, agent: await Agent.start(seat, { session: `s13-reader-${++n}`, bearer: rename[meant] ?? meant, ...(positions[meant] ? { label: positions[meant] } : {}) }) });
       /** @type {Record<string, string>} */
       const idOf = {};
       for (const address of Object.keys(CELLS)) idOf[address] = (await grace.post(`A note for ${address}.`, { to: posted[address] })).id;

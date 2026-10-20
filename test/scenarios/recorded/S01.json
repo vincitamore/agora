@@ -1,7 +1,7 @@
 {
   "scenario": "S01",
   "recordedOn": "2026-10-20",
-  "build": "df835fe",
+  "build": "97624a3",
   "checks": {
     "pointer-per-incident": {
       "today": "green",
@@ -18,6 +18,17 @@
         "of": 3,
         "nearest": "desk.coding"
       }
+    },
+    "first-start-bounded": {
+      "today": "green",
+      "observed": {
+        "old": 0,
+        "after": 1
+      }
+    },
+    "quiet-after-holder-ends": {
+      "today": "green",
+      "observed": 0
     }
   }
 }

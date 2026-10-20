@@ -234,13 +234,13 @@ const SCHEMA = {
       args: ["<room>"],
       options: {
         "--human-name <name>": "the host human: the N3 and N9 notices name them (required)",
-        "--bounds <spec>": "R=2h,R2=4h,I=1h,Bo=4h,H=24h,T=30s,G=10m,G2=30m,S=2h,D=5m (any subset; ms, s, m, h). On evidence (each session's activity record): an idle or dark holder past G → N2 or N4, past G2 → N3; a working holder is held, never pinged; S: a busy turn with no progress is stalled; D: a silent watch is dark. R, R2, I are the time-only backstops for a session with no activity record. Open subject at Bo → N6; nothing older than H is raised; T is the stream's interval",
+        "--bounds <spec>": "R=2h,R2=4h,I=1h,Bo=4h,H=24h,L=10m,T=30s,G=10m,G2=30m,S=2h,D=5m (any subset; ms, s, m, h). On evidence (each session's activity record): an idle or dark holder past G → N2 or N4, past G2 → N3; a working holder is held, never pinged; S: a busy turn with no progress is stalled; D: a silent watch is dark. R, R2, I are the time-only backstops for a session with no activity record. Open subject at Bo → N6; nothing older than H is raised, nor anything older than the messenger's first start in the room less L (its starting point, recorded once in <state>/messenger/<roomId>.start.json); T is the stream's interval",
         "--once": "one tick, then exit (the default without --stream)",
         "--stream": "tick now, on every room event, and every T, until --for or a stop; writes a liveness file",
         "--for <s>": "--stream: stop after this many seconds",
         "--at <iso>": "--once: fold as if now were this instant (a replay; posts what would be due then)",
-        "--dry-run": "print the due notices and post nothing",
-        "--json": "one messenger-tick line per tick (due, posted)",
+        "--dry-run": "print the due notices and post nothing; records no starting point",
+        "--json": "one messenger-tick line per tick (since, due, posted, held)",
       },
       does: "the room's supervision in code (docs/MESSENGER.md): a fold over the room, the board and this seat's sessions that posts fixed-form notices (N1 routed, N2 not taken, N3 to the host human, N4 lease lapsed, N5 unmatched address, N6 open subject, N7 top-level reply, N9 no role fits). Its own posts are its incident record: a restart duplicates nothing. No model; it never answers, claims or quotes",
     },
@@ -306,7 +306,7 @@ const SCHEMA = {
         "--thread-interval <s>": "seconds between reads of one followed thread (default: the room's threadInterval, else 60)",
         "--for <s>": "give up after this many seconds (default: never)",
         "--all": "deliver this side's own posts too (skipped by default)",
-        "--wake <all|addressed|mine>": "what wakes this watch: everything (default); everything except messages addressed to someone else; only messages addressed to you, your model, the seat, or everyone. Filtered messages still advance the cursor and still show in read",
+        "--wake <all|addressed|mine>": "what wakes this watch: everything (default); everything except messages addressed to someone else; only messages addressed to you, your model, your position (the session's --label, whole or its role alone), the seat, or everyone. Filtered messages still advance the cursor and still show in read",
         "--codex-queue": "queue each delivery into this Codex task through `codex queue`",
         "--print-only": "arm a printing watch on purpose under a Codex session; without it, or a Codex bridge, such a watch is refused because Codex does not treat terminal output as a wake",
         "--codex-server <url>": "deliver bounded batches through the authenticated loopback server owning the Codex TUI",
@@ -2844,13 +2844,19 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       /** @type {string | null} */ let accountId = null;
       try { accountId = (await transport.whoami()).id; } catch { accountId = null; }
       const signIt = cfg.sign !== false && !values["no-sign"];
+      // where the messenger starts in this room: recorded at its first start (wall clock less L, never
+      // --at), kept across restarts; a dry run reads it and records nothing
+      const start = await ms.messengerStart(ms.startPath(stateRoot, transport.room), { now: Date.now(), lookBackMs: bounds.L, record: !values["dry-run"] });
+      const sinceIso = new Date(start.since).toISOString();
+      if (start.created) console.error(`agora: messenger's first start in ${roomAlias}: incidents from ${sinceIso} on (the start less L); recorded in ${ms.startPath(stateRoot, transport.room)}`);
+      else if (!start.recorded) console.error(`agora: no starting point recorded for ${roomAlias}; this dry run folds from ${sinceIso} (now less L) and records none`);
       /** @type {import("../src/messenger.mjs").TickDeps} */
       const deps = {
         gather: async () => {
           const { messages, annotations } = await roomRecords();
           const view = await br.readBoard(transport);
           const ctx = await seatContext(messages);
-          return { messages, annotations, boardRecords: view.records, resolve: (a) => br.resolveAddress(a, ctx), ...(await ms.readEvidence(stateRoot, roomAlias)) };
+          return { messages, annotations, boardRecords: view.records, resolve: (a) => br.resolveAddress(a, ctx), records: ctx.records, ...(await ms.readEvidence(stateRoot, roomAlias)) };
         },
         post: async (act) => {
           const text = withTrailers(act.text, act.trailers);
@@ -2859,13 +2865,13 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         },
         lock: ms.fileLock(path.join(stateRoot, "messenger", `${transport.room}.lock`)),
         now: () => at ?? Date.now(),
-        accountId, human: host, bounds, dryRun: Boolean(values["dry-run"]),
+        accountId, human: host, bounds, dryRun: Boolean(values["dry-run"]), since: start.since,
       };
       /** @param {Awaited<ReturnType<typeof ms.runTick>>} r */
       const report = (r) => {
         const skipped = r.due.length && !values["dry-run"] && !r.locked;
         if (json) {
-          console.log(JSON.stringify({ type: "messenger-tick", alias: roomAlias, room: transport.room, at: new Date(deps.now()).toISOString(),
+          console.log(JSON.stringify({ type: "messenger-tick", alias: roomAlias, room: transport.room, at: new Date(deps.now()).toISOString(), since: sinceIso,
             due: r.due.map((a) => ({ kind: a.kind, key: a.key, text: a.text, thread: a.thread ?? null, trailers: a.trailers })),
             posted: r.posted.map((p) => ({ kind: p.kind, key: p.key, id: p.id, cursor: p.cursor })), held: r.held, ...(skipped ? { skipped: "another tick held the room's messenger lock" } : {}) }));
           return;
@@ -3195,15 +3201,17 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
           seat = undefined; // a feed or an offline transport: bearer addressing still works
         }
       }
+      /** The position this session holds (its record's label), an address of its own: `to:` naming it wakes this watch as the resolver and the messenger read it. */
+      const position = positionOf(record) ?? null;
       /** The reader's own choice of what wakes it; never automatic. @type {((m: import('../src/core.mjs').Message) => boolean) | undefined} */
       const wakeRule = wakeMode === "all" ? undefined : (m) => {
         const to = parseTrailers(m.text).to;
-        const forMe = to.some((a) => matchesAddress(a, bearer.name, seat));
+        const forMe = to.some((a) => matchesAddress(a, bearer.name, seat, position));
         return wakeMode === "mine" ? forMe : to.length === 0 || forMe;
       };
-      /** A message whose to: names this bearer flushes a coalesced window immediately. */
+      /** A message whose to: names this bearer or its position flushes a coalesced window immediately. */
       const urgent = (/** @type {import('../src/core.mjs').Message} */ m) =>
-        parseTrailers(m.text).to.some((a) => matchesAddress(a, bearer.name, seat));
+        parseTrailers(m.text).to.some((a) => matchesAddress(a, bearer.name, seat, position));
 
       /**
        * A session on this seat that went dark is announced to this room once; whichever watch

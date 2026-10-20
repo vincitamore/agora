@@ -1,7 +1,7 @@
 {
   "scenario": "S13",
-  "recordedOn": "2026-10-19",
-  "build": "eb00daa",
+  "recordedOn": "2026-10-20",
+  "build": "97624a3",
   "checks": {
     "reach:Lin": {
       "today": "green",
@@ -42,6 +42,12 @@
     "reach:host": {
       "today": "green",
       "observed": []
+    },
+    "reach:main.coding": {
+      "today": "green",
+      "observed": [
+        "coding/Opus"
+      ]
     }
   }
 }

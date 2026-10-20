@@ -4,9 +4,10 @@
 // here has a red leg beside it: the variation that must move it.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import * as messenger from "../src/messenger.mjs";
 import {
   ACTIVITY_FILE, DEFAULT_BOUNDS, NOTICE_TEMPLATES, SEEN_FILE, evidenceOf, fileLock, formatAge, formatNotice, noticeKey, parseBounds, parseNotice, parseSeen,
   readActivity, readEvidence, readSeen, runTick, seenKey, tick,
@@ -31,7 +32,7 @@ test("the notice set is exactly these nine forms", () => {
     N9: "No role fits {id}; for {human}.",
   });
   assert.ok(Object.isFrozen(NOTICE_TEMPLATES));
-  assert.deepEqual({ ...DEFAULT_BOUNDS }, { R: 7_200_000, R2: 14_400_000, I: 3_600_000, Bo: 14_400_000, H: 86_400_000, T: 30_000, G: 600_000, G2: 1_800_000, S: 7_200_000, D: 300_000 });
+  assert.deepEqual({ ...DEFAULT_BOUNDS }, { R: 7_200_000, R2: 14_400_000, I: 3_600_000, Bo: 14_400_000, H: 86_400_000, L: 600_000, T: 30_000, G: 600_000, G2: 1_800_000, S: 7_200_000, D: 300_000 });
 });
 
 test("every form reads back as itself; a slot is one token (red leg: a slot with a space is refused)", () => {
@@ -90,13 +91,15 @@ const RECORDS = [
 const SHORT = { ...DEFAULT_BOUNDS, R: 15 * 60_000, R2: 45 * 60_000, I: 2 * 60_000, Bo: 30 * 60_000, H: 4 * 60 * 60_000 };
 /** an activity record as the reader gives it, quiet and fresh unless said otherwise @param {string} session @param {Partial<import("../src/messenger.mjs").Activity>} [o] @returns {import("../src/messenger.mjs").Activity} */
 const ACT = (session, o = {}) => ({ session, turn: "idle", since: T0, lastToolAt: null, lastOutputAt: null, progressAt: null, progress: 0, updatedAt: T0, intervalMs: 2000, ...o });
-/** @param {any[]} messages @param {{ now: number, board?: any[], records?: any[], titles?: Map<string, string>, pinned?: Set<string>, bounds?: any, seen?: Array<[string, string, number]>, activity?: import("../src/messenger.mjs").Activity[] }} o */
+/** @param {any[]} messages @param {{ now: number, board?: any[], records?: any[], titles?: Map<string, string>, pinned?: Set<string>, bounds?: any, seen?: Array<[string, string, number]>, activity?: import("../src/messenger.mjs").Activity[], since?: number }} o */
 function runFull(messages, o) {
-  const ctx = { seatName: "host", accountId: HOST, records: o.records ?? RECORDS, messages };
+  const records = o.records ?? RECORDS;
+  const ctx = { seatName: "host", accountId: HOST, records, messages };
   return tick({ now: o.now, messages, titles: o.titles ?? new Map(), pinned: o.pinned ?? new Set(), boardRecords: o.board ?? [], accountId: HOST,
-    resolve: (a) => resolveAddress(a, ctx), human: "Ada", bounds: o.bounds ?? { ...SHORT },
+    resolve: (a) => resolveAddress(a, ctx), human: "Ada", bounds: o.bounds ?? { ...SHORT }, records,
     ...(o.seen ? { seen: new Map(o.seen.map(([slug, id, at]) => [seenKey(slug, id), at])) } : {}),
-    ...(o.activity ? { activity: new Map(o.activity.map((a) => [a.session, a])) } : {}) });
+    ...(o.activity ? { activity: new Map(o.activity.map((a) => [a.session, a])) } : {}),
+    ...(o.since !== undefined ? { since: o.since } : {}) });
 }
 const run = (/** @type {any[]} */ messages, /** @type {Parameters<typeof runFull>[1]} */ o) => runFull(messages, o).acts;
 const kinds = (/** @type {any[]} */ acts) => acts.map((a) => a.kind);
@@ -193,6 +196,25 @@ test("clock 1 stops at a claim of msg:<id> by the addressee or its reply citing 
   assert.deepEqual(kinds(run([q, claimMsg], { now: T0 + 50 * MIN })), ["N2", "N3"], "red leg: the trailer without the board claim is not a claim");
   const other = msg({ at: T0 + MIN, name: "review/Argon", text: "not me", thread: q.id });
   assert.deepEqual(kinds(run([q, other], { now: T0 + 50 * MIN })), ["N2", "N3"]);
+});
+
+test("clock 1 stops at the addressee's later post in the same subject when the line is itself a reply there (red legs: its post in another subject; a post there by someone else; its post before the line)", () => {
+  const root = msg({ at: T0, kind: "human", name: "Ada", text: "the release", to: ["*"] });
+  const before = msg({ at: T0 + 30_000, name: "coding/Opus", text: "looking at the release", thread: root.id });
+  const ask = msg({ at: T0 + MIN, name: "orchestrator/Opus", text: "please cut the build", to: ["coding"], thread: root.id });
+  const later = msg({ at: T0 + 2 * MIN, name: "coding/Opus", text: "built", thread: root.id });
+  const elsewhere = msg({ at: T0 + 2 * MIN, name: "coding/Opus", text: "built", thread: "m-another-subject" });
+  const byOther = msg({ at: T0 + 2 * MIN, name: "review/Argon", text: "built", thread: root.id });
+  const now = T0 + 50 * MIN;
+  assert.deepEqual(kinds(run([root, ask, later], { now })), [], "the addressee posted in the line's subject after it: taken");
+  assert.deepEqual(kinds(run([root, ask, elsewhere], { now })), ["N2", "N3"], "red leg: its post is in another subject");
+  assert.deepEqual(kinds(run([root, ask, byOther], { now })), ["N2", "N3"], "red leg: someone else posted there");
+  assert.deepEqual(kinds(run([root, before, ask], { now })), ["N2", "N3"], "red leg: its post came before the line");
+  // a line to a position, taken by the position's holder posting in the subject
+  const toPosition = msg({ at: T0 + 3 * MIN, name: "orchestrator/Opus", text: "and tag it", to: ["desk.coding"], thread: root.id });
+  const tagged = msg({ at: T0 + 4 * MIN, name: "coding/Opus", text: "tagged", thread: root.id });
+  assert.deepEqual(kinds(run([root, toPosition, tagged], { now })), []);
+  assert.deepEqual(kinds(run([root, toPosition], { now })), ["N2", "N3"], "red leg: no post after it");
 });
 
 test("a foreign addressee, a person, everyone and ack: none draw no clock; an unmatched address draws one N5 (red leg: a live holder of the name)", () => {
@@ -333,16 +355,49 @@ test("a dark holder is pinged like an idle one: a silent watch, a turn with no p
   assert.deepEqual(kinds(run([q], { now: past, bounds: { ...DEFAULT_BOUNDS, H: 24 * 60 * MIN }, activity: [fresh("s-coding", past, { turn: "busy", since: T0 + MIN, lastToolAt: past - MIN, progressAt: past - MIN })] })), [], "red leg: a tool call a minute ago");
 });
 
-test("a dead session gets its pointer: the resolver reads an address held only by a gone session as retired (N5), and a lapsed lease of a gone holder falls back to the backstop with verdict absent", () => {
+test("a dead session gets its pointer: the resolver reads an address held only by a gone session as retired (N5) for a line posted after it went, and a lapsed lease of a gone holder falls back to the backstop with verdict absent", () => {
   const gone = [{ slug: "s-coding", state: /** @type {const} */ ("gone"), record: /** @type {any} */ ({ bearer: "coding/Opus", label: "desk.coding" }), posted: new Set() }, RECORDS[1]];
   const q = msg({ at: T0, kind: "human", name: "Ada", text: "look please", to: ["coding"] });
-  assert.deepEqual(kinds(run([q], { now: T0 + MIN, records: gone, activity: [ACT("s-coding", { updatedAt: T0 })] })), ["N5"]);
+  assert.deepEqual(kinds(run([q], { now: T0 + MIN, records: gone, activity: [ACT("s-coding", { updatedAt: T0 - MIN })] })), ["N5"]);
   const take = msg({ at: T0, name: "coding/Opus", text: "taking", claim: "parser" });
   const board = [{ cursor: `${EPOCH}:${seq - 1}`, accountId: HOST, operationId: "op9", board: { action: "claim", subject: "work:parser" }, expiresAt: new Date(T0 + 60 * MIN).toISOString(), leaseMs: 3_600_000 }];
   assert.deepEqual(kinds(run([take], { now: T0 + 62 * MIN - 1, board, records: gone, activity: [ACT("s-coding", { updatedAt: T0 + 60 * MIN })] })), []);
   assert.deepEqual(kinds(run([take], { now: T0 + 62 * MIN, board, records: gone, activity: [ACT("s-coding", { updatedAt: T0 + 60 * MIN })] })), ["N4"]);
   const late = run([take], { now: T0 + 105 * MIN, board, records: gone });
   assert.equal(late[1].text, "coding/Opus has not renewed work:parser after 45m; observe: absent.");
+});
+
+test("N5 is never posted for a line its addressee answered, nor after the fact for a line posted while its holder lived (red legs: the holder was gone before the line; no answer; no clock notice)", () => {
+  const goneRec = (/** @type {Record<string, unknown>} */ rec, /** @type {string[]} */ posted = []) =>
+    [{ slug: "s-dummy", state: /** @type {const} */ ("gone"), record: /** @type {any} */ ({ bearer: "dummy/Probe", label: "desk.dummy", ...rec }), posted: new Set(posted) }, ...RECORDS];
+  const ask = msg({ at: T0, kind: "human", name: "Ada", text: "please", to: ["desk.dummy"] });
+  const answer = msg({ at: T0 + MIN, name: "dummy/Probe", text: "done", thread: ask.id });
+  const now = T0 + 30 * MIN;
+  // answered in its thread by the position's session, which has since ended
+  assert.deepEqual(kinds(run([ask, answer], { now, records: goneRec({ lastSeen: new Date(T0 - 5 * MIN).toISOString() }, [answer.id]) })), [], "answered: no pointer");
+  assert.deepEqual(kinds(run([ask], { now, records: goneRec({ lastSeen: new Date(T0 - 5 * MIN).toISOString() }) })), ["N5"], "red leg: no answer, and the holder was gone before the line");
+  // unanswered, but its holder was alive when it was posted: no pointer after the fact
+  assert.deepEqual(kinds(run([ask], { now, records: goneRec({ lastSeen: new Date(T0 + 2 * MIN).toISOString() }) })), [], "seen alive after the line by its record");
+  assert.deepEqual(kinds(run([ask], { now, records: goneRec({ lastSeen: new Date(T0 - 5 * MIN).toISOString() }), activity: [ACT("s-dummy", { updatedAt: T0 + 2 * MIN })] })), [], "seen alive after the line by its activity record");
+  // its clock ran while it lived: the N2 standing for the line is the evidence
+  const n2 = notice(T0 + 15 * MIN, "N2", { age: "15m", since: "posted", id: ask.id }, [{ key: "to", value: "desk.dummy" }, { key: "re", value: ask.id }], ask.id);
+  assert.deepEqual(kinds(run([ask, n2], { now, records: goneRec({ lastSeen: new Date(T0 - 5 * MIN).toISOString() }) })), [], "an N2 for it stands");
+  // a typo addresses no one, then or now: its pointer is due at once
+  const typo = msg({ at: T0, name: "orchestrator/Opus", text: "please", to: ["desk.dumy"] });
+  assert.deepEqual(kinds(run([typo], { now: T0 + 1, records: goneRec({ lastSeen: new Date(T0 + 2 * MIN).toISOString() }) })), ["N5"]);
+  // its session's record was forgotten, so only the room remembers the name: a post signed by it
+  // after the line, in any subject, says the name was held when the line was posted
+  const signedBefore = msg({ at: T0 - 2 * MIN, name: "relay/Haiku", text: "relay up" });
+  const toRelay = msg({ at: T0, name: "orchestrator/Opus", text: "relay this", to: ["relay"] });
+  const signedAfter = msg({ at: T0 + MIN, name: "relay/Haiku", text: "relayed", thread: "m-another-subject" });
+  assert.deepEqual(kinds(run([signedBefore, toRelay, signedAfter], { now })), [], "the name posted after the line");
+  assert.deepEqual(kinds(run([signedBefore, toRelay], { now })), ["N5"], "red leg: the name's last post came before the line (retired)");
+  // a line to the messenger, which only ever posts notices: a notice it signed after the line counts
+  const signedEarlier = notice(T0 - MIN, "N1", { id: "m-earlier" }, [{ key: "to", value: "orchestrator" }, { key: "re", value: "m-earlier" }], "m-earlier");
+  const toMessenger = msg({ at: T0, kind: "human", name: "Ada", text: "are you there?", to: ["messenger"] });
+  const itsNotice = notice(T0 + MIN, "N1", { id: "m-other" }, [{ key: "to", value: "orchestrator" }, { key: "re", value: "m-other" }], "m-other");
+  assert.deepEqual(kinds(run([signedEarlier, toMessenger, itsNotice], { now })), [], "a notice it signed after the line");
+  assert.deepEqual(kinds(run([signedEarlier, toMessenger], { now })), ["N5"], "red leg: its last notice came before the line");
 });
 
 test("clock 2 on evidence: expiry never pings a working holder (it is held); an idle or dark holder is pinged after G and the human told after G2 (red legs: no record; idle for less than G)", () => {
@@ -446,6 +501,45 @@ test("the horizon: an incident that started before H is not raised (red leg: ins
   const q = msg({ at: T0, kind: "human", name: "Ada", text: "old", to: ["coding"] });
   assert.deepEqual(kinds(run([q], { now: T0 + 4 * 60 * MIN + 1 })), []);
   assert.deepEqual(kinds(run([q], { now: T0 + 4 * 60 * MIN - 1 })), ["N2", "N3"]);
+});
+
+test("the starting point: an incident that began before the messenger's first start in the room is not raised (red legs: no starting point; a line after it)", () => {
+  const old = msg({ at: T0, kind: "human", name: "Ada", text: "old", to: ["coding"] });
+  const typo = msg({ at: T0, name: "orchestrator/Opus", text: "old", to: ["nobody"] });
+  const fresh2 = msg({ at: T0 + 20 * MIN, kind: "human", name: "Ada", text: "new", to: ["coding"] });
+  const now = T0 + 70 * MIN;
+  assert.deepEqual(kinds(run([old, typo], { now, since: T0 + 10 * MIN })), [], "before the start: nothing, though H still covers it");
+  assert.deepEqual(kinds(run([old, typo], { now })), ["N2", "N3", "N5"], "red leg: with no starting point H alone bounds it");
+  assert.deepEqual(kinds(run([old, fresh2], { now, since: T0 + 10 * MIN })), ["N2", "N3"], "a line after the start is raised");
+  // a lease that expired before the start is not raised either
+  const take = msg({ at: T0, name: "coding/Opus", text: "taking", claim: "parser" });
+  const board = [{ cursor: `${EPOCH}:${seq - 1}`, accountId: HOST, operationId: "op-start", board: { action: "claim", subject: "work:parser" }, expiresAt: new Date(T0 + 5 * MIN).toISOString(), leaseMs: 300_000 }];
+  assert.deepEqual(kinds(run([take], { now, board, since: T0 + 10 * MIN })), []);
+  assert.deepEqual(kinds(run([take], { now, board })), ["N4", "N3"], "red leg: no starting point");
+});
+
+test("the starting point is recorded once per room, from the first start less the look-back L, and kept across restarts; a dry run records nothing (red legs: a second start; a torn file)", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "agora-messenger-start-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  assert.equal(DEFAULT_BOUNDS.L, 10 * MIN, "the default look-back is small: ten minutes");
+  const file = messenger.startPath(root, "r".repeat(32));
+  assert.equal(file, path.join(root, "messenger", `${"r".repeat(32)}.start.json`));
+  const dry = await messenger.messengerStart(file, { now: T0, lookBackMs: 10 * MIN, record: false });
+  assert.deepEqual(dry, { since: T0 - 10 * MIN, startedAt: T0, recorded: false, created: false });
+  await assert.rejects(stat(file), /ENOENT/, "a dry run writes nothing");
+  const first = await messenger.messengerStart(file, { now: T0, lookBackMs: 10 * MIN, record: true });
+  assert.deepEqual(first, { since: T0 - 10 * MIN, startedAt: T0, recorded: true, created: true });
+  const onDisk = JSON.parse(await readFile(file, "utf8"));
+  assert.deepEqual(onDisk, { v: 1, type: "messenger-start", since: new Date(T0 - 10 * MIN).toISOString(), startedAt: new Date(T0).toISOString(), lookBackMs: 10 * MIN });
+  const again = await messenger.messengerStart(file, { now: T0 + 5 * 60 * MIN, lookBackMs: 60 * MIN, record: true });
+  assert.deepEqual(again, { since: T0 - 10 * MIN, startedAt: T0, recorded: true, created: false }, "red leg: a restart hours later keeps the first start");
+  const dryAfter = await messenger.messengerStart(file, { now: T0 + 5 * 60 * MIN, lookBackMs: 10 * MIN, record: false });
+  assert.deepEqual(dryAfter, { since: T0 - 10 * MIN, startedAt: T0, recorded: true, created: false }, "a dry run reads the recorded start");
+  await writeFile(file, "{ torn");
+  const torn = await messenger.messengerStart(file, { now: T0 + 6 * 60 * MIN, lookBackMs: 10 * MIN, record: true });
+  assert.deepEqual(torn, { since: T0 + 6 * 60 * MIN - 10 * MIN, startedAt: T0 + 6 * 60 * MIN, recorded: true, created: true }, "a torn record is a first start again: the conservative floor, never a flood");
+  assert.throws(() => parseBounds("L=25h"), /L <= H/);
+  assert.equal(parseBounds("L=0s").L, 0, "L=0 starts at the room head");
 });
 
 test("no notice carries the words of the message it points at (red leg: the planted words are in the room)", () => {
