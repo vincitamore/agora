@@ -441,7 +441,7 @@ test("timer: on Windows, Tern starts at logon: install adds agora's Run entry un
   await runTimer("install", spec, deps);
   assert.deepEqual(r.calls.filter((c) => c[0] === "reg" && c[1] === "add"), [], "Tern's own setting is preferred: nothing added beside it");
   await runTimer("remove", spec, deps);
-  assert.deepEqual(r.calls.filter((c) => c[0] === "reg" && c[1] === "delete").map((c) => c[c.indexOf("/v") + 1]), ["agora-tern-daemon", "agora-tern-daemon"], "only agora's own value, and its Startup apps record");
+  assert.deepEqual(r.calls.filter((c) => c[0] === "reg" && c[1] === "delete").map((c) => c[c.indexOf("/v") + 1]), ["agora-tern-daemon", "agora-tern-daemon", "agora-seat-service", "agora-seat-service"], "only agora's own values (Tern's and the seat service's), and their Startup apps records");
   assert.equal(values.has("Tern"), true);
 
   // red leg: a manifest with no Tern row needs no entry, and says so

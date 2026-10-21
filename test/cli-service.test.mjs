@@ -184,3 +184,59 @@ test("stopService holds every cause to its deadline and names the refusal", asyn
   await assert.rejects(stopService(root, { deadlineMs: 300, probeMs: 5000 }), /service-stop-deadline/);
   assert.ok(Date.now() - began < 2000, "the deadline did not bound the stop");
 });
+
+test("service start records how it started and service stop that it was stopped; start --logon follows the record: unrecorded starts nothing (exit 1), a live service is left alone, a deliberate stop is left dark, a service gone without a stop is started again (red legs inline)", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "agora-service-logon-"));
+  const cfg = path.join(root, "agora.json");
+  await writeFile(cfg, JSON.stringify({ actor: { name: "seat", kind: "agent" }, rooms: { scratch: { transport: "local", path: path.join(root, "room.ndjson") } } }));
+  const env = { AGORA_STATE: root, AGORA_CONFIG: cfg, AGORA_SESSION: "svc-logon" };
+  /** @type {Set<number>} */
+  const pids = new Set();
+  t.after(async () => {
+    for (const pid of pids) { try { process.kill(pid); } catch { /* gone */ } }
+    await rm(root, { recursive: true, force: true });
+  });
+  const last = (/** @type {string} */ out) => JSON.parse(out.trim().split(/\r?\n/).at(-1) ?? "{}");
+  const record = async () => JSON.parse(await readFile(path.join(root, "native", "service-start.json"), "utf8"));
+
+  const refusedFlags = await agora(["service", "start", "--logon", "--authority", `a-${"c".repeat(64)}`], env);
+  assert.equal(refusedFlags.code, 2);
+  assert.match(refusedFlags.stderr, /--logon starts with the authority the last recorded start was given/);
+
+  const none = await agora(["service", "start", "--logon", "--json"], env);
+  assert.equal(none.code, 1, none.stderr);
+  assert.equal(last(none.stdout).outcome, "unrecorded");
+  assert.equal((await agora(["service", "status", "--json"], env)).stdout.includes('"present":false'), true, "nothing started");
+
+  const started = await agora(["service", "start", "--json"], env);
+  assert.equal(started.code, 0, started.stderr);
+  const first = last(started.stdout).pid;
+  pids.add(first);
+  const r1 = await record();
+  assert.deepEqual([r1.version, r1.intent, r1.authorityId, r1.config], [1, "up", null, cfg]);
+
+  const running = await agora(["service", "start", "--logon", "--json"], env);
+  assert.equal(running.code, 0, running.stderr);
+  assert.deepEqual([last(running.stdout).outcome, last(running.stdout).pid], ["running", first], "a live service is never started twice");
+
+  // gone without a stop (a reboot, a crash): the logon start brings it back as recorded
+  process.kill(first);
+  for (let i = 0; i < 100 && (await agora(["service", "status", "--json"], env)).stdout.includes('"pidAlive":true'); i++) await new Promise((r) => setTimeout(r, 50));
+  const back = await agora(["service", "start", "--logon", "--json"], env);
+  assert.equal(back.code, 0, back.stderr);
+  const b = last(back.stdout);
+  assert.equal(b.outcome, "started");
+  pids.add(b.pid);
+  assert.notEqual(b.pid, first);
+  assert.deepEqual(await record(), r1, "the logon start records nothing of its own");
+
+  // a deliberate stop: recorded, and the logon start leaves the service dark
+  const stopped = await agora(["service", "stop"], env);
+  assert.equal(stopped.code, 0, stopped.stderr);
+  const r2 = await record();
+  assert.deepEqual([r2.intent, r2.authorityId, r2.config], ["down", null, cfg]);
+  const dark = await agora(["service", "start", "--logon"], env);
+  assert.equal(dark.code, 0, dark.stderr);
+  assert.match(dark.stdout, /native service left dark: it was stopped with agora service stop at /);
+  assert.equal((await agora(["service", "status", "--json"], env)).stdout.includes('"present":false'), true);
+});

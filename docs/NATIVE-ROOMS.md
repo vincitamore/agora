@@ -410,6 +410,7 @@ State below the Agora root is seat-owned:
 
 ```text
 native/service.json                         advisory endpoint, service secret, pid, boot epoch, build
+native/service-start.json                   the last service start (intent up, its authority or null, its config) or deliberate stop (intent down), 0600
 native/service.log, .1, .2                  the daemon's warnings, one JSON line each (ts, level, room, message), 0600, rotated at 1 MiB
 native/keys/                                explicit Agora-owned Tailcat keys
 native/rooms/<room-id>/room.json            room identity, epoch, membership revision
@@ -420,6 +421,35 @@ native/rooms/<room-id>/members/             public enrollment and route records
 native/rooms/<room-id>/attachments/         inert host/replica bytes by digest, each with its .type custody record
 native/outgoing/<room-id>/<operation-id>     explicit/uncertain retry record, never silent success
 ```
+
+## The seat service at logon
+
+The service starts only when asked: `agora service start`, or, unattended, `agora service start
+--logon`, which the Windows startup entry `agora-seat-service` runs at logon when a resident row
+needs a room this seat hosts (`agora resident timer install` writes it; [docs/RESIDENTS.md](RESIDENTS.md)).
+Nothing else starts it, and the resident cycle never does: it reports a dark service and starts no
+resident into it.
+
+`service start` records, before it spawns the daemon, how it was asked to start:
+`native/service-start.json` = `{ version: 1, intent: "up", at, authorityId, config }`, with
+`authorityId` the `--authority` it was given or `null`, and `config` the config the starter read.
+`service stop` records, before it stops anything, `intent: "down"` with the time, keeping the last
+start's `authorityId` and `config` when one is recorded (absent when none is). The record is what
+the operator last asked for, not whether the service runs: a service that crashes keeps `up`.
+
+`service start --logon` reads the record and does one of four things:
+
+| record | the service | outcome | exit |
+|---|---|---|---|
+| absent or unreadable | — | `unrecorded`: nothing started, since the authority would be a guess | 1 |
+| `intent: "down"` | — | `left-dark`: a deliberate stop is never undone at logon | 0 |
+| `intent: "up"` | answers | `running`: a second service is never started | 0 |
+| `intent: "up"` | dark | `started`, with the recorded authority and config; it records nothing of its own | 0 |
+
+`--logon` with `--authority` is refused (exit 2): the authority comes from the record. An endpoint
+that holds the connection without a handshake is refused as a plain start refuses it. Each line
+the logon start prints begins with its time, and the startup entry's wrapper appends it to
+`<state>/residents/service-start.log`.
 
 ## Failure table
 

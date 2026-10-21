@@ -659,7 +659,7 @@ test("timer: one spec per OS, and check reads without writing", async (t) => {
   assert.deepEqual([mnever.state, mnever.firstRun], ["installed", "running"]);
   writes.length = 0;
   await runTimer("remove", win, deps(() => ({ code: 0 })));
-  assert.deepEqual(writes, [`rm ${wrapper}`, `rm ${exitFile}`], "remove takes the wrapper and its record with the task");
+  assert.deepEqual(writes, [`rm ${wrapper}`, `rm ${path.join(s.state, "residents", "service-start.cmd")}`, `rm ${exitFile}`], "remove takes the wrappers and the cycle's record with the task");
   writes.length = 0;
   const contents = new Map(linux.files.map((f) => [f.path, f.content]));
   const linuxOk = await runTimer("check", linux, { ...deps(() => ({ code: 0, stdout: "enabled" })), readFile: async (f) => String(contents.get(f)) });
@@ -945,4 +945,116 @@ test("timer run: asks the OS scheduler to run the installed entry now, outside a
   const missing = await runTimer(/** @type {any} */ ("run"), win, { run: fakeRunner(() => ({ code: 1, stderr: "ERROR: The system cannot find the file specified." })).fn });
   assert.equal(missing.state, "missing");
   assert.match(missing.problems.join(" "), /no cycle timer is installed \(schtasks \/Run \/TN agora-resident-cycle: exit 1 ERROR: The system cannot find the file specified\.\); install it with agora resident timer install/);
+});
+
+test("timer: the seat service starts at logon by agora's own startup entry when a row needs a room this seat hosts, as its last recorded start asked; install refuses by name when no start is recorded; remove takes only agora's entry (red legs inline)", async (t) => {
+  const s = await seat(t);
+  const RUN = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+  const APPROVED = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
+  const recordFile = path.join(s.state, "native", "service-start.json");
+  const up = { file: recordFile, record: { version: 1, intent: "up", at: "2026-01-02T03:04:05.000Z", authorityId: `a-${"b".repeat(64)}`, config: "C:\\agora\\config.json" } };
+  const base = { home: s.home, platform: "win32", node: "C:\\node.exe", entry: "C:\\agora\\bin\\agora.mjs", config: "C:\\agora\\config.json", stateRoot: s.state };
+  const spec = /** @type {any} */ (timerSpec(/** @type {any} */ ({ ...base, service: ["lab.coding"], serviceStart: up })));
+  const wrapper = path.join(s.state, "residents", "service-start.cmd");
+  const log = path.join(s.state, "residents", "service-start.log");
+  // the entry names no authority: the logon start reads the record, so a later start with another authority is followed
+  assert.equal(spec.serviceLogin?.name, "agora-seat-service");
+  assert.equal(spec.serviceLogin?.data, `conhost.exe --headless cmd.exe /d /c "${wrapper}"`);
+  assert.equal(spec.serviceLogin?.file.content, [
+    "@echo off",
+    "chcp 65001 >nul",
+    `set "AGORA_STATE=${s.state}"`,
+    `C:\\node.exe C:\\agora\\bin\\agora.mjs service start --logon --config C:\\agora\\config.json >>"${log}" 2>&1`,
+    "",
+  ].join("\r\n"));
+  assert.equal(/** @type {any} */ (timerSpec(/** @type {any} */ ({ ...base, serviceStart: up }))).serviceLogin.data, null, "no row needs the service: install writes no entry");
+  assert.equal(/** @type {any} */ (timerSpec(/** @type {any} */ ({ ...base, platform: "linux", node: "/opt/node", entry: "/opt/agora.mjs", config: "/home/grace/config.json", service: ["lab.coding"] }))).serviceLogin, null);
+  // another name gives entries of their own, never the default ones
+  assert.deepEqual(residentStart.timerNames?.("w-test"), { task: "w-test", label: "w-test", tern: "w-test-tern-daemon", service: "w-test-seat-service" });
+  assert.deepEqual(residentStart.timerNames?.(undefined), { task: "agora-resident-cycle", label: "agora.resident-cycle", tern: "agora-tern-daemon", service: "agora-seat-service" });
+  assert.throws(() => residentStart.timerNames?.("bad name"), /must be 1-64 letters/);
+  const named = /** @type {any} */ (timerSpec(/** @type {any} */ ({ ...base, name: "w-test", service: ["lab.coding"], serviceStart: up, tern: "C:\\tern.exe" })));
+  assert.deepEqual([named.name, named.login.name, named.serviceLogin.name, named.install[1][3]], ["w-test", "w-test-tern-daemon", "w-test-seat-service", "w-test"]);
+
+  // the OS, stubbed: the Run key's values, the Startup apps records, the wrapper on disk
+  /** @type {Map<string, string>} */
+  const run = new Map();
+  /** @type {Map<string, string>} */
+  const approved = new Map();
+  /** @type {Map<string, string>} */
+  const files = new Map();
+  const taskXml = spec.files[0].content;
+  files.set(spec.files[1].path, spec.files[1].content);
+  files.set(path.join(s.state, "residents", "cycle.exit"), "0\r\n");
+  /** @type {string[]} */
+  const writes = [];
+  const os = fakeRunner((argv) => {
+    // the scheduler's run of the cycle leaves its exit record, as the wrapper does
+    if (argv[0] === "schtasks" && argv[1] === "/Run") { files.set(path.join(s.state, "residents", "cycle.exit"), "0\r\n"); return { code: 0 }; }
+    if (argv[0] === "schtasks") return argv.includes("/XML") ? { code: 0, stdout: taskXml } : argv.includes("/V") ? { code: 0, stdout: `"HOST","\\agora-resident-cycle","x","Ready","x","1/1/2026","0","grace"\r\n` } : { code: 0 };
+    if (argv[1] === "query" && argv[2] === RUN) return { code: 0, stdout: `\r\n${RUN.replace("HKCU", "HKEY_CURRENT_USER")}\r\n${[...run].map(([n, d]) => `    ${n}    REG_SZ    ${d}`).join("\r\n")}\r\n` };
+    if (argv[1] === "query" && argv[2] === APPROVED) return approved.has(argv[4]) ? { code: 0, stdout: `    ${argv[4]}    REG_BINARY    ${approved.get(argv[4])}\r\n` } : { code: 1 };
+    if (argv[1] === "add") { run.set(argv[4], argv[8]); return { code: 0 }; }
+    if (argv[1] === "delete") { (argv[2] === RUN ? run : approved).delete(argv[4]); return { code: 0 }; }
+    return { code: 1 };
+  });
+  const deps = (/** @type {any} */ sp = spec) => ({
+    run: os.fn, sleep: async () => {},
+    writeFile: async (/** @type {string} */ f, /** @type {any} */ d) => { writes.push(f); files.set(f, String(d)); },
+    rm: async (/** @type {string} */ f) => { writes.push(`rm ${f}`); files.delete(f); },
+    mkdir: async () => {},
+    readFile: async (/** @type {string} */ f) => { if (!files.has(f)) throw new Error("absent"); return String(files.get(f)); },
+  });
+  run.set("Other", "C:\\other.exe");
+  run.set("w-test-seat-service", "kept");
+
+  // check, nothing installed: a row needs the service and nothing starts it
+  let c = /** @type {any} */ (await runTimer("check", spec, deps()));
+  assert.equal(c.state, "differs");
+  assert.equal(c.service?.state, "missing");
+  assert.match(c.problems.join(" "), /the seat service does not start at logon, and lab\.coding needs it \(a room this seat hosts\); timer install adds it/);
+  assert.equal(writes.length, 0, "check writes nothing");
+
+  // install with no recorded start: refused by name, before anything is written or registered
+  os.calls.length = 0;
+  const unrecorded = /** @type {any} */ (timerSpec(/** @type {any} */ ({ ...base, service: ["lab.coding"], serviceStart: { file: recordFile, record: null } })));
+  const refused = /** @type {any} */ (await runTimer("install", unrecorded, deps(unrecorded)));
+  assert.equal(refused.state, "refused");
+  assert.match(refused.problems.join(" "), /^service-start-unrecorded: lab\.coding needs the seat service at logon, and no service start is recorded on this seat \(.*service-start\.json is absent\), so its authority cannot be known; start the service once with agora service start/);
+  assert.deepEqual([writes.length, os.calls.length], [0, 0], "nothing written, nothing registered");
+
+  // install with a recorded start: the wrapper, then agora's entry; the check after the first run lists it
+  const installed = /** @type {any} */ (await runTimer("install", spec, deps()));
+  assert.equal(installed.state, "installed", JSON.stringify(installed.check?.problems));
+  assert.equal(files.get(wrapper), spec.serviceLogin.file.content);
+  assert.equal(run.get("agora-seat-service"), spec.serviceLogin.data);
+  assert.deepEqual(installed.check.service, { name: "agora-seat-service", needs: ["lab.coding"], intent: "up", authorityId: up.record.authorityId, at: up.record.at, state: "agora", data: spec.serviceLogin.data, problems: [] });
+
+  // a deliberate stop is followed, not undone: the entry stays and says the logon start leaves the service dark
+  const down = /** @type {any} */ (timerSpec(/** @type {any} */ ({ ...base, service: ["lab.coding"], serviceStart: { file: recordFile, record: { version: 1, intent: "down", at: "2026-01-03T00:00:00.000Z", authorityId: null } } })));
+  c = /** @type {any} */ (await runTimer("check", down, deps(down)));
+  assert.deepEqual([c.state, c.service.state, c.service.intent, c.service.authorityId], ["ok", "agora", "down", null]);
+  // the entry there with no record: it would start nothing
+  c = /** @type {any} */ (await runTimer("check", unrecorded, deps(unrecorded)));
+  assert.deepEqual([c.state, c.service.state], ["differs", "unrecorded"]);
+  // turned off in Startup apps, another program, a missing wrapper
+  approved.set("agora-seat-service", "03000000");
+  assert.equal((/** @type {any} */ (await runTimer("check", spec, deps()))).service.state, "disabled");
+  approved.delete("agora-seat-service");
+  run.set("agora-seat-service", "C:\\elsewhere.exe");
+  assert.equal((/** @type {any} */ (await runTimer("check", spec, deps()))).service.state, "differs");
+  run.set("agora-seat-service", spec.serviceLogin.data);
+  files.delete(wrapper);
+  c = /** @type {any} */ (await runTimer("check", spec, deps()));
+  assert.equal(c.service.state, "differs");
+  assert.match(c.problems.join(" "), /service-start\.cmd is missing; timer install writes it/);
+  files.set(wrapper, spec.serviceLogin.file.content);
+
+  // remove: agora's entries and their Startup apps records, and the wrapper; nothing else in the Run key
+  writes.length = 0;
+  await runTimer("remove", spec, deps());
+  assert.deepEqual([...run.keys()].sort(), ["Other", "w-test-seat-service"]);
+  assert.ok(writes.includes(`rm ${wrapper}`));
+  c = /** @type {any} */ (await runTimer("check", spec, deps()));
+  assert.equal(c.service.state, "missing");
 });

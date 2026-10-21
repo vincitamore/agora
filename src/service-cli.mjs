@@ -7,7 +7,7 @@ import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, sig
 import { constants } from 'node:fs';
 import { spawn } from "node:child_process";
 import { hostname } from "node:os";
-import { mkdir, realpath, rm, open, link } from "node:fs/promises";
+import { mkdir, readFile, realpath, rename, rm, open, link } from "node:fs/promises";
 import path from "node:path";
 import { AgoraError, EXIT } from "./core.mjs";
 import { NativeRoomService, NativeServiceClient } from "./native-service.mjs";
@@ -265,9 +265,63 @@ async function unlinkDescriptor(stateRoot) {
 }
 
 /**
- * @param {{ root: string, entry: string, execPath: string, accountId: string, seatLabel: string, authorityId?: string, configPath?: string }} options
+ * What the last `service start` or `service stop` on this seat asked for: `intent` up (with the
+ * authority and config that start was given, `authorityId` null for a start without one) or down (a
+ * deliberate stop, keeping what the last start was given when one is recorded; absent when none
+ * was). The unattended start at logon reads it; nothing guesses an authority in its place.
+ * @typedef {{ version: 1, intent: "up" | "down", at: string, authorityId?: string | null, config?: string | null }} ServiceStartRecord
+ */
+
+/** Where the seat records its last service start or stop. @param {string} stateRoot */
+export function serviceStartPath(stateRoot) {
+  return path.join(stateRoot, "native", "service-start.json");
+}
+
+/**
+ * The record, `null` when no start or stop was ever recorded here, and `error` when the file is
+ * there but is not a record (it is never read as one).
+ * @param {string} stateRoot
+ * @returns {Promise<{ file: string, record: ServiceStartRecord | null, error?: string }>}
+ */
+export async function readServiceStart(stateRoot) {
+  const file = serviceStartPath(stateRoot);
+  let text;
+  try { text = await readFile(file, "utf8"); }
+  catch (e) {
+    const code = /** @type {NodeJS.ErrnoException} */ (e).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return { file, record: null };
+    return { file, record: null, error: `${file} cannot be read (${code ?? String(e)})` };
+  }
+  /** @type {any} */
+  let r;
+  try { r = JSON.parse(text); } catch { return { file, record: null, error: `${file} is not JSON` }; }
+  const authorityOk = r?.authorityId === undefined || r.authorityId === null || (typeof r.authorityId === "string" && /^a-[a-f0-9]{64}$/.test(r.authorityId));
+  const configOk = r?.config === undefined || r.config === null || (typeof r.config === "string" && r.config.length > 0);
+  if (!r || r.version !== 1 || (r.intent !== "up" && r.intent !== "down") || typeof r.at !== "string" || !authorityOk || !configOk
+    || (r.intent === "up" && r.authorityId === undefined))
+    return { file, record: null, error: `${file} is not a service start record` };
+  return { file, record: r };
+}
+
+/** @param {string} stateRoot @param {ServiceStartRecord} record */
+async function writeServiceStart(stateRoot, record) {
+  const file = serviceStartPath(stateRoot);
+  await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+  const temp = `${file}.tmp-${process.pid}-${randomUUID()}`;
+  try {
+    const handle = await open(temp, "wx", 0o600);
+    try { await handle.writeFile(`${JSON.stringify(record, null, 2)}\n`, "utf8"); await handle.sync(); }
+    finally { await handle.close(); }
+    await rename(temp, file);
+  } finally { await rm(temp, { force: true }); }
+}
+
+/**
+ * @param {{ root: string, entry: string, execPath: string, accountId: string, seatLabel: string, authorityId?: string, configPath?: string, record?: boolean, now?: () => Date }} options
  * `configPath` is the config the starter read; the service reads the same one (its faces borrow
- * tokens named there) and never writes it.
+ * tokens named there) and never writes it. The start is recorded (`readServiceStart`) before the
+ * daemon is spawned, so the record says what the operator asked for even when the start fails;
+ * `record: false` is the logon start, which starts as recorded and records nothing.
  */
 export async function startService(options) {
   await mkdir(options.root, { recursive: true, mode: 0o700 });
@@ -278,6 +332,8 @@ export async function startService(options) {
   if (probe.unresponsive) {
     throw new AgoraError(`service-unresponsive: something holds the native service endpoint and did not complete the handshake (${probe.why}); nothing was started and the descriptor is kept`, EXIT.error);
   }
+  if (options.record !== false)
+    await writeServiceStart(options.root, { version: 1, intent: "up", at: (options.now ?? (() => new Date()))().toISOString(), authorityId: options.authorityId ?? null, config: options.configPath ?? null });
   await unlinkDescriptor(options.root);
   const child = spawn(options.execPath, [options.entry, "service", "--daemon"], {
     env: {
@@ -303,15 +359,42 @@ export async function startService(options) {
 }
 
 /**
+ * The unattended start at logon (`agora service start --logon`, which `agora resident timer
+ * install` registers): the service as the last recorded start asked for it, with that start's
+ * authority and config. `unrecorded`: no start is recorded here, so nothing knows the authority and
+ * nothing starts; `left-dark`: the last act was a deliberate `service stop`; `running`: the service
+ * answers, and a second one is never started; `started`. An endpoint held without a handshake is
+ * refused as `startService` refuses it.
+ * @param {{ root: string, entry: string, execPath: string, accountId: string, seatLabel: string }} options
+ */
+export async function startServiceAtLogon(options) {
+  const { file, record, error } = await readServiceStart(options.root);
+  if (!record) return { outcome: /** @type {const} */ ("unrecorded"), file, record: null, ...(error ? { error } : {}) };
+  if (record.intent === "down") return { outcome: /** @type {const} */ ("left-dark"), file, record };
+  const probe = await probeOwnService(options.root);
+  if (probe.live) return { outcome: /** @type {const} */ ("running"), file, record, pid: probe.pid };
+  const started = await startService({ ...options, authorityId: record.authorityId ?? undefined, configPath: record.config ?? undefined, record: false });
+  return { outcome: /** @type {const} */ ("started"), file, record, ...started };
+}
+
+/**
  * Stop this seat's service: identify it by handshake, never by pid alone; a stale descriptor is
  * unlinked and kills nothing; an endpoint that holds the connection without answering is refused
  * by name and left alone. Every step is bounded, and the whole is held to one deadline, so a cause
- * nobody has met yet ends as `service-stop-deadline` rather than a stop that never returns.
+ * nobody has met yet ends as `service-stop-deadline` rather than a stop that never returns. The stop
+ * is recorded first (`readServiceStart`: intent down), so the logon start leaves the service dark
+ * whether or not this stop then finds one to stop.
  * @param {string} stateRoot
- * @param {{ deadlineMs?: number, probeMs?: number }} [options]
+ * @param {{ deadlineMs?: number, probeMs?: number, record?: boolean, now?: () => Date }} [options]
  */
 export async function stopService(stateRoot, options = {}) {
   const deadlineMs = options.deadlineMs ?? STOP_DEADLINE_MS;
+  // a deliberate stop: the logon start leaves the service dark until the next `service start`
+  if (options.record !== false) {
+    const last = (await readServiceStart(stateRoot)).record;
+    await writeServiceStart(stateRoot, { version: 1, intent: "down", at: (options.now ?? (() => new Date()))().toISOString(),
+      ...(last && last.authorityId !== undefined ? { authorityId: last.authorityId } : {}), ...(last && last.config !== undefined ? { config: last.config } : {}) });
+  }
   /** @type {NodeJS.Timeout | undefined} */
   let timer;
   const deadline = new Promise((_, reject) => {
