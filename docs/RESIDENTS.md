@@ -491,26 +491,35 @@ lingers); the launchd agent has `RunAtLoad` (it loads at login). The pass that r
 supervisor's ([Grants](#grants), **ensure**): it starts every standing row the reboot left dead,
 once the seat service answers. A row whose rooms include no room this seat hosts needs no service.
 
-**The order at logon (Windows).** The seat service and Tern start from the user's Run key at
-logon (below), at once and side by side, since neither needs the other; the cycle runs two
-minutes later, by which time both answer. Nothing else starts the seat service: the cycle reports
-a dark service and starts nothing into it (the **seat service** gate above).
+**The order at logon (Windows).** Tern starts from the user's Run key at logon (below). The task
+runs two minutes after the logon, and its wrapper starts the seat service first and runs the cycle
+after it, so the service answers by the time the cycle needs it. The resident cycle itself never
+starts the service: it reports a dark service and starts nothing into it (the **seat service**
+gate above).
 
-**The seat service at logon (Windows).** When a row of the manifest, or a grant's room, names a
-room this seat hosts (a native room in the config), install also makes the seat service start at
-logon. It writes agora's own Run entry `agora-seat-service` = `conhost.exe --headless cmd.exe /d /c
-"<state>\residents\service-start.cmd"`, a wrapper that runs `agora service start --logon` against
-this state root with its output appended to `<state>\residents\service-start.log`. The entry names
+**The seat service by the task (Windows).** When a row of the manifest, or a grant's room, names a
+room this seat hosts (a native room in the config), the task's wrapper runs `agora service start
+--logon` against this state root before the cycle, with its output appended to
+`<state>\residents\service-start.log`. It runs at logon and on every interval, so a service that
+died without a `service stop` is brought back as last started within one interval. The line names
 no authority. `service start` records how it started the service (its `--authority`, or none, and
 its config) in `<state>/native/service-start.json`, and `service stop` records that it was stopped
-on purpose; the logon start reads that record at logon, so the authority is the one the operator
-last gave, never a guess ([docs/NATIVE-ROOMS.md](NATIVE-ROOMS.md#the-seat-service-at-logon)). A
-service that answers is left alone (a second one is never started), and one stopped with
-`service stop` stays dark until the next `service start`. Install refuses, exit 1, writing and
-registering nothing, while a row needs the service and no start is recorded on this seat
-(`service-start-unrecorded`, naming the rows and the file): a service started before agora kept
-the record is stopped and started once with its authority (`agora service stop`, `agora service
-start --authority <a-64hex>`), then the timer is installed again.
+on purpose; the start reads that record each time, so the authority is the one the operator last
+gave, never a guess ([docs/NATIVE-ROOMS.md](NATIVE-ROOMS.md#the-seat-service-at-logon)). A service
+that answers is left alone (a second one is never started), and one stopped with `service stop`
+stays dark until the next `service start`. Its exit code is not the task's: the cycle runs after it
+whatever it did. Install refuses, exit 1, writing and registering nothing, while a row needs the
+service and no start is recorded on this seat (`service-start-unrecorded`, naming the rows and the
+file): a service started before agora kept the record is stopped and started once with its
+authority (`agora service stop`, `agora service start --authority <a-64hex>`), then the timer is
+installed again.
+
+The task carries the start because a Run entry can be dropped at logon: Explorer has been measured
+logging the start of an entry's command and never running it, while the task's logon trigger ran
+the same wrapper form. An older install wrote the start as agora's own Run entry
+`agora-seat-service` with a wrapper `<state>\residents\service-start.cmd`; install takes both out
+(with the entry's Startup apps record) once the task is registered, and `timer check` names the
+entry while it is still there.
 
 **Tern at logon (Windows).** When a row of the manifest runs on host `tern`, install also makes
 Tern's session daemon start at logon, the way Tern's own **Start at login** (Settings › Sessions)
@@ -522,20 +531,21 @@ the `tern.com` agora finds). The cycle brings Tern up itself as well when a pass
 either alone recovers the room; the startup entry has Tern (and the sessions it keeps) up before
 the first pass.
 
-`timer check` reports each startup entry on a line of its own. `tern at logon:` says `agora's
-startup entry …`, `Tern's own Start at login (…)`, `missing`, `disabled`, `differs` or `not needed`.
-`seat service at logon:` says `agora's startup entry agora-seat-service (as last started at <time>,
-authority <a-…> | no authority)` or `(left dark: stopped with agora service stop at <time>)`,
-`unrecorded` (the entry is there and no start is recorded, so it would start nothing), `missing`,
-`disabled`, `differs` (another program, or the wrapper missing or stale) or `not needed`, and names
-the rows that need it. Either is `differs` while a row needs it and nothing starts it at logon, or
-agora's entry is turned off in Task Manager's Startup apps. `timer remove` deletes agora's two
-entries (and their Startup apps records) and the service wrapper, and never Tern's own entry or
-any other value of the Run key.
+`timer check` reports Tern's start and the seat service's on a line each. `tern at logon:` says
+`agora's startup entry …`, `Tern's own Start at login (…)`, `missing`, `disabled`, `differs` or
+`not needed`; it is `differs` while a row runs under Tern and nothing starts it at logon, or
+agora's entry is turned off in Task Manager's Startup apps. `seat service at logon:` says `the task
+starts it before each cycle (as last started at <time>, authority <a-…> | no authority)`, `(left
+dark: stopped with agora service stop at <time>)` or `(no service start recorded, so it starts
+nothing)`, with its log, or `not needed`, and names the rows that need it; no recorded start, or an
+older install's `agora-seat-service` entry still in the Run key, is `differs`. `timer remove`
+deletes agora's entries (and their Startup apps records) and the wrappers, and never Tern's own
+entry or any other value of the Run key.
 
 The entries' names are agora's own. `AGORA_TIMER_NAME=<name>` gives a second agora on one account
 (or a test) entries of its own: the task or systemd unit and the launchd label `<name>`, the
-startup entries `<name>-tern-daemon` and `<name>-seat-service`; the default ones are never touched.
+startup entry `<name>-tern-daemon` (and `<name>-seat-service`, an older install's, which install
+and remove take out); the default ones are never touched.
 On Linux and macOS agora writes no service start: a seat there that hosts native rooms runs the
 seat service under a unit of its own.
 
@@ -552,7 +562,9 @@ wrapper install writes: Task Scheduler refuses to start node itself under `conho
 (Last Result 0x80070005, and no cycle ever runs), and starts `cmd.exe` there. The wrapper runs the
 cycle with its output appended to `<state>\residents\cycle.log` and then writes the cycle's exit
 code to `<state>\residents\cycle.exit`, because conhost passes no exit code on: the task's Last
-Result is 0 whatever the cycle did. Install deletes any older task of the name first (a task
+Result is 0 whatever the cycle did. The wrapper sets `AGORA_STATE` to the state root that holds it,
+so the cycle (and the service start) act on that root whatever the account's environment says.
+Install deletes any older task of the name first (a task
 re-created over itself keeps the old one's last run) and the old exit record. The state root may
 have spaces but none of `& < > ( ) @ ^ | %`, which `cmd /c` reads inside its quotes; install
 refuses one that does.
@@ -563,8 +575,9 @@ scheduler could not start the last run, its Last Result as `0x80070005`), `faili
 cycle ran and exited `n`), or `failing` (a run ended with no exit record: the wrapper never ran the
 cycle); and `ok` (on Windows: a task not yet run or running, or whose last run's cycle exited 0).
 `--json` carries `triggers`, `lastResult`, `lastRun`, `cycleExit` and, on Windows, `login` (`state`,
-`name`, `data`) and `service` (`state`, `name`, `data`, `needs`, `intent`, `authorityId`, `at`,
-`problems`). An install refused for an unrecorded start is `refused`. A task registered before the
+`name`, `data`) and `service` (`state`: `task`, `unrecorded` or `not needed`; `needs`, `intent`,
+`authorityId`, `at`, `log`, `leftover`: an older install's Run entry or null; `problems`). An
+install refused for an unrecorded start is `refused`. A task registered before the
 logon trigger was added is `differs` (`it has no logon trigger`) until it is installed again.
 `timer run` asks the scheduler to run the entry once now (`schtasks /Run`, `systemctl --user start
 --no-block`, `launchctl kickstart`) and exits 1 naming `missing` when none is installed; `timer

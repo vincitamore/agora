@@ -380,7 +380,7 @@ const SCHEMA = {
         "--allow-key <nodekey:64hex>": "with route open/close: the member's PUBLIC node key as enroll prints it; never a private key, a key file or a digest",
         "--out <path>": "with route open: also write the descriptor here for the operator to carry",
         "--authority <a-64hex>": "with start: load counter-seat authority and policy once; rotation requires restart, a cooperative pin, not OS isolation",
-        "--logon": "with start: the unattended start at logon that agora resident timer install registers: as the last recorded service start (its authority and config); nothing when the service answers or was stopped with service stop; exit 1 when no start is recorded",
+        "--logon": "with start: the unattended start the resident timer's task runs before each cycle (at logon and on its interval; agora resident timer install): as the last recorded service start (its authority and config); nothing when the service answers or was stopped with service stop; exit 1 when no start is recorded",
         "--proof-file <path>": "with route open/close: detached proof for a retained challenge; unsigned route effects refuse",
         "--act <room-enroll|room-revoke>": "with route challenge: prepare this act without effects; --out writes a new public challenge file",
         "--human-name <name>": "with route challenge --act room-enroll: admit this key as the member seat's HUMAN, posting as human under this name only; the grant is in the act the authority signs (docs/MEMBERSHIP.md)",
@@ -1470,11 +1470,11 @@ async function main(argv) {
       return EXIT.ok;
     }
     if (action === "start" && values.logon) {
-      // unattended (the timer's startup entry): as the last recorded start asked, never a second service
+      // unattended (the resident timer's task, before each cycle): as the last recorded start asked, never a second service
       const r = await startServiceAtLogon({ root: stateRoot, entry: entryFile, execPath: process.execPath, accountId: await seatAccountId(stateRoot), seatLabel: seatLabel() });
       const at = new Date().toISOString();
       if (json) console.log(JSON.stringify({ type: "service", action: "start-at-logon", at, ...r }));
-      else console.log(`${at} ${r.outcome === "started" ? `native service started at logon pid ${r.pid ?? "unknown"}, as last started at ${r.record.at} (${r.record.authorityId ? `authority ${r.record.authorityId}` : "no authority"})`
+      else console.log(`${at} ${r.outcome === "started" ? `native service started unattended pid ${r.pid ?? "unknown"}, as last started at ${r.record.at} (${r.record.authorityId ? `authority ${r.record.authorityId}` : "no authority"})`
         : r.outcome === "running" ? `native service already answers (pid ${r.pid ?? "unknown"}): nothing started`
         : r.outcome === "left-dark" ? `native service left dark: it was stopped with agora service stop at ${r.record.at}; agora service start starts it again`
         : `native service not started: ${r.error ?? `no service start is recorded (${r.file} is absent)`}, so its authority is unknown; start it once with agora service start [--authority <a-64hex>]`}`);
@@ -1795,7 +1795,7 @@ async function main(argv) {
         const ternRows = Object.values(timerManifest?.residents ?? {}).filter((r) => r.host === "tern").map((r) => r.slug);
         const tern = process.platform === "win32" && ternRows.length ? rs.ternProgram() : null;
         if (process.platform === "win32" && ternRows.length && !tern) console.error(`agora: ${ternRows.join(", ")} run under Tern, which is not installed on this seat: nothing can start it at logon`);
-        // the seat service starts at logon (Windows) when a row's rooms, or a grant's room, include a room this seat hosts
+        // the task starts the seat service (Windows) when a row's rooms, or a grant's room, include a room this seat hosts
         const hosted = (/** @type {string} */ room) => /** @type {any} */ (cfg.rooms ?? {})[room]?.transport === "native";
         const serviceRows = [
           ...Object.values(timerManifest?.residents ?? {}).filter((r) => r.rooms.some(hosted)).map((r) => r.slug),
@@ -1819,8 +1819,8 @@ async function main(argv) {
             if (l) console.log(`  tern at logon: ${l.state === "agora" ? `agora's startup entry ${l.name}: ${l.data}` : l.state === "tern" ? `Tern's own Start at login (${l.name}): ${l.data}` : l.state === "disabled" ? `agora's startup entry ${l.name}, turned off in Startup apps` : l.state === "differs" ? `agora's startup entry ${l.name} runs ${l.data}` : l.state}`);
             const sv = x.service;
             if (sv) {
-              const how = sv.intent === "down" ? `left dark: stopped with agora service stop at ${sv.at}` : sv.intent === "up" ? `as last started at ${sv.at}, ${sv.authorityId ? `authority ${sv.authorityId}` : "no authority"}` : "no service start recorded";
-              console.log(`  seat service at logon: ${sv.state === "agora" ? `agora's startup entry ${sv.name} (${how}): ${sv.data}` : sv.state === "unrecorded" ? `agora's startup entry ${sv.name}, ${how}` : sv.state === "disabled" ? `agora's startup entry ${sv.name}, turned off in Startup apps` : sv.state === "differs" ? `agora's startup entry ${sv.name}: ${sv.data}` : sv.state}${sv.needs.length ? ` (for ${sv.needs.join(", ")})` : ""}`);
+              const how = sv.intent === "down" ? `left dark: stopped with agora service stop at ${sv.at}` : sv.intent === "up" ? `as last started at ${sv.at}, ${sv.authorityId ? `authority ${sv.authorityId}` : "no authority"}` : "no service start recorded, so it starts nothing";
+              console.log(`  seat service at logon: ${sv.state === "not needed" ? "not needed" : `the task starts it before each cycle (${how}), log ${sv.log}`}${sv.needs.length ? ` (for ${sv.needs.join(", ")})` : ""}`);
             }
           };
           line(res);

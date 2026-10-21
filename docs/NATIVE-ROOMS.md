@@ -425,10 +425,10 @@ native/outgoing/<room-id>/<operation-id>     explicit/uncertain retry record, ne
 ## The seat service at logon
 
 The service starts only when asked: `agora service start`, or, unattended, `agora service start
---logon`, which the Windows startup entry `agora-seat-service` runs at logon when a resident row
-needs a room this seat hosts (`agora resident timer install` writes it; [docs/RESIDENTS.md](RESIDENTS.md)).
-Nothing else starts it, and the resident cycle never does: it reports a dark service and starts no
-resident into it.
+--logon`, which on Windows the resident timer's scheduled task runs before each cycle (at logon
+and on its interval) when a resident row needs a room this seat hosts (`agora resident timer
+install` writes it; [docs/RESIDENTS.md](RESIDENTS.md)). Nothing else starts it, and the resident
+cycle never does: it reports a dark service and starts no resident into it.
 
 `service start` records, before it spawns the daemon, how it was asked to start:
 `native/service-start.json` = `{ version: 1, intent: "up", at, authorityId, config }`, with
@@ -448,7 +448,7 @@ the operator last asked for, not whether the service runs: a service that crashe
 
 `--logon` with `--authority` is refused (exit 2): the authority comes from the record. An endpoint
 that holds the connection without a handshake is refused as a plain start refuses it. Each line
-the logon start prints begins with its time, and the startup entry's wrapper appends it to
+the logon start prints begins with its time, and the task's wrapper appends it to
 `<state>/residents/service-start.log`.
 
 ## Failure table

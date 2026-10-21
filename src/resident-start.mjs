@@ -1285,26 +1285,31 @@ const shArg = (a) => `'${a.replace(/'/g, "'\\''")}'`;
  * `user`: the Windows account the logon trigger fires for (`DOMAIN\user`); `tern`: the program that
  * starts Tern's session daemon at logon (`ternProgram`), when the manifest runs a row under Tern;
  * `name`: the entries' name (`timerNames`); `service`: the positions whose rooms include a room this
- * seat hosts (a native room), which need the seat service up at logon; `serviceStart`: the seat's
- * last recorded service start or stop, as `readServiceStart` (src/service-cli.mjs) read it.
+ * seat hosts (a native room), which need the seat service up before the cycle; `serviceStart`: the
+ * seat's last recorded service start or stop, as `readServiceStart` (src/service-cli.mjs) read it.
  */
 /** @typedef {{ file: string, record: { intent: 'up' | 'down', at: string, authorityId?: string | null, config?: string | null } | null, error?: string }} ServiceStartRead */
 
-/** How long after a logon the cycle first runs: the seat service and the network come up first. */
+/** How long after a logon the task first runs (the seat service's start, then the cycle): the network comes up first. */
 export const LOGON_DELAY_MINUTES = 2;
 /** The Windows startup entry agora writes so Tern's session daemon starts at logon. */
 export const TERN_LOGIN_NAME = "agora-tern-daemon";
-/** The Windows startup entry agora writes so the seat service starts at logon. */
+/**
+ * The Windows startup entry an older install wrote to start the seat service at logon. Explorer can
+ * skip a Run entry at logon without a trace, so the task starts the service now; install and remove
+ * take this entry out.
+ */
 export const SERVICE_LOGIN_NAME = "agora-seat-service";
 const RUN_KEY = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const APPROVED_KEY = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
 const ENTRY_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 /**
- * The names of the OS entries the timer writes: the scheduled task or systemd unit, the launchd
- * label, and the two Windows startup entries (Tern's session daemon, the seat service). The default
- * is agora's own; another name (`AGORA_TIMER_NAME`) gives a second agora on one account, or a test,
- * entries of its own that never touch the default ones.
+ * The names of the OS entries the timer keeps: the scheduled task or systemd unit, the launchd
+ * label, Tern's Windows startup entry, and the seat service's startup entry an older install wrote
+ * (`SERVICE_LOGIN_NAME`), which install and remove take out. The default is agora's own; another
+ * name (`AGORA_TIMER_NAME`) gives a second agora on one account, or a test, entries of its own that
+ * never touch the default ones.
  * @param {string} [name]
  */
 export function timerNames(name) {
@@ -1322,7 +1327,8 @@ export function timerNames(name) {
  *
  * On Windows the task's program is `conhost.exe --headless`, so no window opens, running `cmd.exe`
  * on a wrapper written into the state root: Task Scheduler refuses to start node itself under
- * `conhost --headless` (0x80070005, access denied) and starts `cmd.exe` there. The wrapper runs the
+ * `conhost --headless` (0x80070005, access denied) and starts `cmd.exe` there. The wrapper sets
+ * `AGORA_STATE` to this state root, so everything it runs acts on the root that holds it, runs the
  * cycle with its output appended to `<state>/residents/cycle.log`, then writes the cycle's exit code
  * to `<state>/residents/cycle.exit`. conhost does not pass its child's exit code on, so the task's
  * Last Result says only whether the scheduler could start it; the exit record says whether the
@@ -1330,14 +1336,14 @@ export function timerNames(name) {
  * session daemon at logon, as Tern's own Start at login does; `data` is null when no row runs under
  * Tern, and then install writes none (remove still takes agora's).
  *
- * `serviceLogin` is the startup entry that brings the seat service up at logon, when a row's rooms
- * include a room this seat hosts: `conhost.exe --headless` running `cmd.exe` on a second wrapper,
- * `<state>/residents/service-start.cmd`, which runs `agora service start --logon` against this
- * state root with its output appended to `service-start.log`. The entry names no authority: the
- * logon start reads the seat's last recorded service start (its authority and config) and leaves a
- * service that answers, or was stopped with `service stop`, as it is. At logon the startup entries
- * (the service, Tern) start at once and the cycle `LOGON_DELAY_MINUTES` later. `data` is null when no
- * row needs the service.
+ * `service` is the seat service's start: when a row's rooms include a room this seat hosts
+ * (`needs`), the wrapper runs `agora service start --logon` before the cycle, at logon and on every
+ * interval, with its output appended to `<state>/residents/service-start.log`. The line names no
+ * authority: it starts the service as the seat's last recorded start asked (its authority and
+ * config), leaves a service that answers, or was stopped with `service stop`, as it is, and starts
+ * nothing when no start is recorded. Its exit code is not the task's: the cycle's line follows it
+ * whatever it did, and reports a dark service itself. `legacy` is the Run entry and wrapper an
+ * older install wrote for the same start, which install and remove take out.
  * @param {TimerContext} ctx
  */
 export function timerSpec(ctx) {
@@ -1353,10 +1359,18 @@ export function timerSpec(ctx) {
     // `cmd /c "<file>"` keeps the quotes (and so a path with spaces) only while nothing between them
     // is one of cmd's special characters; conhost mangles the `/s ""..""` form that would allow them
     if (/["\r\n&<>()@^|%]/.test(wrapper)) throw new AgoraError(`the timer's wrapper ${wrapper} cannot carry a quote or any of & < > ( ) @ ^ | %, which cmd /c reads; give agora a state root without them (AGORA_STATE, or the config's state)`, EXIT.usage);
+    const needs = ctx.service ?? [];
+    // the seat service, as the last recorded start asked for it, in this state root
+    const serviceLog = path.join(ctx.stateRoot, "residents", "service-start.log");
+    const serviceCommand = [ctx.node, ctx.entry, "service", "start", "--logon", ...(ctx.config ? ["--config", ctx.config] : [])];
     const script = [
       `@echo off`,
       // the batch file is UTF-8: a path outside the OEM code page reads as written
       `chcp 65001 >nul`,
+      // the task belongs to the state root that holds its wrapper, logs and exit record
+      `set "AGORA_STATE=${ctx.stateRoot}"`,
+      // the service first, so the cycle that follows finds it up
+      ...(needs.length ? [`${serviceCommand.map((a) => cmdArg(a)).join(" ")} >>${cmdArg(serviceLog, true)} 2>&1`] : []),
       `${command.map((a) => cmdArg(a)).join(" ")} >>${cmdArg(log, true)} 2>&1`,
       `>${cmdArg(exitFile, true)} echo %ERRORLEVEL%`,
       ``,
@@ -1377,26 +1391,14 @@ export function timerSpec(ctx) {
     ].join("\r\n");
     const xmlFile = path.join(tmpdir(), `${names.task}-${process.pid}.xml`);
     if (ctx.tern && /["\r\n]/.test(ctx.tern)) throw new AgoraError(`the Tern program ${JSON.stringify(ctx.tern)} cannot be written into a startup entry (a quote or a line break); move it`, EXIT.usage);
-    // the seat service at logon: as the last recorded start asked for it, in this state root
-    const serviceWrapper = path.join(ctx.stateRoot, "residents", "service-start.cmd");
-    const serviceLog = path.join(ctx.stateRoot, "residents", "service-start.log");
-    const serviceCommand = [ctx.node, ctx.entry, "service", "start", "--logon", ...(ctx.config ? ["--config", ctx.config] : [])];
-    const serviceScript = [
-      `@echo off`,
-      `chcp 65001 >nul`,
-      `set "AGORA_STATE=${ctx.stateRoot}"`,
-      `${serviceCommand.map((a) => cmdArg(a)).join(" ")} >>${cmdArg(serviceLog, true)} 2>&1`,
-      ``,
-    ].join("\r\n");
-    const needs = ctx.service ?? [];
     return {
       kind: "schtasks", name: names.task, command, interval: `PT${minutes}M`, triggers: [`every PT${minutes}M`, `at logon after ${logon}`], log, exitFile,
       expect: { command: "conhost.exe", arguments: args, interval: `PT${minutes}M`, logon },
       login: { name: names.tern, key: RUN_KEY, approved: APPROVED_KEY, data: ctx.tern ? `"${ctx.tern}" daemon --login` : null },
-      serviceLogin: {
-        name: names.service, key: RUN_KEY, approved: APPROVED_KEY, data: needs.length ? `conhost.exe --headless cmd.exe /d /c "${serviceWrapper}"` : null,
-        needs, file: { path: serviceWrapper, content: serviceScript }, log: serviceLog, command: serviceCommand,
+      service: {
+        needs, command: serviceCommand, log: serviceLog,
         start: ctx.serviceStart ?? { file: path.join(ctx.stateRoot, "native", "service-start.json"), record: null },
+        legacy: { name: names.service, key: RUN_KEY, approved: APPROVED_KEY, file: path.join(ctx.stateRoot, "residents", "service-start.cmd") },
       },
       files: [
         { path: xmlFile, content: doc, encoding: /** @type {const} */ ("utf16le"), temporary: true },
@@ -1433,7 +1435,7 @@ export function timerSpec(ctx) {
       ``,
     ].join("\n");
     return {
-      kind: "launchd", name: names.label, command, interval: `${seconds}s`, triggers: [`every ${seconds}s`, "at login"], log, exitFile: null, expect: null, login: null, serviceLogin: null,
+      kind: "launchd", name: names.label, command, interval: `${seconds}s`, triggers: [`every ${seconds}s`, "at login"], log, exitFile: null, expect: null, login: null, service: null,
       files: [{ path: file, content, encoding: /** @type {const} */ ("utf8"), temporary: false }],
       install: [["launchctl", "bootout", `gui/${uid}/${names.label}`], ["launchctl", "bootstrap", `gui/${uid}`, file]],
       check: [["launchctl", "print", `gui/${uid}/${names.label}`]],
@@ -1465,7 +1467,7 @@ export function timerSpec(ctx) {
     ``,
   ].join("\n");
   return {
-    kind: "systemd", name: `${names.task}.timer`, command, interval: `${minutes}min`, triggers: [`every ${minutes}min`, `at login after ${LOGON_DELAY_MINUTES}min`], log: null, exitFile: null, expect: null, login: null, serviceLogin: null,
+    kind: "systemd", name: `${names.task}.timer`, command, interval: `${minutes}min`, triggers: [`every ${minutes}min`, `at login after ${LOGON_DELAY_MINUTES}min`], log: null, exitFile: null, expect: null, login: null, service: null,
     files: [
       { path: path.join(unitDir, `${names.task}.service`), content: service, encoding: /** @type {const} */ ("utf8"), temporary: false },
       { path: path.join(unitDir, `${names.task}.timer`), content: timer, encoding: /** @type {const} */ ("utf8"), temporary: false },
@@ -1567,55 +1569,52 @@ async function turnedOff(entry, go) {
 }
 
 /**
- * Where the seat service's start at logon stands, read from the user's Run key, agora's wrapper and
- * the seat's service start record: `agora` (agora's entry, on, and a recorded start it can follow;
- * `intent` down means the logon start leaves the service dark), `unrecorded` (the entry is there but
- * no service start is recorded, so the logon start cannot know the authority and starts nothing),
- * `disabled` (turned off in Startup apps), `differs` (the entry or its wrapper is not what install
- * writes), `missing` (a row needs the service and nothing starts it), or `not needed`.
- * @typedef {{ state: 'agora' | 'unrecorded' | 'disabled' | 'differs' | 'missing' | 'not needed', name: string, data: string | null, needs: string[],
- *   intent: 'up' | 'down' | null, authorityId?: string | null, at: string | null, problems: string[] }} ServiceLoginState
+ * Where the seat service's start stands. The task's wrapper starts it before each cycle, so its
+ * state is read from the seat's service start record: `task` (a row needs the service and a start is
+ * recorded, which the wrapper follows; `intent` down means it leaves the service dark), `unrecorded`
+ * (a row needs it and no start is recorded, so the wrapper cannot know the authority and starts
+ * nothing), or `not needed`. Whether the registered task and its wrapper are what install writes is
+ * the task's own check. `leftover` is the Run entry an older install wrote for the same start (its
+ * command), still in the user's Run key, or null.
+ * @typedef {{ state: 'task' | 'unrecorded' | 'not needed', needs: string[], intent: 'up' | 'down' | null, authorityId?: string | null, at: string | null,
+ *   log: string, leftover: string | null, problems: string[] }} ServiceState
  */
 
 /**
- * @param {NonNullable<TimerSpec['serviceLogin']>} sl
+ * The older install's startup entry for the seat service, when it is still in the Run key.
+ * @param {NonNullable<TimerSpec['service']>['legacy']} legacy
  * @param {(argv: string[]) => Promise<{ code: number, stdout: string, stderr: string }>} go
- * @param {(file: string) => Promise<string>} read
- * @returns {Promise<ServiceLoginState>}
  */
-async function serviceLoginState(sl, go, read) {
-  const q = await go(["reg", "query", sl.key]);
-  const ours = (q.code === 0 ? parseRegValues(q.stdout) : []).find((v) => v.name === sl.name);
-  const rec = sl.start.record;
-  const base = { name: sl.name, needs: sl.needs, intent: rec?.intent ?? null, ...(rec && rec.authorityId !== undefined ? { authorityId: rec.authorityId } : {}), at: rec?.at ?? null };
-  const unrecorded = `no service start is recorded on this seat (${sl.start.error ?? `${sl.start.file} is absent`}), so the logon start cannot know the service's authority and would start nothing; start the service once with agora service start [--authority <a-64hex>]`;
-  if (ours) {
-    if (await turnedOff(sl, go))
-      return { ...base, state: "disabled", data: ours.data, problems: [`the seat service's start at logon (${sl.name}) is turned off in Task Manager's Startup apps; timer install turns it on again`] };
-    if (sl.data && ours.data !== sl.data)
-      return { ...base, state: "differs", data: ours.data, problems: [`the seat service's start at logon (${sl.name}) runs ${ours.data}, not ${sl.data}; timer install rewrites it`] };
-    if (sl.data) {
-      let text = null;
-      try { text = await read(sl.file.path); } catch { /* absent */ }
-      if (text === null) return { ...base, state: "differs", data: ours.data, problems: [`${sl.file.path} is missing; timer install writes it`] };
-      if (text !== sl.file.content) return { ...base, state: "differs", data: ours.data, problems: [`${sl.file.path} differs from what install writes`] };
-      if (!rec) return { ...base, state: "unrecorded", data: ours.data, problems: [unrecorded] };
-    }
-    return { ...base, state: "agora", data: ours.data, problems: [] };
-  }
-  if (!sl.data) return { ...base, state: "not needed", data: null, problems: [] };
-  const who = `${sl.needs.join(", ")} need${sl.needs.length === 1 ? "s" : ""} it (a room this seat hosts)`;
-  return { ...base, state: "missing", data: null, problems: [`the seat service does not start at logon, and ${who}; timer install adds it${rec ? "" : ` once a start is recorded: ${unrecorded}`}`] };
+async function legacyEntry(legacy, go) {
+  const q = await go(["reg", "query", legacy.key]);
+  return (q.code === 0 ? parseRegValues(q.stdout) : []).find((v) => v.name === legacy.name)?.data ?? null;
+}
+
+/**
+ * @param {NonNullable<TimerSpec['service']>} sv
+ * @param {(argv: string[]) => Promise<{ code: number, stdout: string, stderr: string }>} go
+ * @returns {Promise<ServiceState>}
+ */
+async function serviceState(sv, go) {
+  const leftover = await legacyEntry(sv.legacy, go);
+  const rec = sv.start.record;
+  const base = { needs: sv.needs, intent: rec?.intent ?? null, ...(rec && rec.authorityId !== undefined ? { authorityId: rec.authorityId } : {}), at: rec?.at ?? null, log: sv.log, leftover };
+  /** @type {string[]} */
+  const problems = [];
+  if (leftover !== null) problems.push(`an older install's startup entry ${sv.legacy.name} still starts the seat service from the Run key, which Explorer can skip at logon; timer install takes it out, since the task starts the service before each cycle`);
+  if (!sv.needs.length) return { ...base, state: "not needed", problems };
+  if (!rec) problems.push(`no service start is recorded on this seat (${sv.start.error ?? `${sv.start.file} is absent`}), so the task's start of the seat service cannot know its authority and starts nothing; start the service once with agora service start [--authority <a-64hex>]`);
+  return { ...base, state: rec ? "task" : "unrecorded", problems };
 }
 
 /**
  * What `runTimer` returns: the entry's state (`installed`, `kicked`, `removed`, `failed`, `refused`, or a
  * check's `ok`, `missing`, `differs`, `failing`), why not, the commands it ran, and for install the check
  * after its first run. `triggers` names when the entry runs; `login` (Windows) is where Tern's start at
- * logon stands, `service` (Windows) the seat service's.
+ * logon stands, `service` (Windows) the seat service's start by the task.
  * @typedef {{ type: string, action: string, kind: string, name: string, interval: string, triggers: string[], command: string[], state: string, problems: string[],
  *   ran: Array<{ argv: string[], code: number, stderr: string }>, lastResult?: number, lastRun?: string, cycleExit?: number | null,
- *   firstRun?: string, check?: TimerResult, login?: LoginState, service?: ServiceLoginState }} TimerResult
+ *   firstRun?: string, check?: TimerResult, login?: LoginState, service?: ServiceState }} TimerResult
  */
 
 /**
@@ -1629,8 +1628,9 @@ async function serviceLoginState(sl, go, read) {
  * the `check` that follows as `check`: the install's state is `installed` only when that check is ok,
  * else the check's own state (`failing`, `differs`, `missing`), so a timer that cannot run the cycle
  * is never reported installed. A first run still going at the deadline is `firstRun: "running"`.
- * Install is `refused`, writing nothing, when a row needs the seat service at logon and no service
- * start is recorded on this seat (`service-start-unrecorded`): the authority would be a guess.
+ * Install is `refused`, writing nothing, when a row needs the seat service and no service start is
+ * recorded on this seat (`service-start-unrecorded`): the authority would be a guess. Once the task
+ * is registered, install takes out the Run entry and wrapper an older install wrote for the service.
  * @param {'install' | 'check' | 'run' | 'remove'} action @param {TimerSpec} spec
  * @param {{ run?: Runner, writeFile?: (file: string, data: Buffer | string) => Promise<void>, readFile?: (file: string) => Promise<string>, rm?: (file: string) => Promise<void>, mkdir?: (dir: string) => Promise<void>,
  *   sleep?: (ms: number) => Promise<void>, settleMs?: number }} [deps]
@@ -1705,10 +1705,10 @@ export async function runTimer(action, spec, deps = {}) {
       }
       if (present) for (const argv of spec.check) { const r = await go(argv); if (r.code !== 0) problems.push(`${argv.join(" ")}: exit ${r.code}${r.stdout.trim() ? ` (${r.stdout.trim()})` : ""}`); }
     }
-    // Tern's start at logon, and the seat service's, where this OS has them agora keeps
+    // Tern's start at logon, and the seat service's start by the task, where this OS has them
     const login = spec.login ? await loginState(spec.login, go) : null;
     if (login) problems.push(...login.problems);
-    const service = spec.serviceLogin ? await serviceLoginState(spec.serviceLogin, go, read) : null;
+    const service = spec.service ? await serviceState(spec.service, go) : null;
     if (service) problems.push(...service.problems);
     if (failing) problems.push(failing);
     const state = !present ? "missing" : failing ? "failing" : problems.length ? "differs" : "ok";
@@ -1716,11 +1716,11 @@ export async function runTimer(action, spec, deps = {}) {
       ...(service ? { service } : {}) };
   }
   if (action === "install") {
-    // the seat service starts at logon as its last recorded start asked: with none recorded, the
+    // the task starts the seat service as its last recorded start asked: with none recorded, the
     // authority is unknown and nothing is guessed, so nothing is installed
-    const sl = spec.serviceLogin;
-    if (sl?.data && !sl.start.record)
-      return { ...base, state: "refused", problems: [`service-start-unrecorded: ${sl.needs.join(", ")} need${sl.needs.length === 1 ? "s" : ""} the seat service at logon, and no service start is recorded on this seat (${sl.start.error ?? `${sl.start.file} is absent`}), so its authority cannot be known; start the service once with agora service start [--authority <a-64hex>] (stop it first if it runs), then install again. Nothing was installed`], ran };
+    const sv = spec.service;
+    if (sv?.needs.length && !sv.start.record)
+      return { ...base, state: "refused", problems: [`service-start-unrecorded: ${sv.needs.join(", ")} need${sv.needs.length === 1 ? "s" : ""} the seat service at logon, and no service start is recorded on this seat (${sv.start.error ?? `${sv.start.file} is absent`}), so its authority cannot be known; start the service once with agora service start [--authority <a-64hex>] (stop it first if it runs), then install again. Nothing was installed`], ran };
     for (const f of spec.files) {
       await mk(path.dirname(f.path));
       await write(f.path, f.encoding === "utf16le" ? Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(f.content, "utf16le")]) : f.content);
@@ -1748,16 +1748,12 @@ export async function runTimer(action, spec, deps = {}) {
         if (now.state === "disabled") await go(["reg", "delete", spec.login.approved, "/v", spec.login.name, "/f"]);
       }
     }
-    // the seat service at logon: agora's wrapper, then agora's entry, written on
-    if (sl?.data) {
-      await mk(path.dirname(sl.file.path));
-      await write(sl.file.path, sl.file.content);
-      const now = await serviceLoginState(sl, go, read);
-      if (now.state !== "agora") {
-        const add = await go(["reg", "add", sl.key, "/v", sl.name, "/t", "REG_SZ", "/d", sl.data, "/f"]);
-        if (add.code !== 0) return { ...base, state: "failed", problems: [`reg add ${sl.key} /v ${sl.name}: exit ${add.code} ${add.stderr.trim().slice(0, 300)}`], ran };
-        if (now.state === "disabled") await go(["reg", "delete", sl.approved, "/v", sl.name, "/f"]);
-      }
+    // the task starts the seat service now: an older install's startup entry for it goes, with its
+    // Startup apps record and its wrapper
+    if (sv) {
+      if ((await legacyEntry(sv.legacy, go)) !== null)
+        for (const key of [sv.legacy.key, sv.legacy.approved]) await go(["reg", "delete", key, "/v", sv.legacy.name, "/f"]);
+      await remove(sv.legacy.file);
     }
     // the proof: one run by the scheduler, waited for, then the same check `timer check` makes
     const sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
@@ -1769,9 +1765,9 @@ export async function runTimer(action, spec, deps = {}) {
   }
   for (const argv of spec.remove) await go(argv);
   // agora's own startup entries and their Startup apps records; Tern's own Start at login is Tern's
-  for (const entry of [spec.login, spec.serviceLogin]) if (entry) for (const key of [entry.key, entry.approved]) await go(["reg", "delete", key, "/v", entry.name, "/f"]);
+  for (const entry of [spec.login, spec.service?.legacy]) if (entry) for (const key of [entry.key, entry.approved]) await go(["reg", "delete", key, "/v", entry.name, "/f"]);
   for (const f of spec.files) if (!f.temporary) await remove(f.path);
-  if (spec.serviceLogin) await remove(spec.serviceLogin.file.path);
+  if (spec.service) await remove(spec.service.legacy.file);
   if (spec.exitFile) await remove(spec.exitFile);
   return { ...base, state: "removed", problems: [], ran };
 }
