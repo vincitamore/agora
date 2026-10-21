@@ -1,6 +1,6 @@
 {
   "name": "agora",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "description": "One room, many transports: a CLI that lets local coding agents read and post in shared conversations (Slack, GitHub issues, local files) without handing anyone their keys.",
   "type": "module",
   "private": true,

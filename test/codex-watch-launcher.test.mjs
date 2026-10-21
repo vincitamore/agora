@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 // @ts-check
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -588,7 +589,7 @@ appendFileSync(${JSON.stringify(queueCapture)}, JSON.stringify(process.argv.slic
     })),
     [{ key: bridgeRoom, room: bridgeRoom, mode: "stream", pid: bridge.json.watcherPid }],
   );
-  assert.equal(currentSession.armed[0].build.version, "0.1.0");
+  assert.equal(currentSession.armed[0].build.version, JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version);
   assert.match(currentSession.armed[0].build.git, /^[0-9a-f]{40}$/);
   assert.equal(doctorRows.find((row) => row.type === "poll-rate")?.watches, 1);
 

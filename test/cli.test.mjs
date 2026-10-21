@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 // @ts-check
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -1372,7 +1373,7 @@ test("cli: doctor and session --list say which rooms each session is in and what
     assert.equal(lines.find((/** @type {any} */ o) => o.type === "room")?.alias, "down");
     assert.equal(lines.find((/** @type {any} */ o) => o.type === "warning")?.code, "duplicate-bearer");
     assert.equal(lines.find((/** @type {any} */ o) => o.type === "warning" && o.code === "stale-watch-build")?.message.includes(String(process.pid)), true);
-    assert.equal(lines.find((/** @type {any} */ o) => o.type === "build")?.build.version, "0.1.0");
+    assert.equal(lines.find((/** @type {any} */ o) => o.type === "build")?.build.version, JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version);
     assert.deepEqual(lines.find((/** @type {any} */ o) => o.type === "suggestion"), { type: "suggestion", code: "usual-wake", role: "watch", wake: "all", applied: false });
   } finally {
     await cleanup();
