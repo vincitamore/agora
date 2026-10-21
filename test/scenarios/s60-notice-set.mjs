@@ -3,8 +3,9 @@
  * S60 · notice-set. The messenger's notices are a closed set of one-line forms that carry ids, ages
  * and names and never the words of what they point at. Two checks, both on the build's own
  * modules with no seat: the form set equals the set this scenario pins, and a tick over a room whose
- * every message carries a planted phrase raises notices of each clock (the queue's and the waiting
- * record's included, whose waiting line names its need in the planted words) and none carries it.
+ * every message carries a planted phrase raises notices of each clock (the queue's, the waiting
+ * record's and the arming handover's included, whose waiting line names its need in the planted
+ * words) and none carries it.
  */
 
 import { DEFAULT_BOUNDS, NOTICE_TEMPLATES, tick } from "../../src/messenger.mjs";
@@ -25,6 +26,7 @@ const PINNED = {
   N10: "Queued {task} not started after {age}, with no task held: {id}.",
   N11: "Waiting on {person} for {task} after {age}: {id}.",
   N12: "On arming: {task} waits on {person} after {age}: {id}.",
+  N13: "On arming: queued {queued}; active {active}.",
 };
 const PHRASE = "violet-anchor-pumice";
 
@@ -34,11 +36,11 @@ export const scenario = {
   name: "notice-set",
   checks: {
     "form-set-pinned": {
-      bar: "the notice forms are exactly the twelve pinned ones",
+      bar: "the notice forms are exactly the thirteen pinned ones",
       redLeg: "one form grows a slot for the message's words (a paraphrase planted in N2)",
     },
     "no-words-carried": {
-      bar: "0 notices carry the planted phrase, over a room that raises N1, N2, N3, N4, N5, N6, N7, N10, N11 and N12",
+      bar: "0 notices carry the planted phrase, over a room that raises N1, N2, N3, N4, N5, N6, N7, N10, N11, N12 and N13",
       redLeg: "each notice is posted with the first words of the message it points at appended",
     },
   },
@@ -83,7 +85,7 @@ export const scenario = {
       return ctx.red("no-words-carried") && cited ? `${a.text} ${cited.text.split("\n")[0]}` : a.text;
     });
     const kinds = [...new Set(acts.map((a) => a.kind))].sort();
-    ctx.check("no-words-carried", { carrying: 0, kinds: ["N1", "N10", "N11", "N12", "N2", "N3", "N4", "N5", "N6", "N7"] },
+    ctx.check("no-words-carried", { carrying: 0, kinds: ["N1", "N10", "N11", "N12", "N13", "N2", "N3", "N4", "N5", "N6", "N7"] },
       { carrying: posted.filter((t) => t.includes(PHRASE)).length, kinds });
   },
 };

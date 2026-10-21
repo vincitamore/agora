@@ -158,6 +158,33 @@ test("manifest: every refusal names the file and the field", async (t) => {
   assert.ok(RESERVED_ENV.includes("AGORA_ROOM_CMD"));
 });
 
+test("manifest: a row's context ceiling is { ceiling: <tokens> }, inherited from defaults, absent by default, read by no messenger row; anything else is refused by its field (red leg: no context field)", async (t) => {
+  const s = await seat(t);
+  const plain = validateManifest(manifestDoc(), s.manifestFile);
+  assert.equal(plain.residents["desk.coding"].context, null, "no field: the cycle's own bounds only");
+  const d = manifestDoc();
+  /** @type {any} */ (d.residents["desk.coding"]).context = { ceiling: 150_000 };
+  const m = validateManifest(d, s.manifestFile);
+  assert.deepEqual(m.residents["desk.coding"].context, { ceiling: 150_000 });
+  const viaDefaults = manifestDoc();
+  /** @type {any} */ (viaDefaults.defaults).context = { ceiling: 200_000 };
+  /** @type {any} */ (viaDefaults.residents["desk.messenger"]).harness = "agora";
+  const md = validateManifest(viaDefaults, s.manifestFile);
+  assert.deepEqual(md.residents["desk.coding"].context, { ceiling: 200_000 });
+  assert.equal(md.residents["desk.messenger"].context, null, "a messenger is code: it has no context to bound");
+  /** @param {unknown} context @param {RegExp} re */
+  const refuses = (context, re) => {
+    const bad = manifestDoc();
+    /** @type {any} */ (bad.residents["desk.coding"]).context = context;
+    assert.throws(() => validateManifest(bad, s.manifestFile), re);
+  };
+  refuses(150_000, /desk\.coding\.context: must be an object \{ ceiling: <tokens> \}/);
+  refuses({ ceiling: 0 }, /desk\.coding\.context\.ceiling: must be a whole number of tokens, at least 1/);
+  refuses({ ceiling: "150K" }, /desk\.coding\.context\.ceiling: must be a whole number of tokens/);
+  refuses({ ceiling: 150_000, floor: 1 }, /desk\.coding\.context\.floor: unknown field \(have: ceiling\)/);
+  refuses({}, /desk\.coding\.context\.ceiling: is required/);
+});
+
 test("plan: omp under tern carries the extension overlay, the role env and a host command that re-enters start --run", async (t) => {
   const s = await seat(t);
   const m = validateManifest(manifestDoc(), s.manifestFile);
@@ -403,14 +430,32 @@ test("timer: one spec per OS, and check reads without writing", async (t) => {
 
   const win = timerSpec({ ...base, platform: "win32", node: "C:\\Program Files\\nodejs\\node.exe", entry: "C:\\agora\\bin\\agora.mjs", config: "C:\\agora\\config.json" });
   assert.equal(win.kind, "schtasks");
-  assert.deepEqual(win.install, [["schtasks", "/Create", "/TN", "agora-resident-cycle", "/XML", win.files[0].path, "/F"]]);
-  assert.deepEqual(win.check, [["schtasks", "/Query", "/TN", "agora-resident-cycle", "/XML", "ONE"]]);
+  const wrapper = path.join(s.state, "residents", "cycle.cmd");
+  const log = path.join(s.state, "residents", "cycle.log");
+  const exitFile = path.join(s.state, "residents", "cycle.exit");
+  assert.deepEqual(win.files.map((f) => [f.path === wrapper ? "wrapper" : "xml", f.temporary]), [["xml", true], ["wrapper", false]], "the XML is used once; the wrapper is the task's program and stays");
+  assert.deepEqual(win.install, [["schtasks", "/Delete", "/TN", "agora-resident-cycle", "/F"], ["schtasks", "/Create", "/TN", "agora-resident-cycle", "/XML", win.files[0].path, "/F"]], "deleted first, so a new entry carries no old entry's last run");
+  assert.deepEqual(win.check, [["schtasks", "/Query", "/TN", "agora-resident-cycle", "/XML", "ONE"], ["schtasks", "/Query", "/TN", "agora-resident-cycle", "/V", "/FO", "CSV", "/NH"]]);
   assert.deepEqual(win.remove, [["schtasks", "/Delete", "/TN", "agora-resident-cycle", "/F"]]);
-  assert.equal(win.files[0].temporary, true);
-  assert.equal(win.expect?.arguments, `--headless "C:\\Program Files\\nodejs\\node.exe" C:\\agora\\bin\\agora.mjs resident cycle --all --config C:\\agora\\config.json`);
+  // Task Scheduler cannot start node under `conhost --headless` (0x80070005); it can start cmd.exe
+  // there, on a wrapper agora writes, quoted once so a path with spaces holds (conhost mangles /s "")
+  assert.equal(win.expect?.arguments, `--headless cmd.exe /d /c "${wrapper}"`);
   assert.deepEqual(parseTaskXml(win.files[0].content), { command: "conhost.exe", arguments: win.expect?.arguments, interval: "PT15M" });
   assert.match(win.files[0].content, /<MultipleInstancesPolicy>IgnoreNew<\/MultipleInstancesPolicy>/);
   assert.match(win.files[0].content, /<LogonType>InteractiveToken<\/LogonType>/, "runs in the user's session, where Tern is");
+  assert.equal(win.files[1].content, [
+    "@echo off",
+    "chcp 65001 >nul",
+    `"C:\\Program Files\\nodejs\\node.exe" C:\\agora\\bin\\agora.mjs resident cycle --all --config C:\\agora\\config.json >>"${log}" 2>&1`,
+    `>"${exitFile}" echo %ERRORLEVEL%`,
+    "",
+  ].join("\r\n"), "the cycle's own output is its log, as launchd's is; its exit code is recorded, since conhost passes none on");
+  // a path with spaces is quoted; % is doubled, since cmd expands it even inside quotes; a quote cannot be carried
+  const odd = timerSpec({ ...base, platform: "win32", node: "C:\\node.exe", entry: "C:\\agora\\bin\\agora.mjs", config: "C:\\Users\\Grace Hopper\\100%\\config.json" });
+  assert.match(odd.files[1].content, /--config "C:\\Users\\Grace Hopper\\100%%\\config\.json" >>/);
+  assert.throws(() => timerSpec({ ...base, platform: "win32", node: "C:\\node.exe", entry: "C:\\agora\\bin\\agora.mjs", config: "C:\\a\"b\\config.json" }), /cannot carry/);
+  // the wrapper's own path rides cmd /c inside one pair of quotes, where cmd still reads & ( ) and friends
+  assert.throws(() => timerSpec({ ...base, platform: "win32", node: "C:\\node.exe", entry: "C:\\agora\\bin\\agora.mjs", stateRoot: "C:\\Users\\Ada (lab)\\state" }), /wrapper .* cannot carry a quote or any of & < > \( \) @ \^ \| %/);
 
   const linux = timerSpec({ ...base, platform: "linux", seconds: 600 });
   assert.equal(linux.kind, "systemd");
@@ -431,28 +476,65 @@ test("timer: one spec per OS, and check reads without writing", async (t) => {
   assert.throws(() => timerSpec({ ...base, platform: "linux", seconds: 90 }), /whole minutes/);
   assert.throws(() => timerSpec({ ...base, platform: "linux", config: "/home/it's/config.json" }), /cannot carry/);
 
-  // check: a registered task with the same command is ok; another command differs; absent is missing
+  // check: a registered task with the same command and wrapper, whose last run started and ran the
+  // cycle to exit 0, is ok; another command or wrapper differs; a run the scheduler refused, one that
+  // never reached the cycle, or a cycle that exited non-zero is failing; absent is missing
   /** @type {string[]} */
   const writes = [];
+  const files = new Map(win.files.map((f) => [f.path, f.content]));
+  files.set(exitFile, "0 \r\n");
   const deps = (/** @type {(argv: string[]) => { code: number, stdout?: string }} */ answer) => ({
     run: fakeRunner(answer).fn,
     writeFile: async (/** @type {string} */ f) => { writes.push(f); },
     rm: async (/** @type {string} */ f) => { writes.push(`rm ${f}`); },
     mkdir: async () => {},
-    readFile: async () => { throw new Error("absent"); },
+    readFile: async (/** @type {string} */ f) => { if (!files.has(f)) throw new Error("absent"); return String(files.get(f)); },
   });
   const utf16 = (/** @type {string} */ text) => text.split("").join("\u0000");
-  assert.equal((await runTimer("check", win, deps(() => ({ code: 0, stdout: utf16(win.files[0].content) })))).state, "ok");
-  const differs = await runTimer("check", win, deps(() => ({ code: 0, stdout: win.files[0].content.replace("PT15M", "PT5M") })));
+  const csv = (/** @type {string} */ last) => `"HOST","\\agora-resident-cycle","1/1/2026 0:15:00 AM","Ready","Interactive only","1/1/2026 0:00:01 AM","${last}","grace","conhost.exe --headless cmd.exe","N/A"\r\n`;
+  const sched = (/** @type {string} */ xmlText, /** @type {string} */ last) => (/** @type {string[]} */ argv) => argv.includes("/XML") ? { code: 0, stdout: xmlText } : { code: 0, stdout: csv(last) };
+  const ok = await runTimer("check", win, deps(sched(utf16(win.files[0].content), "0")));
+  assert.deepEqual([ok.state, ok.lastResult, ok.cycleExit], ["ok", 0, 0]);
+  assert.equal((await runTimer("check", win, deps(sched(win.files[0].content, "267011")))).state, "ok", "registered and not yet run has not failed");
+  assert.equal((await runTimer("check", win, deps(sched(win.files[0].content, "267009")))).state, "ok", "running now has not failed");
+  // the trial's case: registered as written, and every run refused before agora started
+  const failing = await runTimer("check", win, deps(sched(win.files[0].content, "-2147024891")));
+  assert.deepEqual([failing.state, failing.lastResult], ["failing", -2147024891]);
+  assert.match(failing.problems.join(" "), /ended with 0x80070005 \(-2147024891\): the scheduler could not start it/);
+  // conhost ends 0 whatever its child did: the wrapper's record tells a cycle that failed or never ran
+  files.set(exitFile, "1\r\n");
+  const exited = await runTimer("check", win, deps(sched(win.files[0].content, "0")));
+  assert.deepEqual([exited.state, exited.cycleExit], ["failing", 1]);
+  assert.match(exited.problems.join(" "), new RegExp(`ran the cycle, which exited 1; its own lines are in ${log.replace(/\\/g, "\\\\")}`));
+  files.delete(exitFile);
+  const never = await runTimer("check", win, deps(sched(win.files[0].content, "0")));
+  assert.equal(never.state, "failing");
+  assert.match(never.problems.join(" "), /did not run the cycle: .*cycle\.exit is absent/);
+  files.set(exitFile, "0\r\n");
+  const differs = await runTimer("check", win, deps(sched(win.files[0].content.replace("PT15M", "PT5M"), "0")));
   assert.equal(differs.state, "differs");
   assert.match(differs.problems.join(" "), /its interval is PT5M, not PT15M/);
+  files.set(wrapper, "@echo off\r\nnode other.mjs\r\n");
+  const stale = await runTimer("check", win, deps(sched(win.files[0].content, "0")));
+  assert.equal(stale.state, "differs");
+  assert.match(stale.problems.join(" "), /cycle\.cmd differs from what install writes/);
+  files.delete(wrapper);
+  assert.equal((await runTimer("check", win, deps(sched(win.files[0].content, "0")))).state, "differs", "a task whose wrapper is gone cannot run");
+  files.set(wrapper, win.files[1].content);
   assert.equal((await runTimer("check", win, deps(() => ({ code: 1 })))).state, "missing");
-  assert.equal((await runTimer("check", linux, deps(() => ({ code: 0 })))).state, "missing");
+  assert.equal((await runTimer("check", linux, { ...deps(() => ({ code: 0 })), readFile: async () => { throw new Error("absent"); } })).state, "missing");
   assert.deepEqual(writes, [], "check writes nothing");
 
   const installed = await runTimer("install", win, deps(() => ({ code: 0 })));
   assert.equal(installed.state, "installed");
-  assert.deepEqual(writes, [win.files[0].path, `rm ${win.files[0].path}`], "the XML is written, used, and removed");
+  assert.deepEqual(writes, [win.files[0].path, wrapper, `rm ${exitFile}`, `rm ${win.files[0].path}`], "the XML is written, used, and removed; the wrapper stays; an older exit record cannot vouch for the new entry");
+  writes.length = 0;
+  const first = await runTimer("install", win, deps((argv) => ({ code: argv[1] === "/Delete" ? 1 : 0 })));
+  assert.equal(first.state, "installed", "a first install has nothing to delete");
+  assert.equal((await runTimer("install", win, deps((argv) => ({ code: argv[1] === "/Create" ? 1 : 0 })))).state, "failed");
+  writes.length = 0;
+  await runTimer("remove", win, deps(() => ({ code: 0 })));
+  assert.deepEqual(writes, [`rm ${wrapper}`, `rm ${exitFile}`], "remove takes the wrapper and its record with the task");
   writes.length = 0;
   const contents = new Map(linux.files.map((f) => [f.path, f.content]));
   const linuxOk = await runTimer("check", linux, { ...deps(() => ({ code: 0, stdout: "enabled" })), readFile: async (f) => String(contents.get(f)) });

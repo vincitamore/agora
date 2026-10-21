@@ -6,7 +6,8 @@
  *
  *   want     admission. The holder asks for `<room>.<role>`; the want is refused by name past
  *            `maxLive`, for a model outside `models`, for a role outside `roles` (when it is a list),
- *            for a new role with no card, or when every slot of the role is held. A row's slots are
+ *            for a new role with no card, for a new role one edit from a row's name family (the
+ *            nearest name is given), or when every slot of the role is held. A row's slots are
  *            the row itself when it is `on-demand`, then `-2` .. `-<max>`.
  *   ensure   the one start authority. It starts each admitted want that is not running, restarts a
  *            granted position or a messenger row whose host died (a run record left, nothing
@@ -152,6 +153,39 @@ export function withGranted(manifest, fold) {
 }
 
 /**
+ * The rows of `room` whose name family a new role's segment is one edit from: the row's own name
+ * (`codng`, `codings` for `coding`), or a numbered name of it (`coding2`, `coding_2` for
+ * `coding-2`, whatever the row's `max`). A role that near a row would stand up beside it as an
+ * ad-hoc role wearing another card, so a want for it is refused with the name it most likely meant.
+ * Under three letters nothing is near: every short name is one letter from another.
+ * @param {Manifest} manifest @param {string} room @param {string} segment
+ * @returns {Array<{ name: string, row: string }>} the nearest name and the row it belongs to, full positions
+ */
+export function familyNear(manifest, room, segment) {
+  /** @type {Array<{ name: string, row: string }>} */
+  const near = [];
+  const numbered = /^(.*?)[-_]?(\d+)$/.exec(segment);
+  for (const slug of Object.keys(manifest.residents)) {
+    const dot = slug.lastIndexOf(".");
+    if ((dot < 0 ? "" : slug.slice(0, dot)) !== room) continue;
+    const name = slug.slice(dot + 1);
+    const at = (/** @type {string} */ n) => (room ? `${room}.${n}` : n);
+    if (numbered && numbered[1] === name) near.push({ name: at(Number(numbered[2]) >= 2 ? `${name}-${Number(numbered[2])}` : name), row: slug });
+    else if (segment.length >= 3 && name.length >= 3 && oneEdit(segment, name)) near.push({ name: slug, row: slug });
+  }
+  return near;
+}
+
+/** Are two different strings exactly one insertion, deletion or substitution apart? @param {string} a @param {string} b */
+function oneEdit(a, b) {
+  if (a === b || Math.abs(a.length - b.length) > 1) return false;
+  const [s, l] = a.length <= b.length ? [a, b] : [b, a];
+  let i = 0;
+  while (i < s.length && s[i] === l[i]) i++;
+  return s.length === l.length ? s.slice(i + 1) === l.slice(i + 1) : s.slice(i) === l.slice(i + 1);
+}
+
+/**
  * Admit or refuse one want. Pure but for `held` (is a slot's position running?), the card files'
  * existence and `lineage` (would a start of the picked slot on the want's model break a lineage rule
  * against what runs now? `resident-start.mjs` `lineageRefusal`, asked of the manifest with every open
@@ -176,6 +210,10 @@ export async function admitWant(a) {
   if (room !== g.room) return refuse(`${a.requester}'s grant stands residents up as ${g.room ? `${g.room}.` : ""}<role>; ${a.position} is outside it`);
   const slotOf = /^(.*)-(\d+)$/.exec(a.position);
   if (slotOf && a.manifest.residents[slotOf[1]]) return refuse(`${a.position} is a slot of ${slotOf[1]}: want ${slotOf[1]} and the seat picks the slot`);
+  if (!a.manifest.residents[a.position]) {
+    const near = familyNear(a.manifest, room, segment);
+    if (near.length) return refuse(`${a.position} is not a row and is one edit from ${near.map((n) => n.name === n.row ? n.row : `${n.name}, a slot of ${n.row}`).join("; ")}: want ${[...new Set(near.map((n) => n.row))].join(" or ")}${near.some((n) => n.name !== n.row) ? " and the seat picks the slot" : ""}`);
+  }
   if (a.position === a.requester) return refuse("a grant holder does not want its own position");
   const base = a.manifest.residents[a.position] ?? null;
   if (base?.harness === "agora") return refuse(`${a.position} is a messenger row (harness agora): it runs code and is never granted`);

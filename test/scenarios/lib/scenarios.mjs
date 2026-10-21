@@ -50,6 +50,7 @@ export const SCENARIO_FILES = Object.freeze({
   S61: "../s61-grant.mjs",
   S62: "../s62-revoke.mjs",
   S64: "../s64-queue-clock.mjs",
+  S65: "../s65-queue-identity.mjs",
 });
 
 /** @param {string} id @returns {Promise<Scenario>} */

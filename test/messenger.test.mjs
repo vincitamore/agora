@@ -19,7 +19,7 @@ import { withTrailers } from "../src/trailers.mjs";
 // A notice is a pointer, never a paraphrase: it carries ids, ages and names and never the words of
 // the message it points at. This pin is the whole set, by exact equality, so a form that grows a
 // slot for a message's text (or a new form) is a red bar here and a reviewed change, not drift.
-test("the notice set is exactly these twelve forms", () => {
+test("the notice set is exactly these thirteen forms", () => {
   assert.deepEqual({ ...NOTICE_TEMPLATES }, {
     N1: "Routed: unaddressed request {id}.",
     N2: "Not taken {age} since {since}: {id}.",
@@ -33,6 +33,7 @@ test("the notice set is exactly these twelve forms", () => {
     N10: "Queued {task} not started after {age}, with no task held: {id}.",
     N11: "Waiting on {person} for {task} after {age}: {id}.",
     N12: "On arming: {task} waits on {person} after {age}: {id}.",
+    N13: "On arming: queued {queued}; active {active}.",
   });
   assert.ok(Object.isFrozen(NOTICE_TEMPLATES));
   assert.deepEqual({ ...DEFAULT_BOUNDS }, { R: 7_200_000, R2: 14_400_000, I: 3_600_000, Bo: 14_400_000, H: 86_400_000, L: 600_000, T: 30_000, G: 600_000, G2: 1_800_000, S: 7_200_000, D: 300_000 });
@@ -41,7 +42,7 @@ test("the notice set is exactly these twelve forms", () => {
 test("every form reads back as itself; a slot is one token (red leg: a slot with a space is refused)", () => {
   const sample = { id: "a".repeat(64), age: "16m", since: "posted", position: "desk.coding", verb: "taken", verdict: "unknown", subject: "work:msg:x",
     addr: "builder", kind: "retired", nearest: "desk.coding", root: "b".repeat(64), attestor: "observe", path: "ensure", outcome: "ready", human: "Ada",
-    task: "task:parser-fix", person: "Ada" };
+    task: "task:parser-fix", person: "Ada", queued: `task:slugify@${"d".repeat(64)},task:chunk@${"e".repeat(64)}`, active: "none" };
   for (const kind of /** @type {(keyof typeof NOTICE_TEMPLATES)[]} */ (Object.keys(NOTICE_TEMPLATES))) {
     const text = withTrailers(formatNotice(kind, sample), [{ key: "re", value: "c".repeat(64) }]) + "\n\n-- messenger/Code";
     const back = parseNotice(text);
@@ -404,6 +405,94 @@ test("the waiting record: one N11 to the person after R, the task queued again o
   const n12 = notice(T0 + 10 * MIN, "N12", { task: "task:faster", person: "Ada", age: "8m", id: park.id }, onArm[0].trailers, b.id);
   assert.deepEqual(kinds(run([...ms, n12], { now: T0 + 12 * MIN, records: successor })), [], "once per arming");
   assert.deepEqual(kinds(run([...ms, n12], { now: T0 + 14 * MIN, records: [RECORDS[0], armed("s-orch3", T0 + 13 * MIN)] })), ["N12"], "the next arming is told again");
+});
+
+test("a task is its subject, not its name: a name reused in a later subject is a new task, and N10 names the queued one (red legs: the old subject's close leaves the new task queued; a claim by name outside any subject takes the open one)", () => {
+  const a = ask(T0, "add slugify"), b = ask(T0 + 10 * MIN, "add slugify for titles too"), c = ask(T0 + 11 * MIN, "make the reports smaller");
+  const ms = [a, intake(T0 + MIN, a.id, "slugify"), takeTask(T0 + 2 * MIN, a.id, "slugify"), closeTask(T0 + 5 * MIN, a.id, "slugify"),
+    b, c, intake(T0 + 12 * MIN, b.id, "slugify"), intake(T0 + 13 * MIN, c.id, "reports")];
+  assert.deepEqual(queueOf(ms, new Set()).tasks.map((t) => [t.slug, t.root, t.state]), [["slugify", a.id, "done"], ["slugify", b.id, "queued"], ["reports", c.id, "queued"]]);
+  const idle = (/** @type {number} */ now) => [fresh("s-orch", now, { since: T0 + 13 * MIN })];
+  assert.deepEqual(run(ms, { now: T0 + 30 * MIN, activity: idle(T0 + 30 * MIN) }).map((x) => [x.kind, x.text]),
+    [["N10", `Queued task:slugify not started after 18m, with no task held: ${b.id}.`]], "the head is the older queued subject, whatever its name was used for before");
+  // a second close in the old subject (a stray release with a verdict) is the old task's, never the new one's
+  const stray = closeTask(T0 + 14 * MIN, a.id, "slugify");
+  assert.deepEqual(queueOf([...ms, stray], new Set()).tasks.map((t) => [t.root, t.state]), [[a.id, "done"], [b.id, "queued"], [c.id, "queued"]]);
+  // a claim by name posted outside any subject takes the open task of that name
+  const topClaim = msg({ at: T0 + 15 * MIN, name: "orchestrator/Opus", text: "taking slugify", claim: "task:slugify" });
+  assert.deepEqual(queueOf([...ms, topClaim], new Set()).tasks.map((t) => [t.root, t.state]), [[a.id, "done"], [b.id, "active"], [c.id, "queued"]]);
+});
+
+test("the queue fold reads from the starting point: a task taken before it and never closed does not hold the queue (red leg: with no starting point it does)", () => {
+  const old = ask(T0 - 30 * MIN, "fix the median");
+  const fresh2 = ask(T0, "fix the median again");
+  const ms = [old, intake(T0 - 29 * MIN, old.id, "median-fix"), takeTask(T0 - 28 * MIN, old.id, "median-fix"), fresh2, intake(T0 + MIN, fresh2.id, "median-fix")];
+  const idle = [fresh("s-orch", T0 + 20 * MIN, { since: T0 + MIN })];
+  assert.deepEqual(run(ms, { now: T0 + 20 * MIN, activity: idle, since: T0 - MIN }).map((x) => [x.kind, x.trailers[1].value]), [["N10", fresh2.id]]);
+  assert.deepEqual(queueOf(ms, new Set(), T0 - MIN).tasks.map((t) => [t.root, t.state]), [[fresh2.id, "queued"]]);
+  assert.deepEqual(kinds(run(ms, { now: T0 + 20 * MIN, activity: idle })), [], "red leg: no starting point, so the old task is held and the queue waits behind it");
+});
+
+test("a waiting record is read from the waiting trailer anywhere in the block, or from `waiting: <person>; needs: <thing>` anywhere in the release line (red legs: a waiting in prose; the inline form with no needs)", () => {
+  const b = ask(T0, "make the reports smaller");
+  const taken = [b, intake(T0 + MIN, b.id, "reports"), takeTask(T0 + MIN, b.id, "reports")];
+  const parked = (/** @type {any} */ park) => { const t = queueOf([...taken, park], new Set()).tasks[0]; return [t.state, t.waiting?.person ?? null]; };
+  const inline = parkTask(T0 + 2 * MIN, b.id, "reports", "Released: no bar. waiting: Ada; needs: which report, and what counts as smaller.");
+  assert.deepEqual(parked(inline), ["waiting", "Ada"], "mid-line, after other words");
+  assert.deepEqual(parked(parkTask(T0 + 2 * MIN, b.id, "reports")), ["waiting", "Ada"], "the line-start form still reads");
+  const trailer = msg({ at: T0 + 2 * MIN, name: "orchestrator/Opus", text: "Released: no bar.", thread: b.id, to: ["Ada"], release: "task:reports",
+    extra: [{ key: "task", value: "reports" }, { key: "waiting", value: "Ada; needs: which report" }] });
+  assert.deepEqual(parked(trailer), ["waiting", "Ada"], "the trailer, last in its block");
+  assert.deepEqual(parked(parkTask(T0 + 2 * MIN, b.id, "reports", "Released: I am waiting on Ada to say which report.")), ["queued", null], "red leg: prose");
+  assert.deepEqual(parked(parkTask(T0 + 2 * MIN, b.id, "reports", "Released: no bar, waiting: Ada said nothing yet.")), ["queued", null], "red leg: inline with no needs");
+  assert.deepEqual(run([...taken, inline], { now: T0 + 17 * MIN }).map((x) => [x.kind, x.trailers]), [["N11", [{ key: "to", value: "Ada" }, { key: "re", value: inline.id }]]]);
+});
+
+test("on arming, an orchestrator session that took the position after tasks were queued or taken gets one N13 listing them by subject, in the Room subject (red legs: a session armed before them; nothing queued or held)", () => {
+  const roomRoot = msg({ at: T0 - 60 * MIN, kind: "human", name: "Ada", text: "Room" });
+  const a = ask(T0, "fix the parser"), b = ask(T0 + MIN, "add slugify"), c = ask(T0 + 2 * MIN, "add chunk");
+  const ms = [roomRoot, a, b, c, intake(T0 + 3 * MIN, a.id, "parser-fix"), takeTask(T0 + 4 * MIN, a.id, "parser-fix"), intake(T0 + 5 * MIN, b.id, "slugify"), intake(T0 + 6 * MIN, c.id, "chunk")];
+  const armed = (/** @type {string} */ slug, /** @type {number} */ at) => ({ slug, state: live, record: /** @type {any} */ ({ bearer: "orchestrator/Sonnet", label: "desk.orchestrator", startedAt: new Date(at).toISOString() }), posted: new Set() });
+  const pins = { pinned: new Set([roomRoot.id]), titles: new Map([[roomRoot.id, "Room"]]) };
+  const successor = [RECORDS[0], armed("s-orch2", T0 + 8 * MIN)];
+  const onArm = run(ms, { now: T0 + 9 * MIN, records: successor, ...pins });
+  const text = `On arming: queued task:slugify@${b.id},task:chunk@${c.id}; active task:parser-fix@${a.id}.`;
+  assert.deepEqual(onArm.map((x) => [x.kind, x.text, x.trailers, x.thread]), [["N13", text, [{ key: "to", value: "orchestrator" }], roomRoot.id]]);
+  assert.deepEqual(run(ms, { now: T0 + 9 * MIN, records: successor }).filter((x) => x.kind === "N13").map((x) => x.thread), [undefined], "no Room subject: top level");
+  const n13 = notice(T0 + 9 * MIN, "N13", { queued: `task:slugify@${b.id},task:chunk@${c.id}`, active: `task:parser-fix@${a.id}` }, onArm[0].trailers, roomRoot.id);
+  assert.deepEqual(kinds(run([...ms, n13], { now: T0 + 12 * MIN, records: successor, ...pins })), [], "once per arming");
+  assert.deepEqual(kinds(run([...ms, n13], { now: T0 + 14 * MIN, records: [RECORDS[0], armed("s-orch3", T0 + 13 * MIN)], ...pins })), ["N13"], "the next arming is told again");
+  assert.deepEqual(kinds(run(ms, { now: T0 + 9 * MIN, records: [RECORDS[0], armed("s-orch", T0 - MIN)], ...pins })), [], "red leg: the session armed before every task, and saw them live");
+  assert.deepEqual(kinds(run(ms.slice(0, 4), { now: T0 + 9 * MIN, records: successor, ...pins })), [], "red leg: nothing queued or held, nothing to hand over");
+});
+
+test("no clock 1 for a line that owes no answer: ack: none, an address naming the messenger itself, an answer to a notice, a release with no verdict and no claim (red legs: each as a request to coding)", () => {
+  const now = T0 + 20 * MIN; // past R with no activity record: a request is clocked
+  const request = msg({ at: T0, name: "orchestrator/Opus", text: "please run the suite", to: ["coding"] });
+  assert.deepEqual(kinds(run([request], { now })), ["N2"], "red leg: a request to coding");
+  // (a) ack: none
+  assert.deepEqual(kinds(run([msg({ at: T0, name: "orchestrator/Opus", text: "fyi", to: ["coding"], extra: [{ key: "ack", value: "none" }] })], { now })), []);
+  // (b) the messenger itself: its role, or the bearer its notices are signed by
+  const withMessenger = [...RECORDS, { slug: "s-msgr", state: live, record: /** @type {any} */ ({ bearer: "messenger/Code", label: "desk.messenger" }), posted: new Set() }];
+  const toSelf = msg({ at: T0, name: "orchestrator/Opus", text: "answered your notice", to: ["messenger"] });
+  assert.deepEqual(kinds(run([toSelf], { now, records: withMessenger })), []);
+  const sentry = [...RECORDS, { slug: "s-sentry", state: live, record: /** @type {any} */ ({ bearer: "sentry/Code" }), posted: new Set() }];
+  const own = notice(T0 - MIN, "N5", { addr: "nobody", kind: "unknown", nearest: "none" }, [{ key: "re", value: "z".repeat(64) }]);
+  const signed = { ...own, author: { ...own.author, name: "sentry/Code" }, signedAs: "sentry/Code", text: own.text.replace("-- messenger/Code", "-- sentry/Code") };
+  const toSentry = msg({ at: T0, name: "orchestrator/Opus", text: "answered", to: ["sentry"] });
+  assert.deepEqual(kinds(run([signed, toSentry], { now, records: sentry })), [], "the bearer that signs the notices is the messenger");
+  assert.deepEqual(kinds(run([toSentry], { now, records: sentry })), ["N2"], "red leg: with no notice signed by it, sentry is any holder");
+  // (c) an answer to a notice
+  const n10 = notice(T0 - MIN, "N10", { task: "task:x", age: "10m", id: "r".repeat(64) }, [{ key: "to", value: "orchestrator" }, { key: "re", value: "r".repeat(64) }]);
+  const plain = msg({ at: T0 - MIN, name: "review/Argon", text: "a line" });
+  assert.deepEqual(kinds(run([n10, msg({ at: T0, name: "orchestrator/Opus", text: "not started because", thread: n10.id, to: ["coding"], re: n10.id })], { now })), []);
+  assert.deepEqual(kinds(run([plain, msg({ at: T0, name: "orchestrator/Opus", text: "please look", thread: plain.id, to: ["coding"], re: plain.id })], { now })), ["N2"], "red leg: re: a line that is no notice");
+  // (d) a release with no verdict and no claim: a record act
+  const released = (/** @type {Array<{ key: string, value: string }>} */ extra, to = ["coding"]) => msg({ at: T0, name: "orchestrator/Opus", text: "Released work:x/impl", to, release: "work:x/impl", extra });
+  assert.deepEqual(kinds(run([released([])], { now })), []);
+  assert.deepEqual(kinds(run([released([{ key: "verdict", value: "pass" }])], { now })), ["N2"], "red leg: a release with a verdict is a result to act on");
+  assert.deepEqual(kinds(run([released([{ key: "claim", value: "work:x/review" }])], { now })), ["N2"], "red leg: a release beside a claim hands work on");
+  assert.deepEqual(kinds(run([released([], ["codng"])], { now })), ["N5"], "no clock, but an address that names no one still draws its pointer");
 });
 
 test("clock 2: a lapsed lease of this seat's gives N4 after I and N3 at R2; a release or verdict settles it; a foreign lease never (red leg: no release)", () => {

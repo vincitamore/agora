@@ -142,6 +142,30 @@ test("want: within caps takes the next slot; refused by name past maxLive, outsi
   assert.match(String(/** @type {any} */ (await admit(none, empty, { position: "lab.triage" })).reason), /host none/);
 });
 
+test("want: a new role one edit from a row's name or slot is refused with the nearest slot named, so it never shadows the row's family (red leg: a role far from every row is admitted)", async (t) => {
+  const s = await seat(t);
+  const m = load(s, seedDoc({ roles: "open", models: ["sonnet", "opus"], maxLive: 2, maxHours: 8, card: "roles/ad-hoc.md" }));
+  const empty = foldLedger([]);
+  const refused = async (/** @type {string} */ position) => String(/** @type {any} */ (await admit(m, empty, { position })).reason);
+  // the trial's case: coding2 was admitted as a new role wearing the ad-hoc card, not coding's slot
+  assert.equal(await refused("lab.coding2"), "lab.coding2 is not a row and is one edit from lab.coding-2, a slot of lab.coding: want lab.coding and the seat picks the slot");
+  assert.match(await refused("lab.coding_2"), /one edit from lab\.coding-2, a slot of lab\.coding: want lab\.coding/);
+  assert.match(await refused("lab.coding_3"), /one edit from lab\.coding-3, a slot of lab\.coding/);
+  assert.match(await refused("lab.codng"), /^lab\.codng is not a row and is one edit from lab\.coding: want lab\.coding/);
+  assert.match(await refused("lab.codings"), /one edit from lab\.coding:/);
+  // a row's family is its name and every numbered name, whether or not its max reaches that slot
+  assert.match(await refused("lab.review2"), /one edit from lab\.review-2, a slot of lab\.review: want lab\.review/);
+  assert.match(await refused("lab.reviews"), /one edit from lab\.review:/);
+  // red leg: a role that is no edit near a row is a new role, admitted at its own position
+  const triage = /** @type {any} */ (await admit(m, empty, { position: "lab.triage", model: "sonnet" }));
+  assert.deepEqual([triage.ok, triage.want?.position, triage.want?.base], [true, "lab.triage", null]);
+  const reviewer = /** @type {any} */ (await admit(m, empty, { position: "lab.reviewer", model: "sonnet" }));
+  assert.equal(reviewer.ok, true, "two edits from review is a role of its own");
+  // the row itself and its slot keep their own answers
+  assert.equal(/** @type {any} */ (await admit(m, empty, { position: "lab.coding" })).want.position, "lab.coding-2");
+  assert.match(await refused("lab.coding-2"), /is a slot of lab\.coding/);
+});
+
 test("a granted row is the base row with the want's model, its own folder, the default bearer and the cards appended", async (t) => {
   const s = await seat(t);
   const m = load(s, seedDoc(undefined, { "lab.coding": { role: "coding", model: "opus", tenure: "standing", max: 3, append: ["roles/coding.md"], bearer: "coding/Special", restart: "x {slug}", workdir: { path: "shared", files: { "NOTE.md": [{ text: "n" }] } } } }));

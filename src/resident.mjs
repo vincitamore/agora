@@ -248,12 +248,13 @@ export function matchesResidentRecord(record, slug) {
  * @param {number} [a.idleSeconds]
  * @param {number} [a.minContext]
  * @param {number} [a.maxContext] cycle past this even warm, once idle past `deafSeconds`
+ * @param {number} [a.ceiling] the row's own context ceiling: past it, with no request pending, the verdict names it (`overCeiling`) so the caller asks a succession
  * @param {number} [a.deafSeconds] the grace a resident with no live watch gets before it is deaf
  * @param {number} [a.watching] live watches the session holds (armed records whose pid answers, plus a fresh harness-owned watch heartbeat); absent = not measured, no deaf verdict
  * @param {string | null} [a.activityAt] the heartbeat of the session's harness-owned watch, when it keeps an activity record
- * @param {{ at: string, turn: Awaited<ReturnType<typeof positionTurn>>, held?: Array<{ subject: string, at: string }> }} [a.succeed] a pending succeed request, the session's turn, and the claims it took after the request and still holds
+ * @param {{ at: string, ceiling?: number, turn: Awaited<ReturnType<typeof positionTurn>>, held?: Array<{ subject: string, at: string }> }} [a.succeed] a pending succeed request (asked by the cycle at the row's `ceiling`, or by the resident), the session's turn, and the claims that hold it: taken after the request, or any the session holds for a ceiling's
  */
-export async function cycleVerdict({ slug, sessions, measure, now = new Date(), idleSeconds = DEFAULT_IDLE_SECONDS, minContext = DEFAULT_MIN_CONTEXT, maxContext = DEFAULT_MAX_CONTEXT, deafSeconds = DEFAULT_DEAF_SECONDS, watching, activityAt, succeed }) {
+export async function cycleVerdict({ slug, sessions, measure, now = new Date(), idleSeconds = DEFAULT_IDLE_SECONDS, minContext = DEFAULT_MIN_CONTEXT, maxContext = DEFAULT_MAX_CONTEXT, ceiling, deafSeconds = DEFAULT_DEAF_SECONDS, watching, activityAt, succeed }) {
   assertResidentSlug(slug);
   const live = sessions.filter((s) => s.state === "live" && matchesResidentRecord(s.record, slug));
   /** @type {Record<string, unknown>} */
@@ -264,21 +265,25 @@ export async function cycleVerdict({ slug, sessions, measure, now = new Date(), 
   row.session = s.slug;
   row.bearer = s.record.bearer;
   const m = await measure({ slug: s.slug, ...s.record });
-  // Succeed: the resident asked to be handed to a fresh session. Honoured only between turns, so no
-  // tool call, child job or delivery in flight is cut off, and never while the session holds a claim
-  // it took after the request (it asked at a close and then took the next task: mid-task, however
-  // idle its turn); a request older than the session that holds the position now was already honoured.
+  // Succeed: the resident asked to be handed to a fresh session, or the cycle asked for it past the
+  // row's ceiling. Honoured only between turns, so no tool call, child job or delivery in flight is
+  // cut off, and never while the session holds a claim that is mid-task: one it took after its own
+  // request (it asked at a close and then took the next task, however idle its turn), or, for the
+  // ceiling's request, which may come mid-task, any it holds. A request older than the session that
+  // holds the position now was already honoured.
   if (succeed) {
     row.succeed = succeed.at;
     if (m.status === "measured") Object.assign(row, { lastInference: m.lastInference, context: m.context, transcript: m.file });
     if (s.record.startedAt && Date.parse(succeed.at) < Date.parse(s.record.startedAt))
       return { ...row, action: "none", stale: true, reason: `the succeed request of ${succeed.at} predates this session (started ${s.record.startedAt}): it was honoured` };
+    const asked = succeed.ceiling !== undefined ? `ceiling ${succeed.ceiling} asked a succession ${succeed.at}` : `succeed requested ${succeed.at}`;
     const t = succeed.turn;
     if (succeed.held?.length)
-      return { ...row, action: "none", reason: `succeed requested ${succeed.at}; waits while this session holds ${succeed.held.map((h) => `${h.subject}, claimed ${h.at}`).join("; ")} after the request` };
-    if (t.status !== "read") return { ...row, action: "none", reason: `succeed requested ${succeed.at}; its turn cannot be read (${t.status === "unsupported" ? t.reason : "no live session"}), so it waits` };
-    if (!t.turnEnded) return { ...row, action: "none", reason: `succeed requested ${succeed.at}; waits for the running turn to end` };
-    return { ...row, action: "cycle", reason: `succeed: requested ${succeed.at}; the turn ended ${Math.max(0, Math.floor((now.getTime() - Date.parse(t.at)) / 1000))}s ago` };
+      return { ...row, action: "none", reason: `${asked}; waits while this session holds ${succeed.held.map((h) => `${h.subject}, claimed ${h.at}`).join("; ")}${succeed.ceiling !== undefined ? "" : " after the request"}` };
+    if (t.status !== "read") return { ...row, action: "none", reason: `${asked}; its turn cannot be read (${t.status === "unsupported" ? t.reason : "no live session"}), so it waits` };
+    if (!t.turnEnded) return { ...row, action: "none", reason: `${asked}; waits for the running turn to end` };
+    const ended = `the turn ended ${Math.max(0, Math.floor((now.getTime() - Date.parse(t.at)) / 1000))}s ago`;
+    return { ...row, action: "cycle", reason: succeed.ceiling !== undefined ? `ceiling: context ${row.context ?? "unmeasured"} past the row's ceiling ${succeed.ceiling}; asked ${succeed.at}, ${ended}` : `succeed: requested ${succeed.at}; ${ended}` };
   }
   if (m.status !== "measured") return { ...row, action: "none", reason: m.reason };
   const idle = Math.floor((now.getTime() - new Date(m.lastInference).getTime()) / 1000);
@@ -289,6 +294,9 @@ export async function cycleVerdict({ slug, sessions, measure, now = new Date(), 
   // Deaf: no live watch and not working. A resident whose watches died (an API error on the turn
   // that should have re-armed them) never wakes again, so size and warmth are beside the point.
   if (watching === 0 && idle >= deafSeconds) return { ...row, action: "cycle", reason: `deaf: no live watch and idle ${idle}s >= ${deafSeconds}s` };
+  // The row's own ceiling: a position whose work outgrows it (a reviewer that reads whole diffs) is
+  // handed on at its next idle, through a succeed request so the turn-end kick and the claim deferral apply
+  if (ceiling !== undefined && m.context >= ceiling) return { ...row, action: "none", overCeiling: ceiling, reason: `ceiling: context ${m.context} >= the row's ceiling ${ceiling}; a succession is asked, honoured at its next idle` };
   // Ceiling: every wake re-reads the whole context, so past this a successor at the orientation
   // floor is cheaper even warm. Only between turns (idle past the deaf grace), never mid-work.
   if (m.context >= maxContext && idle >= deafSeconds) return { ...row, action: "cycle", reason: `ceiling: context ${m.context} >= ${maxContext} and idle ${idle}s >= ${deafSeconds}s` };
@@ -331,21 +339,38 @@ export async function watchEvidence(stateRoot, session, deps = {}) {
 }
 
 /**
- * Plan one resident's cycle against the seat's live records.
+ * Plan one resident's cycle against the seat's live records. Past the row's `ceiling` with no
+ * request pending, it writes the succeed request (`by: cycle`, with the ceiling; not on a dry run)
+ * and judges that request as any other: the session's agora-room watch kicks the timer at its next
+ * turn end, and the cycle honours it once no claim holds it.
  * @param {string} stateRoot @param {string} slug
- * @param {{ now?: Date, idleSeconds?: number, minContext?: number, maxContext?: number, deafSeconds?: number, home?: string, kill?: (pid: number, sig: 0) => void, boot?: number }} [opts]
+ * @param {{ now?: Date, idleSeconds?: number, minContext?: number, maxContext?: number, ceiling?: number, dryRun?: boolean, deafSeconds?: number, home?: string, kill?: (pid: number, sig: 0) => void, boot?: number }} [opts]
  */
 export async function planCycle(stateRoot, slug, opts = {}) {
   const deps = { kill: opts.kill, boot: opts.boot };
+  const now = opts.now ?? new Date();
   const sessions = await listRecords(stateRoot, deps);
   // The live watches of the session the verdict will measure (the newest live one for this slug).
   const live = sessions.filter((s) => s.state === "live" && matchesResidentRecord(s.record, slug));
   live.sort((a, b) => String(b.record?.startedAt ?? "").localeCompare(String(a.record?.startedAt ?? "")));
-  const ev = live.length ? await watchEvidence(stateRoot, live[0].slug, { ...deps, now: (opts.now ?? new Date()).getTime() }) : undefined;
+  const ev = live.length ? await watchEvidence(stateRoot, live[0].slug, { ...deps, now: now.getTime() }) : undefined;
   const watching = ev ? ev.armed + (ev.heard ? 1 : 0) : undefined;
-  const request = await readSucceedRequest(stateRoot, slug);
-  const succeed = request ? { at: request.at, turn: await positionTurn(stateRoot, slug, { home: opts.home, ...deps }), held: live.length ? await claimsSince(live[0].dir, request.at) : [] } : undefined;
-  return cycleVerdict({ slug, sessions, measure: transcriptMeasure({ home: opts.home }), now: opts.now, idleSeconds: opts.idleSeconds, minContext: opts.minContext, maxContext: opts.maxContext, deafSeconds: opts.deafSeconds, watching, activityAt: ev?.activityAt, succeed });
+  const read = transcriptMeasure({ home: opts.home });
+  /** @type {ReturnType<typeof read> | undefined} */
+  let measured;
+  const measure = (/** @type {any} */ rec) => (measured ??= read(rec));
+  const judge = async (/** @type {{ at: string, ceiling?: unknown } | null} */ request) => {
+    const ceiling = typeof request?.ceiling === "number" ? request.ceiling : undefined;
+    // a ceiling's request may come mid-task, so any claim the session holds defers it
+    const since = ceiling !== undefined ? new Date(0).toISOString() : request?.at ?? "";
+    const succeed = request ? { at: request.at, ceiling, turn: await positionTurn(stateRoot, slug, { home: opts.home, ...deps }), held: live.length ? await claimsSince(live[0].dir, since) : [] } : undefined;
+    return cycleVerdict({ slug, sessions, measure, now, idleSeconds: opts.idleSeconds, minContext: opts.minContext, maxContext: opts.maxContext, ceiling: opts.ceiling, deafSeconds: opts.deafSeconds, watching, activityAt: ev?.activityAt, succeed });
+  };
+  const verdict = await judge(await readSucceedRequest(stateRoot, slug));
+  const over = /** @type {{ overCeiling?: unknown }} */ (verdict).overCeiling;
+  if (typeof over !== "number") return verdict;
+  const asked = opts.dryRun ? { at: now.toISOString(), ceiling: over } : await writeSucceedRequest(stateRoot, slug, { by: "cycle", now, ceiling: over });
+  return { ...(await judge(asked)), requested: asked.at };
 }
 
 /**
@@ -374,18 +399,18 @@ export function succeedRequestPath(stateRoot, slug) {
 
 /**
  * Ask the cycle to hand `slug` to a fresh session at its next tick between turns. A second request
- * replaces the first.
- * @param {string} stateRoot @param {string} slug @param {{ by: string, now?: Date }} fields
+ * replaces the first. `ceiling`: the cycle asked, past the row's context ceiling.
+ * @param {string} stateRoot @param {string} slug @param {{ by: string, now?: Date, ceiling?: number }} fields
  */
 export async function writeSucceedRequest(stateRoot, slug, fields) {
   const file = succeedRequestPath(stateRoot, slug);
-  const rec = { type: "resident-succeed", slug, at: (fields.now ?? new Date()).toISOString(), by: fields.by };
+  const rec = { type: "resident-succeed", slug, at: (fields.now ?? new Date()).toISOString(), by: fields.by, ...(fields.ceiling !== undefined ? { ceiling: fields.ceiling } : {}) };
   await writeFileAtomic(file, JSON.stringify(rec) + "\n");
   return { file, ...rec };
 }
 
 /** @param {string} stateRoot @param {string} slug
- * @returns {Promise<{ file: string, slug: string, at: string, by: string } | null>} */
+ * @returns {Promise<{ file: string, slug: string, at: string, by: string, ceiling?: number } | null>} */
 export async function readSucceedRequest(stateRoot, slug) {
   const file = succeedRequestPath(stateRoot, slug);
   try {

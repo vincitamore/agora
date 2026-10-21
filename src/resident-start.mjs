@@ -51,7 +51,7 @@ export const HARNESSES = Object.freeze(["omp", "claude", "agora"]);
 export const HOSTS = Object.freeze(["tern", "tmux", "none"]);
 export const WAKES = Object.freeze(["all", "addressed", "mine"]);
 const TOP_KEYS = new Set(["version", "models", "vars", "defaults", "residents", "grants"]);
-const ROW_KEYS = new Set(["role", "harness", "model", "thinking", "rooms", "wake", "profile", "append", "workdir", "skills", "host", "env", "args", "preamble", "bearer", "restart", "command", "tenure", "max", "lineage"]);
+const ROW_KEYS = new Set(["role", "harness", "model", "thinking", "rooms", "wake", "profile", "append", "workdir", "skills", "host", "env", "args", "preamble", "bearer", "restart", "command", "tenure", "max", "lineage", "context"]);
 const REQUIRED = ["role", "harness", "model", "rooms", "profile", "host"];
 /** `standing`: started by `start --all` and kept; `on-demand`: started only when a grant holder wants it. */
 export const TENURES = Object.freeze(["standing", "on-demand"]);
@@ -85,6 +85,7 @@ export const DEFAULT_TIMER_SECONDS = 900;
  *   skills: { dir: string, names: string[] } | null, host: 'tern' | 'tmux' | 'none',
  *   env: Record<string, string>, args: string[], preamble: 'on' | 'off' | null, bearer: string | null,
  *   restart: string | null, command: string[] | null, tenure: 'standing' | 'on-demand', max: number, lineage: string,
+ *   context: { ceiling: number } | null,
  * }} ManifestResident
  */
 /**
@@ -262,12 +263,23 @@ export function validateManifest(raw, file) {
       if (agoraRow && row.max !== 1) bad(`${at}.max`, "a messenger row (harness agora) is one per room");
       max = /** @type {number} */ (row.max);
     }
+    // past `ceiling` tokens the cycle asks a succession for the position, honoured at its next idle
+    /** @type {{ ceiling: number } | null} */
+    let context = null;
+    if (row.context !== undefined && !agoraRow) {
+      if (!isObj(row.context)) bad(`${at}.context`, "must be an object { ceiling: <tokens> }");
+      const c = /** @type {Record<string, unknown>} */ (row.context);
+      for (const k of Object.keys(c)) if (k !== "ceiling") bad(`${at}.context.${k}`, "unknown field (have: ceiling)");
+      if (c.ceiling === undefined) bad(`${at}.context.ceiling`, "is required");
+      if (!Number.isInteger(c.ceiling) || /** @type {number} */ (c.ceiling) < 1) bad(`${at}.context.ceiling`, "must be a whole number of tokens, at least 1");
+      context = { ceiling: /** @type {number} */ (c.ceiling) };
+    }
 
     residents[slug] = {
       slug, role, harness, model: agoraRow ? MESSENGER_MODEL : str("model"), thinking: agoraRow ? null : optStr("thinking"), rooms: [...new Set(rooms)], wake,
       // a messenger row has no prompt: a profile or an append inherited from defaults is not read
       profile: agoraRow ? "" : resolveIn(str("profile")), append: agoraRow ? [] : strList("append", null).map(resolveIn), workdir, skills: agoraRow ? null : skills, host, env,
-      args: strList("args", null), preamble, bearer, restart: optStr("restart"), command, tenure, max, lineage: /** @type {string} */ (lineage),
+      args: strList("args", null), preamble, bearer, restart: optStr("restart"), command, tenure, max, lineage: /** @type {string} */ (lineage), context,
     };
   }
 
@@ -1082,8 +1094,17 @@ export async function restartResident(manifest, slug, ctx, deps = { checkout: ct
 
 /** @param {string} s */
 const xml = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-/** A Windows command-line argument. @param {string} a */
-const winArg = (a) => (/[\s"]/.test(a) || !a ? `"${a.replace(/"/g, '\\"')}"` : a);
+/**
+ * One word of a `.cmd` line: quoted when cmd would split or act on it (or `always`), with `%`
+ * doubled (a batch file expands it even inside quotes). A quote or a line break cannot be carried,
+ * and no Windows path has one.
+ * @param {string} a @param {boolean} [always]
+ */
+const cmdArg = (a, always = false) => {
+  if (/["\r\n]/.test(a)) throw new AgoraError(`the timer's command cannot carry ${JSON.stringify(a)} (a quote or a line break); move the file`, EXIT.usage);
+  const w = a.replace(/%/g, "%%");
+  return always || !a || /[\s&|<>^(),;=!%]/.test(a) ? `"${w}"` : w;
+};
 /** A POSIX shell word. @param {string} a */
 const shArg = (a) => `'${a.replace(/'/g, "'\\''")}'`;
 
@@ -1096,6 +1117,14 @@ const shArg = (a) => `'${a.replace(/'/g, "'\\''")}'`;
  * The scheduler entry for this OS, as data: the files it writes and the commands install, check,
  * run (one run now, by the scheduler, outside any session's process tree) and remove run. Nothing is
  * written here.
+ *
+ * On Windows the task's program is `conhost.exe --headless`, so no window opens, running `cmd.exe`
+ * on a wrapper written into the state root: Task Scheduler refuses to start node itself under
+ * `conhost --headless` (0x80070005, access denied) and starts `cmd.exe` there. The wrapper runs the
+ * cycle with its output appended to `<state>/residents/cycle.log`, then writes the cycle's exit code
+ * to `<state>/residents/cycle.exit`. conhost does not pass its child's exit code on, so the task's
+ * Last Result says only whether the scheduler could start it; the exit record says whether the
+ * cycle ran and how it ended.
  * @param {TimerContext} ctx
  */
 export function timerSpec(ctx) {
@@ -1104,7 +1133,21 @@ export function timerSpec(ctx) {
   const minutes = seconds / 60;
   const command = [ctx.node, ctx.entry, "resident", "cycle", "--all", ...(ctx.config ? ["--config", ctx.config] : []), ...(ctx.manifest ? ["--manifest", ctx.manifest] : [])];
   if (ctx.platform === "win32") {
-    const args = ["--headless", ...command].map(winArg).join(" ");
+    const wrapper = path.join(ctx.stateRoot, "residents", "cycle.cmd");
+    const log = path.join(ctx.stateRoot, "residents", "cycle.log");
+    const exitFile = path.join(ctx.stateRoot, "residents", "cycle.exit");
+    // `cmd /c "<file>"` keeps the quotes (and so a path with spaces) only while nothing between them
+    // is one of cmd's special characters; conhost mangles the `/s ""..""` form that would allow them
+    if (/["\r\n&<>()@^|%]/.test(wrapper)) throw new AgoraError(`the timer's wrapper ${wrapper} cannot carry a quote or any of & < > ( ) @ ^ | %, which cmd /c reads; give agora a state root without them (AGORA_STATE, or the config's state)`, EXIT.usage);
+    const script = [
+      `@echo off`,
+      // the batch file is UTF-8: a path outside the OEM code page reads as written
+      `chcp 65001 >nul`,
+      `${command.map((a) => cmdArg(a)).join(" ")} >>${cmdArg(log, true)} 2>&1`,
+      `>${cmdArg(exitFile, true)} echo %ERRORLEVEL%`,
+      ``,
+    ].join("\r\n");
+    const args = `--headless cmd.exe /d /c "${wrapper}"`;
     const doc = [
       `<?xml version="1.0" encoding="UTF-16"?>`,
       `<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">`,
@@ -1118,10 +1161,15 @@ export function timerSpec(ctx) {
     ].join("\r\n");
     const xmlFile = path.join(tmpdir(), `${TIMER_NAME}-${process.pid}.xml`);
     return {
-      kind: "schtasks", name: TIMER_NAME, command, interval: `PT${minutes}M`, expect: { command: "conhost.exe", arguments: args, interval: `PT${minutes}M` },
-      files: [{ path: xmlFile, content: doc, encoding: /** @type {const} */ ("utf16le"), temporary: true }],
-      install: [["schtasks", "/Create", "/TN", TIMER_NAME, "/XML", xmlFile, "/F"]],
-      check: [["schtasks", "/Query", "/TN", TIMER_NAME, "/XML", "ONE"]],
+      kind: "schtasks", name: TIMER_NAME, command, interval: `PT${minutes}M`, log, exitFile, expect: { command: "conhost.exe", arguments: args, interval: `PT${minutes}M` },
+      files: [
+        { path: xmlFile, content: doc, encoding: /** @type {const} */ ("utf16le"), temporary: true },
+        { path: wrapper, content: script, encoding: /** @type {const} */ ("utf8"), temporary: false },
+      ],
+      // delete first: a task re-created over itself keeps the old entry's Last Run and Last Result
+      install: [["schtasks", "/Delete", "/TN", TIMER_NAME, "/F"], ["schtasks", "/Create", "/TN", TIMER_NAME, "/XML", xmlFile, "/F"]],
+      // the registered entry, then its last run: Last Result is the seventh column of the verbose CSV in every locale
+      check: [["schtasks", "/Query", "/TN", TIMER_NAME, "/XML", "ONE"], ["schtasks", "/Query", "/TN", TIMER_NAME, "/V", "/FO", "CSV", "/NH"]],
       remove: [["schtasks", "/Delete", "/TN", TIMER_NAME, "/F"]],
       run: [["schtasks", "/Run", "/TN", TIMER_NAME]],
     };
@@ -1148,7 +1196,7 @@ export function timerSpec(ctx) {
       ``,
     ].join("\n");
     return {
-      kind: "launchd", name: LAUNCHD_LABEL, command, interval: `${seconds}s`, expect: null,
+      kind: "launchd", name: LAUNCHD_LABEL, command, interval: `${seconds}s`, log, exitFile: null, expect: null,
       files: [{ path: file, content, encoding: /** @type {const} */ ("utf8"), temporary: false }],
       install: [["launchctl", "bootout", `gui/${uid}/${LAUNCHD_LABEL}`], ["launchctl", "bootstrap", `gui/${uid}`, file]],
       check: [["launchctl", "print", `gui/${uid}/${LAUNCHD_LABEL}`]],
@@ -1179,7 +1227,7 @@ export function timerSpec(ctx) {
     ``,
   ].join("\n");
   return {
-    kind: "systemd", name: `${TIMER_NAME}.timer`, command, interval: `${minutes}min`, expect: null,
+    kind: "systemd", name: `${TIMER_NAME}.timer`, command, interval: `${minutes}min`, log: null, exitFile: null, expect: null,
     files: [
       { path: path.join(unitDir, `${TIMER_NAME}.service`), content: service, encoding: /** @type {const} */ ("utf8"), temporary: false },
       { path: path.join(unitDir, `${TIMER_NAME}.timer`), content: timer, encoding: /** @type {const} */ ("utf8"), temporary: false },
@@ -1200,10 +1248,32 @@ export function parseTaskXml(doc) {
   return { command: tag("Command"), arguments: tag("Arguments"), interval: tag("Interval") };
 }
 
+/** Last Result codes that are not a failed run: the task is running now, or has not run yet. */
+const TASK_NOT_FAILED = Object.freeze([0, 0x41301, 0x41303]);
+
 /**
- * install | check | run | remove. `check` changes nothing and reports ok, missing or differs. `run`
- * asks the scheduler to run the installed entry once now (kicked), or names that none is installed
- * (missing); it never runs the cycle in this process.
+ * The Last Run Time and Last Result of `schtasks /Query /V /FO CSV /NH`: the sixth and seventh
+ * columns of its first row (the column order is fixed; the header, which this omits, is localized).
+ * @param {string} text @returns {{ lastRun: string, lastResult: number } | null}
+ */
+export function parseTaskCsv(text) {
+  const row = text.replace(/\u0000/g, "").split(/\r?\n/).find((l) => l.startsWith('"'));
+  if (!row) return null;
+  const cols = [...row.matchAll(/"((?:[^"]|"")*)"/g)].map((m) => m[1].replace(/""/g, '"'));
+  const lastResult = Number(cols[6]);
+  return Number.isInteger(lastResult) ? { lastRun: cols[5], lastResult } : null;
+}
+
+/** A Task Scheduler result as Windows prints it, `0x80070005`. @param {number} code */
+export const hresult = (code) => `0x${(code >>> 0).toString(16).toUpperCase().padStart(8, "0")}`;
+
+/**
+ * install | check | run | remove. `check` changes nothing and reports ok, missing, differs (the
+ * registered entry or its wrapper is not what install writes) or, for a Windows task, failing: the
+ * scheduler could not start its last run (Last Result), or that run ended without running the cycle
+ * or with the cycle exiting non-zero (the wrapper's exit record). A task not yet run, or running, is
+ * ok. `run` asks the scheduler to run the installed entry once now (kicked), or names that none is
+ * installed (missing); it never runs the cycle in this process.
  * @param {'install' | 'check' | 'run' | 'remove'} action @param {TimerSpec} spec
  * @param {{ run?: Runner, writeFile?: (file: string, data: Buffer | string) => Promise<void>, readFile?: (file: string) => Promise<string>, rm?: (file: string) => Promise<void>, mkdir?: (dir: string) => Promise<void> }} [deps]
  */
@@ -1229,6 +1299,12 @@ export async function runTimer(action, spec, deps = {}) {
     /** @type {string[]} */
     const problems = [];
     let present = true;
+    /** @type {{ lastRun: string, lastResult: number } | null} */
+    let last = null;
+    /** @type {number | null} the cycle's own exit code, from the wrapper's record of its last run */
+    let cycleExit = null;
+    /** @type {string | null} */
+    let failing = null;
     if (spec.kind === "schtasks") {
       const r = await go(spec.check[0]);
       if (r.code !== 0) present = false;
@@ -1237,6 +1313,27 @@ export async function runTimer(action, spec, deps = {}) {
         const want = /** @type {NonNullable<TimerSpec['expect']>} */ (spec.expect);
         if (got.command !== want.command || got.arguments !== want.arguments) problems.push(`its command is ${got.command} ${got.arguments}, not ${want.command} ${want.arguments}`);
         if (got.interval !== want.interval) problems.push(`its interval is ${got.interval}, not ${want.interval}`);
+        // the program the task runs: a task whose wrapper is gone or stale cannot run the cycle
+        for (const f of spec.files) {
+          if (f.temporary) continue;
+          let text = null;
+          try { text = await read(f.path); } catch { /* absent */ }
+          if (text === null) problems.push(`${f.path} is missing; timer install writes it`);
+          else if (text !== f.content) problems.push(`${f.path} differs from what install writes`);
+        }
+        const q = await go(spec.check[1]);
+        last = q.code === 0 ? parseTaskCsv(q.stdout) : null;
+        if (!last) problems.push(`its last run cannot be read (${spec.check[1].join(" ")}: exit ${q.code})`);
+        else if (!problems.length && !TASK_NOT_FAILED.includes(last.lastResult))
+          failing = `its last run, at ${last.lastRun}, ended with ${hresult(last.lastResult)} (${last.lastResult}): the scheduler could not start it`;
+        else if (!problems.length && last.lastResult === 0 && spec.exitFile) {
+          // a run ended (conhost waits for its child): the wrapper left the cycle's exit code, or never ran
+          let text = null;
+          try { text = await read(spec.exitFile); } catch { /* absent */ }
+          const code = text === null ? NaN : Number(text.trim());
+          if (text === null || !Number.isInteger(code)) failing = `its last run, at ${last.lastRun}, did not run the cycle: ${spec.exitFile} is ${text === null ? "absent" : "unreadable"}`;
+          else if ((cycleExit = code) !== 0) failing = `its last run, at ${last.lastRun}, ran the cycle, which exited ${code}; its own lines are in ${spec.log}`;
+        }
       }
     } else {
       for (const f of spec.files) {
@@ -1247,20 +1344,23 @@ export async function runTimer(action, spec, deps = {}) {
       }
       if (present) for (const argv of spec.check) { const r = await go(argv); if (r.code !== 0) problems.push(`${argv.join(" ")}: exit ${r.code}${r.stdout.trim() ? ` (${r.stdout.trim()})` : ""}`); }
     }
-    const state = !present ? "missing" : problems.length ? "differs" : "ok";
-    return { ...base, state, problems, ran };
+    if (failing) problems.push(failing);
+    const state = !present ? "missing" : failing ? "failing" : problems.length ? "differs" : "ok";
+    return { ...base, state, problems, ran, ...(last ? { lastResult: last.lastResult, lastRun: last.lastRun, cycleExit } : {}) };
   }
   if (action === "install") {
     for (const f of spec.files) {
       await mk(path.dirname(f.path));
       await write(f.path, f.encoding === "utf16le" ? Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(f.content, "utf16le")]) : f.content);
     }
+    // a new entry has not run: an exit record left by an older one must not vouch for it
+    if (spec.exitFile) await remove(spec.exitFile);
     let failed = null;
     try {
       for (const argv of spec.install) {
         const r = await go(argv);
-        // launchd's bootout of an agent that is not loaded fails; that is the case it exists for
-        if (r.code !== 0 && !(spec.kind === "launchd" && argv[1] === "bootout")) { failed = `${argv.join(" ")}: exit ${r.code} ${r.stderr.trim().slice(0, 300)}`; break; }
+        // launchd's bootout and schtasks' delete of an entry that is not there fail; that is the case they exist for
+        if (r.code !== 0 && !(spec.kind === "launchd" && argv[1] === "bootout") && !(spec.kind === "schtasks" && argv[1] === "/Delete")) { failed = `${argv.join(" ")}: exit ${r.code} ${r.stderr.trim().slice(0, 300)}`; break; }
       }
     } finally {
       for (const f of spec.files) if (f.temporary) await remove(f.path);
@@ -1269,5 +1369,6 @@ export async function runTimer(action, spec, deps = {}) {
   }
   for (const argv of spec.remove) await go(argv);
   for (const f of spec.files) if (!f.temporary) await remove(f.path);
+  if (spec.exitFile) await remove(spec.exitFile);
   return { ...base, state: "removed", problems: [], ran };
 }

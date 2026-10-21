@@ -51,6 +51,7 @@ export const NOTICE_TEMPLATES = Object.freeze({
   N10: "Queued {task} not started after {age}, with no task held: {id}.",
   N11: "Waiting on {person} for {task} after {age}: {id}.",
   N12: "On arming: {task} waits on {person} after {age}: {id}.",
+  N13: "On arming: queued {queued}; active {active}.",
 });
 
 /** @typedef {keyof typeof NOTICE_TEMPLATES} NoticeKind */
@@ -171,6 +172,9 @@ export function noticeKey(kind, f, t) {
     case "N7": return `N7:${t.re ?? ""}`;
     case "N8": return `N8:${f.position}:${f.path}:${f.outcome}`;
     case "N10": case "N11": case "N12": return `${kind}:${f.id}`;
+    // the room's queue as one arming learns it: one standing line per arming, the arming's place in
+    // the log decides whether the latest one already covers it
+    case "N13": return "N13";
   }
   return `${kind}`;
 }
@@ -252,17 +256,22 @@ function readMessages(messages) {
   }).sort((a, b) => a.seq - b.seq);
 }
 
-/** `waiting: <person>; needs: <thing>`, as a line of the body or as the `waiting` trailer. */
+/** `waiting: <person>; needs: <thing>` (or `waiting: <person>`) as a body line of its own, or as the `waiting` trailer. */
 const WAITING_LINE = /^waiting:[ \t]*([^\s;]+)[ \t]*(?:;.*)?$/im;
+/** The same form after other words on a line (`Released: no bar. waiting: Ada; needs: …`): there it reads only with its `needs:`. */
+const WAITING_INLINE = /(?:^|[\s.,;:(])waiting:[ \t]*([^\s;,]+)[ \t]*;[ \t]*needs:/i;
 
 /**
- * The person a line says a task waits on: its `waiting` trailer, else a body line of the form
- * `waiting: <person>; needs: <thing>`. Undefined for anything else (a waiting in prose records none).
+ * The person a line says a task waits on: its `waiting` trailer, wherever it stands in the block;
+ * else a body line `waiting: <person>; needs: <thing>`; else that form with its `needs:` anywhere in
+ * a body line. Undefined for anything else (a waiting in prose records none).
  * @param {{ text: string, trailers: Array<{ key: string, value: string }> }} m
  */
 function waitingOf(m) {
   const t = m.trailers.find((x) => x.key === "waiting");
-  return WAITING_LINE.exec(t ? `waiting: ${t.value}` : parseTrailers(m.text).body)?.[1];
+  if (t) return WAITING_LINE.exec(`waiting: ${t.value}`)?.[1];
+  const body = parseTrailers(m.text).body;
+  return (WAITING_LINE.exec(body) ?? WAITING_INLINE.exec(body))?.[1];
 }
 
 /**
@@ -272,39 +281,58 @@ function waitingOf(m) {
  *   holder: string | null, waiting: { person: string, id: string, ts: number, seq: number } | null,
  * }} Task
  * @typedef {{ tasks: Task[], free: { ts: number, seq: number } }} Queue
- * A task is a subject (its root's thread) that some line marks `task: <slug>`, or whose
- * `task:<slug>` some line claims or releases. `order` is its root's place in the log; `since` and
- * `sinceSeq` are when it entered its state; `holder` is the claim's bearer while active; `waiting`
- * is the waiting line while parked. `free` is since when no task has been held (`-Infinity` and 0
- * when none ever was).
+ * A task is a subject: the root (and its thread) a line in it marks `task: <slug>`, or the subject of
+ * a line claiming or releasing a `task:<slug>` that names no task. Its identity is the root, never the
+ * name: a name used again in a later subject is a new task. `order` is its root's place in the log;
+ * `since` and `sinceSeq` are when it entered its state; `holder` is the claim's bearer while active;
+ * `waiting` is the waiting line while parked. `free` is since when no task has been held
+ * (`-Infinity` and 0 when none ever was).
  */
 
 /**
- * The room's task queue, a fold over trailers and stored nowhere (docs/MESSENGER.md § The queue).
- * In log order: a `task:` mark queues its subject; `claim: task:<slug>` makes it active, held by the
- * claim's bearer; `release: task:<slug>` closes it with a `verdict:` on the same line, and of an active
- * task otherwise parks it with a waiting line or hands it back to the queue; a verdict the holder posts in the task's
- * subject closes it with no release; and a human's line in a parked task's subject (or citing the
- * waiting line) is the answer, which hands it back to the queue. The messenger's own notices are
- * not acts.
- * @param {ReturnType<typeof readMessages>} ms @param {Set<string>} pinned @returns {Queue}
+ * The room's task queue, a fold over trailers and stored nowhere (docs/MESSENGER.md § The queue),
+ * over the lines at or after `from` (the earliest instant the messenger may raise anything: history
+ * before it neither queues, holds nor closes a task). In log order: a `task:` mark queues its
+ * subject; `claim: task:<slug>` makes it active, held by the claim's bearer; `release: task:<slug>`
+ * closes it with a `verdict:` on the same line, and of an active task otherwise parks it with a
+ * waiting line or hands it back to the queue; a verdict the holder posts in the task's subject
+ * closes it with no release; and a human's line in a parked task's subject (or citing the waiting
+ * line) is the answer, which hands it back to the queue. A claim or release names the task of that
+ * name in its own subject, else the newest open one of that name, else (a release) the newest closed
+ * one; a claim of a name that is open nowhere starts a task in its own subject. The messenger's own
+ * notices are not acts.
+ * @param {ReturnType<typeof readMessages>} ms @param {Set<string>} pinned @param {number} [from] @returns {Queue}
  */
-function foldQueue(ms, pinned) {
-  /** @type {Map<string, Task>} */
+function foldQueue(ms, pinned, from = -Infinity) {
+  /** subject root and name -> the task @type {Map<string, Task>} */
   const tasks = new Map();
+  const keyOf = (/** @type {string} */ root, /** @type {string} */ slug) => `${root}\n${slug}`;
   const rootSeq = new Map(ms.map((m) => [m.id, m.seq]));
   const PREFIX = "work:task:";
-  /** @param {string | undefined} s */
-  const isTask = (s) => s !== undefined && s.startsWith(PREFIX) && s.length > PREFIX.length;
+  /** the task name a board subject carries, if it is a task's @param {string | undefined} s */
+  const slugOf = (s) => (s !== undefined && s.startsWith(PREFIX) && s.length > PREFIX.length ? s.slice(PREFIX.length) : undefined);
   let free = { ts: -Infinity, seq: 0 };
   /** @param {Task} t @param {Task["state"]} state @param {typeof ms[number]} m */
   const move = (t, state, m) => { t.state = state; t.since = m.ts; t.sinceSeq = m.seq; t.holder = null; t.waiting = null; };
+  /** @param {string} slug @param {typeof ms[number]} m */
+  const open = (slug, m) => {
+    /** @type {Task} */
+    const t = { subject: `${PREFIX}${slug}`, slug, root: m.root, order: rootSeq.get(m.root) ?? m.seq, pinned: pinned.has(m.root), state: "queued", since: m.ts, sinceSeq: m.seq, holder: null, waiting: null };
+    tasks.set(keyOf(m.root, slug), t);
+    return t;
+  };
+  /** the task a claim or release of `task:<slug>` on this line names @param {string} slug @param {typeof ms[number]} m @param {boolean} claim */
+  const named = (slug, m, claim) => {
+    const here = tasks.get(keyOf(m.root, slug));
+    if (here) return here;
+    const same = [...tasks.values()].filter((t) => t.slug === slug);
+    return same.filter((t) => t.state !== "done").pop() ?? (claim ? undefined : same.pop()) ?? open(slug, m);
+  };
   for (const m of ms) {
-    if (m.notice) continue;
-    const marked = m.trailers.map((t) => t.key === "task" ? safeSubject(`task:${t.value}`) : t.key === "claim" || t.key === "release" ? safeSubject(t.value) : undefined);
-    for (const s of marked) if (isTask(s) && !tasks.has(/** @type {string} */ (s))) {
-      tasks.set(/** @type {string} */ (s), { subject: /** @type {string} */ (s), slug: /** @type {string} */ (s).slice(PREFIX.length), root: m.root, order: rootSeq.get(m.root) ?? m.seq,
-        pinned: pinned.has(m.root), state: "queued", since: m.ts, sinceSeq: m.seq, holder: null, waiting: null });
+    if (m.notice || m.ts < from) continue;
+    for (const t of m.trailers) {
+      const slug = t.key === "task" ? slugOf(safeSubject(`task:${t.value}`)) : undefined;
+      if (slug !== undefined && !tasks.has(keyOf(m.root, slug))) open(slug, m);
     }
     const heldBefore = [...tasks.values()].some((t) => t.state === "active");
     const verdict = m.trailers.some((t) => t.key === "verdict");
@@ -312,8 +340,9 @@ function foldQueue(ms, pinned) {
     const released = new Set();
     for (const t of m.trailers) {
       if (t.key !== "claim" && t.key !== "release") continue;
-      const task = tasks.get(/** @type {string} */ (safeSubject(t.value)));
-      if (!task) continue;
+      const slug = slugOf(safeSubject(t.value));
+      if (slug === undefined) continue;
+      const task = named(slug, m, t.key === "claim");
       if (t.key === "claim") { move(task, "active", m); task.holder = m.bearer; continue; }
       released.add(task);
       // a release closes any task with a verdict on the line; otherwise it acts only on a held task (a
@@ -337,9 +366,10 @@ function foldQueue(ms, pinned) {
  * The room's task queue from a read (`foldQueue`): every task with its state, and since when no
  * task has been held.
  * @param {any[]} messages @param {Set<string>} pinned the pinned roots (a pinned task is the head)
+ * @param {number} [from] the fold's start: what the messenger may raise from (its starting point, within the horizon)
  */
-export function queueOf(messages, pinned) {
-  return foldQueue(readMessages(messages), pinned);
+export function queueOf(messages, pinned, from) {
+  return foldQueue(readMessages(messages), pinned, from);
 }
 
 /**
@@ -468,11 +498,26 @@ export function tick(input) {
       emit("N3", m.seq, { position, verb: "taken", id: m.id, age: formatAge(age), verdict }, toHuman, m.root);
     }
   };
+  /** the messenger itself, on this seat: a holder of the messenger role, the bearer its notices are
+   * signed by, or the session whose ledger posted one. A line addressed to it is never clocked: it
+   * cannot take a line, and its notices are answered with `re:`, which it reads as an answer */
+  const ownNotices = new Set(ms.filter((m) => m.notice && !m.human).map((m) => m.id));
+  const selfBearers = new Set(ms.filter((m) => ownNotices.has(m.id)).map((m) => m.bearer));
+  const selfSessions = new Set((input.records ?? []).filter((r) => r.posted && [...r.posted].some((id) => ownNotices.has(id))).map((r) => r.slug));
+  /** @param {import('./board-read.mjs').ResolvedHolder} h */
+  const isSelf = (h) => h.role === "messenger" || selfBearers.has(h.bearer) || (h.session !== null && selfSessions.has(h.session));
+  /** a line that owes its addressee no answer, and so starts no delivery clock (with `ack: none`
+   * and an address to the messenger itself, the whole set: docs/MESSENGER.md § The clocks): an
+   * answer to a notice (its `re:` cites one), or a release with no verdict and no claim (a record
+   * act: the hold has ended, nothing is handed on) @param {typeof ms[number]} m */
+  const owesNoAnswer = (m) => m.trailers.some((t) => t.key === "re" && byRef.get(t.value)?.notice)
+    || (m.trailers.some((t) => t.key === "release") && !m.trailers.some((t) => t.key === "verdict" || t.key === "claim"));
 
   for (const m of ms) {
     if (m.notice || m.ts < horizon) continue;
     // clock 1 on addressed lines, and the unmatched-address pointer
     if (m.to.length && trailer(m, "ack") !== "none") {
+      const noAnswer = owesNoAnswer(m);
       for (const addr of m.to) {
         const r = resolve(addr);
         if (r.kind === "everyone" || r.kind === "seat" || r.kind === "person") continue;
@@ -482,8 +527,8 @@ export function tick(input) {
           if (!heldWhenPosted(m, addr)) emit("N5", m.seq, { addr, kind: r.why ?? "unknown", nearest: r.nearest ?? "none" }, [{ key: "re", value: m.id }], m.root);
           continue;
         }
-        const local = localOf(r);
-        if (local.length) clock1(m, addr, local, m.id, m.ts);
+        const local = localOf(r).filter((h) => !isSelf(h));
+        if (local.length && !noAnswer) clock1(m, addr, local, m.id, m.ts);
       }
     }
     // routing, no model: an unaddressed human request outside the Room subject
@@ -555,10 +600,12 @@ export function tick(input) {
   // the orchestrator from the later of its queueing and the last task's end. A working orchestrator
   // is held; an idle or dark one is told after G of quiet (N10) and the human after G2 (N3
   // `started`); with no activity record, R and R2 from that instant. With no orchestrator stood the
-  // host human is told at R, once.
-  const queue = foldQueue(ms, input.pinned);
-  const head = queue.tasks.some((t) => t.state === "active") ? undefined
-    : queue.tasks.filter((t) => t.state === "queued" && t.since >= horizon).sort((a, b) => Number(b.pinned) - Number(a.pinned) || a.order - b.order)[0];
+  // host human is told at R, once. The queue is folded from the horizon: history the messenger may
+  // not raise neither holds the queue nor stands in it.
+  const queue = foldQueue(ms, input.pinned, horizon);
+  /** @param {Task} a @param {Task} b */
+  const queueOrder = (a, b) => Number(b.pinned) - Number(a.pinned) || a.order - b.order;
+  const head = queue.tasks.some((t) => t.state === "active") ? undefined : queue.tasks.filter((t) => t.state === "queued").sort(queueOrder)[0];
   if (head) {
     const startTs = Math.max(head.since, queue.free.ts);
     const after = Math.max(head.sinceSeq, queue.free.seq);
@@ -594,14 +641,38 @@ export function tick(input) {
     if (t.state !== "waiting" || !w) continue;
     const fields = { person: w.person, task: `task:${t.slug}`, age: formatAge(now - w.ts), id: w.id };
     const re = { key: "re", value: w.id };
-    if (w.ts >= horizon && now - w.ts >= bounds.R) emit("N11", w.seq, fields, [{ key: "to", value: w.person }, re], t.root);
+    if (now - w.ts >= bounds.R) emit("N11", w.seq, fields, [{ key: "to", value: w.person }, re], t.root);
     const arm = Math.max(-Infinity, ...orchestrator().map((h) => armedAt(h.session)).filter((a) => a > w.ts && a <= now));
     if (arm >= horizon) {
       const armSeq = ms.reduce((s, x) => (x.ts <= arm ? Math.max(s, x.seq) : s), w.seq);
       emit("N12", armSeq, fields, [{ key: "to", value: "orchestrator" }, re], t.root);
     }
   }
+
+  // the queue at arming: an orchestrator session whose record started after a task it would hold or
+  // take entered that state (queued or active) is handed the whole queue once, by subject, in the
+  // Room subject, so a successor or a swapped model learns what it owes from the room
+  const lastArming = Math.max(-Infinity, ...orchestrator().map((h) => armedAt(h.session)).filter((a) => a <= now));
+  const queued = queue.tasks.filter((t) => t.state === "queued").sort(queueOrder);
+  const active = queue.tasks.filter((t) => t.state === "active");
+  if (lastArming >= horizon && [...queued, ...active].some((t) => t.since < lastArming)) {
+    /** @param {Task[]} ts */
+    const list = (ts) => (ts.length ? ts.map((t) => `task:${t.slug}@${t.root}`).join(",") : "none");
+    const armSeq = ms.reduce((s, x) => (x.ts <= lastArming ? Math.max(s, x.seq) : s), 0);
+    emit("N13", armSeq, { queued: list(queued), active: list(active) }, [{ key: "to", value: "orchestrator" }], roomSubjectRoot(input.messages, input.titles, input.pinned) ?? undefined);
+  }
   return { acts, notices: done.size, held };
+}
+
+/**
+ * The Room subject: the pinned, titled root that room business is posted under (the earliest pinned
+ * root when none is titled). Null when the room pins none; the line then goes top level.
+ * @param {any[]} messages @param {Map<string, string>} titles @param {Set<string>} pinned @returns {string | null}
+ */
+export function roomSubjectRoot(messages, titles, pinned) {
+  const roots = messages.filter((m) => !m.thread && pinned.has(String(m.id)));
+  const pick = roots.find((m) => titles.has(String(m.id))) ?? roots[0];
+  return pick ? String(pick.id) : null;
 }
 
 // ---------------------------------------------------------------------------------------------

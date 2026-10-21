@@ -1763,7 +1763,10 @@ async function main(argv) {
         const res = await rs.runTimer(/** @type {'install' | 'check' | 'run' | 'remove'} */ (sub), spec);
         if (json) console.log(JSON.stringify(res));
         else {
-          console.log(`${res.kind} ${res.name}: ${res.state} (every ${res.interval}: ${res.command.join(" ")})`);
+          // failing names what failed: the scheduler's code, or the cycle's own exit
+          const r = /** @type {{ lastResult?: number, cycleExit?: number | null }} */ (res);
+          const code = res.state !== "failing" ? "" : r.lastResult !== undefined && r.lastResult !== 0 ? ` ${rs.hresult(r.lastResult)}` : typeof r.cycleExit === "number" ? ` exit ${r.cycleExit}` : "";
+          console.log(`${res.kind} ${res.name}: ${res.state}${code} (every ${res.interval}: ${res.command.join(" ")})`);
           for (const p of res.problems) console.log(`  ${p}`);
         }
         return res.state === "ok" || res.state === "installed" || res.state === "removed" || res.state === "kicked" ? EXIT.ok : EXIT.error;
@@ -1869,7 +1872,8 @@ async function main(argv) {
           else console.log(`${slug.padEnd(14)} ${String(row.action).padEnd(12)} ${row.reason}`);
           continue;
         }
-        const row = /** @type {any} */ (await planCycle(stateRoot, slug, { idleSeconds, minContext, maxContext, deafSeconds }));
+        // a manifest row's own context ceiling: past it the cycle asks a succession at its next idle
+        const row = /** @type {any} */ (await planCycle(stateRoot, slug, { idleSeconds, minContext, maxContext, deafSeconds, ceiling: manifest?.residents[slug]?.context?.ceiling, dryRun: Boolean(values["dry-run"]) }));
         // a request the session that holds the position now outlived was honoured: clear it
         if (row.stale && !values["dry-run"]) await removeSucceedRequest(stateRoot, slug);
         if (row.action === "cycle") {

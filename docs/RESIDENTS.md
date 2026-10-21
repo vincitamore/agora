@@ -67,6 +67,7 @@ is `defaults` with the row's own fields over it. Fields:
 | `tenure` | | `standing` (default): `start --all` starts it; `on-demand`: started only when a grant holder wants it ([Grants](#grants)) |
 | `max` | | how many positions of this row may run (default 1): the row's own and, by a want, `-2` .. `-<max>` |
 | `lineage` | | `any` (default) or `different-from-<role>`: this position must run another model family than every position of that role in its room ([Lineage](#lineage)) |
+| `context` | | `{ "ceiling": <tokens> }`: past this context the cycle asks a succession for the position, honoured at its next idle ([The cycle](#the-cycle)); a granted slot of the row keeps it. Not read for `agora` |
 
 `vars` are text, or `{ "path": ... }` for an absolute path (forward slashes) resolved against the
 manifest. An unknown key, a missing required field, a bad value, a working-folder file outside the
@@ -241,6 +242,12 @@ refused, by name and with the cap it hit, when:
 - the holder holds no grant, or the position is outside its room;
 - the role is outside `roles` (when it is a list), or names a messenger row, the holder's own
   position, or a slot (`coding-2`: want `coding`, and the seat picks the slot);
+- the role is new and one edit from a row's name family in the room: the row's own name (`codng`,
+  `codings` for `coding`) or a numbered name of it (`coding2`, `coding_2` for `coding-2`, whatever
+  its `max`), which would otherwise stand up beside the row as an ad-hoc role wearing another card.
+  The refusal names the nearest (`lab.coding2 is not a row and is one edit from lab.coding-2, a
+  slot of lab.coding: want lab.coding and the seat picks the slot`). A name under three letters is
+  near nothing;
 - the model (`--model`, else the row's, else the defaults') is outside `models`;
 - `--hours` is past `maxHours`, or `maxLive` wants are already open;
 - the role is new (no row) and neither the grant nor `--card` gives it a card, or a card does not
@@ -343,7 +350,7 @@ is the guard and the act. Per resident it finds the newest live session that hol
 usage: context = input + cache read + cache creation, last inference = its timestamp. An entry the
 harness wrote itself is not an inference and is skipped: Claude Code logs an API error (a 529, a
 spend limit) as model `<synthetic>` with all-zero usage, and reading that as the newest message
-measured two 700K residents as context 0 for three days. It cycles in four cases, and says which:
+measured two 700K residents as context 0 for three days. It cycles in five cases, and says which:
 
 - **succeed**: the resident asked for it (`agora resident succeed`, below) and its turn has ended.
   Size and warmth are beside the point: the resident judged its own handover.
@@ -357,6 +364,13 @@ measured two 700K residents as context 0 for three days. It cycles in four cases
   deaf resident's watches died (an API error on the turn that should have re-armed them, a
   stopped extension), so it will never wake again; size and warmth are beside the point. The row
   prints `watching` and the heartbeat as `activityAt`.
+- **the row's ceiling**: a manifest row's `context.ceiling`, for a position whose work outgrows a
+  session (a reviewer reading whole diffs reached 303K in one session). Past it, whatever the
+  warmth, the cycle writes a succeed request for the position (`by: cycle`, with `ceiling`; not on
+  `--dry-run`) and judges it as a resident's own, with one difference: the request may come
+  mid-task, so **any** claim the session holds defers it, not only one taken after the request.
+  The request makes the turn-end kick below fire, so the succession lands at the next idle rather
+  than the timer's next tick. The row prints `requested` when this pass wrote it.
 - **ceiling**: the context is at least `--max-context` (default 400000) and the last inference is
   older than `--deaf`, so the session is between turns. Every wake re-reads the whole context, so
   past this a successor at the orientation floor is cheaper even while the cache is warm.
@@ -413,11 +427,27 @@ and this config (and `--manifest`, when given): a Windows scheduled task `agora-
 (run in the user's session, headless, one instance at a time), a systemd user timer
 `agora-resident-cycle.timer` with its oneshot service (through a login shell, for the user's
 `PATH`), or a launchd agent `agora.resident-cycle` (logging to `<state>/residents/cycle.log`).
-`--interval <seconds>` sets the period in whole minutes (default 900). `timer check` compares what
-is installed with what install would write and exits 1 on `missing` or `differs`, changing
-nothing; `timer run` asks the scheduler to run the entry once now (`schtasks /Run`, `systemctl
---user start --no-block`, `launchctl kickstart`) and exits 1 naming `missing` when none is
-installed; `timer remove` takes it out.
+`--interval <seconds>` sets the period in whole minutes (default 900).
+
+On Windows the task runs `conhost.exe --headless cmd.exe /d /c "<state>\residents\cycle.cmd"`, a
+wrapper install writes: Task Scheduler refuses to start node itself under `conhost --headless`
+(Last Result 0x80070005, and no cycle ever runs), and starts `cmd.exe` there. The wrapper runs the
+cycle with its output appended to `<state>\residents\cycle.log` and then writes the cycle's exit
+code to `<state>\residents\cycle.exit`, because conhost passes no exit code on: the task's Last
+Result is 0 whatever the cycle did. Install deletes any older task of the name first (a task
+re-created over itself keeps the old one's last run) and the old exit record. The state root may
+have spaces but none of `& < > ( ) @ ^ | %`, which `cmd /c` reads inside its quotes; install
+refuses one that does.
+
+`timer check` changes nothing and exits 1 unless `ok`. It reports `missing`; `differs` (the entry,
+or on Windows its wrapper, is not what install would write); on Windows `failing <code>` (the
+scheduler could not start the last run, its Last Result as `0x80070005`), `failing exit <n>` (the
+cycle ran and exited `n`), or `failing` (a run ended with no exit record: the wrapper never ran the
+cycle); and `ok` (on Windows: a task not yet run or running, or whose last run's cycle exited 0).
+`--json` carries `lastResult`, `lastRun` and `cycleExit`. `timer run` asks the scheduler to run
+the entry once now (`schtasks /Run`, `systemctl --user start --no-block`, `launchctl kickstart`)
+and exits 1 naming `missing` when none is installed; `timer remove` takes it out, with the
+wrapper and the exit record.
 
 ```
 agora resident timer install|check|run|remove [--interval <seconds>] [--manifest <path>] [--json]

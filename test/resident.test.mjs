@@ -497,3 +497,87 @@ test("succeed: a session that took a claim after its request is mid-task, so the
   v = await plan();
   assert.deepEqual([v.action, /^succeed: /.test(v.reason)], ["cycle", true], "released: honoured at the next idle");
 });
+
+test("cycleVerdict: a row's ceiling asks a succession whatever the warmth; under it, or with a request pending, the request decides (red leg: no ceiling)", async () => {
+  const now = new Date("2026-01-02T00:00:00.000Z");
+  const rec = { slug: "omp-r", state: "live", record: { bearer: "review/Argon", label: "lab.review", startedAt: "2026-01-01T00:00:00.000Z", source: "OMP_SESSION_ID" } };
+  const measure = async () => ({ status: /** @type {const} */ ("measured"), lastInference: "2026-01-01T23:59:30.000Z", context: 160_000, file: "t" });
+  const base = { slug: "lab.review", now, sessions: [rec], measure, watching: 1 };
+  let v = /** @type {any} */ (await cycleVerdict({ ...base }));
+  assert.deepEqual([v.action, v.overCeiling], ["none", undefined], "red leg: warm and short of the seat's ceiling, no row ceiling: left alone");
+  v = await cycleVerdict({ ...base, ceiling: 150_000 });
+  assert.deepEqual([v.action, v.overCeiling], ["none", 150_000]);
+  assert.equal(v.reason, "ceiling: context 160000 >= the row's ceiling 150000; a succession is asked, honoured at its next idle");
+  v = await cycleVerdict({ ...base, ceiling: 170_000 });
+  assert.equal(v.overCeiling, undefined, "under the row's ceiling");
+  // with the request standing, the succeed rule decides: its own reason names the ceiling
+  const turn = { status: /** @type {const} */ ("read"), session: "omp-r", startedAt: rec.record.startedAt, at: "2026-01-01T23:59:30.000Z", turnEnded: true };
+  v = await cycleVerdict({ ...base, ceiling: 150_000, succeed: { at: "2026-01-01T23:59:40.000Z", ceiling: 150_000, turn, held: [{ subject: "review:t1", at: "2026-01-01T23:00:00.000Z" }] } });
+  assert.deepEqual([v.action, v.reason], ["none", "ceiling 150000 asked a succession 2026-01-01T23:59:40.000Z; waits while this session holds review:t1, claimed 2026-01-01T23:00:00.000Z"]);
+  v = await cycleVerdict({ ...base, ceiling: 150_000, succeed: { at: "2026-01-01T23:59:40.000Z", ceiling: 150_000, turn } });
+  assert.deepEqual([v.action, /^ceiling: context 160000 past the row's ceiling 150000; asked 2026-01-01T23:59:40\.000Z, the turn ended 30s ago$/.test(v.reason)], ["cycle", true]);
+});
+
+test("planCycle with a row ceiling: past it the cycle writes the succeed request (so the turn-end kick fires) and defers while the session holds any claim, then honours at its next idle; a dry run writes nothing (red leg: under the ceiling no request)", async (t) => {
+  const ago = (/** @type {number} */ s) => new Date(Date.now() - s * 1000).toISOString();
+  // warm (30 s) and 120K: short of the seat's minimum and ceiling, so only the row's ceiling acts
+  const s = await seat(t, { bearer: "review/Argon", turns: [[ago(30), 10, 120_000, 0]] });
+  const dir = path.join(s.state, "sessions", s.slug);
+  await writeRecord(dir, /** @type {any} */ ({ slug: s.slug, source: "CLAUDE_CODE_SESSION_ID" }), { bearer: "review/Argon", label: "lab.review" });
+  const { appendCarryEvent } = await import("../src/carry-check.mjs");
+  let n = 0;
+  const event = (/** @type {string} */ kind, /** @type {string} */ subject, /** @type {string} */ at) => appendCarryEvent(dir, {
+    version: 1, id: `00000000-0000-4000-8000-${String(++n).padStart(12, "0")}`, kind, at, session: s.slug, bearer: "review/Argon",
+    ref: { room: "lab", id: `m${n}`, cursor: String(n) }, subject,
+  });
+  const plan = (/** @type {Record<string, unknown>} */ o = {}) => /** @type {Promise<any>} */ (resident.planCycle(s.state, "lab.review", { home: s.home, ...o }));
+  // red leg: under the ceiling nothing is asked
+  let v = await plan({ ceiling: 130_000 });
+  assert.match(String(v.reason), /^warm or working/);
+  assert.equal(await resident.readSucceedRequest(s.state, "lab.review"), null);
+  // mid-review: the claim was taken before the ceiling was seen, and it still holds the succession
+  await event("claim", "review:t1", ago(120));
+  const dry = await plan({ ceiling: 100_000, dryRun: true });
+  assert.deepEqual([dry.action, /waits while this session holds review:t1/.test(dry.reason)], ["none", true]);
+  assert.equal(await resident.readSucceedRequest(s.state, "lab.review"), null, "a dry run asks nothing");
+  v = await plan({ ceiling: 100_000 });
+  assert.equal(v.action, "none");
+  assert.match(String(v.reason), /^ceiling 100000 asked a succession .*; waits while this session holds review:t1, claimed /);
+  const req = await resident.readSucceedRequest(s.state, "lab.review");
+  assert.deepEqual([req?.by, req?.ceiling, req?.at], ["cycle", 100_000, v.requested], "the request the agora-room watch kicks the timer for at its next turn end");
+  // the next pass reads the standing request and does not write another
+  v = await plan({ ceiling: 100_000 });
+  assert.equal((await resident.readSucceedRequest(s.state, "lab.review"))?.at, req?.at);
+  await event("release", "review:t1", ago(5));
+  v = await plan({ ceiling: 100_000 });
+  assert.deepEqual([v.action, /^ceiling: context 120010 past the row's ceiling 100000; asked /.test(v.reason)], ["cycle", true], `released at a turn end: honoured (${v.reason})`);
+});
+
+test("CLI: cycle reads a manifest row's context ceiling; a dry run would hand it on and asks nothing, a real pass mid-claim writes the request (red leg: the row without a ceiling is warm and left alone)", async (t) => {
+  const ago = (/** @type {number} */ s) => new Date(Date.now() - s * 1000).toISOString();
+  const s = await seat(t, { bearer: "review/Argon", turns: [[ago(30), 10, 120_000, 0]] });
+  const dir = path.join(s.state, "sessions", s.slug);
+  await writeRecord(dir, /** @type {any} */ ({ slug: s.slug, source: "CLAUDE_CODE_SESSION_ID" }), { bearer: "review/Argon", label: "lab.review" });
+  await writeFile(path.join(s.root, "PROFILE.md"), "# review\n");
+  const cfgPath = path.join(s.root, "agora.json");
+  await writeFile(cfgPath, JSON.stringify({ actor: { name: "Grace", kind: "human" }, rooms: { lab: { transport: "local", path: path.join(s.root, "room.ndjson") } } }));
+  const manifestFile = path.join(s.root, "residents.json");
+  const doc = (/** @type {Record<string, unknown>} */ extra) => JSON.stringify({ version: 1, residents: { "lab.review": { role: "review", harness: "claude", model: "argon-9", rooms: ["lab"], profile: "PROFILE.md", host: "tern", ...extra } } });
+  const env = { AGORA_STATE: s.state, AGORA_CONFIG: cfgPath, HOME: s.home, USERPROFILE: s.home };
+  const cycle = async (/** @type {string[]} */ more) => {
+    const r = await agora(["resident", "cycle", "lab.review", "--manifest", manifestFile, "--json", ...more], env);
+    assert.equal(r.code, 0, r.stderr);
+    return JSON.parse(r.stdout.trim().split("\n").pop() ?? "{}");
+  };
+  await writeFile(manifestFile, doc({}));
+  assert.match((await cycle(["--dry-run"])).reason, /^warm or working/, "red leg: no ceiling, the seat's bounds only");
+  await writeFile(manifestFile, doc({ context: { ceiling: 100_000 } }));
+  const dry = await cycle(["--dry-run"]);
+  assert.deepEqual([dry.action, /^ceiling: context 120010 past the row's ceiling 100000/.test(dry.reason)], ["would-cycle", true]);
+  assert.equal(await resident.readSucceedRequest(s.state, "lab.review"), null, "a dry run asks nothing");
+  const { appendCarryEvent } = await import("../src/carry-check.mjs");
+  await appendCarryEvent(dir, { version: 1, id: "00000000-0000-4000-8000-000000000001", kind: "claim", at: ago(60), session: s.slug, bearer: "review/Argon", ref: { room: "lab", id: "m1", cursor: "1" }, subject: "review:t1" });
+  const real = await cycle([]);
+  assert.deepEqual([real.action, /^ceiling 100000 asked a succession .*; waits while this session holds review:t1/.test(real.reason)], ["none", true]);
+  assert.deepEqual([(await resident.readSucceedRequest(s.state, "lab.review"))?.ceiling, real.requested !== undefined], [100_000, true]);
+});

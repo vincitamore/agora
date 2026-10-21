@@ -1,0 +1,34 @@
+{
+  "scenario": "S65",
+  "recordedOn": "2026-10-21",
+  "build": "2e6e10b",
+  "checks": {
+    "reused-name-head": {
+      "today": "green",
+      "observed": {
+        "n10": 1,
+        "names": "reused-subject"
+      }
+    },
+    "inline-waiting": {
+      "today": "green",
+      "observed": {
+        "n11": 1,
+        "to": "Ada"
+      }
+    },
+    "arming-handover": {
+      "today": "green",
+      "observed": {
+        "n13": 1,
+        "to": "orchestrator",
+        "queued": "task:slugify@<reused-subject>,task:reports@<newer-subject>",
+        "active": "none"
+      }
+    },
+    "no-self-clock": {
+      "today": "green",
+      "observed": 0
+    }
+  }
+}
