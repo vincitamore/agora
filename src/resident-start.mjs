@@ -41,7 +41,7 @@ import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { AgoraError, EXIT, expandHome, writeFileAtomic } from "./core.mjs";
 import { ROOM_MECHANICS_DOC, RESIDENT_SLUG_RE, markSuccession, renderResidentPrompt, residentDir } from "./resident.mjs";
-import { POSITION_RE, listRecords, markRestarted, pidAlive, positionOf, roomOfKey, sessionScope } from "./session.mjs";
+import { POSITION_RE, bootEpoch, listRecords, markRestarted, pidAlive, positionOf, roomOfKey, sessionScope } from "./session.mjs";
 import { LINEAGE_RE, counterparts, differentFrom, lineageClash, modelFamily } from "./lineage.mjs";
 import { modelLabel } from "../plugins/omp/agora-room/index.mjs";
 import { livenessPath } from "./messenger.mjs";
@@ -62,7 +62,7 @@ const NOT_REQUIRED_FOR_AGORA = new Set(["model", "profile"]);
 /** The model a messenger row records when it names none: its bearer is `<role>/Code`. */
 export const MESSENGER_MODEL = "code";
 /** What the verb itself sets for the harness; a manifest may not set these. */
-export const RESERVED_ENV = Object.freeze(["AGORA_CONFIG", "AGORA_STATE", "AGORA_SESSION", "AGORA_LABEL", "AGORA_ACTOR", "AGORA_ROLE", "AGORA_MODEL", "AGORA_ROOM", "AGORA_ROOM_WAKE", "AGORA_ROOM_PREAMBLE", "AGORA_ROOM_CMD"]);
+export const RESERVED_ENV = Object.freeze(["AGORA_CONFIG", "AGORA_STATE", "AGORA_SESSION", "AGORA_LABEL", "AGORA_ACTOR", "AGORA_ROLE", "AGORA_MODEL", "AGORA_ROOM", "AGORA_ROOM_WAKE", "AGORA_ROOM_PREAMBLE", "AGORA_ROOM_CMD", "AGORA_CONTEXT_CEILING"]);
 /** A manifest names paths and switches, never a credential. */
 const SECRET_NAME = /TOKEN|SECRET|PASSW(OR)?D|API_?KEY|PRIVATE_?KEY|CREDENTIAL/i;
 const ROLE_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -422,6 +422,69 @@ export function findTern(deps = {}) {
   return null;
 }
 
+/** How long the cycle waits for a Tern it started to answer. */
+export const TERN_WAIT_MS = 20_000;
+
+/**
+ * The program that runs Tern's session daemon: on Windows the windowed `tern.exe` beside the
+ * console `tern.com` the CLI lookup finds (it opens no console window when started at logon or by a
+ * headless cycle), else the CLI itself. Null when Tern is not installed.
+ * @param {{ env?: Record<string, string | undefined>, platform?: string, exists?: (p: string) => boolean }} [deps]
+ */
+export function ternProgram(deps = {}) {
+  const cli = findTern(deps);
+  if (!cli) return null;
+  const exists = deps.exists ?? ((/** @type {string} */ p) => { try { return statSync(p).isFile(); } catch { return false; } });
+  if ((deps.platform ?? process.platform) === "win32" && /\.com$/i.test(cli)) {
+    const gui = cli.replace(/\.com$/i, ".exe");
+    if (exists(gui)) return gui;
+  }
+  return cli;
+}
+
+/**
+ * Start a program that outlives this process: no shell, no window, nothing inherited. Resolves to
+ * null once it has started, or to why it could not be.
+ * @param {string[]} argv @returns {Promise<string | null>}
+ */
+export function launchDetached(argv) {
+  return new Promise((resolve) => {
+    /** @type {import("node:child_process").ChildProcess} */
+    let child;
+    try { child = spawn(argv[0], argv.slice(1), { detached: true, stdio: "ignore", windowsHide: true, shell: false }); }
+    catch (e) { resolve(e instanceof Error ? e.message : String(e)); return; }
+    child.once("error", (e) => resolve(e.message));
+    child.once("spawn", () => { child.unref(); resolve(null); });
+  });
+}
+
+/**
+ * Tern up before residents are started into it: a Tern whose CLI answers `tern ls` is left; one
+ * that does not is started the way Tern's own Start at login starts it (`tern daemon --login`: its
+ * session daemon in the background, no window) and waited for. A dry run starts nothing.
+ * @param {{ env?: Record<string, string | undefined>, platform?: string, exists?: (p: string) => boolean, run?: Runner,
+ *   launch?: (argv: string[]) => Promise<string | null> | string | null | void, sleep?: (ms: number) => Promise<void>, waitMs?: number, dryRun?: boolean }} [deps]
+ * @returns {Promise<{ up: boolean, started: boolean, reason: string | null }>}
+ */
+export async function ensureTern(deps = {}) {
+  const cli = findTern(deps);
+  if (!cli) return { up: false, started: false, reason: "tern is not installed (not on PATH, nor in the installer's folder)" };
+  const exec = deps.run ?? runCommand;
+  const answers = async () => (await exec([cli, "ls", "--json"], { timeoutMs: 10_000 })).code === 0;
+  if (await answers()) return { up: true, started: false, reason: null };
+  if (deps.dryRun) return { up: false, started: false, reason: "Tern is not running (dry run: not started)" };
+  const program = /** @type {string} */ (ternProgram(deps));
+  const failed = await (deps.launch ?? launchDetached)([program, "daemon", "--login"]);
+  if (failed) return { up: false, started: false, reason: `Tern is not running, and ${program} daemon --login could not be started: ${failed}` };
+  const sleep = deps.sleep ?? ((/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms)));
+  const waitMs = deps.waitMs ?? TERN_WAIT_MS;
+  for (let waited = 0; waited < waitMs; waited += 500) {
+    await sleep(500);
+    if (await answers()) return { up: true, started: true, reason: null };
+  }
+  return { up: false, started: true, reason: `Tern did not answer within ${Math.round(waitMs / 1000)}s of ${program} daemon --login` };
+}
+
 /** Replace `{{NAME}}` for each declared var. @param {string} text @param {Record<string, string>} vars */
 export function substituteVars(text, vars) {
   return text.replace(/\{\{([A-Z][A-Z0-9_]*)\}\}/g, (m, name) => (Object.hasOwn(vars, name) ? vars[name] : m));
@@ -508,6 +571,9 @@ export function planResident(manifest, slug, ctx) {
     };
   if (!ctx.cfg.path) delete harnessEnv.AGORA_CONFIG;
   if (row.preamble && !messenger) harnessEnv.AGORA_ROOM_PREAMBLE = row.preamble;
+  // the row's own context ceiling: the harness's agora-room watch compares its context with it at
+  // every turn end and asks the succession itself, so the ceiling holds between cycle runs
+  if (row.context && !messenger) harnessEnv.AGORA_CONTEXT_CEILING = String(row.context.ceiling);
   // omp's extension registers `<AGORA_ROLE>/<Model>` itself and follows a model change (AGORA_ROLE
   // carries the slot for a numbered slot); an explicit bearer, and every Claude Code session, signs
   // through AGORA_ACTOR.
@@ -775,13 +841,13 @@ export const runCommand = (argv, opts = {}) => new Promise((resolve) => {
 
 /**
  * @typedef {{ type: 'resident-run', id: string, resident: string, host: 'tern' | 'tmux' | 'none', startedAt: string,
- *   model?: string, hostInfo: Record<string, string>, handle: Record<string, unknown> | null, pid?: number,
+ *   model?: string, hostInfo: Record<string, string>, handle: Record<string, unknown> | null, pid?: number, pidBoot?: number,
  *   exec: { argv: string[], env: Record<string, string>, cwd: string } }} RunRecord
  */
 
 /**
  * The run record, with the harness pid the host's wrapper recorded beside it (a sidecar file, so the
- * wrapper and the starter never write the same file at once).
+ * wrapper and the starter never write the same file at once) and the boot that pid belongs to.
  * @param {string} stateRoot @param {string} slug @returns {Promise<RunRecord | null>}
  */
 export async function readRun(stateRoot, slug) {
@@ -791,7 +857,10 @@ export async function readRun(stateRoot, slug) {
     if (rec?.type !== "resident-run") throw new AgoraError(`${file} is not a resident run record; remove it by hand`, EXIT.error);
     try {
       const side = JSON.parse(await readFile(`${file}.pid`, "utf8"));
-      if (side?.id === rec.id && Number.isInteger(side.pid)) rec.pid = side.pid;
+      if (side?.id === rec.id && Number.isInteger(side.pid)) {
+        rec.pid = side.pid;
+        if (typeof side.bootEpoch === "number") rec.pidBoot = side.bootEpoch;
+      }
     } catch { /* no wrapper pid yet */ }
     return rec;
   } catch (e) {
@@ -821,14 +890,20 @@ function ternSessions(doc) {
 }
 
 /**
- * Is the host's handle still running something? `unknown` when the host cannot be asked.
- * @param {RunRecord} run @param {{ run?: Runner, kill?: (pid: number, sig: 0) => void }} [deps]
+ * Is the host's handle still running something? `unknown` when the host cannot be asked. Nothing a
+ * start recorded outlives a reboot: a harness pid from another boot names whatever runs on it now,
+ * and a tmux server or a foreground harness started before this boot is gone with it. A Tern
+ * session is asked of Tern, which may keep sessions across a restart of its own.
+ * @param {RunRecord} run @param {{ run?: Runner, kill?: (pid: number, sig: 0) => void, boot?: number }} [deps]
  * @returns {Promise<'live' | 'gone' | 'unknown'>}
  */
 export async function hostAlive(run, deps = {}) {
   const exec = deps.run ?? runCommand;
-  // The harness's own pid, once the wrapper recorded it, settles it either way it answers.
+  const boot = deps.boot ?? bootEpoch();
+  // The harness's own pid, once the wrapper recorded it in this boot, settles it either way it answers.
+  if (typeof run.pid === "number" && typeof run.pidBoot === "number" && Math.abs(boot - run.pidBoot) > 2) return "gone";
   if (typeof run.pid === "number" && !pidAlive(run.pid, deps.kill)) return "gone";
+  if (run.host !== "tern" && Date.parse(run.startedAt) / 1000 < boot - 2) return "gone";
   const h = /** @type {Record<string, any>} */ (run.handle ?? {});
   // A record with no handle and no pid is a start that died between writing it and the host
   // answering; within the lock's bound it may still be that start, past it nothing holds it.
@@ -936,14 +1011,14 @@ export function runForeground(exec, onPid) {
 
 /**
  * `start <slug> --run <file>`: the host's program. Runs the recorded harness in this terminal,
- * records its pid beside the run record, and exits with its code.
+ * records its pid (and the boot it belongs to) beside the run record, and exits with its code.
  * @param {string} file @param {string} slug
  */
 export async function execRun(file, slug) {
   const run = await readRunFile(file);
   if (run.resident !== slug) throw new AgoraError(`${file} records resident ${run.resident}, not ${slug}`, EXIT.usage);
   return runForeground(run.exec, async (pid) => {
-    await writeFileAtomic(`${file}.pid`, JSON.stringify({ id: run.id, pid }) + "\n");
+    await writeFileAtomic(`${file}.pid`, JSON.stringify({ id: run.id, pid, bootEpoch: bootEpoch() }) + "\n");
   });
 }
 
@@ -957,7 +1032,9 @@ export async function execRun(file, slug) {
  * session (`markSuccession`): a relaunch, a model swap or a restart after a death is a succession,
  * and the new session's agora-room extension or plugin inherits before its first read. `none`
  * returns an `exec` the caller awaits in the foreground; `tern` and `tmux` return once the host
- * reports its handle.
+ * reports its handle. The run record of the start that stood is replaced only by the next start's:
+ * a start that is refused, or that the host refuses, leaves it, so the supervisor still reads the
+ * position as one that stood and died (`stop` alone removes it).
  * @param {ResidentPlan} plan @param {string} stateRoot @param {StartDeps} deps
  * @returns {Promise<{ row: Record<string, unknown>, exec?: () => Promise<number> }>}
  */
@@ -970,10 +1047,9 @@ export async function startResident(plan, stateRoot, deps) {
   try {
     const state = await residentState(stateRoot, plan.resident, deps);
     if (state.running) return { row: { ...base, action: "running", reason: state.reason, sessions: state.sessions } };
-    if (state.run) {
-      await hostKill(state.run, deps).catch(() => {}); // a finished host session left behind (an empty Tern session)
-      await removeRun(plan.runFile);
-    }
+    // a finished host session left behind (an empty Tern session) is ended; its record stays until a new one replaces it
+    const prior = state.run ? await readFile(plan.runFile, "utf8").catch(() => null) : null;
+    if (state.run) await hostKill(state.run, deps).catch(() => {});
     // lineage: a start onto the family a counterpart in force runs is refused before anything is written
     const clash = lineageClash({ slug: plan.resident, model: plan.model }, await modelsInForce(stateRoot, plan.lineage.against, { kill: deps.kill, boot: deps.boot }));
     if (clash) return { row: { ...base, action: "refused", reason: clash } };
@@ -998,7 +1074,8 @@ export async function startResident(plan, stateRoot, deps) {
     }
     const r = await (deps.run ?? runCommand)(/** @type {string[]} */ (plan.hostArgv), { timeoutMs: 30_000 });
     if (r.code !== 0) {
-      await removeRun(plan.runFile);
+      if (prior !== null) await writeFileAtomic(plan.runFile, prior);
+      else await removeRun(plan.runFile);
       throw new AgoraError(`resident ${plan.resident}: the ${plan.host} host refused the start (exit ${r.code}): ${(r.stderr || r.stdout).trim().slice(0, 400)}`, EXIT.error);
     }
     /** @type {Record<string, unknown>} */
@@ -1110,13 +1187,24 @@ const shArg = (a) => `'${a.replace(/'/g, "'\\''")}'`;
 
 /**
  * @typedef {{ platform: string, home: string, env?: Record<string, string | undefined>, node: string, entry: string,
- *   config?: string, manifest?: string, seconds?: number, uid?: number, stateRoot: string }} TimerContext
+ *   config?: string, manifest?: string, seconds?: number, uid?: number, stateRoot: string, user?: string, tern?: string | null }} TimerContext
+ * `user`: the Windows account the logon trigger fires for (`DOMAIN\user`); `tern`: the program that
+ * starts Tern's session daemon at logon (`ternProgram`), when the manifest runs a row under Tern.
  */
+
+/** How long after a logon the cycle first runs: the seat service and the network come up first. */
+export const LOGON_DELAY_MINUTES = 2;
+/** The Windows startup entry agora writes so Tern's session daemon starts at logon. */
+export const TERN_LOGIN_NAME = "agora-tern-daemon";
+const RUN_KEY = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+const APPROVED_KEY = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
 
 /**
  * The scheduler entry for this OS, as data: the files it writes and the commands install, check,
  * run (one run now, by the scheduler, outside any session's process tree) and remove run. Nothing is
- * written here.
+ * written here. The entry runs on its interval and once at each logon, so a seat recovers its
+ * residents minutes after a reboot (a Windows logon trigger, a systemd user timer's
+ * `OnStartupSec`, launchd's `RunAtLoad`).
  *
  * On Windows the task's program is `conhost.exe --headless`, so no window opens, running `cmd.exe`
  * on a wrapper written into the state root: Task Scheduler refuses to start node itself under
@@ -1124,7 +1212,9 @@ const shArg = (a) => `'${a.replace(/'/g, "'\\''")}'`;
  * cycle with its output appended to `<state>/residents/cycle.log`, then writes the cycle's exit code
  * to `<state>/residents/cycle.exit`. conhost does not pass its child's exit code on, so the task's
  * Last Result says only whether the scheduler could start it; the exit record says whether the
- * cycle ran and how it ended.
+ * cycle ran and how it ended. `login` is the startup entry (the user's Run key) that starts Tern's
+ * session daemon at logon, as Tern's own Start at login does; `data` is null when no row runs under
+ * Tern, and then install writes none (remove still takes agora's).
  * @param {TimerContext} ctx
  */
 export function timerSpec(ctx) {
@@ -1148,11 +1238,13 @@ export function timerSpec(ctx) {
       ``,
     ].join("\r\n");
     const args = `--headless cmd.exe /d /c "${wrapper}"`;
+    const logon = `PT${LOGON_DELAY_MINUTES}M`;
+    // the logon trigger names the account it fires for: one with no user is any user's, which only an administrator may register
     const doc = [
       `<?xml version="1.0" encoding="UTF-16"?>`,
       `<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">`,
-      `  <RegistrationInfo><Description>agora resident cycle --all every ${minutes} minutes</Description></RegistrationInfo>`,
-      `  <Triggers><TimeTrigger><Repetition><Interval>PT${minutes}M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition><StartBoundary>2026-01-01T00:00:00</StartBoundary><Enabled>true</Enabled></TimeTrigger></Triggers>`,
+      `  <RegistrationInfo><Description>agora resident cycle --all every ${minutes} minutes and at logon</Description></RegistrationInfo>`,
+      `  <Triggers><TimeTrigger><Repetition><Interval>PT${minutes}M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition><StartBoundary>2026-01-01T00:00:00</StartBoundary><Enabled>true</Enabled></TimeTrigger><LogonTrigger><Enabled>true</Enabled>${ctx.user ? `<UserId>${xml(ctx.user)}</UserId>` : ""}<Delay>${logon}</Delay></LogonTrigger></Triggers>`,
       `  <Principals><Principal id="Author"><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>`,
       `  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><ExecutionTimeLimit>PT10M</ExecutionTimeLimit><Enabled>true</Enabled></Settings>`,
       `  <Actions Context="Author"><Exec><Command>conhost.exe</Command><Arguments>${xml(args)}</Arguments></Exec></Actions>`,
@@ -1160,8 +1252,11 @@ export function timerSpec(ctx) {
       ``,
     ].join("\r\n");
     const xmlFile = path.join(tmpdir(), `${TIMER_NAME}-${process.pid}.xml`);
+    if (ctx.tern && /["\r\n]/.test(ctx.tern)) throw new AgoraError(`the Tern program ${JSON.stringify(ctx.tern)} cannot be written into a startup entry (a quote or a line break); move it`, EXIT.usage);
     return {
-      kind: "schtasks", name: TIMER_NAME, command, interval: `PT${minutes}M`, log, exitFile, expect: { command: "conhost.exe", arguments: args, interval: `PT${minutes}M` },
+      kind: "schtasks", name: TIMER_NAME, command, interval: `PT${minutes}M`, triggers: [`every PT${minutes}M`, `at logon after ${logon}`], log, exitFile,
+      expect: { command: "conhost.exe", arguments: args, interval: `PT${minutes}M`, logon },
+      login: { name: TERN_LOGIN_NAME, key: RUN_KEY, approved: APPROVED_KEY, data: ctx.tern ? `"${ctx.tern}" daemon --login` : null },
       files: [
         { path: xmlFile, content: doc, encoding: /** @type {const} */ ("utf16le"), temporary: true },
         { path: wrapper, content: script, encoding: /** @type {const} */ ("utf8"), temporary: false },
@@ -1188,7 +1283,8 @@ export function timerSpec(ctx) {
       `  <key>Label</key><string>${LAUNCHD_LABEL}</string>`,
       `  <key>ProgramArguments</key><array><string>/bin/sh</string><string>-lc</string><string>${xml(line)}</string></array>`,
       `  <key>StartInterval</key><integer>${seconds}</integer>`,
-      `  <key>RunAtLoad</key><false/>`,
+      // loaded at login: the first run after a logon recovers the residents
+      `  <key>RunAtLoad</key><true/>`,
       `  <key>StandardOutPath</key><string>${xml(log)}</string>`,
       `  <key>StandardErrorPath</key><string>${xml(log)}</string>`,
       `</dict>`,
@@ -1196,7 +1292,7 @@ export function timerSpec(ctx) {
       ``,
     ].join("\n");
     return {
-      kind: "launchd", name: LAUNCHD_LABEL, command, interval: `${seconds}s`, log, exitFile: null, expect: null,
+      kind: "launchd", name: LAUNCHD_LABEL, command, interval: `${seconds}s`, triggers: [`every ${seconds}s`, "at login"], log, exitFile: null, expect: null, login: null,
       files: [{ path: file, content, encoding: /** @type {const} */ ("utf8"), temporary: false }],
       install: [["launchctl", "bootout", `gui/${uid}/${LAUNCHD_LABEL}`], ["launchctl", "bootstrap", `gui/${uid}`, file]],
       check: [["launchctl", "print", `gui/${uid}/${LAUNCHD_LABEL}`]],
@@ -1219,7 +1315,8 @@ export function timerSpec(ctx) {
     `Description=agora resident cycle --all every ${minutes} minutes`,
     ``,
     `[Timer]`,
-    `OnBootSec=${minutes}min`,
+    // a user timer starts with the user's service manager, at login (or at boot with lingering)
+    `OnStartupSec=${LOGON_DELAY_MINUTES}min`,
     `OnUnitActiveSec=${minutes}min`,
     ``,
     `[Install]`,
@@ -1227,7 +1324,7 @@ export function timerSpec(ctx) {
     ``,
   ].join("\n");
   return {
-    kind: "systemd", name: `${TIMER_NAME}.timer`, command, interval: `${minutes}min`, log: null, exitFile: null, expect: null,
+    kind: "systemd", name: `${TIMER_NAME}.timer`, command, interval: `${minutes}min`, triggers: [`every ${minutes}min`, `at login after ${LOGON_DELAY_MINUTES}min`], log: null, exitFile: null, expect: null, login: null,
     files: [
       { path: path.join(unitDir, `${TIMER_NAME}.service`), content: service, encoding: /** @type {const} */ ("utf8"), temporary: false },
       { path: path.join(unitDir, `${TIMER_NAME}.timer`), content: timer, encoding: /** @type {const} */ ("utf8"), temporary: false },
@@ -1241,11 +1338,27 @@ export function timerSpec(ctx) {
 
 /** @typedef {ReturnType<typeof timerSpec>} TimerSpec */
 
-/** The `<Command>`, `<Arguments>` and `<Interval>` of a scheduled task's XML. @param {string} doc */
+/**
+ * The `<Command>`, `<Arguments>` and `<Interval>` of a scheduled task's XML, and its logon trigger's
+ * delay: `logon` is undefined when the task has no logon trigger, "" for one with no delay.
+ * @param {string} doc
+ */
 export function parseTaskXml(doc) {
   const unxml = (/** @type {string | undefined} */ s) => s === undefined ? undefined : s.replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
-  const tag = (/** @type {string} */ t) => unxml(doc.match(new RegExp(`<${t}>([\\s\\S]*?)</${t}>`))?.[1]?.trim());
-  return { command: tag("Command"), arguments: tag("Arguments"), interval: tag("Interval") };
+  const tag = (/** @type {string} */ t, from = doc) => unxml(from.match(new RegExp(`<${t}>([\\s\\S]*?)</${t}>`))?.[1]?.trim());
+  const logonTrigger = doc.match(/<LogonTrigger\b[^>]*>([\s\S]*?)<\/LogonTrigger>/)?.[1];
+  return { command: tag("Command"), arguments: tag("Arguments"), interval: tag("Interval"), logon: logonTrigger === undefined ? undefined : tag("Delay", logonTrigger) ?? "" };
+}
+
+/** The values of `reg query <key>`: one line each, `    <name>    <type>    <data>`. @param {string} text */
+export function parseRegValues(text) {
+  /** @type {Array<{ name: string, type: string, data: string }>} */
+  const out = [];
+  for (const line of text.replace(/\u0000/g, "").split(/\r?\n/)) {
+    const m = /^ {4}(.+?) {4}(REG_[A-Z_]+)(?: {4}(.*))?$/.exec(line);
+    if (m) out.push({ name: m[1], type: m[2], data: m[3] ?? "" });
+  }
+  return out;
 }
 
 /** Last Result codes that are not a failed run: the task is running now, or has not run yet. */
@@ -1272,11 +1385,46 @@ const FIRST_RUN_MS = 120_000;
 const FIRST_RUN_POLL_MS = 500;
 
 /**
+ * Where Tern's start at logon stands, read from the user's Run key: `agora` (agora's entry, on),
+ * `tern` (Tern's own Start at login, which install prefers and never touches), `disabled` (agora's
+ * entry, turned off in Task Manager's Startup apps), `differs` (agora's entry runs another
+ * program), `missing` (a row runs under Tern and nothing starts it), or `not needed`.
+ * @typedef {{ state: 'agora' | 'tern' | 'disabled' | 'differs' | 'missing' | 'not needed', name: string, data: string | null, problems: string[] }} LoginState
+ */
+
+/**
+ * @param {NonNullable<TimerSpec['login']>} login
+ * @param {(argv: string[]) => Promise<{ code: number, stdout: string, stderr: string }>} go
+ * @returns {Promise<LoginState & { ours: boolean }>}
+ */
+async function loginState(login, go) {
+  const q = await go(["reg", "query", login.key]);
+  const values = q.code === 0 ? parseRegValues(q.stdout) : [];
+  const ours = values.find((v) => v.name === login.name);
+  // Tern's own Start at login runs its daemon with --login: whatever it names its value
+  const own = values.find((v) => v.name !== login.name && /\btern\.exe\b/i.test(v.data) && /\s--login\b/.test(v.data));
+  if (ours) {
+    const a = await go(["reg", "query", login.approved, "/v", login.name]);
+    const first = a.code === 0 ? /REG_BINARY\s+([0-9A-Fa-f]{2})/.exec(a.stdout)?.[1] : undefined;
+    // Task Manager records a turned-off startup entry with an odd first byte
+    if (first !== undefined && parseInt(first, 16) % 2 === 1)
+      return { state: "disabled", name: login.name, data: ours.data, ours: true, problems: [`Tern's start at logon (${login.name}) is turned off in Task Manager's Startup apps; timer install turns it on again`] };
+    if (login.data && ours.data !== login.data)
+      return { state: "differs", name: login.name, data: ours.data, ours: true, problems: [`Tern's start at logon (${login.name}) runs ${ours.data}, not ${login.data}; timer install rewrites it`] };
+    return { state: "agora", name: login.name, data: ours.data, ours: true, problems: [] };
+  }
+  if (own) return { state: "tern", name: own.name, data: own.data, ours: false, problems: [] };
+  if (!login.data) return { state: "not needed", name: login.name, data: null, ours: false, problems: [] };
+  return { state: "missing", name: login.name, data: null, ours: false, problems: ["Tern does not start at logon; timer install adds it (or turn on Start at login in Tern's Settings › Sessions)"] };
+}
+
+/**
  * What `runTimer` returns: the entry's state (`installed`, `kicked`, `removed`, `failed`, or a check's `ok`,
  * `missing`, `differs`, `failing`), why not, the commands it ran, and for install the check after its first run.
- * @typedef {{ type: string, action: string, kind: string, name: string, interval: string, command: string[], state: string, problems: string[],
+ * `triggers` names when the entry runs; `login` (Windows) is where Tern's start at logon stands.
+ * @typedef {{ type: string, action: string, kind: string, name: string, interval: string, triggers: string[], command: string[], state: string, problems: string[],
  *   ran: Array<{ argv: string[], code: number, stderr: string }>, lastResult?: number, lastRun?: string, cycleExit?: number | null,
- *   firstRun?: string, check?: TimerResult }} TimerResult
+ *   firstRun?: string, check?: TimerResult, login?: LoginState }} TimerResult
  */
 
 /**
@@ -1301,7 +1449,7 @@ export async function runTimer(action, spec, deps = {}) {
   const read = deps.readFile ?? ((f) => readFile(f, "utf8"));
   const remove = deps.rm ?? ((f) => rm(f, { force: true }));
   const mk = deps.mkdir ?? (async (d) => { await mkdir(d, { recursive: true }); });
-  const base = { type: "resident-timer", action, kind: spec.kind, name: spec.name, interval: spec.interval, command: spec.command };
+  const base = { type: "resident-timer", action, kind: spec.kind, name: spec.name, interval: spec.interval, triggers: spec.triggers, command: spec.command };
   /** @type {Array<{ argv: string[], code: number, stderr: string }>} */
   const ran = [];
   const go = async (/** @type {string[]} */ argv) => { const r = await exec(argv, { timeoutMs: 30_000 }); ran.push({ argv, code: r.code, stderr: r.stderr.trim().slice(0, 300) }); return r; };
@@ -1331,6 +1479,8 @@ export async function runTimer(action, spec, deps = {}) {
         const want = /** @type {NonNullable<TimerSpec['expect']>} */ (spec.expect);
         if (got.command !== want.command || got.arguments !== want.arguments) problems.push(`its command is ${got.command} ${got.arguments}, not ${want.command} ${want.arguments}`);
         if (got.interval !== want.interval) problems.push(`its interval is ${got.interval}, not ${want.interval}`);
+        if (got.logon === undefined) problems.push("it has no logon trigger; timer install adds one");
+        else if (got.logon !== want.logon) problems.push(`its logon trigger's delay is ${got.logon || "none"}, not ${want.logon}`);
         // the program the task runs: a task whose wrapper is gone or stale cannot run the cycle
         for (const f of spec.files) {
           if (f.temporary) continue;
@@ -1362,9 +1512,12 @@ export async function runTimer(action, spec, deps = {}) {
       }
       if (present) for (const argv of spec.check) { const r = await go(argv); if (r.code !== 0) problems.push(`${argv.join(" ")}: exit ${r.code}${r.stdout.trim() ? ` (${r.stdout.trim()})` : ""}`); }
     }
+    // Tern's start at logon, where this OS has one agora keeps
+    const login = spec.login ? await loginState(spec.login, go) : null;
+    if (login) problems.push(...login.problems);
     if (failing) problems.push(failing);
     const state = !present ? "missing" : failing ? "failing" : problems.length ? "differs" : "ok";
-    return { ...base, state, problems, ran, ...(last ? { lastResult: last.lastResult, lastRun: last.lastRun, cycleExit } : {}) };
+    return { ...base, state, problems, ran, ...(last ? { lastResult: last.lastResult, lastRun: last.lastRun, cycleExit } : {}), ...(login ? { login: { state: login.state, name: login.name, data: login.data, problems: login.problems } } : {}) };
   }
   if (action === "install") {
     for (const f of spec.files) {
@@ -1384,6 +1537,16 @@ export async function runTimer(action, spec, deps = {}) {
       for (const f of spec.files) if (f.temporary) await remove(f.path);
     }
     if (failed) return { ...base, state: "failed", problems: [failed], ran };
+    // Tern's session daemon at logon: Tern's own Start at login is preferred; else agora's entry, written on
+    if (spec.login?.data) {
+      const now = await loginState(spec.login, go);
+      if (now.state !== "agora" && now.state !== "tern") {
+        const add = await go(["reg", "add", spec.login.key, "/v", spec.login.name, "/t", "REG_SZ", "/d", spec.login.data, "/f"]);
+        if (add.code !== 0) return { ...base, state: "failed", problems: [`reg add ${spec.login.key} /v ${spec.login.name}: exit ${add.code} ${add.stderr.trim().slice(0, 300)}`], ran };
+        // a fresh entry is on: a record that Startup apps turned it off is the old entry's
+        if (now.state === "disabled") await go(["reg", "delete", spec.login.approved, "/v", spec.login.name, "/f"]);
+      }
+    }
     // the proof: one run by the scheduler, waited for, then the same check `timer check` makes
     const sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     const settleMs = deps.settleMs ?? FIRST_RUN_MS;
@@ -1393,6 +1556,8 @@ export async function runTimer(action, spec, deps = {}) {
     return { ...base, state, problems: first.failure ? [first.failure] : [], ran, firstRun: first.running ? "running" : "ended", check };
   }
   for (const argv of spec.remove) await go(argv);
+  // agora's own startup entry and its Startup apps record; Tern's own Start at login is Tern's
+  if (spec.login) for (const key of [spec.login.key, spec.login.approved]) await go(["reg", "delete", key, "/v", spec.login.name, "/f"]);
   for (const f of spec.files) if (!f.temporary) await remove(f.path);
   if (spec.exitFile) await remove(spec.exitFile);
   return { ...base, state: "removed", problems: [], ran };

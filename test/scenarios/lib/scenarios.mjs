@@ -52,6 +52,7 @@ export const SCENARIO_FILES = Object.freeze({
   S64: "../s64-queue-clock.mjs",
   S65: "../s65-queue-identity.mjs",
   S66: "../s66-withdrawal-and-holder.mjs",
+  S67: "../s67-reboot-recovery.mjs",
 });
 
 /** @param {string} id @returns {Promise<Scenario>} */

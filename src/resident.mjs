@@ -399,7 +399,8 @@ export function succeedRequestPath(stateRoot, slug) {
 
 /**
  * Ask the cycle to hand `slug` to a fresh session at its next tick between turns. A second request
- * replaces the first. `ceiling`: the cycle asked, past the row's context ceiling.
+ * replaces the first. `ceiling`: asked past the row's context ceiling, by the cycle or by the
+ * session's own agora-room watch at a turn end; any claim the session holds defers it.
  * @param {string} stateRoot @param {string} slug @param {{ by: string, now?: Date, ceiling?: number }} fields
  */
 export async function writeSucceedRequest(stateRoot, slug, fields) {

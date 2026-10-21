@@ -30,7 +30,8 @@ import path from "node:path";
 import { AgoraError, EXIT } from "./core.mjs";
 import { annotationState, fileLock, formatAge, formatNotice, roomSubjectRoot } from "./messenger.mjs";
 import { positionTurn, readInheritMarker, RESIDENT_SLUG_RE } from "./resident.mjs";
-import { manifestRow, planResident, residentState, startResident, stopResident } from "./resident-start.mjs";
+import { ensureTern, manifestRow, planResident, residentState, startResident, stopResident, which } from "./resident-start.mjs";
+import { connectSeatService } from "./wake/subscriber.mjs";
 import { oneEdit } from "./board-read.mjs";
 import { POSITION_RE, listRecords, positionOf } from "./session.mjs";
 import { withTrailers } from "./trailers.mjs";
@@ -341,44 +342,153 @@ export async function recordUnwant(stateRoot, a) {
   });
 }
 
+/** A position is started this many times within the window by the supervisor, then held until a start by hand. */
+export const RESTART_LIMIT = Object.freeze({ starts: 3, withinSeconds: 3600 });
+/** Seconds between two starts in one pass: a reboot's recovery does not start every harness at once. */
+export const DEFAULT_STAGGER_SECONDS = 10;
+
 /**
+ * `service` says whether the seat service a row's rooms need answers; `host` brings a host up
+ * before a start into it (Tern) or says why it cannot; both absent mean always up, for a seat with
+ * neither to ask. `sleep` paces the starts.
  * @typedef {{
  *   start: (position: string, row: ManifestResident) => Promise<{ action: string, reason?: unknown }>,
  *   stop: (position: string) => Promise<{ action: string, reason?: unknown }>,
- *   state: (position: string) => Promise<{ running: boolean, run: unknown, reason: string | null }>,
+ *   state: (position: string) => Promise<{ running: boolean, run: any, reason: string | null, host?: 'live' | 'gone' | 'unknown' | null }>,
  *   marker: (position: string) => Promise<boolean>,
  *   turn: (position: string) => ReturnType<typeof positionTurn>,
  *   post: (room: string, text: string) => Promise<{ id: string } | null>,
  *   now: () => number,
+ *   service?: (row: ManifestResident) => Promise<{ up: boolean, reason: string | null }>,
+ *   host?: (kind: string, opts: { dryRun: boolean }) => Promise<{ up: boolean, started: boolean, reason: string | null }>,
+ *   sleep?: (ms: number) => Promise<void>,
  * }} EnsureDeps
  */
 
 /**
+ * The room's host human: the `--human-name` its messenger row runs with, else null.
+ * @param {Manifest} manifest @param {string} room
+ */
+export function hostHuman(manifest, room) {
+  const row = Object.values(manifest.residents).find((r) => r.harness === "agora" && r.rooms[0] === room);
+  if (!row) return null;
+  for (let i = 0; i < row.args.length; i++) {
+    const a = row.args[i];
+    if (a === "--human-name" && i + 1 < row.args.length) return row.args[i + 1];
+    if (a.startsWith("--human-name=")) return a.slice("--human-name=".length);
+  }
+  return null;
+}
+
+/**
+ * A position's supervisor restarts, as the ledger has them: the hold standing now (a `held` record
+ * that no start by hand has followed: a run record started after it) and the restarts inside the
+ * window since the last hold.
+ * @param {any[]} events @param {string} position @param {number} now @param {{ starts: number, withinSeconds: number }} limit
+ * @param {{ startedAt?: unknown } | null} run
+ */
+export function restartRecord(events, position, now, limit, run) {
+  const runAt = run && typeof run.startedAt === "string" ? Date.parse(run.startedAt) : NaN;
+  /** @type {number | null} */
+  let heldAt = null;
+  for (const e of events) if (e.ev === "held" && e.position === position && typeof e.at === "string") heldAt = Date.parse(e.at);
+  const from = Math.max(now - limit.withinSeconds * 1000, heldAt ?? -Infinity);
+  const starts = events.filter((e) => e.ev === "start" && e.position === position && e.path === "restart" && Date.parse(e.at) > from);
+  return { held: heldAt !== null && !(runAt > heldAt), starts: starts.length, firstAt: starts.length ? Date.parse(starts[0].at) : null };
+}
+
+/**
  * The supervisor's pass, under the grants lock. Returns one row per act or standing fact.
+ *
+ * A standing row whose run record is left and whose host is gone died (a reboot, a crash): it is
+ * started again, as a messenger row always was. A row with no run record was stopped by hand, or
+ * never started here, and is left. A start goes through the gates in order: the seat service its
+ * rooms need answers (a dark service starts nothing and is said once per episode, never spent as a
+ * start); its host is up (Tern is brought up first); the position has not been started
+ * `restartLimit.starts` times within the window (past it the host human is told once, by an N8 line
+ * addressed to them, and starts stop until a start by hand). Starts in one pass are `staggerSeconds`
+ * apart.
  * @param {Manifest} manifest @param {string} stateRoot @param {EnsureDeps} deps
- * @param {{ graceSeconds?: number, dryRun?: boolean }} [opts]
+ * @param {{ graceSeconds?: number, dryRun?: boolean, staggerSeconds?: number, restartLimit?: { starts?: number, withinSeconds?: number } }} [opts]
  */
 export async function ensure(manifest, stateRoot, deps, opts = {}) {
   const grace = (opts.graceSeconds ?? DEFAULT_STOP_GRACE_SECONDS) * 1000;
+  const limit = { ...RESTART_LIMIT, ...(opts.restartLimit ?? {}) };
+  const staggerMs = (opts.staggerSeconds ?? DEFAULT_STAGGER_SECONDS) * 1000;
+  const dryRun = Boolean(opts.dryRun);
   return withGrantsLock(stateRoot, async () => {
     /** @type {Record<string, unknown>[]} */
     const rows = [];
     const now = deps.now();
     const at = new Date(now).toISOString();
+    const events = await readLedger(stateRoot);
     /** @param {Record<string, unknown>} ev */
-    const record = async (ev) => { if (!opts.dryRun) await appendLedger(stateRoot, { at, ...ev }); };
-    /** @param {string} room @param {Record<string, string>} fields */
-    const notice = async (room, fields) => {
+    const record = async (ev) => { if (!dryRun) await appendLedger(stateRoot, { at, ...ev }); };
+    /** @param {string} room @param {Record<string, string>} fields @param {string | null} [to] */
+    const notice = async (room, fields, to = null) => {
       const text = formatNotice("N8", fields);
       // a record line owes no disposition; the trailer is also what lets the line be read back as N8
-      try { const r = await deps.post(room, withTrailers(text, [{ key: "ack", value: "none" }])); return { notice: text, room, posted: r?.id ?? null }; }
+      const trailers = [...(to ? [{ key: "to", value: to }] : []), { key: "ack", value: "none" }];
+      try { const r = await deps.post(room, withTrailers(text, trailers)); return { notice: text, room, posted: r?.id ?? null }; }
       catch (e) { return { notice: text, room, posted: null, postError: e instanceof Error ? e.message : String(e) }; }
     };
     const base = (/** @type {string} */ position, /** @type {string | null} */ id) => ({ type: "resident-ensure", position, ...(id ? { want: id } : {}) });
     /** @param {unknown} e */
     const msg = (e) => (e instanceof Error ? e.message : String(e));
 
-    for (const w of openWants(foldLedger(await readLedger(stateRoot)))) {
+    // ---- the gates every start passes ----
+    const lastService = [...events].reverse().find((e) => e.ev === "dark" || e.ev === "light");
+    let darkOpen = lastService?.ev === "dark";
+    /** @type {string[]} */
+    const dark = [];
+    /** @type {string | null} */
+    let darkReason = null;
+    /** @type {Map<string, Promise<{ up: boolean, started: boolean, reason: string | null }>>} */
+    const hosts = new Map();
+    let ternStartedNoted = false;
+    let starts = 0;
+    const sleep = deps.sleep ?? ((/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms)));
+    /**
+     * Whether a start of `pos` may go now: null when it may, else what stops it (`dark`: the pass
+     * says so once for every such position; `host`: the start fails by name).
+     * @param {string} pos @param {ManifestResident} row
+     * @returns {Promise<{ dark: true } | { host: string } | null>}
+     */
+    const gate = async (pos, row) => {
+      const svc = deps.service ? await deps.service(row) : { up: true, reason: null };
+      if (!svc.up) { dark.push(pos); darkReason ??= svc.reason; return { dark: true }; }
+      if (darkOpen) { await record({ ev: "light" }); darkOpen = false; }
+      if (deps.host) {
+        if (!hosts.has(row.host)) hosts.set(row.host, deps.host(row.host, { dryRun }));
+        const h = await /** @type {Promise<{ up: boolean, started: boolean, reason: string | null }>} */ (hosts.get(row.host));
+        if (!h.up) return { host: h.reason ?? `its host ${row.host} is not up` };
+      }
+      return null;
+    };
+    const pace = async () => { if (starts++ > 0 && staggerMs > 0) await sleep(staggerMs); };
+    const ternNote = async (/** @type {ManifestResident} */ row) => {
+      if (row.host !== "tern" || ternStartedNoted || !hosts.has("tern")) return {};
+      if (!(await /** @type {Promise<{ started: boolean }>} */ (hosts.get("tern"))).started) return {};
+      ternStartedNoted = true;
+      return { host: "tern started" };
+    };
+    /**
+     * The restart limit for a supervisor restart: null when a start may go, else the held row
+     * (the host human told once, when the hold is new).
+     * @param {string} pos @param {ManifestResident} row @param {any} run @param {string | null} id
+     */
+    const holdOf = async (pos, row, run, id) => {
+      const rec = restartRecord(events, pos, now, limit, run);
+      const reason = `restart limit: ${limit.starts} starts in ${formatAge(limit.withinSeconds * 1000)}; a start by hand (agora resident start ${pos}) clears it`;
+      if (rec.held) return { ...base(pos, id), action: "held", reason };
+      if (rec.starts < limit.starts) return null;
+      if (dryRun) return { ...base(pos, id), action: "would-hold", reason };
+      await record({ ev: "held", position: pos, starts: rec.starts, within: limit.withinSeconds });
+      const n = await notice(row.rooms[0], { position: pos, verdict: "absent", attestor: "host", age: formatAge(Math.max(0, now - (rec.firstAt ?? now))), path: "restart", outcome: "held" }, hostHuman(manifest, row.rooms[0]));
+      return { ...base(pos, id), action: "held", reason, ...n };
+    };
+
+    for (const w of openWants(foldLedger(events))) {
       const pos = w.want.position;
       const id = w.want.id;
       let ending = wantEnding(w, manifest, now);
@@ -397,16 +507,24 @@ export async function ensure(manifest, stateRoot, deps, opts = {}) {
           continue;
         }
         const path_ = started ? "restart" : "grant";
-        if (opts.dryRun) { rows.push({ ...base(pos, id), action: started ? "would-restart" : "would-start" }); continue; }
+        const held = started ? await holdOf(pos, row, st.run, id) : null;
+        if (held) { rows.push(held); continue; }
+        const g = await gate(pos, row);
+        if (g && "dark" in g) continue;
+        if (dryRun) { rows.push({ ...base(pos, id), action: started ? "would-restart" : "would-start", ...(g ? { reason: g.host } : {}) }); continue; }
         /** @type {{ action: string, reason?: unknown }} */
         let r;
-        try { r = await deps.start(pos, row); } catch (e) { r = { action: "failed", reason: msg(e) }; }
+        if (g) r = { action: "failed", reason: g.host };
+        else {
+          await pace();
+          try { r = await deps.start(pos, row); } catch (e) { r = { action: "failed", reason: msg(e) }; }
+        }
         if (r.action === "running") { rows.push({ ...base(pos, id), action: "running", reason: r.reason }); continue; }
         const outcome = r.action === "started" ? "started" : "failed";
         await record({ ev: "start", id, position: pos, path: path_, outcome, ...(r.reason ? { reason: String(r.reason) } : {}) });
         const n = await notice(row.rooms[0], { position: pos, verdict: started ? "absent" : "wanted", attestor: started ? "host" : w.want.by,
           age: formatAge(started ? 0 : now - Date.parse(w.want.at)), path: path_, outcome });
-        rows.push({ ...base(pos, id), action: outcome === "started" ? (started ? "restarted" : "started") : "failed", ...(r.reason ? { reason: String(r.reason) } : {}), ...n });
+        rows.push({ ...base(pos, id), action: outcome === "started" ? (started ? "restarted" : "started") : "failed", ...(r.reason ? { reason: String(r.reason) } : {}), ...(await ternNote(row)), ...n });
         continue;
       }
 
@@ -414,9 +532,9 @@ export async function ensure(manifest, stateRoot, deps, opts = {}) {
       if (!w.ending && !w.unwant) await record({ ev: "ending", id, position: pos, why: end.why, by: end.by });
       const endedAt = end.at ? Date.parse(end.at) : w.ending ? Date.parse(w.ending.at) : now;
       if (!st.running) {
-        if (st.run && !opts.dryRun) await deps.stop(pos).catch(() => {}); // a dead host's leftovers
+        if (st.run && !dryRun) await deps.stop(pos).catch(() => {}); // a dead host's leftovers
         await record({ ev: "end", id, position: pos, why: end.why });
-        rows.push({ ...base(pos, id), action: opts.dryRun ? "would-end" : "ended", reason: `${end.why}; nothing runs at the position` });
+        rows.push({ ...base(pos, id), action: dryRun ? "would-end" : "ended", reason: `${end.why}; nothing runs at the position` });
         continue;
       }
       const turn = await deps.turn(pos);
@@ -427,7 +545,7 @@ export async function ensure(manifest, stateRoot, deps, opts = {}) {
         rows.push({ ...base(pos, id), action: "held", reason: `${end.why}; stops at its next idle: ${why}` });
         continue;
       }
-      if (opts.dryRun) { rows.push({ ...base(pos, id), action: "would-stop", reason: end.why }); continue; }
+      if (dryRun) { rows.push({ ...base(pos, id), action: "would-stop", reason: end.why }); continue; }
       /** @type {{ action: string, reason?: unknown }} */
       let r;
       try { r = await deps.stop(pos); } catch (e) { r = { action: "failed", reason: msg(e) }; }
@@ -439,20 +557,40 @@ export async function ensure(manifest, stateRoot, deps, opts = {}) {
       rows.push({ ...base(pos, id), action: outcome, ...(r.reason ? { reason: String(r.reason) } : {}), ...n });
     }
 
-    // a messenger row whose host died: restart it. One with no run record was stopped by its operator.
+    // a standing row (the messenger's included) whose host died: start it again. One with no run
+    // record was stopped by its operator, or never started here, and is left.
     for (const row of Object.values(manifest.residents)) {
-      if (row.harness !== "agora") continue;
-      const st = await deps.state(row.slug);
-      if (st.running || !st.run) continue;
-      if (opts.dryRun) { rows.push({ ...base(row.slug, null), action: "would-restart", reason: "its host is gone" }); continue; }
+      if (row.tenure !== "standing") continue;
+      let st = await deps.state(row.slug);
+      if (!st.run) continue;
+      // a Tern host that does not answer cannot say whether its session runs: it is brought up, then asked again
+      const unread = st.running && st.host === "unknown" && row.host === "tern";
+      if (st.running && !unread) continue;
+      const held = await holdOf(row.slug, row, st.run, null);
+      if (held) { rows.push(held); continue; }
+      const g = await gate(row.slug, row);
+      if (g && "dark" in g) continue;
+      if (!g && unread) { st = await deps.state(row.slug); if (st.running) continue; }
+      if (dryRun) { rows.push({ ...base(row.slug, null), action: "would-restart", reason: g ? g.host : "its host is gone" }); continue; }
       /** @type {{ action: string, reason?: unknown }} */
       let r;
-      try { r = await deps.start(row.slug, row); } catch (e) { r = { action: "failed", reason: msg(e) }; }
+      if (g) r = { action: "failed", reason: g.host };
+      else {
+        await pace();
+        try { r = await deps.start(row.slug, row); } catch (e) { r = { action: "failed", reason: msg(e) }; }
+      }
       if (r.action === "running") continue;
       const outcome = r.action === "started" ? "started" : "failed";
       await record({ ev: "start", position: row.slug, path: "restart", outcome, ...(r.reason ? { reason: String(r.reason) } : {}) });
       const n = await notice(row.rooms[0], { position: row.slug, verdict: "absent", attestor: "host", age: "0s", path: "restart", outcome });
-      rows.push({ ...base(row.slug, null), action: outcome === "started" ? "restarted" : "failed", ...(r.reason ? { reason: String(r.reason) } : {}), ...n });
+      rows.push({ ...base(row.slug, null), action: outcome === "started" ? "restarted" : "failed", ...(r.reason ? { reason: String(r.reason) } : {}), ...(await ternNote(row)), ...n });
+    }
+
+    // a dark seat service: nothing was started into it, said once for the episode
+    if (dark.length && !darkOpen) {
+      await record({ ev: "dark", positions: dark, reason: darkReason });
+      rows.push({ type: "resident-ensure", position: "seat service", action: "dark", positions: dark,
+        reason: `the seat service is dark (${darkReason ?? "no answer"}): nothing started for ${dark.join(", ")}; the first pass after it answers starts them` });
     }
     return rows;
   });
@@ -461,13 +599,26 @@ export async function ensure(manifest, stateRoot, deps, opts = {}) {
 /**
  * The seat's own acts for `ensure`: start through the host the row names (never `none`, which has
  * no handle a supervisor can start into), stop by the recorded handle, the turn from the harness
- * transcript. `post` is the caller's: it signs and places the N8 line.
+ * transcript. `post` is the caller's: it signs and places the N8 line. `service` connects to this
+ * seat's service once per pass when a row's rooms include a room it hosts (a native room); `host`
+ * brings Tern up (`ensureTern`) or finds tmux.
  * @param {{ manifest: Manifest, ctx: import("./resident-start.mjs").PlanContext, post: EnsureDeps['post'], home?: string,
- *   run?: import("./resident-start.mjs").Runner, now?: () => number }} a
+ *   run?: import("./resident-start.mjs").Runner, now?: () => number, launch?: (argv: string[]) => Promise<string | null>, sleep?: (ms: number) => Promise<void>,
+ *   connect?: typeof connectSeatService }} a
  * @returns {EnsureDeps}
  */
 export function seatEnsureDeps(a) {
   const stateRoot = a.ctx.stateRoot;
+  /** @type {Promise<{ up: boolean, reason: string | null }> | null} */
+  let serviceProbe = null;
+  const probeService = async () => {
+    try {
+      const { client } = await (a.connect ?? connectSeatService)(stateRoot, { timeoutMs: 5000 });
+      client.close();
+      return { up: true, reason: null };
+    } catch (e) { return { up: false, reason: e instanceof Error ? e.message : String(e) }; }
+  };
+  const hostDeps = { env: a.ctx.env, platform: a.ctx.platform, exists: a.ctx.exists, run: a.run, launch: a.launch, sleep: a.sleep };
   return {
     start: async (position, row) => {
       // the plan sees every open want as a row, so a granted slot's lineage is checked against the others
@@ -483,6 +634,18 @@ export function seatEnsureDeps(a) {
     turn: (position) => positionTurn(stateRoot, position, { home: a.home }),
     post: a.post,
     now: a.now ?? (() => Date.now()),
+    service: async (row) => {
+      // a room this seat hosts is served by this seat's service; another transport needs none
+      const hosted = row.rooms.some((r) => /** @type {any} */ (a.ctx.cfg.rooms ?? {})[r]?.transport === "native");
+      if (!hosted) return { up: true, reason: null };
+      return (serviceProbe ??= probeService());
+    },
+    host: async (kind, opts) => {
+      if (kind === "tern") return ensureTern({ ...hostDeps, dryRun: opts.dryRun });
+      if (kind === "tmux") return which("tmux", hostDeps) ? { up: true, started: false, reason: null } : { up: false, started: false, reason: "tmux is not on PATH" };
+      return { up: true, started: false, reason: null };
+    },
+    ...(a.sleep ? { sleep: a.sleep } : {}),
   };
 }
 

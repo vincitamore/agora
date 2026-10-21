@@ -1,0 +1,43 @@
+{
+  "scenario": "S67",
+  "recordedOn": "2026-10-21",
+  "build": "2b27302",
+  "checks": {
+    "dark-service-starts-nothing": {
+      "today": "green",
+      "observed": {
+        "started": 0,
+        "darkReports": 1
+      }
+    },
+    "reboot-restarts-every-standing": {
+      "today": "green",
+      "observed": [
+        [
+          "main.coding",
+          1,
+          true
+        ],
+        [
+          "main.messenger",
+          1,
+          true
+        ],
+        [
+          "main.orchestrator",
+          1,
+          true
+        ]
+      ]
+    },
+    "restart-limit-holds": {
+      "today": "green",
+      "observed": {
+        "starts": 3,
+        "told": 1,
+        "toHuman": 1,
+        "running": false
+      }
+    }
+  }
+}

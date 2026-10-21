@@ -381,6 +381,37 @@ export class SucceedKick {
 }
 
 /**
+ * The context one inference's usage says the next request re-reads: uncached input, cache read and
+ * cache write (input is exclusive of the cache in both harnesses' counts), in omp's keys (`input`,
+ * `cacheRead`, `cacheWrite`) or the API's (`input_tokens`, `cache_read_input_tokens`,
+ * `cache_creation_input_tokens`). Null for no usage, or one that counted nothing (a harness's own
+ * error entry).
+ * @param {any} u @returns {number | null}
+ */
+export function contextOfUsage(u) {
+  if (!u || typeof u !== "object") return null;
+  const n = (/** @type {unknown} */ v) => (Number.isSafeInteger(v) && /** @type {number} */ (v) >= 0 ? /** @type {number} */ (v) : 0);
+  const context = n(u.input ?? u.input_tokens) + n(u.cacheRead ?? u.cache_read_input_tokens) + n(u.cacheWrite ?? u.cache_creation_input_tokens);
+  return context + n(u.output ?? u.output_tokens) === 0 ? null : context;
+}
+
+/** The row's context ceiling a launcher gave this session (`AGORA_CONTEXT_CEILING`), or null. @param {unknown} value */
+export function contextCeiling(value) {
+  const s = typeof value === "string" ? value.trim() : "";
+  return /^[1-9][0-9]*$/.test(s) && Number.isSafeInteger(Number(s)) ? Number(s) : null;
+}
+
+/**
+ * The live ceiling: at a turn end, a session whose context is at or past its row's ceiling, with no
+ * succeed request pending, asks its own succession (`agora resident succeed --ceiling`), so the
+ * ceiling holds without waiting for a cycle run; the turn-end kick then runs the cycle.
+ * @param {{ ceiling: number | null, context: number | null, pending: boolean }} p
+ */
+export function ceilingDue({ ceiling, context, pending }) {
+  return ceiling !== null && context !== null && context >= ceiling && !pending;
+}
+
+/**
  * One seen line. `position` is the session's label (its place on the seat), `readAt` when the poll
  * that read the message finished, `admittedAt` when the watch put it in its intake; the room, the
  * message id and its cursor say what was delivered.

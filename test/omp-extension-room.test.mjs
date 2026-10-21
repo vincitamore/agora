@@ -539,6 +539,56 @@ test("succeed kick: a turn end with a pending succeed request at this position a
   } finally { await r.cleanup(); }
 });
 
+test("ceiling: a session launched with its row's ceiling asks its own ceiling succession at the first turn end past it, once, and the kick runs the cycle (red legs: under it, or with no ceiling, nothing is asked)", async () => {
+  const r = await room();
+  try {
+    const log = path.join(r.dir, "calls.log");
+    const wrapper = path.join(r.dir, "wrapper.mjs");
+    await writeFile(wrapper, [
+      'import { spawnSync } from "node:child_process";',
+      'import { appendFileSync } from "node:fs";',
+      "const args = process.argv.slice(2);",
+      `appendFileSync(${JSON.stringify(log)}, args.join(" ") + "\\n");`,
+      'if (args[0] === "resident" && args[1] === "timer") { process.stdout.write(JSON.stringify({ type: "resident-timer", action: "run", state: "kicked", problems: [] }) + "\\n"); process.exit(0); }',
+      `const c = spawnSync(process.execPath, [${JSON.stringify(bin)}, ...args], { stdio: "inherit" }); process.exit(c.status ?? 1);`,
+    ].join("\n"));
+    const state = path.join(r.dir, "state");
+    const calls = async (/** @type {string} */ head) => (await readFile(log, "utf8").catch(() => "")).split("\n").filter((l) => l.startsWith(head));
+    /** @param {any} s @param {Record<string, number>} usage @param {Record<string, unknown>} [extra] */
+    const answered = async (s, usage, extra = {}) => {
+      s.ctx.idle = false;
+      await s.emit("agent_start", s.ctx);
+      await s.emit("message_end", s.ctx, { message: { role: "assistant", stopReason: "stop", usage, ...extra } });
+      s.ctx.idle = true;
+      await s.emit("agent_end", s.ctx);
+      await s.runTimeouts();
+    };
+    const env = { AGORA_ROOM_CMD: JSON.stringify([process.execPath, wrapper]), AGORA_LABEL: "desk.review", AGORA_ROLE: "review", AGORA_STATE: state };
+    // red leg: no ceiling given, however large the context
+    const plain = await start(r, { env });
+    await answered(plain, { input: 10, cacheRead: 500_000, cacheWrite: 0, output: 5 });
+    assert.deepEqual(await calls("resident succeed"), []);
+    plain.rt.stop();
+
+    const s = await start(r, { env: { ...env, AGORA_CONTEXT_CEILING: "150000" } });
+    await answered(s, { input: 10, cacheRead: 149_000, cacheWrite: 989, output: 5 });
+    assert.deepEqual(await calls("resident succeed"), [], "red leg: under the ceiling nothing is asked");
+    // an aborted reply measures nothing
+    await answered(s, { input: 10, cacheRead: 400_000, cacheWrite: 0, output: 5 }, { stopReason: "aborted" });
+    assert.deepEqual(await calls("resident succeed"), []);
+    await answered(s, { input: 12, cacheRead: 150_100, cacheWrite: 300, output: 5 });
+    assert.deepEqual(await calls("resident succeed"), ["resident succeed desk.review --ceiling 150000 --json"]);
+    const { readSucceedRequest } = await import("../src/resident.mjs");
+    const req = await readSucceedRequest(state, "desk.review");
+    assert.equal(req?.ceiling, 150_000, "a ceiling's request: any claim defers it");
+    assert.equal((await calls("resident timer run")).length, 1, "the same turn end kicks the cycle");
+    assert.deepEqual([s.rt.state().ceiling.ceiling, s.rt.state().ceiling.context], [150_000, 150_412]);
+    await answered(s, { input: 12, cacheRead: 160_000, cacheWrite: 0, output: 5 });
+    assert.equal((await calls("resident succeed")).length, 1, "a request pending: asked once");
+    assert.equal((await calls("resident timer run")).length, 1, "and kicked once");
+  } finally { await r.cleanup(); }
+});
+
 test("recovery: a failed poll and a child killed for not answering are both recovered at the next tick, the message arriving once", async () => {
   const r = await room();
   try {

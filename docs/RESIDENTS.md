@@ -226,7 +226,7 @@ position it wants carries that prefix.
 ```
 agora resident want <room>.<role> --because <text> [--model <alias>] [--card <path>] [--hours <n>] [--dry-run] [--grace <s>] [--json]
 agora resident unwant <want-id|position> [--because <text>] [--grace <s>] [--json]
-agora resident ensure [--dry-run] [--grace <s>] [--json]
+agora resident ensure [--dry-run] [--grace <s>] [--stagger <s>] [--json]
 agora resident grant [--json]
 ```
 
@@ -281,8 +281,34 @@ be run directly. Under the seat's grants lock it:
   transcript's last entry is an assistant message that called no tool, and has been quiet for
   `--grace` seconds (default 60). While a turn runs it is held and says so; a turn it cannot read
   holds it too;
-- restarts a messenger row (`harness: "agora"`) whose host died; one with no run record was stopped
-  by its operator and is left.
+- restarts a **standing** row (`tenure: "standing"`, the default, the messenger's included) whose
+  host died: its run record is left and nothing runs at the position. This is what recovers a room
+  after a reboot: nothing a start recorded outlives one (a harness pid from another boot names
+  nothing, a tmux server or a foreground harness started before the boot is gone), so the first
+  pass after the reboot finds every standing position dead and starts it. A row with no run record
+  was stopped by its operator (`resident stop` removes it), or was never started here, and is left;
+  an `on-demand` row is a grant's to start. A restart that fails keeps the run record of the start
+  that stood, so the next pass tries again.
+
+Every start (a want's, a granted position's restart, a standing row's) passes three gates, in order:
+
+- **the seat service**: a row whose rooms include a room this seat hosts (a native room) starts only
+  when the seat service answers. A dark service starts nothing; the pass says so once for the
+  episode (one row, action `dark`, naming the positions it held back, and `dark` in the record),
+  never retries it as a start and spends no restart on it; the first pass after the service answers
+  (recorded `light`) starts them.
+- **the host**: on host `tern`, Tern must answer (`tern ls`). One that does not is started the way
+  its own Start at login starts it, `tern daemon --login` (on Windows the windowed `tern.exe` beside
+  the `tern.com` agora finds, so no console opens), and waited for up to 20 s, once per pass, before
+  any resident is started into it; the first row started after it prints `host: tern started`. A
+  Tern that cannot be started is a failed start, said by name. On host `tmux`, tmux must be on PATH.
+- **the restart limit**: a position the supervisor has restarted 3 times within the hour is held
+  (action `held`), and its host human (the `--human-name` of the room's messenger row) is told once,
+  by an N8 line addressed to them; starts stop until a start by hand (a run record started after
+  the hold) clears it. A wedged resident is a person's to look at, not a loop's to pay for.
+
+Starts in one pass are 10 s apart (`--stagger <seconds>`), so a reboot's recovery does not start
+every harness at once.
 
 Each start or stop posts one N8 line, the messenger's fixed form (docs/MESSENGER.md), with the
 trailer `ack: none`, as the room's messenger position when the manifest has one for the room (else
@@ -295,13 +321,16 @@ desk.coding-2: revoked by manifest 2m; path grant; outcome stopped.
 desk.coding-2: unwanted by desk.orchestrator 0s; path grant; outcome stopped.
 desk.coding-2: expired by clock 1m; path grant; outcome stopped.
 desk.messenger: absent by host 0s; path restart; outcome started.
+desk.orchestrator: absent by host 42m; path restart; outcome held.
 ```
 
 The age is from the want to its start, or from the end of the want (first seen, for a revocation) to
-the stop. **The record** is `<state>/residents/grants.jsonl`, append-only: every want, refusal (of a
-want or of an unwant), unwant, ending (when a revocation or expiry was first seen), start, stop and end, one JSON line
-each. What is open is a fold over it; nothing else is kept. `grant` prints each grant's caps and its
-open wants with where each stands.
+the stop; for a hold, from the first of the restarts it counts. The hold's line also carries `to:
+<host human>`. **The record** is `<state>/residents/grants.jsonl`, append-only: every want, refusal
+(of a want or of an unwant), unwant, ending (when a revocation or expiry was first seen), start,
+stop, end, hold, and the seat service going dark and answering again, one JSON line each. What is
+open is a fold over it; nothing else is kept. `grant` prints each grant's caps and its open wants
+with where each stands.
 
 ## The arming sequence a profile carries
 
@@ -344,7 +373,7 @@ the context size at the moment the cold wake lands. Measured: a resident that wo
 afternoon and slept overnight held 382K and would have paid it cold on the next message; its
 successor armed at 118K.
 
-`agora resident cycle <slug>... | --all [--dry-run] [--idle <s>] [--min-context <n>] [--max-context <n>] [--deaf <s>] [--restart <cmd>] [--json]`
+`agora resident cycle <slug>... | --all [--dry-run] [--idle <s>] [--min-context <n>] [--max-context <n>] [--deaf <s>] [--restart <cmd>] [--grace <s>] [--stagger <s>] [--json]`
 is the guard and the act. Per resident it finds the newest live session that holds it (see
 [Positions](#positions)), reads that session's Claude Code or OMP transcript, and takes the newest assistant message's
 usage: context = input + cache read + cache creation, last inference = its timestamp. An entry the
@@ -370,7 +399,14 @@ measured two 700K residents as context 0 for three days. It cycles in five cases
   `--dry-run`) and judges it as a resident's own, with one difference: the request may come
   mid-task, so **any** claim the session holds defers it, not only one taken after the request.
   The request makes the turn-end kick below fire, so the succession lands at the next idle rather
-  than the timer's next tick. The row prints `requested` when this pass wrote it.
+  than the timer's next tick. The row prints `requested` when this pass wrote it. This is the
+  backstop: the ceiling is held live by the session's own watch. `resident start` exports the
+  row's ceiling to the harness as `AGORA_CONTEXT_CEILING`, and at every turn end the agora-room
+  extension (omp: the last reply's usage) or plugin (Claude Code: `$.session.usage()`) compares
+  the session's context with it; at or past it, with no request pending, it runs `agora resident
+  succeed <position> --ceiling <tokens>` and the kick in the same turn end runs the cycle. A
+  manifest edit of the ceiling reaches a live session at its next start; the cycle reads the
+  manifest every run.
 - **ceiling**: the context is at least `--max-context` (default 400000) and the last inference is
   older than `--deaf`, so the session is between turns. Every wake re-reads the whole context, so
   past this a successor at the orientation floor is cheaper even while the cache is warm.
@@ -388,7 +424,7 @@ is the caller's). A manifest resident on host `none` has no handle a timer can s
 needs a `restart` command. `--all` first runs one `ensure` pass ([Grants](#grants)), then takes the
 slugs from the config's `residents` table, the manifest and the open wants.
 
-**Succeed.** `agora resident succeed [<position>]` (default: this session's position) writes
+**Succeed.** `agora resident succeed [<position>] [--ceiling <tokens>]` (default: this session's position) writes
 `<state>/residents/<position>/succeed.json`, a request to be handed to a fresh session. A resident
 makes it when a piece of work closes past its working size. The cycle honours it only between
 turns: the transcript's last entry is an assistant message that called no tool, so no tool call,
@@ -397,7 +433,9 @@ holds a claim it took after the request (read from its own carry evidence: every
 `release:` trailer it posted): it asked at a close and then took the next task, so it is mid-task
 however idle its turn, and the request waits for that claim's release. Honoured, the request is
 removed; a request older than the session that now holds the position was already honoured and is
-cleared.
+cleared. `--ceiling` marks the request as the row's ceiling's (any claim defers it, as above) and
+leaves a request already pending for the session that holds the position, so a watch that asks at
+every turn end past the ceiling asks once.
 
 The request is honoured at the next idle, not at the timer's next tick: at the end of the first
 turn after a request, the agora-room extension (omp) and plugin (Claude Code) run `agora resident
@@ -429,6 +467,28 @@ and this config (and `--manifest`, when given): a Windows scheduled task `agora-
 `PATH`), or a launchd agent `agora.resident-cycle` (logging to `<state>/residents/cycle.log`).
 `--interval <seconds>` sets the period in whole minutes (default 900).
 
+The entry also runs **at logon**, so a seat recovers its residents minutes after a reboot rather
+than at the interval's next tick: the Windows task carries a logon trigger for the installing
+account (`USERDOMAIN\USERNAME`) with a 2-minute delay, so the seat service and the network are up
+first; the systemd user timer has `OnStartupSec=2min` (the user's timers start with the user's
+session, or at boot when the user lingers); the launchd agent has `RunAtLoad` (it loads at login).
+The pass that runs then is the supervisor's ([Grants](#grants), **ensure**): it starts every
+standing row the reboot left dead, once the seat service answers.
+
+**Tern at logon (Windows).** When a row of the manifest runs on host `tern`, install also makes
+Tern's session daemon start at logon, the way Tern's own **Start at login** (Settings › Sessions)
+does: `tern daemon --login`, which starts the daemon in the background with no window, unless one
+runs. Tern's own setting is preferred: when the user's Run key already holds an entry that starts
+`tern.exe` with `--login`, install writes nothing beside it. Otherwise it writes agora's own Run
+entry `agora-tern-daemon` = `"<Tern folder>\tern.exe" daemon --login` (the windowed program beside
+the `tern.com` agora finds). The cycle brings Tern up itself as well when a pass needs it, so
+either alone recovers the room; the startup entry has Tern (and the sessions it keeps) up before
+the first pass. `timer check` reports it on a line of its own (`tern at logon: agora's startup
+entry …`, `Tern's own Start at login (…)`, `missing`, `disabled`, `differs`, `not needed`) and is
+`differs` while a Tern row has nothing starting Tern at logon, or agora's entry is turned off in
+Task Manager's Startup apps. `timer remove` deletes agora's entry (and its Startup apps record)
+and never Tern's own.
+
 Install then runs the entry once through the scheduler itself (the `timer run` call; systemd
 starts the oneshot service and waits for it), waits for that run to end (up to two minutes), and
 prints the `timer check` that follows, so the install's own output is the proof the timer can run
@@ -452,7 +512,9 @@ or on Windows its wrapper, is not what install would write); on Windows `failing
 scheduler could not start the last run, its Last Result as `0x80070005`), `failing exit <n>` (the
 cycle ran and exited `n`), or `failing` (a run ended with no exit record: the wrapper never ran the
 cycle); and `ok` (on Windows: a task not yet run or running, or whose last run's cycle exited 0).
-`--json` carries `lastResult`, `lastRun` and `cycleExit`. `timer run` asks the scheduler to run
+`--json` carries `triggers`, `lastResult`, `lastRun`, `cycleExit` and, on Windows, `login` (`state`,
+`name`, `data`). A task registered before the logon trigger was added is `differs` (`it has no logon
+trigger`) until it is installed again. `timer run` asks the scheduler to run
 the entry once now (`schtasks /Run`, `systemctl --user start --no-block`, `launchctl kickstart`)
 and exits 1 naming `missing` when none is installed; `timer remove` takes it out, with the
 wrapper and the exit record.

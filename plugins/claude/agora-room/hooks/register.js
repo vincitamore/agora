@@ -13,13 +13,16 @@
 //   inherit a session started at a position (AGORA_LABEL) runs `agora resident inherit <position>`
 //           before its first read, so a successor starts from its predecessor's cursors, follow set
 //           and posted ledger, never the head.
+//   ceiling a session launched with its row's context ceiling (AGORA_CONTEXT_CEILING) asks its own
+//           succession at the first turn end past it (`agora resident succeed --ceiling`), then the
+//           turn-end kick runs the cycle, so the ceiling holds between cycle runs.
 //
 // A hooks module may not bind, pass or store `$` (claude plugin validate refuses it), so every
 // function that needs the mods API is declared inside the session.start hook, where `$` is in
 // scope, and the other hooks reach them through `api`. What can be decided from data lives in
 // ./lib.js.
 import {
-  PANE_ID, SUBJECTS_PAGE, TOOL_NAME, COMMAND, ActivityTracker, DeliveryQueue, SeenLog, SucceedKick, activityPath, buildSubjects, chooseRoom, childEnvFor, deliveryText,
+  PANE_ID, SUBJECTS_PAGE, TOOL_NAME, COMMAND, ActivityTracker, DeliveryQueue, SeenLog, SucceedKick, activityPath, buildSubjects, ceilingDue, chooseRoom, childEnvFor, contextCeiling, deliveryText,
   isStopReason, jsonLines, paneTree, parseReadOutput, parseWatchOutput, postArgs, receiptText,
   resolveConfig, seenPath, seenRecord, statusLine, succeedPath, TO_NOBODY, whoRows,
 } from './lib.js'
@@ -50,6 +53,7 @@ export function register(on, options) {
       AGORA_ROOM_PANE_AS: await $.env.get('AGORA_ROOM_PANE_AS'),
       AGORA_STATE: await $.env.get('AGORA_STATE'),
       AGORA_LABEL: await $.env.get('AGORA_LABEL'),
+      AGORA_CONTEXT_CEILING: await $.env.get('AGORA_CONTEXT_CEILING'),
     }
     const home = (await $.env.get('HOME')) || (await $.env.get('USERPROFILE')) || null
     let file = null
@@ -116,6 +120,27 @@ export function register(on, options) {
       if (!at) return
       const said = kick.outcome(at, await run(['resident', 'timer', 'run', '--json']))
       if (said) $.ui.log(said)
+    }
+
+    // The live ceiling: a launcher that gave the row a ceiling exports it. At a turn end the session's
+    // own context (the last response's input side, as /context counts it) past the ceiling, with no
+    // request pending, asks its own succession; the kick that follows runs the cycle, which honours
+    // it once no claim holds it. The cycle's own check remains the backstop.
+    const ceiling = contextCeiling(env.AGORA_CONTEXT_CEILING)
+    let ceilingAsked = null
+    let ceilingWarned = false
+    async function askCeiling() {
+      if (!succeedFile || !position || ceiling === null) return
+      let context = null
+      try { const u = await $.session.usage(); context = typeof u?.context?.tokens === 'number' ? u.context.tokens : null } catch { context = null }
+      let pending = true
+      try { pending = await $.fs.exists(succeedFile) } catch { pending = true }
+      if (!ceilingDue({ ceiling, context, pending })) return
+      const r = await run(['resident', 'succeed', position, '--ceiling', String(ceiling), '--json'])
+      if (r.exitCode === 0) { ceilingAsked = { at: stamp(), context }; return }
+      lastError = 'agora resident succeed ' + position + ' --ceiling ' + ceiling + ' exit ' + r.exitCode + ': ' + String(r.stderr).slice(0, 200)
+      errors += 1
+      if (!ceilingWarned) { ceilingWarned = true; $.ui.log(lastError) }
     }
 
     async function persist() {
@@ -431,7 +456,9 @@ export function register(on, options) {
       turnStart: async () => { if (activity.turnStart()) await writeActivity(true) },
       turnEnd: async () => {
         if (activity.turnEnd()) await writeActivity(true)
-        // a turn just ended: a pending succeed request is honoured now, not at the timer's next tick
+        // a turn just ended: past the row's ceiling it asks its own succession, and a pending
+        // succeed request is honoured now, not at the timer's next tick
+        try { await askCeiling() } catch (err) { lastError = 'ceiling: ' + String(err?.message ?? err) }
         try { await kickSucceed() } catch (err) { lastError = 'succeed kick: ' + String(err?.message ?? err) }
       },
       appended(door, type) {

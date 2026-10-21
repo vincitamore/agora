@@ -55,6 +55,8 @@ The CLI runs with no shell. The default command, the checkout's own `bin/agora.m
 
 **Succeed kick.** At the end of the first turn after a succeed request at its position (`<state>/residents/<position>/succeed.json`, written by `agora resident succeed`), the extension runs `agora resident timer run --json`, once per request: the OS scheduler runs the cycle now, outside this session's process tree, so the request is honoured at this idle and not at the timer's next tick. It never runs the cycle itself, whose restart stops this session and its children. With no timer installed it says so once (a notice) and the request waits for the next cycle. `state().succeedKick` carries `kickedFor`, `notice`, `notices` and `lastError`.
 
+**Live ceiling.** A session `agora resident start` launched from a row with a context ceiling carries it as `AGORA_CONTEXT_CEILING`. The extension keeps the context of the last reply this session's own loop finished (its usage: input + cache read + cache write; an aborted reply or a subagent's measures nothing), and at a turn end at or past the ceiling, with no succeed request pending at its position, runs `agora resident succeed <position> --ceiling <tokens> --json`; the succeed kick in the same turn end then runs the cycle, which honours the request once the session holds no claim. So the ceiling holds between cycle runs; the cycle's own ceiling check remains the backstop. A failed ask is said once. `state().ceiling` carries `ceiling`, `context` and `asked`.
+
 ## The parts
 
 ### Watch

@@ -108,7 +108,7 @@ import { runUsage } from "../src/usage-cli.mjs";
 import { runUsageSessionsCli } from "../src/session-accounting.mjs";
 import { readShadowArgs, runEconomyShadowCli, ShadowInputError } from "../src/economy/shadow.mjs";
 import { clearStandDown, clearWatchStop, completeStandDownAck, declareStandDown, listStandDowns, standDownRequested } from "../src/stand-down.mjs";
-import { DEFAULT_DEAF_SECONDS, DEFAULT_IDLE_SECONDS, DEFAULT_MAX_CONTEXT, DEFAULT_MIN_CONTEXT, ROOM_MECHANICS_DOC, assertResidentSlug, configuredResidents, inheritResident, planCycle, removeSucceedRequest, renderResidentPrompt, restartCommand, writeInheritMarker, writeSucceedRequest } from "../src/resident.mjs";
+import { DEFAULT_DEAF_SECONDS, DEFAULT_IDLE_SECONDS, DEFAULT_MAX_CONTEXT, DEFAULT_MIN_CONTEXT, ROOM_MECHANICS_DOC, assertResidentSlug, configuredResidents, inheritResident, planCycle, readSucceedRequest, removeSucceedRequest, renderResidentPrompt, restartCommand, writeInheritMarker, writeSucceedRequest } from "../src/resident.mjs";
 import { nativeRecordArgumentRefusal, nativeRecordVerb, prepareAttachments, readSlackFiles, runNativeRecordVerb } from "../src/cli-native-records.mjs";
 import { NativeRoomStore } from "../src/native-store.mjs";
 import { FACE_ATTACHMENT_MODES, FACE_BUILT, FACE_SELECTORS, appendFaceRecord, faceCopies, facePolicyPath, listFaceRecords, normalizeSelectors, readFacePolicy, selectFaces, writeFacePolicy } from "../src/faces.mjs";
@@ -421,7 +421,7 @@ const SCHEMA = {
       does: "clear this session's stand-down record. This verb does not start a session or re-arm watches; a live session re-arms them itself. agora codex is the separate attached-session launcher",
     },
     resident: {
-      args: ["<prompt <profile-path> | start <slug>...|--all | stop <slug>...|--all | timer install|check|run|remove | cycle <slug>...|--all | inherit <slug> | succeed [<position>] | want <room>.<role> --because <text> | unwant <want-id|position> | ensure | grant>"],
+      args: ["<prompt <profile-path> | start <slug>...|--all | stop <slug>...|--all | timer install|check|run|remove | cycle <slug>...|--all | inherit <slug> | succeed [<position>] [--ceiling <tokens>] | want <room>.<role> --because <text> | unwant <want-id|position> | ensure | grant>"],
       options: {
         "--all": "start: every standing resident in the manifest (an on-demand row starts only when wanted); stop: every resident in the manifest and every granted position; cycle: every slug in the config's residents table, the manifest and the open wants, after one ensure pass",
         "--manifest <path>": "the resident manifest (default: the config's residentManifest, else <state>/residents.json); agora reads it and never writes it",
@@ -442,8 +442,10 @@ const SCHEMA = {
         "--card <path>": "want: a card (a brief) appended after the row's own; a new role wears the grant's card, then this",
         "--hours <n>": "want: how long the want lasts (default and cap: the grant's maxHours)",
         "--grace <seconds>": "ensure, want, unwant, cycle --all: a granted position whose want ended stops once its turn has ended and been quiet this long (default 60)",
+        "--stagger <seconds>": "ensure, want, unwant, cycle --all: the pause between two starts in one pass (default 10), so a reboot's recovery does not start every harness at once",
+        "--ceiling <tokens>": "succeed: the request is the row's context ceiling's (any claim the session holds defers it); a request already pending for the session that holds the position is left as it is",
       },
-      does: "standing sessions. prompt prints a profile with the shipped room-mechanics block appended (the resident-sized discipline, so no skill loads at arming). start reads one row of the resident manifest, renders the prompt, builds the working folder, writes the harness overlay (omp: the checkout's agora-room extension; claude: its plugin dir) and starts the harness under its host with one fixed first prompt; a position that already holds a live session, or whose last start is still running under its host, is not started twice, and a start whose model family breaks a row's lineage rule (lineage: different-from-<role>) against a position in force is refused by name. stop ends a resident by the host handle its start recorded (<state>/residents/<slug>/run.json) and marks its sessions as handled, so no departure line follows a stop. timer install|check|run|remove the OS scheduler entry that runs cycle --all (Windows Task Scheduler, systemd user timer, launchd); install runs the entry once itself, waits for that run and prints the check after it (non-zero when it fails); check changes nothing; run asks the scheduler to run it once now, outside any session (the agora-room extension and plugin do, once per succeed request, at the turn end after it). cycle finds the newest live session holding the position <slug> (its session --label), or for a session with no position the newest signing as /<slug>, measures its last real inference and context from the harness transcript (harness-written error entries are skipped), and when it is deaf (no live watch, idle past --deaf), past the ceiling (--max-context, idle past --deaf), cold (past --idle) AND large (past --min-context), or asked to succeed, between turns and holding no claim it took after the request, writes <state>/residents/<slug>/inherit.json naming it and restarts the unit (--restart, the manifest row's restart, the config row's restart, else for a manifest resident stop and start): a successor pays its floor, a cold wake pays the whole context. inherit consumes that marker (the same inheritance as session --inherit) and is a no-op without one. succeed asks the cycle to hand a position (default: this session's) to a fresh session once its turn ends. want, from the session holding a grant (the manifest's grants[<position>]), asks for a resident at <room>.<role>: refused by name past maxLive, outside the grant's models or roles, for a new role with no card, when every slot is held, or when its model's family breaks a lineage rule; admitted, it is recorded and ensure runs. ensure (also run by want, unwant and cycle --all) starts admitted wants, restarts a granted position or messenger row whose host died, and stops a granted position whose want ended (unwanted, expired, the grant removed or narrowed) at its next idle, posting one N8 line per start or stop in the room's Room subject; every want, refusal, start and stop is kept in <state>/residents/grants.jsonl. grant prints the grants and their open wants. Never writes the shared config or the manifest; docs/RESIDENTS.md",
+      does: "standing sessions. prompt prints a profile with the shipped room-mechanics block appended (the resident-sized discipline, so no skill loads at arming). start reads one row of the resident manifest, renders the prompt, builds the working folder, writes the harness overlay (omp: the checkout's agora-room extension; claude: its plugin dir) and starts the harness under its host with one fixed first prompt; a position that already holds a live session, or whose last start is still running under its host, is not started twice, and a start whose model family breaks a row's lineage rule (lineage: different-from-<role>) against a position in force is refused by name. stop ends a resident by the host handle its start recorded (<state>/residents/<slug>/run.json) and marks its sessions as handled, so no departure line follows a stop. timer install|check|run|remove the OS scheduler entry that runs cycle --all on its interval and at logon (Windows Task Scheduler, systemd user timer, launchd), and on Windows, when a row runs under Tern, Tern's start at logon (Tern's own Start at login when it is on, else agora's startup entry agora-tern-daemon); install runs the entry once itself, waits for that run and prints the check after it (non-zero when it fails); check changes nothing and reports both; run asks the scheduler to run it once now, outside any session (the agora-room extension and plugin do, once per succeed request, at the turn end after it). cycle finds the newest live session holding the position <slug> (its session --label), or for a session with no position the newest signing as /<slug>, measures its last real inference and context from the harness transcript (harness-written error entries are skipped), and when it is deaf (no live watch, idle past --deaf), past the ceiling (--max-context, idle past --deaf), cold (past --idle) AND large (past --min-context), or asked to succeed, between turns and holding no claim it took after the request, writes <state>/residents/<slug>/inherit.json naming it and restarts the unit (--restart, the manifest row's restart, the config row's restart, else for a manifest resident stop and start): a successor pays its floor, a cold wake pays the whole context. inherit consumes that marker (the same inheritance as session --inherit) and is a no-op without one. succeed asks the cycle to hand a position (default: this session's) to a fresh session once its turn ends; a session started with its row's context ceiling (AGORA_CONTEXT_CEILING) has its agora-room watch ask it with --ceiling at the first turn end past the ceiling. want, from the session holding a grant (the manifest's grants[<position>]), asks for a resident at <room>.<role>: refused by name past maxLive, outside the grant's models or roles, for a new role with no card, when every slot is held, or when its model's family breaks a lineage rule; admitted, it is recorded and ensure runs. ensure (also run by want, unwant and cycle --all) starts admitted wants, restarts a granted position or a standing row whose host died (a run record left, nothing running: how a room recovers after a reboot), and stops a granted position whose want ended (unwanted, expired, the grant removed or narrowed) at its next idle, posting one N8 line per start or stop in the room's Room subject; a start waits for the seat service its rooms need (a dark service is said once, never retried as a start), brings Tern up first on host tern, and past 3 restarts of a position within the hour holds it and tells the room's host human once; every want, refusal, start, stop and hold is kept in <state>/residents/grants.jsonl. grant prints the grants and their open wants. Never writes the shared config or the manifest; docs/RESIDENTS.md",
     },
     doctor: { args: [], options: { "--offline": "skip the identity check", "--repair-tailcat": "restore the cached runtime from its hash-verified bundled capsule" }, does: "config, token presence per room, identity per room, this session and bearer and where each came from, the harness prompt-cache TTL where this seat can read one, and the reads a minute this seat spends with the arithmetic behind the number; three preflights for a resident bearer warn when a watch is armed against a five-minute TTL (cache-ttl), when a watch polls within half to one and a half times a TTL that was read (interval-near-ttl), and when no live watch in a room wakes on all (no-all-watch). Room and watch reports are derived. Tailcat integrity is verified locally; first use expands the bundled capsule into state, and --repair-tailcat explicitly restores a corrupt cache" },
     schema: { args: [], options: { "--json": "the whole surface as JSON, protocol included" }, does: "this description" },
@@ -639,6 +641,8 @@ const OPTIONS = /** @type {const} */ ({
   replace: { type: "boolean", default: false },
   bounds: { type: "string" },
   at: { type: "string" },
+  ceiling: { type: "string" },
+  stagger: { type: "string" },
 });
 
 /**
@@ -1670,7 +1674,7 @@ async function main(argv) {
       const rs = await import("../src/resident-start.mjs");
       const rg = await import("../src/resident-grant.mjs");
       const ctx = { cfg, stateRoot, checkout: projectRoot, entry: entryFile, node: process.versions.bun ? rs.which("node") ?? "node" : process.execPath };
-      return rg.ensure(manifest, stateRoot, rg.seatEnsureDeps({ manifest, ctx, post: supervisorPost(manifest) }), { graceSeconds: wholeOpt("grace", rg.DEFAULT_STOP_GRACE_SECONDS), dryRun });
+      return rg.ensure(manifest, stateRoot, rg.seatEnsureDeps({ manifest, ctx, post: supervisorPost(manifest) }), { graceSeconds: wholeOpt("grace", rg.DEFAULT_STOP_GRACE_SECONDS), staggerSeconds: wholeOpt("stagger", rg.DEFAULT_STAGGER_SECONDS), dryRun });
     };
     /** @param {Record<string, any>[]} rows */
     const printEnsure = (rows) => {
@@ -1683,12 +1687,27 @@ async function main(argv) {
       return rc;
     };
     if (action === "succeed") {
-      if (rest.length > 1) throw new AgoraError("agora resident succeed [<position>]", EXIT.usage);
-      const position = rest.length ? String(rest[0]) : resolveLabel({ env: process.env }) ?? positionOf(record);
-      if (!position) throw new AgoraError("succeed names a position, or runs from a session that holds one (AGORA_LABEL, or session --label)", EXIT.usage);
-      const req = await writeSucceedRequest(stateRoot, assertResidentSlug(position), { by: session.slug });
+      if (rest.length > 1) throw new AgoraError("agora resident succeed [<position>] [--ceiling <tokens>]", EXIT.usage);
+      const named = rest.length ? String(rest[0]) : resolveLabel({ env: process.env }) ?? positionOf(record);
+      if (!named) throw new AgoraError("succeed names a position, or runs from a session that holds one (AGORA_LABEL, or session --label)", EXIT.usage);
+      const position = assertResidentSlug(named);
+      /** @type {number | undefined} */
+      let ceiling;
+      if (values.ceiling !== undefined) {
+        ceiling = Number(values.ceiling);
+        if (!Number.isSafeInteger(ceiling) || ceiling < 1) throw new AgoraError(`--ceiling takes the row's context ceiling in tokens, a whole number at least 1, not ${JSON.stringify(values.ceiling)}`, EXIT.usage);
+        // the watch asks at every turn end past the ceiling: a request this session already has pending stands
+        const pending = await readSucceedRequest(stateRoot, position);
+        const since = /** @type {any} */ (record)?.startedAt;
+        if (pending && !(typeof since === "string" && Date.parse(pending.at) < Date.parse(since))) {
+          if (json) console.log(JSON.stringify({ ...pending, already: true }));
+          else console.log(`succeed already requested for ${position} at ${pending.at} (${pending.file})`);
+          return EXIT.ok;
+        }
+      }
+      const req = await writeSucceedRequest(stateRoot, position, { by: session.slug, ...(ceiling !== undefined ? { ceiling } : {}) });
       if (json) console.log(JSON.stringify(req));
-      else console.log(`succeed requested for ${position}: the next cycle hands it to a fresh session once its turn has ended (${req.file})`);
+      else console.log(`succeed requested for ${position}${ceiling !== undefined ? `, past its ceiling ${ceiling}` : ""}: the next cycle hands it to a fresh session once its turn has ended${ceiling !== undefined ? " and it holds no claim" : ""} (${req.file})`);
       return EXIT.ok;
     }
     if (action === "want" || action === "unwant" || action === "ensure" || action === "grant") {
@@ -1756,9 +1775,15 @@ async function main(argv) {
         const sub = String(rest[0] ?? "");
         if (rest.length !== 1 || !["install", "check", "run", "remove"].includes(sub)) throw new AgoraError("agora resident timer install|check|run|remove [--interval <seconds>]", EXIT.usage);
         const seconds = values.interval === undefined ? undefined : Number(values.interval);
+        // Tern starts at logon (Windows) when a row of the manifest runs under it
+        const timerManifest = await rs.findManifest(cfg, stateRoot, manifestArg);
+        const ternRows = Object.values(timerManifest?.residents ?? {}).filter((r) => r.host === "tern").map((r) => r.slug);
+        const tern = process.platform === "win32" && ternRows.length ? rs.ternProgram() : null;
+        if (process.platform === "win32" && ternRows.length && !tern) console.error(`agora: ${ternRows.join(", ")} run under Tern, which is not installed on this seat: nothing can start it at logon`);
         const spec = rs.timerSpec({
           platform: process.platform, home: homedir(), env: process.env, node: nodeExe, entry: entryFile, config: cfg.path,
           manifest: values.manifest === undefined ? undefined : resolvePath(String(values.manifest)), seconds, uid: process.getuid?.(), stateRoot,
+          user: process.env.USERNAME ? (process.env.USERDOMAIN ? `${process.env.USERDOMAIN}\\${process.env.USERNAME}` : process.env.USERNAME) : undefined, tern,
         });
         const res = await rs.runTimer(/** @type {'install' | 'check' | 'run' | 'remove'} */ (sub), spec);
         if (json) console.log(JSON.stringify(res));
@@ -1766,8 +1791,10 @@ async function main(argv) {
           // failing names what failed: the scheduler's code, or the cycle's own exit
           const line = (/** @type {Record<string, any>} */ x) => {
             const code = x.state !== "failing" ? "" : x.lastResult !== undefined && x.lastResult !== 0 ? ` ${rs.hresult(x.lastResult)}` : typeof x.cycleExit === "number" ? ` exit ${x.cycleExit}` : "";
-            console.log(`${x.kind} ${x.name}: ${x.state}${code} (every ${x.interval}: ${x.command.join(" ")})`);
+            console.log(`${x.kind} ${x.name}: ${x.state}${code} (${x.triggers.join(", ")}: ${x.command.join(" ")})`);
             for (const p of x.problems) console.log(`  ${p}`);
+            const l = x.login;
+            if (l) console.log(`  tern at logon: ${l.state === "agora" ? `agora's startup entry ${l.name}: ${l.data}` : l.state === "tern" ? `Tern's own Start at login (${l.name}): ${l.data}` : l.state === "disabled" ? `agora's startup entry ${l.name}, turned off in Startup apps` : l.state === "differs" ? `agora's startup entry ${l.name} runs ${l.data}` : l.state}`);
           };
           line(res);
           // install ran the entry once itself: its check is the proof

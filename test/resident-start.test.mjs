@@ -440,7 +440,7 @@ test("timer: one spec per OS, and check reads without writing", async (t) => {
   // Task Scheduler cannot start node under `conhost --headless` (0x80070005); it can start cmd.exe
   // there, on a wrapper agora writes, quoted once so a path with spaces holds (conhost mangles /s "")
   assert.equal(win.expect?.arguments, `--headless cmd.exe /d /c "${wrapper}"`);
-  assert.deepEqual(parseTaskXml(win.files[0].content), { command: "conhost.exe", arguments: win.expect?.arguments, interval: "PT15M" });
+  assert.deepEqual(parseTaskXml(win.files[0].content), { command: "conhost.exe", arguments: win.expect?.arguments, interval: "PT15M", logon: "PT2M" });
   assert.match(win.files[0].content, /<MultipleInstancesPolicy>IgnoreNew<\/MultipleInstancesPolicy>/);
   assert.match(win.files[0].content, /<LogonType>InteractiveToken<\/LogonType>/, "runs in the user's session, where Tern is");
   assert.equal(win.files[1].content, [

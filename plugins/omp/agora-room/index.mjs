@@ -15,6 +15,9 @@
 //   inherit a session started at a position (AGORA_LABEL) runs `agora resident inherit <position>`
 //           before its first read, so a successor (a cycle, a succeed, a relaunch, a model swap)
 //           starts from its predecessor's cursors, follow set and posted ledger, never the head.
+//   ceiling a session launched with its row's context ceiling (AGORA_CONTEXT_CEILING) asks its own
+//           succession at the first turn end past it (`agora resident succeed --ceiling`), then the
+//           turn-end kick runs the cycle, so the ceiling holds between cycle runs.
 //
 // The plain helpers (configuration, the CLI's output, the delivery queue, post arguments) are the
 // Claude Code plugin's, imported in place, so the two harnesses cannot drift apart. This package
@@ -25,7 +28,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  ActivityTracker, DeliveryQueue, SESSION_RE, SeenLog, SucceedKick, TOOL_NAME, activityPath, chooseRoom, childEnvFor, deliveryText, jsonLines, parseWatchOutput, postArgs, receiptText,
+  ActivityTracker, DeliveryQueue, SESSION_RE, SeenLog, SucceedKick, TOOL_NAME, activityPath, ceilingDue, chooseRoom, childEnvFor, contextCeiling, contextOfUsage, deliveryText, jsonLines, parseWatchOutput, postArgs, receiptText,
   resolveConfig, seenPath, seenRecord, statusLine, succeedPath,
 } from "../../claude/agora-room/hooks/lib.js";
 
@@ -243,7 +246,7 @@ export function createAgoraRoom(pi, deps = {}) {
   pi.on("message_end", async (/** @type {any} */ e, /** @type {any} */ ctx) => {
     if (ctx?.agent?.kind === "sub") return;
     const role = e?.message?.role;
-    if (role === "assistant") rt?.noteOutput(true);
+    if (role === "assistant") { rt?.noteOutput(true); rt?.noteUsage(e.message); }
     else if (role !== "toolResult") rt?.noteEntry(); // a tool result is counted by tool_result
   });
   pi.on("session_shutdown", async () => { rt?.stop(); });
@@ -410,6 +413,27 @@ async function startSession(pi, ctx, deps) {
     if (!at) return;
     const said = kick.outcome(at, await run(["resident", "timer", "run", "--json"]));
     if (said) notify(said, "warning");
+  }
+
+  // ---- the live ceiling: the row's context ceiling, held at this session's own turn ends ----
+  // A launcher that gave the row a ceiling exports it (AGORA_CONTEXT_CEILING). The context is the
+  // last inference's usage, as omp reports it; at a turn end past the ceiling, with no request
+  // pending, the watch asks its own succession (`agora resident succeed --ceiling`) and the kick
+  // below runs the cycle, which honours it once no claim holds it. The cycle's own check remains.
+  const ceiling = contextCeiling(env.AGORA_CONTEXT_CEILING);
+  /** @type {number | null} */
+  let lastContext = null;
+  /** @type {{ at: string, context: number } | null} */
+  let ceilingAsked = null;
+  let ceilingWarned = false;
+  async function askCeiling() {
+    if (!succeedFile || !launched || ceiling === null) return;
+    if (!ceilingDue({ ceiling, context: lastContext, pending: existsSync(succeedFile) })) return;
+    const r = await run(["resident", "succeed", launched, "--ceiling", String(ceiling), "--json"]);
+    if (r.exitCode === 0) { ceilingAsked = { at: stamp(), context: /** @type {number} */ (lastContext) }; return; }
+    lastError = `agora resident succeed ${launched} --ceiling ${ceiling} exit ${r.exitCode}: ${r.stderr.slice(0, 200)}`;
+    errors += 1;
+    if (!ceilingWarned) { ceilingWarned = true; notify(lastError, "warning"); }
   }
 
   // ---- succession: take the predecessor's place before the first read ----
@@ -606,7 +630,9 @@ async function startSession(pi, ctx, deps) {
         // agent_end runs before the session reports idle; the drain runs right after it.
         timers.push(ctx.setTimeout(() => drain(), 0));
       }
-      // a turn just ended: a pending succeed request is honoured now, not at the timer's next tick
+      // a turn just ended: past the row's ceiling it asks its own succession, and a pending succeed
+      // request is honoured now, not at the timer's next tick
+      try { await askCeiling(); } catch (err) { lastError = `ceiling: ${msgOf(err)}`; }
       try { await kickSucceed(); } catch (err) { lastError = `succeed kick: ${msgOf(err)}`; }
     },
     /** a tool call began or ended in this session */
@@ -615,6 +641,12 @@ async function startSession(pi, ctx, deps) {
     noteOutput(finished) { if (!stopped) activity.output(finished); },
     /** another transcript entry was kept */
     noteEntry() { if (!stopped) activity.entry(); },
+    /** a finished assistant message: its usage is the context the next request re-reads @param {any} message */
+    noteUsage(message) {
+      if (stopped || message?.stopReason === "aborted" || message?.model === "<synthetic>") return;
+      const c = contextOfUsage(message?.usage);
+      if (c !== null) lastContext = c;
+    },
     stop() {
       if (stopped) return;
       stopped = true;
@@ -624,7 +656,7 @@ async function startSession(pi, ctx, deps) {
       writeActivity(true);
       flush();
     },
-    state: () => ({ queue: dq.queue.length, delivered: dq.deliveredCount, awaiting: awaiting !== null, deferring, registeredAs, inherit: inherited, lastError, rooms: Object.fromEntries(rooms), succeedKick: kick.state() }),
+    state: () => ({ queue: dq.queue.length, delivered: dq.deliveredCount, awaiting: awaiting !== null, deferring, registeredAs, inherit: inherited, lastError, rooms: Object.fromEntries(rooms), succeedKick: kick.state(), ceiling: { ceiling, context: lastContext, asked: ceilingAsked } }),
   };
 }
 

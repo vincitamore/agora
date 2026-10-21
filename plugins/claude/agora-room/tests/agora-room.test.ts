@@ -213,6 +213,50 @@ test('succeed kick: a turn end with a pending succeed request asks the OS schedu
   expect(said).toEqual(['no cycle timer is installed: the succession requested at 2026-01-01T01:00:00.000Z waits for the next cycle (agora resident timer install)']) // once
 })
 
+test('ceiling: a session launched with its row\'s ceiling asks its own ceiling succession at the first turn end past it, once, and the kick runs the cycle (red legs: under it, or no ceiling, nothing is asked)', async ($, on) => {
+  mock.clock(on)
+  const files = new Map<string, string>()
+  const request = '/home/u/.agora/state/residents/desk.review/succeed.json'
+  let tokens: number | undefined = 149_000
+  const s = stubs(on, {
+    env: { AGORA_LABEL: 'desk.review', AGORA_CONTEXT_CEILING: '150000' },
+    files,
+    script: (a) => {
+      if (a[0] === 'cursor') return { stdout: '{"room":"lab","cursor":"9"}\n' }
+      if (a[0] === 'resident' && a[1] === 'succeed') {
+        // the CLI writes the request the kick then reads
+        files.set(request, JSON.stringify({ type: 'resident-succeed', slug: 'desk.review', at: '2026-01-01T00:00:00.000Z', by: 'k', ceiling: 150000 }))
+        return { stdout: '{"type":"resident-succeed","slug":"desk.review","at":"2026-01-01T00:00:00.000Z","by":"k","ceiling":150000}\n' }
+      }
+      if (a[0] === 'resident' && a[1] === 'timer') return { stdout: '{"type":"resident-timer","action":"run","state":"kicked","problems":[]}\n' }
+      return {}
+    },
+  })
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200000, ...(tokens === undefined ? {} : { tokens }) } } }))
+  on('turn.start', ($: unknown, e: { turnId: string }) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: '' }))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  const asked = () => s.calls.filter((c) => c.argv[0] === 'resident' && c.argv[1] === 'succeed').map((c) => c.argv.join(' '))
+  const kicks = () => s.calls.filter((c) => cli(c.argv) === 'resident timer run').length
+  const turnOnce = async (id: string) => {
+    await $.turn.start({ text: 'go', turnId: id })
+    await $.turn.complete({ answer: 'done', durationMs: 5, isAborted: false, turnId: id, reason: 'answer' } as never)
+  }
+  await turnOnce('t0')
+  expect(asked()).toEqual([]) // red leg: under the ceiling
+  tokens = undefined
+  await turnOnce('t1')
+  expect(asked()).toEqual([]) // no reading yet
+  tokens = 150_400
+  await turnOnce('t2')
+  expect(asked()).toEqual(['resident succeed desk.review --ceiling 150000 --json'])
+  expect(kicks()).toBe(1) // the same turn end kicks the cycle
+  tokens = 170_000
+  await turnOnce('t3')
+  expect(asked().length).toBe(1) // a request pending: asked once
+  expect(kicks()).toBe(1)
+})
+
 test('watch: the delivered text is a short preamble and then the message line', async ($, on) => {
   const clock = mock.clock(on)
   let polls = 0
