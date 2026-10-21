@@ -1353,7 +1353,7 @@ test("cli: doctor and session --list say which rooms each session is in and what
     assert.match(r.stdout, /WARNING live watch pid \d+.*older than installed.*re-arm it/, "session --list names the stale resident and remedy");
     r = await agora(["doctor", "--offline"], A);
     assert.match(r.stdout, /rooms down {2}watching down \(stream, pid \d+\)/);
-    assert.match(r.stdout, /build {3}0\.1\.0\+/);
+    assert.match(r.stdout, new RegExp(`build {3}${JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version.replace(/\./g, "\\.")}\+`));
     assert.match(r.stdout, /WARNING live watch pid \d+.*older than installed.*re-arm it/);
     assert.match(r.stdout, /usual --wake for role watch is all \(not applied\)/);
     assert.match(r.stdout, /WARNING live sessions a, b all carry the bearer Grace\/watch/);
