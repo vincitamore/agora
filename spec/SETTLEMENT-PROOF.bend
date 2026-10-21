@@ -349,3 +349,34 @@ def Laws.asserter_retracts(l, f, a, ms, by, in):
   %by : {S.standing.of(S.read.retract(ms, _)) == False{} : Bool}
   %in : {S.standing.of(Bool.pick(S.Standing, _, S.Unsettled{}, S.Settled{a})) == False{} : Bool}
   {==}
+
+def Laws.fact_is_its_id(x, y):
+  {==}
+
+def Laws.membership_is_being_listed(m, n, ms):
+  {==}
+
+def Laws.only_an_assertion_is_an_exhibit(f, m, n, s):
+  {==}
+
+def Laws.coordination_free_is_retracting_nothing(f, m, n, s, es):
+  {==}
+
+def Laws.apply_is_in_order(e, es, l):
+  {==}
+
+def Laws.newest_assertion_names_the_asserter(l, f, m):
+  %fact_eq_refl(f) : {S.read.go(l, f, S.read.on_assert(_, m, S.Pending{[]})) == S.Settled{m} : S.Standing}
+  %go_done(l, f, False{}, m) : {_ == S.Settled{m} : S.Standing}
+  {==}
+
+def Laws.empty_ledger_settles_nothing(f):
+  {==}
+
+def Laws.other_entries_change_nothing(l, x, y, m, n, s, ne):
+  %ne : {(S.read.go(l, S.Fact{x}, S.read.on_assert(_, m, S.Pending{[]})),
+          S.read.go(l, S.Fact{x}, S.read.on_retract(_, s, S.Pending{[]})),
+          S.read.go(l, S.Fact{x}, S.Pending{[]}))
+         == (S.read.go(l, S.Fact{x}, S.Pending{[]}), S.read.go(l, S.Fact{x}, S.Pending{[]}), S.read.go(l, S.Fact{x}, S.Pending{[]}))
+         : S.Standing & S.Standing & S.Standing}
+  {==}
