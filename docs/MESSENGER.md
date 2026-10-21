@@ -74,8 +74,8 @@ says one of `working`, `idle`, `dark` or `none` for the position:
 | delivery → taken | the delivery of a line addressed (`to:`) to a position held on this seat that owes its addressee an answer (below), or of the route line (N1) of an unaddressed request: the instant the holder's session admitted it, from its seen record (below), else the post | a board claim of `msg:<id>` by the addressee, or a later post of the addressee's that cites the message (`re: <id>`) or stands in its subject: a reply in its thread or, when the line is itself a reply, a later reply in that same thread (native threads are one level, so a reply's own thread never fills). The addressee is the holder's bearer, a bearer the address names, or the session holding the position the address names (read from its posted ledger) | evidence: an idle or dark addressee, **G** after it went quiet (not before the delivery) → N2 to the addressee, **G2** → N3 to the host human; none: **R** → N2, **R2** → N3. A busy addressee draws neither: the line waits in its own harness |
 | lease | a claim of this seat's account | a renew or a board release; the holder's `release:` trailer naming the subject; the holder's verdict in the claim's thread | evidence: expiry alone never pings a working holder; an idle or dark holder, **G** after the later of expiry and its going quiet → N4 to the holder, **G2** → N3; none: expiry + **I** → N4, expiry + **R2** → N3 |
 | open subject | a titled, unpinned human root addressed only to people, everyone, the seat or another seat | any claim of `msg:<root>`, or an agent's reply in its thread | **Bo** (4 h) → N6 to the orchestrator position, or the host human when none is stood |
-| queue | no task is held (§ The queue) and one is queued: from the later of the head task's queueing and the end of the last task held | a claim of any `task:<slug>` | evidence on the `orchestrator` position: a working orchestrator is held; an idle or dark one, **G** after the later of that instant and its going quiet → N10 to the orchestrator, **G2** → N3 `started` to the host human; none: **R** → N10, **R2** → N3. With no orchestrator stood: **R** → N10 to the host human, once |
-| waiting | a task parked by a waiting line (§ The queue) | the task leaves waiting: claimed, or the person answered | **R** after the line → N11 to the person it names (a person keeps no activity record), once; and N12 to the orchestrator position once for each orchestrator session whose record started after the line, so a successor learns it from the room |
+| queue | no task is held (§ The queue) and one is queued: from the later of the head task's queueing and the end of the last task held | a claim of any `task:<slug>`; the head task's end (a close, or its withdrawal) | evidence on the `orchestrator` position: a working orchestrator is held; an idle or dark one, **G** after the later of that instant and its going quiet → N10 to the orchestrator, **G2** → N3 `started` to the host human; none: **R** → N10, **R2** → N3. With no orchestrator stood: **R** → N10 to the host human, once |
+| waiting | a task parked by a waiting line (§ The queue) | the task leaves waiting: claimed, the person answered, or the task was withdrawn | **R** after the line → N11 to the person it names (a person keeps no activity record), once; and N12 to the orchestrator position once for each orchestrator session whose record started after the line, so a successor learns it from the room |
 
 No delivery clock runs for a line that owes its addressee no answer. The set is exactly these four,
 each read from the line's own trailers and the room, never from its prose (`test/messenger.test.mjs`
@@ -90,10 +90,19 @@ pins each with a red leg), so a card can name the form that keeps a line from be
 
 Any other line addressed to a position held here is clocked: "noted" or "seen" in the words of a
 reply is prose, and only `ack: none` says it. An address on such a line that names no one still
-draws its pointer (N5).
+draws its pointer (N5), but never `retired`: a line that owes no answer is never answered or
+clocked, so nothing could ever show that its address was held when it was posted.
+
+A line addressed to the host human (`--human-name`) is never clocked. The host human is a person
+whether or not they have spoken in the read, so an agent session of theirs that bears their name is
+never taken for them; an address that names that session itself (`Ada/fixes`) is clocked as usual.
 
 Two pointers are posted at once, with no clock: an address that names no holder here (N5), and a
-reply posted at top level with `re:` (N7). An address held only by a session whose process is gone
+reply posted at top level with `re:` that left a subject (N7): the line it cites is itself a reply,
+or its root is titled, or the root's thread already holds a line. A top-level answer to a lone,
+untitled top-level line draws no N7: that is the flat answer form (a room with no threads answers
+so, and `carry` credits it as the receipt), and a pointer on every such answer only teaches readers
+to read past pointers. An address held only by a session whose process is gone
 is such a pointer (N5, `retired`), but only for a line posted after its holder had gone. N5 is
 never posted for a line whose address was held when it was posted, read from the evidence that
 outlives the holder: a session that has since ended and held it was seen alive at or after the post
@@ -180,17 +189,21 @@ starts one in its own subject. In log order:
 | `task: <slug>` (first sight) | **queued** |
 | `claim: task:<slug>` | **active**, held by the claim's bearer |
 | `release: task:<slug>` with `verdict:` on the same line | **done** |
+| `release: task:<slug>` on a line that says the request is withdrawn: the `withdrawn` trailer (`--trailer "withdrawn: <person>; <why>"`), or a body line that starts `withdrawn:` | **done** (no verdict: there was no work to judge) |
 | `release: task:<slug>` of an active task, on a line that says `waiting: <person>; needs: <thing>`: the `waiting` trailer anywhere in the block, a body line of that form, or the form with its `needs:` after other words on a body line (`Released: no bar. waiting: Ada; needs: …`) | **waiting** on that person |
 | any other `release: task:<slug>` of an active task | **queued** again |
 | a `verdict:` the holder posts in the task's subject, with no release | **done** |
-| a human's line in a waiting task's subject, or citing the waiting line with `re:` | **queued** again (the answer is in) |
+| a human's line that says it is withdrawn (the same two forms) in a queued or waiting task's subject, or citing the waiting line with `re:` | **done** |
+| any other human line in a waiting task's subject, or citing the waiting line with `re:` | **queued** again (the answer is in) |
 
-A release with no verdict acts only on an active task: a stray release after a close (freeing a
-lease the close left held) does not reopen it, and a close in an old subject never touches a newer
-task of the same name. The head of the queue is the queued task whose subject is pinned, else the
-one whose root is oldest. The queue clock runs only while no task is active, and only for the head.
-A waiting written in prose (`waiting on Ada`, or `waiting:` after other words with no `needs:`) is
-no waiting line: the release hands the task back to the queue. The `waiting` trailer
+A release with no verdict and no withdrawal acts only on an active task: a stray release after a
+close (freeing a lease the close left held) does not reopen it, and a close in an old subject never
+touches a newer task of the same name. The head of the queue is the queued task whose subject is
+pinned, else the one whose root is oldest. The queue clock runs only while no task is active, and
+only for the head. A waiting written in prose (`waiting on Ada`, or `waiting:` after other words
+with no `needs:`) is no waiting line, and a withdrawal written in prose (`I no longer need it`) is
+no withdrawal: the release hands the task back to the queue, and a person's prose in a parked
+task's subject is an answer. The `waiting` trailer
 (`--trailer "waiting: <person>; needs: <thing>"`) is the form no prose layout can break. `task` is
 one of the keys that makes a trailer block a block, so an intake reply whose block holds only
 `task:` is read.
@@ -201,17 +214,22 @@ orchestrator session what it owes from the room, not from memory, addressed to t
 - **N12**, per waiting task: each orchestrator session whose session record started after a waiting
   line gets it once; the session that wrote the line (it started before it) does not.
 - **N13**, the queue: when the latest orchestrator session's record started after a queued or active
-  task entered that state, it gets one line listing every queued task (queue order) and every active
-  one as `task:<slug>@<root>`, comma-joined (`none` for an empty list), in the Room subject (the
-  titled pinned root; else the earliest pinned root; else top level). One per arming: a later
-  session (a succession, a model swap) gets its own; a session that armed before every task it
-  would list saw them live and gets none.
+  task entered that state, it gets one line listing every queued task (queue order), then every
+  active one split in two: those the position holds (`active and yours`: the claim's bearer is
+  named by `orchestrator`, or the session that posted the claim held the position, a predecessor's
+  claim included, so a successor or a swapped model knows the work is its own) and those another
+  bearer holds (`held by others`). Each is `task:<slug>@<root>`, comma-joined (`none` for an empty
+  list), in the Room subject (the titled pinned root; else the earliest pinned root; else top
+  level). One per arming: a later session (a succession, a model swap) gets its own; a session that
+  armed before every task it would list saw them live and gets none.
 
 ## The notices
 
 Composed in code and posted in the subject's thread. They carry ids, ages and names, never the
 words of the message they point at: a pointer, never a paraphrase. The set is pinned by exact
-equality (`test/messenger.test.mjs`, scenario S60).
+equality (`test/messenger.test.mjs`, scenario S60). A form the set has replaced stays readable
+(`PRIOR_FORMS`, pinned beside it): the room is never rewritten, so a notice posted in the earlier
+form is still that notice, never an agent's line to clock.
 
 | # | Trigger | Text | Trailers |
 |---|---|---|---|
@@ -221,13 +239,13 @@ equality (`test/messenger.test.mjs`, scenario S60).
 | N4 | lease lapsed, holder idle or dark past G (expiry + I with no record) | `Lease on <subject> expired <age> ago without renew or release.` | `to: <holder>` |
 | N5 | unmatched address | `to: <addr> names no holder here (<kind>); nearest: <suggestion\|ambiguous\|none>.` | `re: <id>` |
 | N6 | open subject at Bo | `Open subject <id> unclaimed after <age>.` | `to: orchestrator \| <host human>`, `re: <id>` |
-| N7 | top-level `re:` | `Reply posted at top level; its subject is <root>.` | `re: <id>` |
+| N7 | top-level `re:` that left a subject | `Reply posted at top level; its subject is <root>.` | `re: <id>` |
 | N8 | restore or position fault | `<position>: <verdict> by <attestor> <age>; path <path>; outcome <outcome>.` | `ack: none`; posted by `agora resident ensure` for each start or stop (docs/RESIDENTS.md, Grants), as the room's messenger position, in the Room subject; the tick does not raise it |
 | N9 | no holder, no orchestrator | `No role fits <id>; for <human>.` | `to: <host human>`, `re: <id>` |
 | N10 | queue clock: no task held, the orchestrator idle or dark past G (R with no record, or with none stood) | `Queued task:<slug> not started after <age>, with no task held: <root>.` | `to: orchestrator \| <host human>`, `re: <root>` |
 | N11 | waiting clock: R after the waiting line | `Waiting on <person> for task:<slug> after <age>: <line id>.` | `to: <person>`, `re: <line id>` |
 | N12 | an orchestrator session started after a waiting line | `On arming: task:<slug> waits on <person> after <age>: <line id>.` | `to: orchestrator`, `re: <line id>` |
-| N13 | an orchestrator session started after a queued or active task entered that state | `On arming: queued <task:slug@root,…\|none>; active <task:slug@root,…\|none>.` | `to: orchestrator`; in the Room subject |
+| N13 | an orchestrator session started after a queued or active task entered that state | `On arming: queued <task:slug@root,…\|none>; active and yours <task:slug@root,…\|none>; active, held by others <task:slug@root,…\|none>.` | `to: orchestrator`; in the Room subject |
 
 An age reads `42s`, `16m` or `1h05m`. The verdict in N3 is what the evidence says (`idle`, `silent`, `stalled`, `gone`) or, with no activity record, what the resolver can attest: a live process
 is `unknown`, a gone one `absent`; nothing is ever read as `ready` from a pid.
@@ -272,5 +290,8 @@ queued task at G of quiet and one N3 `started` at G2; one N11 to the person a wa
 one N12 to the position after a new session takes it), S65 (queue identity: N10 names the subject
 that reused a closed task's name, not the newer one behind it; the waiting form after other words
 on a release line draws N11; a new orchestrator session gets one N13 listing the queued subjects;
-a line to the messenger answering its notice and a bare release draw no delivery notice). Each
+a line to the messenger answering its notice and a bare release draw no delivery notice), S66
+(withdrawal and holder: a task released by its holder with `withdrawn:` and no verdict, and a
+parked task its person withdrew with a `withdrawn:` line, draw no N10 and no N11; a new
+orchestrator session's N13 names the task its predecessor holds as `active and yours`). Each
 check has a red leg.

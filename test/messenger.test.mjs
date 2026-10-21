@@ -33,16 +33,27 @@ test("the notice set is exactly these thirteen forms", () => {
     N10: "Queued {task} not started after {age}, with no task held: {id}.",
     N11: "Waiting on {person} for {task} after {age}: {id}.",
     N12: "On arming: {task} waits on {person} after {age}: {id}.",
-    N13: "On arming: queued {queued}; active {active}.",
+    N13: "On arming: queued {queued}; active and yours {yours}; active, held by others {others}.",
   });
   assert.ok(Object.isFrozen(NOTICE_TEMPLATES));
   assert.deepEqual({ ...DEFAULT_BOUNDS }, { R: 7_200_000, R2: 14_400_000, I: 3_600_000, Bo: 14_400_000, H: 86_400_000, L: 600_000, T: 30_000, G: 600_000, G2: 1_800_000, S: 7_200_000, D: 300_000 });
 });
 
+// The room is never rewritten, so a notice posted in a form the set has since replaced must still
+// read as that notice: else it is read as an agent's line (clocked, and its incident unrecorded).
+// Pinned by exact equality so the list is a reviewed record of replaced forms, never a second set.
+test("a notice posted in a replaced form still reads as that notice (red leg: a line in neither form is no notice)", () => {
+  assert.deepEqual(JSON.parse(JSON.stringify(messenger.PRIOR_FORMS)), { N13: ["On arming: queued {queued}; active {active}."] });
+  assert.ok(Object.isFrozen(messenger.PRIOR_FORMS) && Object.isFrozen(messenger.PRIOR_FORMS.N13));
+  const old = `On arming: queued task:slugify@${"d".repeat(64)}; active none.\n\nto: orchestrator\n\n-- messenger/Code`;
+  assert.deepEqual([parseNotice(old)?.kind, parseNotice(old)?.fields], ["N13", { queued: `task:slugify@${"d".repeat(64)}`, active: "none" }]);
+  assert.equal(parseNotice("On arming: queued all of it; active none.\n\nto: orchestrator"), null, "red leg: a slot with a space is no notice in any form");
+});
+
 test("every form reads back as itself; a slot is one token (red leg: a slot with a space is refused)", () => {
   const sample = { id: "a".repeat(64), age: "16m", since: "posted", position: "desk.coding", verb: "taken", verdict: "unknown", subject: "work:msg:x",
     addr: "builder", kind: "retired", nearest: "desk.coding", root: "b".repeat(64), attestor: "observe", path: "ensure", outcome: "ready", human: "Ada",
-    task: "task:parser-fix", person: "Ada", queued: `task:slugify@${"d".repeat(64)},task:chunk@${"e".repeat(64)}`, active: "none" };
+    task: "task:parser-fix", person: "Ada", queued: `task:slugify@${"d".repeat(64)},task:chunk@${"e".repeat(64)}`, yours: `task:parser-fix@${"f".repeat(64)}`, others: "none" };
   for (const kind of /** @type {(keyof typeof NOTICE_TEMPLATES)[]} */ (Object.keys(NOTICE_TEMPLATES))) {
     const text = withTrailers(formatNotice(kind, sample), [{ key: "re", value: "c".repeat(64) }]) + "\n\n-- messenger/Code";
     const back = parseNotice(text);
@@ -193,7 +204,7 @@ test("the seen record: the plugins' writer and the messenger's reader agree on t
 test("clock 1 stops at a claim of msg:<id> by the addressee or its reply citing the message (red leg: a reply by someone else does not stop it)", () => {
   const q = msg({ at: T0, kind: "human", name: "Ada", text: "look please", to: ["coding"] });
   const reply = msg({ at: T0 + MIN, name: "coding/Opus", text: "on it", re: q.id });
-  assert.deepEqual(kinds(run([q, reply], { now: T0 + 50 * MIN })), ["N7"], "taken; the top-level re: reply draws only its pointer");
+  assert.deepEqual(kinds(run([q, reply], { now: T0 + 50 * MIN })), [], "taken; a top-level answer to a lone top-level line is the flat answer form, so no pointer either");
   const threaded = msg({ at: T0 + MIN, name: "coding/Opus", text: "on it", thread: q.id });
   assert.deepEqual(kinds(run([q, threaded], { now: T0 + 50 * MIN })), []);
   // a claim posted top level, citing nothing: the board claim alone stops the clock
@@ -239,6 +250,13 @@ test("a foreign addressee, a person, everyone and ack: none draw no clock; an un
   assert.equal(n5[0].text, "to: cod names no holder here (half-name); nearest: desk.coding.");
   assert.deepEqual(n5[0].trailers, [{ key: "re", value: typo.id }]);
   assert.deepEqual(kinds(run([typo], { now: T0 + 1, records: [...RECORDS, { slug: "s-cod", state: live, record: { bearer: "cod/Haiku", label: "desk.cod" }, posted: new Set() }] })), [], "red leg: a holder named cod");
+  // the host human is a person whether or not they have spoken in the read, so a line to them is
+  // never clocked against an agent session of theirs that bears their name
+  const theirs = [...RECORDS, { slug: "s-ada", state: live, record: /** @type {any} */ ({ bearer: "Ada/fixes" }), posted: new Set() }];
+  const toHost = msg({ at: T0, name: "orchestrator/Opus", text: "handed to you", to: ["Ada"] });
+  assert.deepEqual(kinds(run([toHost], { now: T0 + 50 * MIN, records: theirs })), [], "a line to the host human");
+  const toTheirSession = msg({ at: T0, name: "orchestrator/Opus", text: "for the fixes session", to: ["Ada/fixes"] });
+  assert.deepEqual(kinds(run([toTheirSession], { now: T0 + 50 * MIN, records: theirs })), ["N2", "N3"], "red leg: the address names the agent session itself");
 });
 
 test("N5 names the one live holder a typo is one letter from, and says ambiguous for two (red leg: two letters off names none)", () => {
@@ -281,7 +299,15 @@ test("N7 for a top-level reply naming its subject; N6 for an open titled subject
   const root = msg({ at: T0, kind: "human", name: "Ada", text: "question", to: ["*"] });
   const top = msg({ at: T0 + MIN, name: "coding/Opus", text: "answer", re: root.id });
   const n7 = run([root, top], { now: T0 + MIN + 1, titles: new Map([[root.id, "Q"]]) });
-  assert.deepEqual(n7.map((a) => [a.kind, a.text, a.thread]), [["N7", `Reply posted at top level; its subject is ${root.id}.`, root.id]]);
+  assert.deepEqual(n7.map((a) => [a.kind, a.text, a.thread]), [["N7", `Reply posted at top level; its subject is ${root.id}.`, root.id]], "a titled root is a subject");
+  // a reply escaped a subject: the root's thread already holds a line, or the line cited is itself a reply
+  const lone = msg({ at: T0, kind: "human", name: "Ada", text: "another question", to: ["*"] });
+  const first = msg({ at: T0 + MIN, name: "review/Argon", text: "which file?", thread: lone.id });
+  const topAfter = msg({ at: T0 + 2 * MIN, name: "coding/Opus", text: "the parser", re: lone.id });
+  const topToReply = msg({ at: T0 + 3 * MIN, name: "coding/Opus", text: "the first one", re: first.id });
+  assert.deepEqual(run([lone, first, topAfter, topToReply], { now: T0 + 3 * MIN + 1 }).filter((a) => a.kind === "N7").map((a) => [a.trailers[0].value, a.text]),
+    [[topAfter.id, `Reply posted at top level; its subject is ${lone.id}.`], [topToReply.id, `Reply posted at top level; its subject is ${lone.id}.`]]);
+  assert.deepEqual(kinds(run([lone, topAfter], { now: T0 + 3 * MIN + 1 })).filter((k) => k === "N7"), [], "red leg: a lone, untitled top-level line answered at top level is the flat answer form");
   const n6 = run([root], { now: T0 + 30 * MIN, titles: new Map([[root.id, "Q"]]) });
   assert.deepEqual(n6.map((a) => [a.kind, a.text, a.trailers[0].value]), [["N6", `Open subject ${root.id} unclaimed after 30m.`, "orchestrator"]]);
   assert.deepEqual(kinds(run([root], { now: T0 + 30 * MIN - 1, titles: new Map([[root.id, "Q"]]) })), []);
@@ -448,7 +474,41 @@ test("a waiting record is read from the waiting trailer anywhere in the block, o
   assert.deepEqual(run([...taken, inline], { now: T0 + 17 * MIN }).map((x) => [x.kind, x.trailers]), [["N11", [{ key: "to", value: "Ada" }, { key: "re", value: inline.id }]]]);
 });
 
-test("on arming, an orchestrator session that took the position after tasks were queued or taken gets one N13 listing them by subject, in the Room subject (red legs: a session armed before them; nothing queued or held)", () => {
+test("a withdrawal ends a task with no verdict: a release carrying `withdrawn:` closes it, and a person's `withdrawn:` line in a queued or waiting task's subject ends it; no N10, N11 or N12 follows (red legs: the same release with no withdrawn; the person's words in prose)", () => {
+  const b = ask(T0, "make the output tidier");
+  const taken = [b, intake(T0 + MIN, b.id, "tidier"), takeTask(T0 + 2 * MIN, b.id, "tidier")];
+  /** the holder's release, closing the task as withdrawn by the trailer, by a body line, or (red) by neither @param {number} at @param {"trailer" | "body" | "none"} form */
+  const release = (at, form) => msg({ at, name: "orchestrator/Opus", text: form === "body" ? "Closed.\nwithdrawn: Ada; no bar set, no work done" : "Closed: Ada withdrew it; there was no work to judge.",
+    thread: b.id, to: ["Ada"], release: "task:tidier", extra: form === "trailer" ? [{ key: "withdrawn", value: "Ada; no bar set, no work done" }] : [] });
+  const state = (/** @type {any[]} */ ms) => queueOf(ms, new Set()).tasks.map((t) => [t.slug, t.state]);
+  assert.deepEqual(state([...taken, release(T0 + 3 * MIN, "trailer")]), [["tidier", "done"]], "the trailer");
+  assert.deepEqual(state([...taken, release(T0 + 3 * MIN, "body")]), [["tidier", "done"]], "a body line of its own");
+  assert.deepEqual(state([...taken, release(T0 + 3 * MIN, "none")]), [["tidier", "queued"]], "red leg: a release with no withdrawn hands it back");
+  // the queue clock after it: nothing for a withdrawn task, the false N10 for the red leg
+  const now = T0 + 3 * MIN + 11 * MIN;
+  const idle = [fresh("s-orch", now, { since: T0 + 3 * MIN })];
+  assert.deepEqual(kinds(run([...taken, release(T0 + 3 * MIN, "trailer")], { now, activity: idle })), []);
+  assert.deepEqual(kinds(run([...taken, release(T0 + 3 * MIN, "none")], { now, activity: idle })), ["N10"], "red leg: re-queued, so the queue clock runs");
+  // parked on Ada, who withdraws it in its subject (or citing the waiting line)
+  const park = parkTask(T0 + 3 * MIN, b.id, "tidier");
+  const says = (/** @type {string} */ text, /** @type {{ thread?: string, re?: string }} */ where) => msg({ at: T0 + 5 * MIN, kind: "human", name: "Ada", text, to: ["orchestrator"], ...where });
+  assert.deepEqual(state([...taken, park, says("Withdrawn: I no longer need it; close it without a bar.", { thread: b.id })]), [["tidier", "done"]], "in its subject");
+  assert.deepEqual(state([...taken, park, says("withdrawn: not needed", { re: park.id })]), [["tidier", "done"]], "citing the waiting line");
+  assert.deepEqual(state([...taken, park, says("I no longer need it; close it without a bar.", { thread: b.id })]), [["tidier", "queued"]], "red leg: in prose it is an answer, which hands it back");
+  const withdrawn = says("Withdrawn: I no longer need it.", { thread: b.id });
+  const later = T0 + 3 * MIN + 30 * MIN;
+  assert.deepEqual(kinds(run([...taken, park, withdrawn], { now: later, activity: [fresh("s-orch", later, { since: T0 + 5 * MIN })] })).filter((k) => ["N10", "N11", "N12"].includes(k)), [],
+    "no waiting record and no queue clock once it ends");
+  // the order trial rooms show: the person withdraws, the holder claims it again only to close it
+  const reclaim = takeTask(T0 + 6 * MIN, b.id, "tidier");
+  assert.deepEqual(state([...taken, park, withdrawn, reclaim, release(T0 + 7 * MIN, "trailer")]), [["tidier", "done"]]);
+  // queued and never taken: the person's withdrawal ends it too
+  const queuedOnly = [b, intake(T0 + MIN, b.id, "tidier")];
+  assert.deepEqual(state([...queuedOnly, says("withdrawn: not needed after all", { thread: b.id })]), [["tidier", "done"]]);
+  assert.deepEqual(state([...queuedOnly, says("not needed after all", { thread: b.id })]), [["tidier", "queued"]], "red leg: prose");
+});
+
+test("on arming, an orchestrator session that took the position after tasks were queued or taken gets one N13 listing them by subject, the active ones split by whether the position holds them, in the Room subject (red legs: a task another bearer holds; a session armed before them; nothing queued or held)", () => {
   const roomRoot = msg({ at: T0 - 60 * MIN, kind: "human", name: "Ada", text: "Room" });
   const a = ask(T0, "fix the parser"), b = ask(T0 + MIN, "add slugify"), c = ask(T0 + 2 * MIN, "add chunk");
   const ms = [roomRoot, a, b, c, intake(T0 + 3 * MIN, a.id, "parser-fix"), takeTask(T0 + 4 * MIN, a.id, "parser-fix"), intake(T0 + 5 * MIN, b.id, "slugify"), intake(T0 + 6 * MIN, c.id, "chunk")];
@@ -456,11 +516,18 @@ test("on arming, an orchestrator session that took the position after tasks were
   const pins = { pinned: new Set([roomRoot.id]), titles: new Map([[roomRoot.id, "Room"]]) };
   const successor = [RECORDS[0], armed("s-orch2", T0 + 8 * MIN)];
   const onArm = run(ms, { now: T0 + 9 * MIN, records: successor, ...pins });
-  const text = `On arming: queued task:slugify@${b.id},task:chunk@${c.id}; active task:parser-fix@${a.id}.`;
-  assert.deepEqual(onArm.map((x) => [x.kind, x.text, x.trailers, x.thread]), [["N13", text, [{ key: "to", value: "orchestrator" }], roomRoot.id]]);
+  const text = `On arming: queued task:slugify@${b.id},task:chunk@${c.id}; active and yours task:parser-fix@${a.id}; active, held by others none.`;
+  assert.deepEqual(onArm.map((x) => [x.kind, x.text, x.trailers, x.thread]), [["N13", text, [{ key: "to", value: "orchestrator" }], roomRoot.id]],
+    "the predecessor session's claim is the position's: the successor is told it is its own");
   assert.deepEqual(run(ms, { now: T0 + 9 * MIN, records: successor }).filter((x) => x.kind === "N13").map((x) => x.thread), [undefined], "no Room subject: top level");
-  const n13 = notice(T0 + 9 * MIN, "N13", { queued: `task:slugify@${b.id},task:chunk@${c.id}`, active: `task:parser-fix@${a.id}` }, onArm[0].trailers, roomRoot.id);
+  // a task some other bearer took (a rig, a maker) is active but not the position's
+  const byOther = [...ms.slice(0, 5), msg({ at: T0 + 4 * MIN, name: "rig/Opus", text: "taking parser-fix", thread: a.id, claim: "task:parser-fix" }), ...ms.slice(6)];
+  assert.deepEqual(run(byOther, { now: T0 + 9 * MIN, records: successor, ...pins }).filter((x) => x.kind === "N13").map((x) => x.text),
+    [`On arming: queued task:slugify@${b.id},task:chunk@${c.id}; active and yours none; active, held by others task:parser-fix@${a.id}.`], "red leg: another bearer holds it");
+  const n13 = notice(T0 + 9 * MIN, "N13", { queued: `task:slugify@${b.id},task:chunk@${c.id}`, yours: `task:parser-fix@${a.id}`, others: "none" }, onArm[0].trailers, roomRoot.id);
   assert.deepEqual(kinds(run([...ms, n13], { now: T0 + 12 * MIN, records: successor, ...pins })), [], "once per arming");
+  const prior = { ...n13, text: `${withTrailers(`On arming: queued task:slugify@${b.id},task:chunk@${c.id}; active task:parser-fix@${a.id}.`, onArm[0].trailers)}\n\n-- messenger/Code` };
+  assert.deepEqual(kinds(run([...ms, prior], { now: T0 + 12 * MIN, records: successor, ...pins })), [], "a notice posted in the replaced form is still this arming's record");
   assert.deepEqual(kinds(run([...ms, n13], { now: T0 + 14 * MIN, records: [RECORDS[0], armed("s-orch3", T0 + 13 * MIN)], ...pins })), ["N13"], "the next arming is told again");
   assert.deepEqual(kinds(run(ms, { now: T0 + 9 * MIN, records: [RECORDS[0], armed("s-orch", T0 - MIN)], ...pins })), [], "red leg: the session armed before every task, and saw them live");
   assert.deepEqual(kinds(run(ms.slice(0, 4), { now: T0 + 9 * MIN, records: successor, ...pins })), [], "red leg: nothing queued or held, nothing to hand over");
@@ -601,6 +668,16 @@ test("N5 is never posted for a line its addressee answered, nor after the fact f
   // its clock ran while it lived: the N2 standing for the line is the evidence
   const n2 = notice(T0 + 15 * MIN, "N2", { age: "15m", since: "posted", id: ask.id }, [{ key: "to", value: "desk.dummy" }, { key: "re", value: ask.id }], ask.id);
   assert.deepEqual(kinds(run([ask, n2], { now, records: goneRec({ lastSeen: new Date(T0 - 5 * MIN).toISOString() }) })), [], "an N2 for it stands");
+  // a line that owes no answer is never answered or clocked, so nothing could ever show its address
+  // was held: it draws no retired pointer at all (a bare release, an answer to a notice)
+  const goneEarly = goneRec({ lastSeen: new Date(T0 - 5 * MIN).toISOString() });
+  const bare = msg({ at: T0, name: "orchestrator/Opus", text: "Released msg:x", to: ["desk.dummy"], release: "msg:x" });
+  const aNotice = notice(T0 - 2 * MIN, "N2", { age: "15m", since: "posted", id: "q".repeat(64) }, [{ key: "to", value: "desk.dummy" }, { key: "re", value: "q".repeat(64) }]);
+  const answersNotice = msg({ at: T0, name: "orchestrator/Opus", text: "answered", to: ["desk.dummy"], re: aNotice.id });
+  assert.deepEqual(kinds(run([bare], { now, records: goneEarly })), [], "a bare release");
+  assert.deepEqual(kinds(run([aNotice, answersNotice], { now, records: goneEarly })).filter((k) => k === "N5"), [], "an answer to a notice");
+  assert.deepEqual(kinds(run([msg({ at: T0, name: "orchestrator/Opus", text: "Released msg:x", to: ["desk.dumy"], release: "msg:x" })], { now, records: goneEarly })), ["N5"],
+    "a typo on such a line still draws its pointer");
   // a typo addresses no one, then or now: its pointer is due at once
   const typo = msg({ at: T0, name: "orchestrator/Opus", text: "please", to: ["desk.dumy"] });
   assert.deepEqual(kinds(run([typo], { now: T0 + 1, records: goneRec({ lastSeen: new Date(T0 + 2 * MIN).toISOString() }) })), ["N5"]);

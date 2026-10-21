@@ -1,7 +1,7 @@
 {
   "scenario": "S60",
   "recordedOn": "2026-10-21",
-  "build": "2e6e10b",
+  "build": "d841464",
   "checks": {
     "form-set-pinned": {
       "today": "green",
@@ -18,7 +18,7 @@
         "N10": "Queued {task} not started after {age}, with no task held: {id}.",
         "N11": "Waiting on {person} for {task} after {age}: {id}.",
         "N12": "On arming: {task} waits on {person} after {age}: {id}.",
-        "N13": "On arming: queued {queued}; active {active}."
+        "N13": "On arming: queued {queued}; active and yours {yours}; active, held by others {others}."
       }
     },
     "no-words-carried": {

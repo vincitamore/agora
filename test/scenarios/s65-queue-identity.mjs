@@ -108,8 +108,8 @@ export const scenario = {
       const n13 = (await rig.notices()).filter((n) => n.kind === "N13" && phase3.includes(n.id));
       /** the subjects by their part in the room, so the recording holds no run's ids @param {string | undefined} s */
       const named13 = (s) => s?.replaceAll(b.id, "<reused-subject>").replaceAll(c.id, "<newer-subject>") ?? null;
-      ctx.check("arming-handover", { n13: 1, to: "orchestrator", queued: "task:slugify@<reused-subject>,task:reports@<newer-subject>", active: "none" },
-        { n13: n13.length, to: n13[0]?.to[0] ?? null, queued: named13(n13[0]?.fields.queued), active: n13[0]?.fields.active ?? null });
+      ctx.check("arming-handover", { n13: 1, to: "orchestrator", queued: "task:slugify@<reused-subject>,task:reports@<newer-subject>", yours: "none", others: "none" },
+        { n13: n13.length, to: n13[0]?.to[0] ?? null, queued: named13(n13[0]?.fields.queued), yours: n13[0]?.fields.yours ?? null, others: n13[0]?.fields.others ?? null });
 
       // phase 4: an answer to the queue notice, to the messenger; a release with no verdict, to coding
       const plain = ctx.red("no-self-clock");

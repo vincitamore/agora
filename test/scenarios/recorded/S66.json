@@ -1,0 +1,27 @@
+{
+  "scenario": "S66",
+  "recordedOn": "2026-10-21",
+  "build": "d841464",
+  "checks": {
+    "release-withdrawal": {
+      "today": "green",
+      "observed": 0
+    },
+    "person-withdrawal": {
+      "today": "green",
+      "observed": {
+        "n10": 0,
+        "n11": 0
+      }
+    },
+    "handover-names-holder": {
+      "today": "green",
+      "observed": {
+        "n13": 1,
+        "to": "orchestrator",
+        "yours": "task:pad@<pad-subject>",
+        "others": "none"
+      }
+    }
+  }
+}

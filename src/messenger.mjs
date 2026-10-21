@@ -51,7 +51,17 @@ export const NOTICE_TEMPLATES = Object.freeze({
   N10: "Queued {task} not started after {age}, with no task held: {id}.",
   N11: "Waiting on {person} for {task} after {age}: {id}.",
   N12: "On arming: {task} waits on {person} after {age}: {id}.",
-  N13: "On arming: queued {queued}; active {active}.",
+  N13: "On arming: queued {queued}; active and yours {yours}; active, held by others {others}.",
+});
+
+/**
+ * Forms a notice was posted in before its current one, read and never composed. The room is never
+ * rewritten, so a line posted in a replaced form still reads as that notice: its incident stays
+ * recorded, and it is never read as an agent's line to clock. Pinned by exact equality in
+ * test/messenger.test.mjs beside the set.
+ */
+export const PRIOR_FORMS = Object.freeze({
+  N13: Object.freeze(["On arming: queued {queued}; active {active}."]),
 });
 
 /** @typedef {keyof typeof NOTICE_TEMPLATES} NoticeKind */
@@ -124,11 +134,11 @@ export function formatNotice(kind, fields) {
   });
 }
 
-/** @type {Array<[NoticeKind, RegExp, string[]]>} */
-const PARSERS = /** @type {any} */ (Object.entries(NOTICE_TEMPLATES).map(([kind, template]) => {
+/** The current forms first, then the replaced ones. @type {Array<[NoticeKind, RegExp, string[]]>} */
+const PARSERS = /** @type {any} */ ([...Object.entries(NOTICE_TEMPLATES), ...Object.entries(PRIOR_FORMS).flatMap(([kind, forms]) => forms.map((f) => [kind, f]))].map(([kind, template]) => {
   /** @type {string[]} */
   const slots = [];
-  const source = template.split(SLOT).map((piece, i) => {
+  const source = template.split(SLOT).map((/** @type {string} */ piece, /** @type {number} */ i) => {
     if (i % 2 === 1) { slots.push(piece); return "(\\S+?)"; }
     return piece.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   }).join("");
@@ -274,19 +284,31 @@ function waitingOf(m) {
   return (WAITING_LINE.exec(body) ?? WAITING_INLINE.exec(body))?.[1];
 }
 
+/** `withdrawn: <who>; <why>` as a body line of its own (the `withdrawn` trailer reads the same). */
+const WITHDRAWN_LINE = /^withdrawn:/im;
+
+/**
+ * Does a line say its request is taken back: a `withdrawn` trailer, or a body line that starts
+ * `withdrawn:`. A withdrawal written in prose (`I no longer need it`) says nothing here.
+ * @param {{ text: string, trailers: Array<{ key: string, value: string }> }} m
+ */
+function withdrawnOf(m) {
+  return m.trailers.some((t) => t.key === "withdrawn") || WITHDRAWN_LINE.test(parseTrailers(m.text).body);
+}
+
 /**
  * @typedef {{
  *   subject: string, slug: string, root: string, order: number, pinned: boolean,
  *   state: "queued" | "active" | "waiting" | "done", since: number, sinceSeq: number,
- *   holder: string | null, waiting: { person: string, id: string, ts: number, seq: number } | null,
+ *   holder: string | null, claim: string | null, waiting: { person: string, id: string, ts: number, seq: number } | null,
  * }} Task
  * @typedef {{ tasks: Task[], free: { ts: number, seq: number } }} Queue
  * A task is a subject: the root (and its thread) a line in it marks `task: <slug>`, or the subject of
  * a line claiming or releasing a `task:<slug>` that names no task. Its identity is the root, never the
  * name: a name used again in a later subject is a new task. `order` is its root's place in the log;
- * `since` and `sinceSeq` are when it entered its state; `holder` is the claim's bearer while active;
- * `waiting` is the waiting line while parked. `free` is since when no task has been held
- * (`-Infinity` and 0 when none ever was).
+ * `since` and `sinceSeq` are when it entered its state; `holder` and `claim` are the claim's bearer
+ * and line while active; `waiting` is the waiting line while parked. `free` is since when no task
+ * has been held (`-Infinity` and 0 when none ever was).
  */
 
 /**
@@ -294,13 +316,14 @@ function waitingOf(m) {
  * over the lines at or after `from` (the earliest instant the messenger may raise anything: history
  * before it neither queues, holds nor closes a task). In log order: a `task:` mark queues its
  * subject; `claim: task:<slug>` makes it active, held by the claim's bearer; `release: task:<slug>`
- * closes it with a `verdict:` on the same line, and of an active task otherwise parks it with a
- * waiting line or hands it back to the queue; a verdict the holder posts in the task's subject
- * closes it with no release; and a human's line in a parked task's subject (or citing the waiting
- * line) is the answer, which hands it back to the queue. A claim or release names the task of that
- * name in its own subject, else the newest open one of that name, else (a release) the newest closed
- * one; a claim of a name that is open nowhere starts a task in its own subject. The messenger's own
- * notices are not acts.
+ * closes it with a `verdict:` or a withdrawal (`withdrawn:`) on the same line, and of an active task
+ * otherwise parks it with a waiting line or hands it back to the queue; a verdict the holder posts in
+ * the task's subject closes it with no release; a human's withdrawal in a queued or parked task's
+ * subject (or citing the waiting line) ends it; and any other human line in a parked task's subject
+ * (or citing the waiting line) is the answer, which hands it back to the queue. A claim or release
+ * names the task of that name in its own subject, else the newest open one of that name, else (a
+ * release) the newest closed one; a claim of a name that is open nowhere starts a task in its own
+ * subject. The messenger's own notices are not acts.
  * @param {ReturnType<typeof readMessages>} ms @param {Set<string>} pinned @param {number} [from] @returns {Queue}
  */
 function foldQueue(ms, pinned, from = -Infinity) {
@@ -313,11 +336,11 @@ function foldQueue(ms, pinned, from = -Infinity) {
   const slugOf = (s) => (s !== undefined && s.startsWith(PREFIX) && s.length > PREFIX.length ? s.slice(PREFIX.length) : undefined);
   let free = { ts: -Infinity, seq: 0 };
   /** @param {Task} t @param {Task["state"]} state @param {typeof ms[number]} m */
-  const move = (t, state, m) => { t.state = state; t.since = m.ts; t.sinceSeq = m.seq; t.holder = null; t.waiting = null; };
+  const move = (t, state, m) => { t.state = state; t.since = m.ts; t.sinceSeq = m.seq; t.holder = null; t.claim = null; t.waiting = null; };
   /** @param {string} slug @param {typeof ms[number]} m */
   const open = (slug, m) => {
     /** @type {Task} */
-    const t = { subject: `${PREFIX}${slug}`, slug, root: m.root, order: rootSeq.get(m.root) ?? m.seq, pinned: pinned.has(m.root), state: "queued", since: m.ts, sinceSeq: m.seq, holder: null, waiting: null };
+    const t = { subject: `${PREFIX}${slug}`, slug, root: m.root, order: rootSeq.get(m.root) ?? m.seq, pinned: pinned.has(m.root), state: "queued", since: m.ts, sinceSeq: m.seq, holder: null, claim: null, waiting: null };
     tasks.set(keyOf(m.root, slug), t);
     return t;
   };
@@ -336,6 +359,9 @@ function foldQueue(ms, pinned, from = -Infinity) {
     }
     const heldBefore = [...tasks.values()].some((t) => t.state === "active");
     const verdict = m.trailers.some((t) => t.key === "verdict");
+    // a withdrawal ends the task as a verdict would: the request is gone, so nothing is queued again
+    const withdrawn = withdrawnOf(m);
+    const closes = verdict || withdrawn;
     /** @type {Set<Task>} */
     const released = new Set();
     for (const t of m.trailers) {
@@ -343,19 +369,20 @@ function foldQueue(ms, pinned, from = -Infinity) {
       const slug = slugOf(safeSubject(t.value));
       if (slug === undefined) continue;
       const task = named(slug, m, t.key === "claim");
-      if (t.key === "claim") { move(task, "active", m); task.holder = m.bearer; continue; }
+      if (t.key === "claim") { move(task, "active", m); task.holder = m.bearer; task.claim = m.id; continue; }
       released.add(task);
-      // a release closes any task with a verdict on the line; otherwise it acts only on a held task (a
-      // stray release after a close, freeing the lease, does not reopen it)
-      if (!verdict && task.state !== "active") continue;
-      const person = verdict ? undefined : waitingOf(m);
-      move(task, verdict ? "done" : person ? "waiting" : "queued", m);
+      // a release closes any task with a verdict or a withdrawal on the line; otherwise it acts only on
+      // a held task (a stray release after a close, freeing the lease, does not reopen it)
+      if (!closes && task.state !== "active") continue;
+      const person = closes ? undefined : waitingOf(m);
+      move(task, closes ? "done" : person ? "waiting" : "queued", m);
       if (person) task.waiting = { person, id: m.id, ts: m.ts, seq: m.seq };
     }
     for (const task of tasks.values()) {
       if (released.has(task)) continue;
       if (verdict && task.state === "active" && task.root === m.root && task.holder === m.bearer) move(task, "done", m);
-      else if (m.human && task.state === "waiting" && (task.root === m.root || m.trailers.some((t) => t.key === "re" && t.value === task.waiting?.id))) move(task, "queued", m);
+      else if (m.human && (task.state === "waiting" || (withdrawn && task.state === "queued"))
+        && (task.root === m.root || m.trailers.some((t) => t.key === "re" && t.value === task.waiting?.id))) move(task, withdrawn ? "done" : "queued", m);
     }
     if (heldBefore && ![...tasks.values()].some((t) => t.state === "active")) free = { ts: m.ts, seq: m.seq };
   }
@@ -404,6 +431,9 @@ export function tick(input) {
   const resolved = new Map();
   /** @param {string} a @returns {Resolution} */
   const resolve = (a) => { if (!resolved.has(a)) resolved.set(a, input.resolve(a)); return resolved.get(a); };
+  /** the host human, named by an address: a person whether or not they have spoken in the read, so
+   * an agent session bearing their name is never taken for them @param {string} a */
+  const isHost = (a) => a.trim().toLowerCase() === human.toLowerCase();
   /** @param {Resolution} r */
   const localOf = (r) => r.holders.filter((h) => h.process !== "foreign");
   const orchestrator = () => (["role", "position"].includes(resolve("orchestrator").kind) ? localOf(resolve("orchestrator")) : []);
@@ -520,11 +550,13 @@ export function tick(input) {
       const noAnswer = owesNoAnswer(m);
       for (const addr of m.to) {
         const r = resolve(addr);
-        if (r.kind === "everyone" || r.kind === "seat" || r.kind === "person") continue;
+        if (isHost(addr) || r.kind === "everyone" || r.kind === "seat" || r.kind === "person") continue;
         if (r.kind === "none") {
           // a pointer for an address that named no one when the line was posted: never for a line its
-          // addressee answered, nor after the fact for one posted while a holder lived
-          if (!heldWhenPosted(m, addr)) emit("N5", m.seq, { addr, kind: r.why ?? "unknown", nearest: r.nearest ?? "none" }, [{ key: "re", value: m.id }], m.root);
+          // addressee answered, nor after the fact for one posted while a holder lived; and never
+          // `retired` on a line that owes no answer, which nothing answers or clocks, so no evidence
+          // could ever show its address was held when it was posted
+          if (!(noAnswer && r.why === "retired") && !heldWhenPosted(m, addr)) emit("N5", m.seq, { addr, kind: r.why ?? "unknown", nearest: r.nearest ?? "none" }, [{ key: "re", value: m.id }], m.root);
           continue;
         }
         const local = localOf(r).filter((h) => !isSelf(h));
@@ -545,15 +577,18 @@ export function tick(input) {
         if (local.length) clock1(m, addr, local, route.id, route.ts);
       }
     }
-    // a reply posted at top level
+    // a reply posted at top level that left a subject: the line it cites is a reply, or its root is
+    // titled or already has a thread. A top-level answer to a lone top-level line is the flat answer
+    // form (a room with no threads answers so, and `carry` credits it), so it draws no pointer
     const re = trailer(m, "re");
     if (!m.thread && re) {
       const cited = byRef.get(re);
-      if (cited && cited.root !== m.id) emit("N7", m.seq, { root: cited.root }, [{ key: "re", value: m.id }], cited.root);
+      const inSubject = cited && (cited.thread !== undefined || input.titles.has(cited.root) || ms.some((x) => x.thread === cited.root && x.seq < m.seq));
+      if (cited && cited.root !== m.id && inSubject) emit("N7", m.seq, { root: cited.root }, [{ key: "re", value: m.id }], cited.root);
     }
     // an open subject: a titled human root addressed to nothing this seat holds
     if (m.human && !m.thread && input.titles.has(m.id) && !input.pinned.has(m.id) && m.to.length
-      && !m.to.some((a) => ["role", "position"].includes(resolve(a).kind) && localOf(resolve(a)).length)) {
+      && !m.to.some((a) => !isHost(a) && ["role", "position"].includes(resolve(a).kind) && localOf(resolve(a)).length)) {
       const age = now - m.ts;
       const answered = ms.some((x) => x.seq > m.seq && !x.notice && !x.human && (x.thread === m.id || trailer(x, "re") === m.id));
       if (age >= bounds.Bo && !claimedSubject(m.id) && !answered) {
@@ -651,15 +686,21 @@ export function tick(input) {
 
   // the queue at arming: an orchestrator session whose record started after a task it would hold or
   // take entered that state (queued or active) is handed the whole queue once, by subject, in the
-  // Room subject, so a successor or a swapped model learns what it owes from the room
-  const lastArming = Math.max(-Infinity, ...orchestrator().map((h) => armedAt(h.session)).filter((a) => a <= now));
+  // Room subject, so a successor or a swapped model learns what it owes from the room. An active task
+  // is named as its own when the position holds it (the claim's bearer or posting session is the
+  // position's, a predecessor's included), else as held by others
+  const holders = orchestrator();
+  const lastArming = Math.max(-Infinity, ...holders.map((h) => armedAt(h.session)).filter((a) => a <= now));
   const queued = queue.tasks.filter((t) => t.state === "queued").sort(queueOrder);
   const active = queue.tasks.filter((t) => t.state === "active");
   if (lastArming >= horizon && [...queued, ...active].some((t) => t.since < lastArming)) {
     /** @param {Task[]} ts */
     const list = (ts) => (ts.length ? ts.map((t) => `task:${t.slug}@${t.root}`).join(",") : "none");
+    /** @param {Task} t */
+    const yours = (t) => t.claim !== null && t.holder !== null && byAddressee("orchestrator", holders, { bearer: t.holder, id: t.claim });
     const armSeq = ms.reduce((s, x) => (x.ts <= lastArming ? Math.max(s, x.seq) : s), 0);
-    emit("N13", armSeq, { queued: list(queued), active: list(active) }, [{ key: "to", value: "orchestrator" }], roomSubjectRoot(input.messages, input.titles, input.pinned) ?? undefined);
+    emit("N13", armSeq, { queued: list(queued), yours: list(active.filter(yours)), others: list(active.filter((t) => !yours(t))) },
+      [{ key: "to", value: "orchestrator" }], roomSubjectRoot(input.messages, input.titles, input.pinned) ?? undefined);
   }
   return { acts, notices: done.size, held };
 }

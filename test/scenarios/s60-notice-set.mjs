@@ -26,7 +26,7 @@ const PINNED = {
   N10: "Queued {task} not started after {age}, with no task held: {id}.",
   N11: "Waiting on {person} for {task} after {age}: {id}.",
   N12: "On arming: {task} waits on {person} after {age}: {id}.",
-  N13: "On arming: queued {queued}; active {active}.",
+  N13: "On arming: queued {queued}; active and yours {yours}; active, held by others {others}.",
 };
 const PHRASE = "violet-anchor-pumice";
 
@@ -63,14 +63,15 @@ export const scenario = {
     const unaddressed = m({ at: T0, human: true, name: "Ada" });
     const open = m({ at: T0, human: true, name: "Ada", to: ["*"] });
     const typo = m({ at: T0, name: "orchestrator/Opus", to: ["cod"] });
-    const topRe = m({ at: T0 + MIN, name: "review/Argon", re: asked.id });
     // a queued task (its root carries the mark) and a parked one, whose waiting line names its need in the planted words
     const queued = m({ at: T0, name: "orchestrator/Opus", task: "slugify", to: ["Ada"] });
     const parkedRoot = m({ at: T0, human: true, name: "Ada", to: ["orchestrator"] });
     const parkTake = m({ at: T0, name: "orchestrator/Opus", thread: parkedRoot.id, claim: "task:faster", to: ["Ada"] });
     const park = m({ at: T0 + MIN, name: "orchestrator/Opus", thread: parkedRoot.id, release: "task:faster", to: ["Ada"], body: `waiting: Ada; needs: ${PHRASE}` });
+    // a reply posted at top level citing a line that stands in a subject (a top-level answer to a lone top-level line draws no pointer)
+    const topRe = m({ at: T0 + MIN, name: "review/Argon", re: park.id });
     const take = m({ at: T0, name: "coding/Opus", claim: "parser" });
-    const messages = [asked, unaddressed, open, typo, topRe, queued, parkedRoot, parkTake, park, take];
+    const messages = [asked, unaddressed, open, typo, queued, parkedRoot, parkTake, park, topRe, take];
     const records = [{ slug: "c", state: /** @type {const} */ ("live"), record: /** @type {any} */ ({ bearer: "coding/Opus", label: "desk.coding" }), posted: new Set() },
       { slug: "o", state: /** @type {const} */ ("live"), record: /** @type {any} */ ({ bearer: "orchestrator/Opus", label: "desk.orchestrator", startedAt: new Date(T0 + 2 * MIN).toISOString() }), posted: new Set() }];
     const rc = { seatName: "host", accountId: HOST, records, messages };

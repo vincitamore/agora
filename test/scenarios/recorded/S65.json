@@ -1,7 +1,7 @@
 {
   "scenario": "S65",
   "recordedOn": "2026-10-21",
-  "build": "2e6e10b",
+  "build": "d841464",
   "checks": {
     "reused-name-head": {
       "today": "green",
@@ -23,7 +23,8 @@
         "n13": 1,
         "to": "orchestrator",
         "queued": "task:slugify@<reused-subject>,task:reports@<newer-subject>",
-        "active": "none"
+        "yours": "none",
+        "others": "none"
       }
     },
     "no-self-clock": {
