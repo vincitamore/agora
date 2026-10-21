@@ -1941,7 +1941,7 @@ async function main(argv) {
           }
         }
         if (json) console.log(JSON.stringify(row));
-        else console.log(`${slug.padEnd(14)} ${String(row.action).padEnd(12)} ${row.context !== undefined ? `context ${row.context}, idle ${row.idleSeconds}s` : ""}${row.restart ? `; restart: ${row.restart}${row.restartExit === 0 ? " ok" : ` exit ${row.restartExit}`}` : ""}  ${row.reason}`);
+        else console.log(`${slug.padEnd(14)} ${String(row.action).padEnd(12)} ${row.context !== undefined ? `context ${row.context}${row.idleSeconds !== undefined ? `, idle ${row.idleSeconds}s` : ""}` : ""}${row.restart ? `; restart: ${row.restart}${row.restartExit === 0 ? " ok" : ` exit ${row.restartExit}`}` : ""}  ${row.reason}`);
       }
       return rc;
     }

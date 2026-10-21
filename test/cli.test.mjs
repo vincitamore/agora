@@ -9,7 +9,8 @@ import { mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { existsSync } from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
-import { bootEpoch } from "../src/session.mjs";
+import { bootEpoch, writeRecord } from "../src/session.mjs";
+import { writeSucceedRequest } from "../src/resident.mjs";
 import { cacheTtls } from "../src/harness.mjs";
 import { tmp } from "./helpers.mjs";
 
@@ -1936,6 +1937,40 @@ test("cli: read --pages walks deeper, and a walk that cannot reach the cursor pr
     assert.ok(schema.verbs.watch.options["--pages <n>"], "and so does watch");
   } finally {
     await back.close();
+    await cleanup();
+  }
+});
+
+test("cli: a cycle row prints idle only when the row measured one; an honoured succession carries context and no idle", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const { cfgPath } = await room(dir);
+    const state = path.join(dir, "state");
+    const home = path.join(dir, "home");
+    const uuid = "0b7b6b0c-1111-4222-8333-444455556666";
+    const slug = `claude-code-${uuid}`;
+    const proj = path.join(home, ".claude", "projects", "-home-user-src-tree");
+    await mkdir(proj, { recursive: true });
+    const assistant = JSON.stringify({ type: "assistant", timestamp: "2026-01-01T02:00:00.000Z", message: { role: "assistant", usage: { input_tokens: 3, cache_read_input_tokens: 200_000, cache_creation_input_tokens: 500, output_tokens: 5 } } });
+    await writeFile(path.join(proj, `${uuid}.jsonl`), `${JSON.stringify({ type: "user", timestamp: "2026-01-01T00:00:00.000Z", message: { role: "user", content: "hello" } })}\n${assistant}\n`);
+    const sdir = path.join(state, "sessions", slug);
+    await mkdir(sdir, { recursive: true });
+    await writeRecord(sdir, /** @type {any} */ ({ slug, source: "CLAUDE_CODE_SESSION_ID" }), { bearer: "Model/r1", pid: process.pid, pidSource: "CLAUDE_PID" });
+    const env = { AGORA_CONFIG: cfgPath, AGORA_STATE: state, HOME: home, USERPROFILE: home };
+
+    // no request: the row measured idleness, and says so
+    let r = await agora(["resident", "cycle", "r1", "--dry-run"], env);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /context 200503, idle \d+s/);
+
+    // an honoured succession's row carries the context and no idleSeconds: nothing is printed for it
+    await writeSucceedRequest(state, "r1", { by: "resident" });
+    r = await agora(["resident", "cycle", "r1", "--dry-run"], env);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /context 200503(?!,)/);
+    assert.doesNotMatch(r.stdout, /undefined/);
+    assert.doesNotMatch(r.stdout, /idle \d+s/);
+  } finally {
     await cleanup();
   }
 });

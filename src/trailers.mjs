@@ -31,11 +31,15 @@ import { parseSignature } from "./core.mjs";
  * `task: <slug>` marks the subject it is posted in as a queued task. It is known so that a block
  * carrying only it is a block: an intake reply need not borrow an address to be read. The
  * messenger's queue fold reads it; the parser carries it and acts on nothing.
+ *
+ * `withdrawn: <person>; <why>` says the request a task answered was taken back. The messenger's
+ * queue fold ends the task with no verdict; the parser carries it and acts on nothing. It is not
+ * `withdraws:` (which takes back one of the emitter's own posts).
  * @typedef {{ key: string, value: string }} Trailer
  */
 
 /** The keys this tool knows. Order is the order the emitter writes them in. */
-export const KNOWN_KEYS = Object.freeze(["to", "re", "withdraws", "claim", "release", "verdict", "exhibit", "because", "ack", "task", "card", "waiting", "context"]);
+export const KNOWN_KEYS = Object.freeze(["to", "re", "withdraws", "claim", "release", "verdict", "exhibit", "because", "ack", "task", "withdrawn", "card", "waiting", "context"]);
 
 /** One cap for parse and emit: a value past this, empty, or containing a newline, is not a trailer. */
 export const TRAILER_VALUE_MAX = 400;

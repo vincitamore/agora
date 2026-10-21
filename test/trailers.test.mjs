@@ -190,6 +190,17 @@ test("task is a known trailer: a block holding only `task: <slug>` is a block, a
   assert.deepEqual(parseTrailers(`body\n\n${block}`).trailers.map((t) => t.key), ["to", "task", "card", "severity"]);
 });
 
+test("withdrawn is a known trailer: a block holding only it is a block, written after task and before card, and the last three keys are unchanged", () => {
+  const r = parseTrailers("the requester took it back\n\nwithdrawn: person-7; no longer needed");
+  assert.equal(r.body, "the requester took it back");
+  assert.deepEqual(r.trailers, [{ key: "withdrawn", value: "person-7; no longer needed" }]);
+  assert.deepEqual(r.to, [], "withdrawn addresses no one");
+  assert.ok(KNOWN_KEYS.indexOf("withdrawn") > KNOWN_KEYS.indexOf("task") && KNOWN_KEYS.indexOf("withdrawn") < KNOWN_KEYS.indexOf("card"));
+  assert.deepEqual(KNOWN_KEYS.slice(-3), ["card", "waiting", "context"]);
+  const block = formatTrailers([{ key: "card", value: "plan P-0012" }, { key: "withdrawn", value: "person-7; gone" }, { key: "release", value: "task:parser-fix" }]);
+  assert.equal(block, ["release: task:parser-fix", "withdrawn: person-7; gone", "card: plan P-0012"].join("\n"));
+});
+
 test("an address matches a bearer by whole segments, from the left", () => {
   const seat = { id: "UBOT", name: "example_bot" };
   const table = [
