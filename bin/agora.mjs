@@ -108,7 +108,7 @@ import { runUsage } from "../src/usage-cli.mjs";
 import { runUsageSessionsCli } from "../src/session-accounting.mjs";
 import { readShadowArgs, runEconomyShadowCli, ShadowInputError } from "../src/economy/shadow.mjs";
 import { clearStandDown, clearWatchStop, completeStandDownAck, declareStandDown, listStandDowns, standDownRequested } from "../src/stand-down.mjs";
-import { DEFAULT_DEAF_SECONDS, DEFAULT_IDLE_SECONDS, DEFAULT_MAX_CONTEXT, DEFAULT_MIN_CONTEXT, ROOM_MECHANICS_DOC, assertResidentSlug, configuredResidents, inheritResident, planCycle, readSucceedRequest, removeSucceedRequest, renderResidentPrompt, restartCommand, writeInheritMarker, writeSucceedRequest } from "../src/resident.mjs";
+import { DEFAULT_DEAF_SECONDS, DEFAULT_IDLE_SECONDS, DEFAULT_MAX_CONTEXT, DEFAULT_MIN_CONTEXT, ROOM_MECHANICS_DOC, assertResidentSlug, configuredResidents, inheritResident, planCycle, readSucceedRequest, removeSucceedRequest, renderResidentPrompt, restartCommand, standingPositions, writeInheritMarker, writeSucceedRequest } from "../src/resident.mjs";
 import { nativeRecordArgumentRefusal, nativeRecordVerb, prepareAttachments, readSlackFiles, runNativeRecordVerb } from "../src/cli-native-records.mjs";
 import { NativeRoomStore } from "../src/native-store.mjs";
 import { FACE_ATTACHMENT_MODES, FACE_BUILT, FACE_SELECTORS, appendFaceRecord, faceCopies, facePolicyPath, listFaceRecords, normalizeSelectors, readFacePolicy, selectFaces, writeFacePolicy } from "../src/faces.mjs";
@@ -244,7 +244,7 @@ const SCHEMA = {
         "--dry-run": "print the due notices and post nothing; records no starting point",
         "--json": "one messenger-tick line per tick (since, due, posted, held)",
       },
-      does: "the room's supervision in code (docs/MESSENGER.md): a fold over the room, the board and this seat's sessions that posts fixed-form notices (N1 routed, N2 not taken, N3 to the host human, N4 lease lapsed, N5 unmatched address, N6 open subject, N7 top-level reply, N9 no role fits, N10 queued task not started, N11 waiting on a person, N12 a waiting task named at arming, N13 the queue named at arming). Its own posts are its incident record: a restart duplicates nothing. No model; it never answers, claims or quotes",
+      does: "the room's supervision in code (docs/MESSENGER.md): a fold over the room, the board and this seat's sessions that posts fixed-form notices (N1 routed, N2 not taken, N3 to the host human, N4 lease lapsed, N5 unmatched address, N6 open subject, N7 top-level reply, N9 no role fits, N10 queued task not started, N11 waiting on a person, N12 a waiting task named at arming, N13 the queue named at arming, N14 a position's claims named at arming). Its own posts are its incident record: a restart duplicates nothing. No model; it never answers, claims or quotes",
     },
     room: {
       args: ["faces <room> | add-remote <alias> <descriptor-path> | upgrade <room> | purge <room>"],
@@ -1807,7 +1807,7 @@ async function main(argv) {
         return res.state === "ok" || res.state === "installed" || res.state === "removed" || res.state === "kicked" ? EXIT.ok : EXIT.error;
       }
       /** @param {Record<string, any>} r */
-      const rowLine = (r) => `${String(r.resident).padEnd(18)} ${String(r.action).padEnd(12)} ${r.host ?? ""}${r.handle ? ` ${JSON.stringify(r.handle)}` : ""}${r.bearer ? `  ${r.bearer} in ${r.rooms.join(",")} (wake ${r.wake})` : ""}${r.reason ? `  ${r.reason}` : ""}`;
+      const rowLine = (r) => `${String(r.resident).padEnd(18)} ${String(r.action).padEnd(12)} ${r.host ?? ""}${r.handle ? ` ${JSON.stringify(r.handle)}` : ""}${r.bearer ? `  ${r.bearer} in ${r.rooms.join(",")} (wake ${r.wake})` : ""}${r.cleared ? `  closed stale tern session ${r.cleared.join(", ")} (it held the name, no harness)` : ""}${r.reason ? `  ${r.reason}` : ""}`;
       if (action === "start" && values.run !== undefined) {
         // the host's program: everything it runs is in the run record the start wrote
         if (rest.length !== 1 || values.all) throw new AgoraError("agora resident start <slug> --run <run.json>", EXIT.usage);
@@ -2932,7 +2932,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
           const { messages, annotations } = await roomRecords();
           const view = await br.readBoard(transport);
           const ctx = await seatContext(messages);
-          return { messages, annotations, boardRecords: view.records, resolve: (a) => br.resolveAddress(a, ctx), records: ctx.records, ...(await ms.readEvidence(stateRoot, roomAlias)) };
+          return { messages, annotations, boardRecords: view.records, resolve: (a) => br.resolveAddress(a, ctx), records: ctx.records, standing: standingPositions(stateRoot), ...(await ms.readEvidence(stateRoot, roomAlias)) };
         },
         post: async (act) => {
           const text = withTrailers(act.text, act.trailers);

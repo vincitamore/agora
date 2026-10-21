@@ -112,6 +112,12 @@ So an answered line never draws one, and a holder's later exit does not raise po
 fact. A record removed with `session --forget` takes its evidence with it. A lapsed lease whose
 holder's session is gone has no holder to read evidence from, so it runs on the time-only bounds.
 
+Nor is a name `retired` while its position is held again or coming back. When every ended session
+the address names stood at a position that a live session holds now (a model swap: the old bearer
+`orchestrator/Sonnet`, the position held by `orchestrator/Haiku`), or at a position this seat is
+bringing back (its folder under `<state>/residents/` holds a run record or an inherit marker: the
+gap of a restart or a succession), no N5 is posted for it.
+
 A position is an address of its own: `to: main.coding`, or its role alone (`to: coding`), names the
 session that holds `main.coding` (its `--label`), whatever its bearer. The resolver reads it so, and
 the holder's `watch --wake mine` wakes on it (`matchesAddress` with the session's position), so a
@@ -222,6 +228,14 @@ orchestrator session what it owes from the room, not from memory, addressed to t
   list), in the Room subject (the titled pinned root; else the earliest pinned root; else top
   level). One per arming: a later session (a succession, a model swap) gets its own; a session that
   armed before every task it would list saw them live and gets none.
+- **N14**, the claims at arming: every position, not only the orchestrator's. When the latest
+  session at a position started after a live claim of this seat's that the position holds was made
+  (the claim line's posting session held the position, read from the posted ledgers that inherit
+  moves to a successor; else the only position a session of the claim's bearer held), that session
+  gets one line naming them, `<subject>@<root>` comma-joined, addressed to the position, in the Room
+  subject. A successor reads the room from its predecessor's cursor, which is past the claim, and
+  the lease runs on for its hour: without the line a restarted maker sits idle on a unit it holds.
+  An orchestrator's task claims are N13's to name, not N14's. One per position per arming, as N13.
 
 ## The notices
 
@@ -246,6 +260,7 @@ form is still that notice, never an agent's line to clock.
 | N11 | waiting clock: R after the waiting line | `Waiting on <person> for task:<slug> after <age>: <line id>.` | `to: <person>`, `re: <line id>` |
 | N12 | an orchestrator session started after a waiting line | `On arming: task:<slug> waits on <person> after <age>: <line id>.` | `to: orchestrator`, `re: <line id>` |
 | N13 | an orchestrator session started after a queued or active task entered that state | `On arming: queued <task:slug@root,…\|none>; active and yours <task:slug@root,…\|none>; active, held by others <task:slug@root,…\|none>.` | `to: orchestrator`; in the Room subject |
+| N14 | a session started at a position after a claim the position holds was made | `On arming: <position> holds <subject@root,…>.` | `to: <position>`; in the Room subject |
 
 An age reads `42s`, `16m` or `1h05m`. The verdict in N3 is what the evidence says (`idle`, `silent`, `stalled`, `gone`) or, with no activity record, what the resolver can attest: a live process
 is `unknown`, a gone one `absent`; nothing is ever read as `ready` from a pid.
@@ -293,5 +308,7 @@ on a release line draws N11; a new orchestrator session gets one N13 listing the
 a line to the messenger answering its notice and a bare release draw no delivery notice), S66
 (withdrawal and holder: a task released by its holder with `withdrawn:` and no verdict, and a
 parked task its person withdrew with a `withdrawn:` line, draw no N10 and no N11; a new
-orchestrator session's N13 names the task its predecessor holds as `active and yours`). Each
-check has a red leg.
+orchestrator session's N13 names the task its predecessor holds as `active and yours`), S68
+(claim on arming: a maker that dies holding `work:fix/impl` and a new session at its position draw
+one N14 to the position naming the claim, which the successor's own `watch --wake mine` delivers;
+one per arming). Each check has a red leg.

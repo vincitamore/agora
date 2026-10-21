@@ -19,7 +19,7 @@ import { withTrailers } from "../src/trailers.mjs";
 // A notice is a pointer, never a paraphrase: it carries ids, ages and names and never the words of
 // the message it points at. This pin is the whole set, by exact equality, so a form that grows a
 // slot for a message's text (or a new form) is a red bar here and a reviewed change, not drift.
-test("the notice set is exactly these thirteen forms", () => {
+test("the notice set is exactly these fourteen forms", () => {
   assert.deepEqual({ ...NOTICE_TEMPLATES }, {
     N1: "Routed: unaddressed request {id}.",
     N2: "Not taken {age} since {since}: {id}.",
@@ -34,6 +34,7 @@ test("the notice set is exactly these thirteen forms", () => {
     N11: "Waiting on {person} for {task} after {age}: {id}.",
     N12: "On arming: {task} waits on {person} after {age}: {id}.",
     N13: "On arming: queued {queued}; active and yours {yours}; active, held by others {others}.",
+    N14: "On arming: {position} holds {claims}.",
   });
   assert.ok(Object.isFrozen(NOTICE_TEMPLATES));
   assert.deepEqual({ ...DEFAULT_BOUNDS }, { R: 7_200_000, R2: 14_400_000, I: 3_600_000, Bo: 14_400_000, H: 86_400_000, L: 600_000, T: 30_000, G: 600_000, G2: 1_800_000, S: 7_200_000, D: 300_000 });
@@ -53,7 +54,8 @@ test("a notice posted in a replaced form still reads as that notice (red leg: a 
 test("every form reads back as itself; a slot is one token (red leg: a slot with a space is refused)", () => {
   const sample = { id: "a".repeat(64), age: "16m", since: "posted", position: "desk.coding", verb: "taken", verdict: "unknown", subject: "work:msg:x",
     addr: "builder", kind: "retired", nearest: "desk.coding", root: "b".repeat(64), attestor: "observe", path: "ensure", outcome: "ready", human: "Ada",
-    task: "task:parser-fix", person: "Ada", queued: `task:slugify@${"d".repeat(64)},task:chunk@${"e".repeat(64)}`, yours: `task:parser-fix@${"f".repeat(64)}`, others: "none" };
+    task: "task:parser-fix", person: "Ada", queued: `task:slugify@${"d".repeat(64)},task:chunk@${"e".repeat(64)}`, yours: `task:parser-fix@${"f".repeat(64)}`, others: "none",
+    claims: `work:parser-fix/impl@${"f".repeat(64)},work:msg:x@${"e".repeat(64)}` };
   for (const kind of /** @type {(keyof typeof NOTICE_TEMPLATES)[]} */ (Object.keys(NOTICE_TEMPLATES))) {
     const text = withTrailers(formatNotice(kind, sample), [{ key: "re", value: "c".repeat(64) }]) + "\n\n-- messenger/Code";
     const back = parseNotice(text);
@@ -109,7 +111,7 @@ const SHORT = { ...DEFAULT_BOUNDS, R: 15 * 60_000, R2: 45 * 60_000, I: 2 * 60_00
 const ACT = (session, o = {}) => ({ session, turn: "idle", since: T0, lastToolAt: null, lastOutputAt: null, progressAt: null, progress: 0, updatedAt: T0, intervalMs: 2000, ...o });
 /** a holder's record, written just now (a live watch) @param {string} session @param {number} now @param {Partial<import("../src/messenger.mjs").Activity>} o */
 const fresh = (session, now, o) => ACT(session, { updatedAt: now - 30_000, ...o });
-/** @param {any[]} messages @param {{ now: number, board?: any[], records?: any[], titles?: Map<string, string>, pinned?: Set<string>, bounds?: any, seen?: Array<[string, string, number]>, activity?: import("../src/messenger.mjs").Activity[], since?: number }} o */
+/** @param {any[]} messages @param {{ now: number, board?: any[], records?: any[], titles?: Map<string, string>, pinned?: Set<string>, bounds?: any, seen?: Array<[string, string, number]>, activity?: import("../src/messenger.mjs").Activity[], since?: number, standing?: Set<string> }} o */
 function runFull(messages, o) {
   const records = o.records ?? RECORDS;
   const ctx = { seatName: "host", accountId: HOST, records, messages };
@@ -117,7 +119,7 @@ function runFull(messages, o) {
     resolve: (a) => resolveAddress(a, ctx), human: "Ada", bounds: o.bounds ?? { ...SHORT }, records,
     ...(o.seen ? { seen: new Map(o.seen.map(([slug, id, at]) => [seenKey(slug, id), at])) } : {}),
     ...(o.activity ? { activity: new Map(o.activity.map((a) => [a.session, a])) } : {}),
-    ...(o.since !== undefined ? { since: o.since } : {}) });
+    ...(o.since !== undefined ? { since: o.since } : {}), ...(o.standing ? { standing: o.standing } : {}) });
 }
 const run = (/** @type {any[]} */ messages, /** @type {Parameters<typeof runFull>[1]} */ o) => runFull(messages, o).acts;
 const kinds = (/** @type {any[]} */ acts) => acts.map((a) => a.kind);
@@ -531,6 +533,51 @@ test("on arming, an orchestrator session that took the position after tasks were
   assert.deepEqual(kinds(run([...ms, n13], { now: T0 + 14 * MIN, records: [RECORDS[0], armed("s-orch3", T0 + 13 * MIN)], ...pins })), ["N13"], "the next arming is told again");
   assert.deepEqual(kinds(run(ms, { now: T0 + 9 * MIN, records: [RECORDS[0], armed("s-orch", T0 - MIN)], ...pins })), [], "red leg: the session armed before every task, and saw them live");
   assert.deepEqual(kinds(run(ms.slice(0, 4), { now: T0 + 9 * MIN, records: successor, ...pins })), [], "red leg: nothing queued or held, nothing to hand over");
+});
+
+test("on arming, a session that took a position holding claims made before it armed (a predecessor's) gets one N14 naming them, addressed to the position, in the Room subject; an orchestrator's task claims stay N13's (red legs: the claim released; the session armed before it; the line already standing; another position's claim)", () => {
+  const roomRoot = msg({ at: T0 - 60 * MIN, kind: "human", name: "Ada", text: "Room" });
+  const ask2 = msg({ at: T0, name: "orchestrator/Opus", text: "implement fix", to: ["coding"] });
+  const claim = msg({ at: T0 + MIN, name: "coding/Sonnet", text: "taking fix/impl", thread: ask2.id, claim: "fix/impl" });
+  const lease = (/** @type {string} */ subject, /** @type {number} */ s) => ({ cursor: `${EPOCH}:${s}`, accountId: HOST, operationId: `op-${subject}`, board: { action: "claim", subject }, expiresAt: new Date(T0 + 61 * MIN).toISOString(), leaseMs: 3_600_000 });
+  const board = [lease("work:fix/impl", seq - 1)];
+  const pins = { pinned: new Set([roomRoot.id]), titles: new Map([[roomRoot.id, "Room"]]) };
+  const rec = (/** @type {string} */ slug, /** @type {"live" | "gone"} */ state, /** @type {number} */ at, /** @type {string[]} */ posted = [], label = "desk.coding", bearer = "coding/Sonnet") =>
+    ({ slug, state, record: /** @type {any} */ ({ bearer, label, startedAt: new Date(at).toISOString() }), posted: new Set(posted) });
+  const pred = rec("s-old", "gone", T0 - 10 * MIN, [claim.id]);
+  const succ = rec("s-new", "live", T0 + 5 * MIN);
+  const ms = [roomRoot, ask2, claim];
+  const onArm = run(ms, { now: T0 + 6 * MIN, board, records: [pred, succ, RECORDS[1]], ...pins }).filter((x) => x.kind === "N14");
+  assert.deepEqual(onArm.map((x) => [x.text, x.trailers, x.thread]), [[`On arming: desk.coding holds work:fix/impl@${ask2.id}.`, [{ key: "to", value: "desk.coding" }], roomRoot.id]],
+    "the predecessor's claim is the position's: its successor is told it holds it");
+  // the ledger moved to the successor by inherit attributes it the same way
+  assert.equal(run(ms, { now: T0 + 6 * MIN, board, records: [rec("s-old", "gone", T0 - 10 * MIN), rec("s-new", "live", T0 + 5 * MIN, [claim.id]), RECORDS[1]], ...pins }).filter((x) => x.kind === "N14").length, 1);
+  const released = msg({ at: T0 + 2 * MIN, name: "coding/Sonnet", text: "done", thread: ask2.id, release: "fix/impl" });
+  const freed = [...board, { cursor: `${EPOCH}:${seq - 1}`, accountId: HOST, operationId: "op-rel", board: { action: "release", subject: "work:fix/impl" } }];
+  assert.deepEqual(kinds(run([...ms, released], { now: T0 + 6 * MIN, board: freed, records: [pred, succ, RECORDS[1]], ...pins }).filter((x) => x.kind === "N14")), [], "red leg: released before the restart, nothing held");
+  assert.deepEqual(kinds(run(ms, { now: T0 + 6 * MIN, board, records: [rec("s-new", "live", T0 - 5 * MIN, [claim.id]), RECORDS[1]], ...pins }).filter((x) => x.kind === "N14")), [], "red leg: the live session made the claim itself after it armed");
+  const n14 = notice(T0 + 6 * MIN, "N14", { position: "desk.coding", claims: `work:fix/impl@${ask2.id}` }, onArm[0].trailers, roomRoot.id);
+  assert.deepEqual(kinds(run([...ms, n14], { now: T0 + 8 * MIN, board, records: [pred, succ, RECORDS[1]], ...pins }).filter((x) => x.kind === "N14")), [], "red leg: once per arming");
+  assert.deepEqual(kinds(run([...ms, n14], { now: T0 + 12 * MIN, board, records: [pred, rec("s-new", "gone", T0 + 5 * MIN), rec("s-newer", "live", T0 + 10 * MIN), RECORDS[1]], ...pins }).filter((x) => x.kind === "N14")), ["N14"], "the next arming is told again");
+  assert.deepEqual(kinds(run(ms, { now: T0 + 6 * MIN, board, records: [rec("s-old", "gone", T0 - 10 * MIN, [claim.id], "desk.review", "review/Argon"), succ, RECORDS[1]], ...pins }).filter((x) => x.kind === "N14")), [], "red leg: the claim is another position's");
+  // an orchestrator holding only its task: N13 names it, so no N14
+  const a = ask(T0, "fix the parser");
+  const take = takeTask(T0 + 4 * MIN, a.id, "parser-fix");
+  const orchBoard = [lease("work:task:parser-fix", seq - 1)];
+  const orchArm = run([roomRoot, a, intake(T0 + 3 * MIN, a.id, "parser-fix"), take], { now: T0 + 9 * MIN, board: orchBoard, records: [RECORDS[0], rec("s-orch2", "live", T0 + 8 * MIN, [], "desk.orchestrator", "orchestrator/Opus")], ...pins });
+  assert.deepEqual(kinds(orchArm), ["N13"], "the task is N13's to name");
+});
+
+test("N5 never says retired for a name whose position is held: by a live successor (a model swap), or restarting (a run record or an inherit marker stands) (red legs: neither; the position held elsewhere by no one)", () => {
+  const goneOld = { slug: "s-orch-old", state: /** @type {const} */ ("gone"), record: /** @type {any} */ ({ bearer: "orchestrator/Sonnet", label: "desk.orchestrator", lastSeen: new Date(T0 - 5 * MIN).toISOString() }), posted: new Set() };
+  const swapped = { slug: "s-orch-new", state: live, record: /** @type {any} */ ({ bearer: "orchestrator/Haiku", label: "desk.orchestrator" }), posted: new Set() };
+  const toOld = msg({ at: T0, name: "review/Argon", text: "verdict", to: ["orchestrator/Sonnet"] });
+  assert.deepEqual(run([toOld], { now: T0 + MIN, records: [goneOld, RECORDS[0]] }).map((a) => a.text), ["to: orchestrator/Sonnet names no holder here (retired); nearest: none."], "red leg: nothing holds the position");
+  assert.deepEqual(kinds(run([toOld], { now: T0 + MIN, records: [goneOld, swapped, RECORDS[0]] })), [], "a model swap: the position is held by its successor");
+  const toPos = msg({ at: T0, kind: "human", name: "Ada", text: "what do you owe?", to: ["desk.orchestrator"] });
+  assert.deepEqual(kinds(run([toPos], { now: T0 + MIN, records: [goneOld, RECORDS[0]] })), ["N5"], "red leg: no run record, no marker");
+  assert.deepEqual(kinds(run([toPos], { now: T0 + MIN, records: [goneOld, RECORDS[0]], standing: new Set(["desk.orchestrator"]) })), [], "a restart gap: the run record says it is coming back");
+  assert.deepEqual(kinds(run([toPos], { now: T0 + MIN, records: [goneOld, RECORDS[0]], standing: new Set(["desk.review"]) })), ["N5"], "red leg: another position's run record");
 });
 
 test("no clock 1 for a line that owes no answer: ack: none, an address naming the messenger itself, an answer to a notice, a release with no verdict and no claim (red legs: each as a request to coding)", () => {

@@ -342,6 +342,8 @@ test("wantEnding: unwanted, revoked by the grant's removal or narrowing, expired
 function fakeDeps(now) {
   const running = new Set();
   const runs = new Set();
+  /** the seat's own measure of a dead position's absence, as residentState gives it @type {Map<string, { since: number, cause: 'reboot' | 'host' }>} */
+  const gone = new Map();
   /** @type {Record<string, any>} */
   const turns = {};
   /** @type {Array<{ room: string, text: string }>} */
@@ -352,15 +354,15 @@ function fakeDeps(now) {
   const acts = [];
   /** @type {import("../src/resident-grant.mjs").EnsureDeps} */
   const deps = {
-    start: async (p) => { acts.push(`start ${p}`); running.add(p); runs.add(p); return { action: "started" }; },
+    start: async (p) => { acts.push(`start ${p}`); running.add(p); runs.add(p); gone.delete(p); return { action: "started" }; },
     stop: async (p) => { acts.push(`stop ${p}`); running.delete(p); runs.delete(p); return { action: "stopped" }; },
-    state: async (p) => ({ running: running.has(p), run: runs.has(p) ? {} : null, reason: running.has(p) ? "live" : null }),
+    state: async (p) => ({ running: running.has(p), run: runs.has(p) ? {} : null, reason: running.has(p) ? "live" : null, ...(gone.has(p) && !running.has(p) ? { absent: gone.get(p) } : {}) }),
     marker: async () => false,
     turn: async (p) => turns[p] ?? { status: "none" },
     post: async (room, text) => { posts.push({ room, text: text.split("\n")[0] }); raws.push(text); return { id: `m${posts.length}` }; },
     now: () => now,
   };
-  return { deps, running, runs, turns, posts, raws, acts };
+  return { deps, running, runs, gone, turns, posts, raws, acts };
 }
 
 test("ensure: an admitted want starts with one N8 line; a second pass posts nothing; a revoked grant stops it at idle with one N8 line; the record is kept", async (t) => {
@@ -406,8 +408,12 @@ test("ensure: a dead granted position is restarted (absent by host); one stopped
   const f = fakeDeps(t0);
   await ensure(m, s.state, f.deps);
   f.running.delete("lab.coding-2"); // died: its run record is left
+  f.gone.set("lab.coding-2", { since: t0 - 7 * 60_000, cause: "host" }); // last seen alive 7 minutes before this pass
   let rows = await ensure(m, s.state, f.deps);
-  assert.deepEqual(rows.map((x) => [x.action, x.notice]), [["restarted", "lab.coding-2: absent by host 0s; path restart; outcome started."]]);
+  assert.deepEqual(rows.map((x) => [x.action, x.notice]), [["restarted", "lab.coding-2: absent by host 7m; path restart; outcome started."]],
+    "the age is the absence measured from the last sign of life, never a fixed 0s");
+  const restart = (await readLedger(s.state)).filter((e) => e.ev === "start").at(-1);
+  assert.deepEqual([restart.path, restart.cause, restart.absentSince], ["restart", "host", new Date(t0 - 7 * 60_000).toISOString()]);
   f.running.delete("lab.coding-2"); f.runs.delete("lab.coding-2"); // stopped by the operator: no run record
   rows = await ensure(m, s.state, f.deps);
   assert.deepEqual(rows.map((x) => x.action), ["ended"]);
@@ -435,11 +441,13 @@ test("ensure: a messenger row whose host died is restarted with one N8 line; one
   let rows = await ensure(m, s.state, f.deps);
   assert.deepEqual(rows, [], "no run record: stopped by its operator, or never started");
   f.runs.add("lab.messenger");
+  f.gone.set("lab.messenger", { since: Date.parse("2025-12-31T21:30:00.000Z"), cause: "reboot" }); // the machine booted since its stream last wrote
   rows = await ensure(m, s.state, f.deps, { dryRun: true });
   assert.deepEqual(rows.map((x) => x.action), ["would-restart"]);
   assert.deepEqual([f.acts, f.posts], [[], []]);
   rows = await ensure(m, s.state, f.deps);
-  assert.deepEqual(rows.map((x) => [x.position, x.action, x.notice]), [["lab.messenger", "restarted", "lab.messenger: absent by host 0s; path restart; outcome started."]]);
+  assert.deepEqual(rows.map((x) => [x.position, x.action, x.notice]), [["lab.messenger", "restarted", "lab.messenger: absent by reboot 2h30m; path restart; outcome started."]],
+    "a reboot is named as the cause, with the whole gap");
   assert.equal((await ensure(m, s.state, f.deps)).length, 0, "running again: nothing to do");
 });
 

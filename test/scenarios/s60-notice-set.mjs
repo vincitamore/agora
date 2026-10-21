@@ -4,7 +4,7 @@
  * and names and never the words of what they point at. Two checks, both on the build's own
  * modules with no seat: the form set equals the set this scenario pins, and a tick over a room whose
  * every message carries a planted phrase raises notices of each clock (the queue's, the waiting
- * record's and the arming handover's included, whose waiting line names its need in the planted
+ * record's, the arming handovers' included, whose waiting line names its need in the planted
  * words) and none carries it.
  */
 
@@ -27,6 +27,7 @@ const PINNED = {
   N11: "Waiting on {person} for {task} after {age}: {id}.",
   N12: "On arming: {task} waits on {person} after {age}: {id}.",
   N13: "On arming: queued {queued}; active and yours {yours}; active, held by others {others}.",
+  N14: "On arming: {position} holds {claims}.",
 };
 const PHRASE = "violet-anchor-pumice";
 
@@ -36,11 +37,11 @@ export const scenario = {
   name: "notice-set",
   checks: {
     "form-set-pinned": {
-      bar: "the notice forms are exactly the thirteen pinned ones",
+      bar: "the notice forms are exactly the fourteen pinned ones",
       redLeg: "one form grows a slot for the message's words (a paraphrase planted in N2)",
     },
     "no-words-carried": {
-      bar: "0 notices carry the planted phrase, over a room that raises N1, N2, N3, N4, N5, N6, N7, N10, N11, N12 and N13",
+      bar: "0 notices carry the planted phrase, over a room that raises N1, N2, N3, N4, N5, N6, N7, N10, N11, N12, N13 and N14",
       redLeg: "each notice is posted with the first words of the message it points at appended",
     },
   },
@@ -71,14 +72,19 @@ export const scenario = {
     // a reply posted at top level citing a line that stands in a subject (a top-level answer to a lone top-level line draws no pointer)
     const topRe = m({ at: T0 + MIN, name: "review/Argon", re: park.id });
     const take = m({ at: T0, name: "coding/Opus", claim: "parser" });
-    const messages = [asked, unaddressed, open, typo, queued, parkedRoot, parkTake, park, topRe, take];
+    // a claim a review session made before it went, held now by the session that took its position
+    const held = m({ at: T0, name: "review/Argon", claim: "parser/review" });
+    const messages = [asked, unaddressed, open, typo, queued, parkedRoot, parkTake, park, topRe, take, held];
     const records = [{ slug: "c", state: /** @type {const} */ ("live"), record: /** @type {any} */ ({ bearer: "coding/Opus", label: "desk.coding" }), posted: new Set() },
-      { slug: "o", state: /** @type {const} */ ("live"), record: /** @type {any} */ ({ bearer: "orchestrator/Opus", label: "desk.orchestrator", startedAt: new Date(T0 + 2 * MIN).toISOString() }), posted: new Set() }];
+      { slug: "o", state: /** @type {const} */ ("live"), record: /** @type {any} */ ({ bearer: "orchestrator/Opus", label: "desk.orchestrator", startedAt: new Date(T0 + 2 * MIN).toISOString() }), posted: new Set() },
+      { slug: "r-old", state: /** @type {const} */ ("gone"), record: /** @type {any} */ ({ bearer: "review/Argon", label: "desk.review", lastSeen: new Date(T0 + MIN).toISOString() }), posted: new Set([held.id]) },
+      { slug: "r", state: /** @type {const} */ ("live"), record: /** @type {any} */ ({ bearer: "review/Argon", label: "desk.review", startedAt: new Date(T0 + 2 * MIN).toISOString() }), posted: new Set() }];
     const rc = { seatName: "host", accountId: HOST, records, messages };
     // past every default bound (the longest is R2 and Bo, hours), so every clock's form is exercised
     const now = T0 + Math.max(DEFAULT_BOUNDS.R2, DEFAULT_BOUNDS.Bo, DEFAULT_BOUNDS.I) + 10 * MIN;
     const { acts } = tick({ now, messages, titles: new Map([[open.id, "Open"]]), pinned: new Set(), accountId: HOST, human: "Ada", bounds: { ...DEFAULT_BOUNDS },
-      boardRecords: [{ cursor: `${E}:${n - 1}`, accountId: HOST, operationId: "op", board: { action: "claim", subject: "work:parser" }, expiresAt: new Date(T0 + 5 * MIN).toISOString(), leaseMs: 300_000 }],
+      boardRecords: [{ cursor: `${E}:${n - 2}`, accountId: HOST, operationId: "op", board: { action: "claim", subject: "work:parser" }, expiresAt: new Date(T0 + 5 * MIN).toISOString(), leaseMs: 300_000 },
+        { cursor: `${E}:${n - 1}`, accountId: HOST, operationId: "op2", board: { action: "claim", subject: "work:parser/review" }, expiresAt: new Date(now + 60 * MIN).toISOString(), leaseMs: 3_600_000 }],
       resolve: (a) => resolveAddress(a, rc), records });
     const byId = new Map(messages.map((x) => [x.id, x]));
     const posted = acts.map((a) => {
@@ -86,7 +92,7 @@ export const scenario = {
       return ctx.red("no-words-carried") && cited ? `${a.text} ${cited.text.split("\n")[0]}` : a.text;
     });
     const kinds = [...new Set(acts.map((a) => a.kind))].sort();
-    ctx.check("no-words-carried", { carrying: 0, kinds: ["N1", "N10", "N11", "N12", "N13", "N2", "N3", "N4", "N5", "N6", "N7"] },
+    ctx.check("no-words-carried", { carrying: 0, kinds: ["N1", "N10", "N11", "N12", "N13", "N14", "N2", "N3", "N4", "N5", "N6", "N7"] },
       { carrying: posted.filter((t) => t.includes(PHRASE)).length, kinds });
   },
 };

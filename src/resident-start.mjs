@@ -40,11 +40,11 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { AgoraError, EXIT, expandHome, writeFileAtomic } from "./core.mjs";
-import { ROOM_MECHANICS_DOC, RESIDENT_SLUG_RE, markSuccession, renderResidentPrompt, residentDir } from "./resident.mjs";
+import { ROOM_MECHANICS_DOC, RESIDENT_SLUG_RE, RUN_FILE, markSuccession, renderResidentPrompt, residentDir } from "./resident.mjs";
 import { POSITION_RE, bootEpoch, listRecords, markRestarted, pidAlive, positionOf, roomOfKey, sessionScope } from "./session.mjs";
 import { LINEAGE_RE, counterparts, differentFrom, lineageClash, modelFamily } from "./lineage.mjs";
 import { modelLabel } from "../plugins/omp/agora-room/index.mjs";
-import { livenessPath } from "./messenger.mjs";
+import { ACTIVITY_FILE, livenessPath } from "./messenger.mjs";
 
 export const MANIFEST_VERSION = 1;
 export const HARNESSES = Object.freeze(["omp", "claude", "agora"]);
@@ -517,7 +517,7 @@ export function firstPrompt(p) {
 
 /** @param {string} stateRoot @param {string} slug */
 export function runFilePath(stateRoot, slug) {
-  return path.join(residentDir(stateRoot, slug), "run.json");
+  return path.join(residentDir(stateRoot, slug), RUN_FILE);
 }
 
 /**
@@ -943,8 +943,40 @@ async function hostKill(run, deps = {}) {
 }
 
 /**
+ * The Tern sessions in the plan's window that carry the plan's session name, each read by what its
+ * live blocks run: `ours` (this position's wrapper on this run file: the host is up), `other` (a
+ * resident wrapper on another run file: another state root's resident), or `stale` (no resident
+ * wrapper at all). Tern keeps its sessions across its own restart and a reboot and restores each
+ * as a bare shell in its folder under the old name: such a session holds no harness, yet the name
+ * refuses `tern new`. On Windows Tern runs a command through `powershell -c`, so the wrapper is
+ * read from the block's command line as well as its program and arguments. Null when Tern cannot
+ * be asked.
+ * @param {ResidentPlan} plan @param {{ run?: Runner }} [deps]
+ * @returns {Promise<Array<{ id: string, kind: 'ours' | 'other' | 'stale' }> | null>}
+ */
+export async function ternNamesakes(plan, deps = {}) {
+  if (!plan.hostInfo.tern) return null;
+  const r = await (deps.run ?? runCommand)([plan.hostInfo.tern, "ls", "--json", ...(plan.hostInfo.window ? ["--window", plan.hostInfo.window] : [])], { timeoutMs: 10_000 });
+  if (r.code !== 0) return null;
+  let doc;
+  try { doc = JSON.parse(r.stdout); } catch { return null; }
+  const norm = (/** @type {string} */ s) => s.replace(/\\/g, "/").toLowerCase();
+  const file = norm(plan.runFile);
+  return ternSessions(doc).filter((s) => s.name === plan.name).map((s) => {
+    /** @type {string[]} */
+    const lines = (Array.isArray(s.tabs) ? s.tabs : []).flatMap((/** @type {any} */ t) => (Array.isArray(t?.blocks) ? t.blocks : []))
+      .filter((/** @type {any} */ b) => b?.live === true && (b.exited === null || b.exited === undefined))
+      .map((/** @type {any} */ b) => norm([b.command ?? "", b.program ?? "", ...(Array.isArray(b.args) ? b.args : [])].join(" ")));
+    const kind = lines.some((l) => l.includes(file)) ? "ours" : lines.some((l) => /\bresident\s+start\b/.test(l) && l.includes("--run")) ? "other" : "stale";
+    return { id: String(s.id), kind: /** @type {'ours' | 'other' | 'stale'} */ (kind) };
+  });
+}
+
+/**
  * Is this position held? A live session record labelled with it, or the host handle of the last
- * start still running (a session between its start and its registration holds no record yet).
+ * start still running (a session between its start and its registration holds no record yet). A
+ * position not held whose last start left a run record also says since when it is absent and why
+ * (`absenceOf`): what a supervisor's restart line reports.
  * @param {string} stateRoot @param {string} slug
  * @param {{ run?: Runner, kill?: (pid: number, sig: 0) => void, boot?: number }} [deps]
  */
@@ -958,7 +990,40 @@ export async function residentState(stateRoot, slug, deps = {}) {
   if (sessions.length) reason = `live session ${sessions.join(", ")} holds the position`;
   else if (host === "live") reason = `the ${run?.host} handle of the last start is running`;
   else if (host === "unknown") reason = `the ${run?.host} handle of the last start cannot be checked; stop it first or remove ${runFilePath(stateRoot, slug)}`;
-  return { running: reason !== null, reason, sessions, run, host };
+  const absent = run && reason === null ? await absenceOf(stateRoot, slug, run, records, { boot: deps.boot }) : null;
+  return { running: reason !== null, reason, sessions, run, host, ...(absent ? { absent } : {}) };
+}
+
+/**
+ * Since when a position is absent, and why: the newest instant anything showed it live (its run
+ * record's start; each of its sessions' record writes and watch heartbeats, the activity record's
+ * `updatedAt`; a messenger stream's liveness file), and `reboot` when this machine booted after that
+ * instant, else `host` (its host's handle ended within this boot).
+ * @param {string} stateRoot @param {string} slug @param {RunRecord} run
+ * @param {Array<{ slug: string, record?: any }>} records the seat's session records
+ * @param {{ boot?: number }} [deps]
+ * @returns {Promise<{ since: number, cause: 'reboot' | 'host' }>}
+ */
+export async function absenceOf(stateRoot, slug, run, records, deps = {}) {
+  const at = (/** @type {unknown} */ v) => { const t = Date.parse(String(v ?? "")); return Number.isFinite(t) ? t : -Infinity; };
+  const json = async (/** @type {string} */ f) => { try { return JSON.parse(await readFile(f, "utf8")); } catch { return null; } };
+  let since = at(run.startedAt);
+  for (const r of records) {
+    if (positionOf(r.record) !== slug) continue;
+    since = Math.max(since, at(r.record?.lastSeen), at((await json(path.join(stateRoot, "sessions", r.slug, ACTIVITY_FILE)))?.updatedAt));
+  }
+  const dir = path.join(stateRoot, "messenger");
+  /** @type {string[]} */
+  let names = [];
+  try { names = readdirSync(dir).filter((n) => n.startsWith(`${slug}.`) && n.endsWith(".json")); } catch { /* no messenger here */ }
+  for (const n of names) {
+    const doc = await json(path.join(dir, n));
+    if (doc?.harness === "agora" && doc.session === slug) since = Math.max(since, at(doc.updatedAt));
+  }
+  const boot = (deps.boot ?? bootEpoch()) * 1000;
+  // the boot epoch is read to the second and wobbles by one or two: a boot within 2 s of the last
+  // sign of life is not taken for a reboot
+  return { since, cause: Number.isFinite(since) && boot - 2000 > since ? "reboot" : "host" };
 }
 
 /** Exclusive start lock; a lock older than the stale bound is taken over. @param {string} dir */
@@ -1072,12 +1137,40 @@ export async function startResident(plan, stateRoot, deps) {
         }),
       };
     }
-    const r = await (deps.run ?? runCommand)(/** @type {string[]} */ (plan.hostArgv), { timeoutMs: 30_000 });
+    const exec = deps.run ?? runCommand;
+    let r = await exec(/** @type {string[]} */ (plan.hostArgv), { timeoutMs: 30_000 });
+    /** @type {string[]} */
+    const cleared = [];
+    /** @type {string | null} */
+    let namesake = null;
+    if (r.code !== 0 && plan.host === "tern") {
+      // a refused `tern new` may be a session already under this name: one Tern restored after its
+      // own restart or a reboot holds no harness and is closed by its id; any other is said by name
+      const namesakes = (await ternNamesakes(plan, deps)) ?? [];
+      const ours = namesakes.find((x) => x.kind === "ours");
+      const other = namesakes.find((x) => x.kind === "other");
+      if (ours) {
+        if (prior !== null) await writeFileAtomic(plan.runFile, prior);
+        else await removeRun(plan.runFile);
+        return { row: { ...base, action: "running", reason: `tern session ${ours.id} called ${plan.name} runs this position's host` } };
+      }
+      if (other) namesake = `tern session ${other.id} called ${plan.name} runs another resident's host (a wrapper on another run file, so another state root's): stop it there, never here`;
+      else if (namesakes.length) {
+        const window = plan.hostInfo.window ? ["--window", plan.hostInfo.window] : [];
+        for (const x of namesakes) {
+          const k = await exec([plan.hostInfo.tern, "kill", "session", x.id, "--json", ...window], { timeoutMs: 15_000 });
+          if (k.code === 0) cleared.push(x.id);
+        }
+        if (cleared.length === namesakes.length) r = await exec(/** @type {string[]} */ (plan.hostArgv), { timeoutMs: 30_000 });
+        else namesake = `tern session ${namesakes.filter((x) => !cleared.includes(x.id)).map((x) => x.id).join(", ")} called ${plan.name} holds no harness and would not close`;
+      }
+    }
     if (r.code !== 0) {
       if (prior !== null) await writeFileAtomic(plan.runFile, prior);
       else await removeRun(plan.runFile);
-      throw new AgoraError(`resident ${plan.resident}: the ${plan.host} host refused the start (exit ${r.code}): ${(r.stderr || r.stdout).trim().slice(0, 400)}`, EXIT.error);
+      throw new AgoraError(`resident ${plan.resident}: the ${plan.host} host refused the start (exit ${r.code}): ${(r.stderr || r.stdout).trim().slice(0, 400)}${namesake ? `; ${namesake}` : ""}`, EXIT.error);
     }
+    if (cleared.length) base.cleared = cleared;
     /** @type {Record<string, unknown>} */
     let handle;
     if (plan.host === "tern") {

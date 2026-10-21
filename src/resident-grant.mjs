@@ -354,7 +354,7 @@ export const DEFAULT_STAGGER_SECONDS = 10;
  * @typedef {{
  *   start: (position: string, row: ManifestResident) => Promise<{ action: string, reason?: unknown }>,
  *   stop: (position: string) => Promise<{ action: string, reason?: unknown }>,
- *   state: (position: string) => Promise<{ running: boolean, run: any, reason: string | null, host?: 'live' | 'gone' | 'unknown' | null }>,
+ *   state: (position: string) => Promise<{ running: boolean, run: any, reason: string | null, host?: 'live' | 'gone' | 'unknown' | null, absent?: { since: number, cause: 'reboot' | 'host' } }>,
  *   marker: (position: string) => Promise<boolean>,
  *   turn: (position: string) => ReturnType<typeof positionTurn>,
  *   post: (room: string, text: string) => Promise<{ id: string } | null>,
@@ -487,6 +487,19 @@ export async function ensure(manifest, stateRoot, deps, opts = {}) {
       const n = await notice(row.rooms[0], { position: pos, verdict: "absent", attestor: "host", age: formatAge(Math.max(0, now - (rec.firstAt ?? now))), path: "restart", outcome: "held" }, hostHuman(manifest, row.rooms[0]));
       return { ...base(pos, id), action: "held", reason, ...n };
     };
+    /**
+     * A restart's absence, read at the start (after the stagger): from the instant the position was
+     * last known live (the state's own measure, else its run record's start) to now, and its cause
+     * (`reboot` when the machine booted since, else `host`: its handle ended). The ledger row and the
+     * N8 line carry it.
+     * @param {{ run: any, absent?: { since: number, cause: 'reboot' | 'host' } }} st
+     */
+    const absence = (st) => {
+      const since = Number.isFinite(st.absent?.since) ? /** @type {number} */ (st.absent?.since) : Date.parse(String(st.run?.startedAt ?? ""));
+      const t = deps.now();
+      const known = Number.isFinite(since);
+      return { at: new Date(t).toISOString(), cause: st.absent?.cause ?? "host", age: formatAge(known ? Math.max(0, t - since) : 0), since: known ? new Date(since).toISOString() : null };
+    };
 
     for (const w of openWants(foldLedger(events))) {
       const pos = w.want.position;
@@ -521,9 +534,10 @@ export async function ensure(manifest, stateRoot, deps, opts = {}) {
         }
         if (r.action === "running") { rows.push({ ...base(pos, id), action: "running", reason: r.reason }); continue; }
         const outcome = r.action === "started" ? "started" : "failed";
-        await record({ ev: "start", id, position: pos, path: path_, outcome, ...(r.reason ? { reason: String(r.reason) } : {}) });
-        const n = await notice(row.rooms[0], { position: pos, verdict: started ? "absent" : "wanted", attestor: started ? "host" : w.want.by,
-          age: formatAge(started ? 0 : now - Date.parse(w.want.at)), path: path_, outcome });
+        const gap = started ? absence(st) : null;
+        await record({ ev: "start", id, position: pos, path: path_, outcome, ...(gap ? { at: gap.at, absentSince: gap.since, cause: gap.cause } : {}), ...(r.reason ? { reason: String(r.reason) } : {}) });
+        const n = await notice(row.rooms[0], { position: pos, verdict: started ? "absent" : "wanted", attestor: gap ? gap.cause : w.want.by,
+          age: gap ? gap.age : formatAge(now - Date.parse(w.want.at)), path: path_, outcome });
         rows.push({ ...base(pos, id), action: outcome === "started" ? (started ? "restarted" : "started") : "failed", ...(r.reason ? { reason: String(r.reason) } : {}), ...(await ternNote(row)), ...n });
         continue;
       }
@@ -581,8 +595,9 @@ export async function ensure(manifest, stateRoot, deps, opts = {}) {
       }
       if (r.action === "running") continue;
       const outcome = r.action === "started" ? "started" : "failed";
-      await record({ ev: "start", position: row.slug, path: "restart", outcome, ...(r.reason ? { reason: String(r.reason) } : {}) });
-      const n = await notice(row.rooms[0], { position: row.slug, verdict: "absent", attestor: "host", age: "0s", path: "restart", outcome });
+      const gap = absence(st);
+      await record({ ev: "start", position: row.slug, path: "restart", outcome, at: gap.at, absentSince: gap.since, cause: gap.cause, ...(r.reason ? { reason: String(r.reason) } : {}) });
+      const n = await notice(row.rooms[0], { position: row.slug, verdict: "absent", attestor: gap.cause, age: gap.age, path: "restart", outcome });
       rows.push({ ...base(row.slug, null), action: outcome === "started" ? "restarted" : "failed", ...(r.reason ? { reason: String(r.reason) } : {}), ...(await ternNote(row)), ...n });
     }
 

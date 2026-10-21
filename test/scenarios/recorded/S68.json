@@ -1,0 +1,21 @@
+{
+  "scenario": "S68",
+  "recordedOn": "2026-10-21",
+  "build": "32e7f98",
+  "checks": {
+    "claim-handed-on-arming": {
+      "today": "green",
+      "observed": {
+        "n14": 1,
+        "to": "main.coding",
+        "claims": "work:fix/impl@<ask>",
+        "byFirstTick": true,
+        "delivered": 1
+      }
+    },
+    "once-per-arming": {
+      "today": "green",
+      "observed": 1
+    }
+  }
+}

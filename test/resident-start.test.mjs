@@ -294,6 +294,87 @@ test("start: renders, builds the folder, records the tern handle; a second start
   assert.deepEqual(r.calls.filter((c) => c[1] === "kill").map((c) => c.slice(1, 4)), [["kill", "session", "41"]], "the empty host session was removed");
 });
 
+test("start: a Tern session under the position's name that runs no harness (restored as a bare shell after Tern's restart or a reboot) is killed by its id and the start goes on; one running this run file's wrapper is the host; one running another resident's wrapper is refused, never killed (red legs inline)", async (t) => {
+  const s = await seat(t);
+  const m = validateManifest(manifestDoc(), s.manifestFile);
+  const p = planResident(m, "desk.messenger", ctxOf(s));
+  /** @param {string} name @param {number} id @param {{ program?: string, args?: string[], command?: string | null }} b */
+  const session = (name, id, b) => ({ id, name, tabs: [{ id: id + 1, blocks: [{ id: id + 2, program: b.program ?? "powershell.exe", args: b.args ?? ["-NoLogo"], command: b.command ?? null, live: true, exited: null }] }] });
+  /** @param {any[]} sessions */
+  const tern = (sessions) => {
+    const live = new Map(sessions.map((x) => [String(x.id), x]));
+    let next = 900;
+    return fakeRunner((argv) => {
+      if (argv[1] === "new") {
+        if ([...live.values()].some((x) => x.name === argv[3])) return { code: 1, stderr: `tern new: a session is already called ${argv[3]}` };
+        next += 10;
+        live.set(String(next), session(argv[3], next, { command: argv.slice(argv.indexOf("--") + 1).join(" ") }));
+        return { code: 0, stdout: JSON.stringify({ session: next, tab: next + 1, block: next + 2 }) };
+      }
+      if (argv[1] === "ls") return { code: 0, stdout: JSON.stringify({ sessions: [...live.values()], detached: [] }) };
+      if (argv[1] === "kill") { live.delete(argv[3]); return { code: 0, stdout: JSON.stringify({ session: Number(argv[3]) }) }; }
+      return { code: 1 };
+    });
+  };
+
+  // the restored leftover: a bare shell under the name, beside an unrelated session
+  const r = tern([session("desk.messenger", 500, {}), session("Default", 4, {})]);
+  const res = await startResident(p, s.state, { checkout: CHECKOUT, run: r.fn, home: s.home });
+  assert.equal(res.row.action, "started");
+  assert.deepEqual(res.row.cleared, ["500"], "the start says which stale session it closed");
+  assert.deepEqual(r.calls.map((c) => c[1]), ["new", "ls", "kill", "new"], "a clash only: the happy path asks Tern nothing more");
+  assert.deepEqual(r.calls.filter((c) => c[1] === "kill").map((c) => c.slice(1, 4)), [["kill", "session", "500"]], "by its id; the unrelated session is untouched");
+  assert.deepEqual((await readRun(s.state, "desk.messenger"))?.handle, { session: 910, tab: 911, block: 912 });
+
+  // red leg: a session of that name running this position's wrapper on this run file is the host itself
+  const s2 = await seat(t);
+  const p2 = planResident(validateManifest(manifestDoc(), s2.manifestFile), "desk.messenger", ctxOf(s2));
+  const ours = tern([session("desk.messenger", 600, { command: `& 'node-bin' ${BIN} resident start desk.messenger --run ${p2.runFile}` })]);
+  const held = await startResident(p2, s2.state, { checkout: CHECKOUT, run: ours.fn, home: s2.home });
+  assert.equal(held.row.action, "running");
+  assert.match(String(held.row.reason), /tern session 600 called desk\.messenger runs this position's host/);
+  assert.equal(ours.calls.filter((c) => c[1] === "kill").length, 0, "never killed");
+  assert.equal(existsSync(p2.runFile), false, "the refused start leaves no run record of its own");
+
+  // red leg: a session of that name running another state root's resident is refused by name, never killed
+  const s3 = await seat(t);
+  const p3 = planResident(validateManifest(manifestDoc(), s3.manifestFile), "desk.messenger", ctxOf(s3));
+  const other = tern([session("desk.messenger", 700, { command: `& 'node-bin' ${BIN} resident start desk.messenger --run C:\\elsewhere\\state\\residents\\desk.messenger\\run.json` })]);
+  await assert.rejects(startResident(p3, s3.state, { checkout: CHECKOUT, run: other.fn, home: s3.home }),
+    /tern session 700 called desk\.messenger runs another resident's host/);
+  assert.equal(other.calls.filter((c) => c[1] === "kill").length, 0, "another resident is never killed");
+});
+
+test("state: a position not held says since when it is absent (the newest of its run's start, its sessions' record writes and watch heartbeats, a messenger's liveness file) and why: reboot when the machine booted since, else host (red legs inline)", async (t) => {
+  const s = await seat(t);
+  const dead = () => { throw Object.assign(new Error("no such process"), { code: "ESRCH" }); };
+  const runOf = (/** @type {string} */ slug, /** @type {number} */ startedAt) => ({ type: "resident-run", id: `r-${slug}`, resident: slug, host: "none", startedAt: new Date(startedAt).toISOString(), hostInfo: {}, handle: { pid: 999_999 }, exec: { argv: [], env: {}, cwd: "." } });
+  const now = Date.now();
+  // a model position: its run started two hours ago; its session's record was last written just now
+  await mkdir(path.dirname(runFilePath(s.state, "desk.coding")), { recursive: true });
+  await writeFile(runFilePath(s.state, "desk.coding"), JSON.stringify(runOf("desk.coding", now - 2 * 3_600_000)));
+  const sdir = path.join(s.state, "sessions", "omp-old");
+  await mkdir(sdir, { recursive: true });
+  await writeRecord(sdir, /** @type {any} */ ({ slug: "omp-old", source: "OMP_SESSION_ID" }), { bearer: "coding/Sonnet", label: "desk.coding", pid: 999_999, pidSource: "OMP_PID" });
+  const lastSeen = Date.parse(JSON.parse(await readFile(path.join(sdir, "session.json"), "utf8")).lastSeen);
+  await writeFile(path.join(sdir, "activity.json"), JSON.stringify({ v: 1, type: "activity", turn: "idle", since: new Date(now - 3_600_000).toISOString(), updatedAt: new Date(lastSeen + 4_000).toISOString() }));
+  const host = await residentState(s.state, "desk.coding", { kill: dead, boot: Math.floor((lastSeen - 60_000) / 1000) });
+  assert.equal(host.running, false);
+  assert.deepEqual(host.absent, { since: lastSeen + 4_000, cause: "host" }, "the watch's heartbeat is the latest sign of life; the machine booted before it");
+  const rebooted = await residentState(s.state, "desk.coding", { kill: dead, boot: Math.floor((lastSeen + 60_000) / 1000) });
+  assert.deepEqual(rebooted.absent, { since: lastSeen + 4_000, cause: "reboot" }, "booted after the last sign of life");
+  // red leg: with no session of its own, only the run's start is known
+  const bare = runOf("desk.review", now - 3_600_000);
+  await mkdir(path.dirname(runFilePath(s.state, "desk.review")), { recursive: true });
+  await writeFile(runFilePath(s.state, "desk.review"), JSON.stringify(bare));
+  assert.deepEqual((await residentState(s.state, "desk.review", { kill: dead, boot: 1 })).absent, { since: now - 3_600_000, cause: "host" });
+  // a messenger stream's liveness file counts for its own position, never another's
+  await mkdir(path.join(s.state, "messenger"), { recursive: true });
+  await writeFile(path.join(s.state, "messenger", "desk.review.lab.json"), JSON.stringify({ harness: "agora", session: "desk.review", updatedAt: new Date(now - 60_000).toISOString() }));
+  await writeFile(path.join(s.state, "messenger", "desk.review-2.lab.json"), JSON.stringify({ harness: "agora", session: "desk.review-2", updatedAt: new Date(now).toISOString() }));
+  assert.deepEqual((await residentState(s.state, "desk.review", { kill: dead, boot: 1 })).absent, { since: now - 60_000, cause: "host" });
+});
+
 test("start: a live session record that holds the position is a running resident, whatever started it", async (t) => {
   const s = await seat(t);
   const m = validateManifest(manifestDoc(), s.manifestFile);

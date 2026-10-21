@@ -58,6 +58,27 @@ export function inheritMarkerPath(stateRoot, slug) {
   return path.join(residentDir(stateRoot, slug), "inherit.json");
 }
 
+/** The run record a start leaves in the position's folder (`agora resident start`). */
+export const RUN_FILE = "run.json";
+
+/**
+ * The positions this seat is bringing back: each whose folder holds a run record (a start that
+ * stood, which the supervisor restarts while its host is gone) or an inherit marker (a succession
+ * under way). The messenger reads such a position as held, never retired.
+ * @param {string} stateRoot @returns {Set<string>}
+ */
+export function standingPositions(stateRoot) {
+  /** @type {Set<string>} */
+  const out = new Set();
+  /** @type {string[]} */
+  let names = [];
+  try { names = readdirSync(path.join(stateRoot, "residents")); } catch { return out; }
+  for (const n of names) {
+    if (RESIDENT_SLUG_RE.test(n) && (existsSync(path.join(stateRoot, "residents", n, RUN_FILE)) || existsSync(inheritMarkerPath(stateRoot, n)))) out.add(n);
+  }
+  return out;
+}
+
 /**
  * The profile text with the shipped room-mechanics block appended: one source for the block,
  * rendered per launch. A profile that already carries the block's heading is returned as is.

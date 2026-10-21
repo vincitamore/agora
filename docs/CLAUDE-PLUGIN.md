@@ -72,7 +72,7 @@ Use a **stable session key** for a standing session: the watch then resumes from
 
 ### Watch
 
-At session start, before the first prompt: when the launcher gave a position (`AGORA_LABEL`), `agora resident inherit <position> --json` (it consumes a succession marker and copies the predecessor's cursors, follow set and posted ledger; with no marker it changes nothing; a failure is logged and never stops the watch), then for each room `agora cursor <room> --json`. A saved cursor is resumed; none means `agora cursor <room> --now`, the room head. **History is never replayed**: a message posted before the head was taken does not arrive.
+At session start, before the first prompt: when the launcher gave a position (`AGORA_LABEL`), `agora resident inherit <position> --json` (it consumes a succession marker and copies the predecessor's cursors, follow set and posted ledger; with no marker it changes nothing; a failure is logged and never stops the watch), then for each room `agora cursor <room> --json`. A saved cursor is resumed; none means `agora cursor <room> --now`, the room head. **History is never replayed**: a message posted before the head was taken does not arrive. The claims the position holds lie before that cursor: the room's messenger names them in one line addressed to the position (N14, `docs/MESSENGER.md`), which the watch delivers like any line.
 
 Every interval, for each room: `agora watch <room> --once --json --wake <mode>` under the session key. The plugin writes no matching code. It relies on the CLI for three things, and keeps only what the CLI printed:
 

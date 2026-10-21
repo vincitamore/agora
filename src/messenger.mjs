@@ -52,6 +52,7 @@ export const NOTICE_TEMPLATES = Object.freeze({
   N11: "Waiting on {person} for {task} after {age}: {id}.",
   N12: "On arming: {task} waits on {person} after {age}: {id}.",
   N13: "On arming: queued {queued}; active and yours {yours}; active, held by others {others}.",
+  N14: "On arming: {position} holds {claims}.",
 });
 
 /**
@@ -185,6 +186,8 @@ export function noticeKey(kind, f, t) {
     // the room's queue as one arming learns it: one standing line per arming, the arming's place in
     // the log decides whether the latest one already covers it
     case "N13": return "N13";
+    // the claims a position holds as one arming learns them: one line per position per arming
+    case "N14": return `N14:${f.position}`;
   }
   return `${kind}`;
 }
@@ -199,14 +202,15 @@ export function noticeKey(kind, f, t) {
  * @typedef {{
  *   now: number, messages: any[], titles: Map<string, string>, pinned: Set<string>, boardRecords: any[],
  *   accountId: string | null, resolve: (address: string) => Resolution, human: string, bounds: Bounds,
- *   seen?: Map<string, number>, activity?: Map<string, Activity>, records?: import('./board-read.mjs').SeatRecord[], since?: number,
+ *   seen?: Map<string, number>, activity?: Map<string, Activity>, records?: import('./board-read.mjs').SeatRecord[], since?: number, standing?: Set<string>,
  * }} TickInput
  * `seen` is `readSeen`'s map: when each of this seat's sessions admitted each line into its intake.
  * `activity` is `readActivity`'s: what each of this seat's sessions is doing now.
  * `records` are this seat's session records with their posted ledgers (the resolver's): who posted
  * a line from which position, and when a session that has ended was last seen alive.
  * `since` is the messenger's starting point in the room (`messengerStart`): nothing that began
- * before it is raised.
+ * before it is raised. `standing` are the positions this seat is bringing back: a run record or an
+ * inherit marker stands for each (a restart or a succession under way).
  * @typedef {{ clock: 1 | 2 | 3, id: string, position: string, state: "working" }} Held
  * Clock 3 is the queue's: `id` is the head task's subject root.
  */
@@ -484,6 +488,18 @@ export function tick(input) {
     return ms.some((x) => x.seq > m.seq && !x.human && byAddressee(addr, [], x))
       || done.has(noticeKey("N2", { id: m.id }, { to: [addr] }));
   };
+  /** does a retired name belong only to positions held again or coming back: every ended session it
+   * names on this seat stood at a position a live session holds now (a model swap's successor) or
+   * one this seat is bringing back (`standing`: its run record or inherit marker stands)
+   * @param {string} addr */
+  const succeeded = (addr) => {
+    const recs = input.records ?? [];
+    const ended = recs.filter((r) => r.state === "gone" && r.record && matchesAddress(addr, r.record.bearer, undefined, positionOf(r.record) ?? null));
+    return ended.length > 0 && ended.every((r) => {
+      const p = positionOf(r.record);
+      return Boolean(p) && (input.standing?.has(/** @type {string} */ (p)) || recs.some((x) => x.state === "live" && positionOf(x.record) === p));
+    });
+  };
   /**
    * Where clock 1 starts for a delivery: the earliest instant (not after `now`, not before the post) at
    * which a holder's session admitted the line, when a seen record says so, else the post.
@@ -553,10 +569,12 @@ export function tick(input) {
         if (isHost(addr) || r.kind === "everyone" || r.kind === "seat" || r.kind === "person") continue;
         if (r.kind === "none") {
           // a pointer for an address that named no one when the line was posted: never for a line its
-          // addressee answered, nor after the fact for one posted while a holder lived; and never
+          // addressee answered, nor after the fact for one posted while a holder lived; never
           // `retired` on a line that owes no answer, which nothing answers or clocks, so no evidence
-          // could ever show its address was held when it was posted
-          if (!(noAnswer && r.why === "retired") && !heldWhenPosted(m, addr)) emit("N5", m.seq, { addr, kind: r.why ?? "unknown", nearest: r.nearest ?? "none" }, [{ key: "re", value: m.id }], m.root);
+          // could ever show its address was held when it was posted; and never `retired` for a name
+          // whose position is held again or coming back (a swap's successor, a restart under way)
+          if (r.why === "retired" && (noAnswer || succeeded(addr))) continue;
+          if (!heldWhenPosted(m, addr)) emit("N5", m.seq, { addr, kind: r.why ?? "unknown", nearest: r.nearest ?? "none" }, [{ key: "re", value: m.id }], m.root);
           continue;
         }
         const local = localOf(r).filter((h) => !isSelf(h));
@@ -702,6 +720,39 @@ export function tick(input) {
     emit("N13", armSeq, { queued: list(queued), yours: list(active.filter(yours)), others: list(active.filter((t) => !yours(t))) },
       [{ key: "to", value: "orchestrator" }], roomSubjectRoot(input.messages, input.titles, input.pinned) ?? undefined);
   }
+
+  // the claims at arming: a session that took a position holding live claims of this seat's made
+  // before it armed (a predecessor's, so its own reading of the room starts past them) is handed
+  // them once, addressed to the position, in the Room subject: a restarted maker learns from the
+  // room that the unit is its own. A claim is the position's by the session that posted it (the
+  // posted ledgers, which inherit moves to a successor), else by a session of the claim's bearer
+  // that stood at one position. An orchestrator's task claims are N13's to name.
+  const recs = input.records ?? [];
+  const orchPositions = new Set(holders.map((h) => h.position).filter(Boolean));
+  /** @param {{ bearer: string, id: string }} who @returns {string | undefined} */
+  const positionOfClaim = (who) => {
+    const p = postedFrom.get(who.id);
+    if (p) return p;
+    const at = new Set(recs.filter((r) => r.record?.bearer === who.bearer).map((r) => positionOf(r.record)).filter(Boolean));
+    return at.size === 1 ? /** @type {string} */ ([...at][0]) : undefined;
+  };
+  /** position -> its claims held now @type {Map<string, Array<{ subject: string, root: string, ts: number }>>} */
+  const claimsAt = new Map();
+  for (const s of board.subjects) {
+    if (!s.holder || (input.accountId && s.holder.accountId !== input.accountId)) continue;
+    const who = authors.get(s.subject);
+    const p = who ? positionOfClaim(who) : undefined;
+    if (!who || !p || (orchPositions.has(p) && s.subject.startsWith("work:task:"))) continue;
+    claimsAt.set(p, [...(claimsAt.get(p) ?? []), { subject: s.subject, root: who.root, ts: byRef.get(who.id)?.ts ?? Infinity }]);
+  }
+  for (const [p, claims] of claimsAt) {
+    const armed = Math.max(-Infinity, ...recs.filter((r) => r.state === "live" && positionOf(r.record) === p).map((r) => Date.parse(r.record?.startedAt ?? "")).filter((a) => a <= now));
+    const owed = claims.filter((c) => c.ts < armed);
+    if (armed < horizon || !owed.length) continue;
+    const armSeq = ms.reduce((s, x) => (x.ts <= armed ? Math.max(s, x.seq) : s), 0);
+    emit("N14", armSeq, { position: p, claims: owed.map((c) => `${c.subject}@${c.root}`).join(",") }, [{ key: "to", value: p }],
+      roomSubjectRoot(input.messages, input.titles, input.pinned) ?? undefined);
+  }
   return { acts, notices: done.size, held };
 }
 
@@ -721,7 +772,7 @@ export function roomSubjectRoot(messages, titles, pinned) {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * @typedef {{ messages: any[], annotations: any[], boardRecords: any[], resolve: (a: string) => Resolution, seen?: Map<string, number>, activity?: Map<string, Activity>, records?: import('./board-read.mjs').SeatRecord[] }} Snapshot
+ * @typedef {{ messages: any[], annotations: any[], boardRecords: any[], resolve: (a: string) => Resolution, seen?: Map<string, number>, activity?: Map<string, Activity>, records?: import('./board-read.mjs').SeatRecord[], standing?: Set<string> }} Snapshot
  * @typedef {{
  *   gather: () => Promise<Snapshot>, post: (act: Act) => Promise<{ id: string, cursor: string }>,
  *   lock: <T>(fn: () => Promise<T>) => Promise<T | undefined>, now: () => number,
@@ -747,7 +798,7 @@ function fold(snap, deps, now) {
   const { titles, pinned } = annotationState(snap.annotations);
   return tick({ now, messages: snap.messages, titles, pinned, boardRecords: snap.boardRecords, accountId: deps.accountId,
     resolve: snap.resolve, human: deps.human, bounds: deps.bounds, ...(snap.seen ? { seen: snap.seen } : {}), ...(snap.activity ? { activity: snap.activity } : {}),
-    ...(snap.records ? { records: snap.records } : {}), ...(deps.since !== undefined ? { since: deps.since } : {}) });
+    ...(snap.records ? { records: snap.records } : {}), ...(snap.standing ? { standing: snap.standing } : {}), ...(deps.since !== undefined ? { since: deps.since } : {}) });
 }
 
 // ---------------------------------------------------------------------------------------------

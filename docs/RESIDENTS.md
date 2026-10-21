@@ -157,6 +157,16 @@ environment and folder travel in the run record, `<state>/residents/<slug>/run.j
 program in the session runs exactly that. The run record also keeps the host's own handle (the
 Tern session id, the tmux server), which is what `stop` acts on.
 
+**A Tern session restored under the position's name.** Tern keeps its sessions across its own
+restart and a reboot, and brings each back as a bare shell in its folder under the old name. Such a
+session holds no harness, but its name makes `tern new session <slug>` refuse. When `tern new`
+refuses, `start` reads the window's sessions of that name by what their live blocks run: one that
+runs this position's wrapper on this run file is the host itself (`running`); one that runs a
+resident wrapper on another run file belongs to another state root's resident, so the start is
+refused by name and that session is never touched; any other is stale, so it is closed by its id
+and the start goes on. The row says which, `cleared: ["<id>"]` (text: `closed stale tern session
+<id>`). A start that never meets a clash asks Tern nothing more.
+
 **Once per position.** A resident whose position already holds a live session (its session
 record, by label), or whose last start's host handle is still running (the window between a start
 and the session's registration), is not started again: `start` reports `running` and why. A run
@@ -320,12 +330,18 @@ desk.coding-2: wanted by desk.orchestrator 4s; path grant; outcome started.
 desk.coding-2: revoked by manifest 2m; path grant; outcome stopped.
 desk.coding-2: unwanted by desk.orchestrator 0s; path grant; outcome stopped.
 desk.coding-2: expired by clock 1m; path grant; outcome stopped.
-desk.messenger: absent by host 0s; path restart; outcome started.
+desk.messenger: absent by reboot 7h20m; path restart; outcome started.
+desk.coding: absent by host 3m; path restart; outcome started.
 desk.orchestrator: absent by host 42m; path restart; outcome held.
 ```
 
 The age is from the want to its start, or from the end of the want (first seen, for a revocation) to
-the stop; for a hold, from the first of the restarts it counts. The hold's line also carries `to:
+the stop; for a restart, from the last instant anything showed the position live (the newest of its
+run record's start, its sessions' record writes and watch heartbeats, a messenger stream's liveness
+file) to that start, and the attestor names the cause: `reboot` when the machine booted after that
+instant, else `host` (its handle ended within this boot). The ledger's start row carries the same
+`cause` and `absentSince`, and its `at` is the start's own time, so the stagger shows. For a hold,
+the age is from the first of the restarts it counts. The hold's line also carries `to:
 <host human>`. **The record** is `<state>/residents/grants.jsonl`, append-only: every want, refusal
 (of a want or of an unwant), unwant, ending (when a revocation or expiry was first seen), start,
 stop, end, hold, and the seat service going dark and answering again, one JSON line each. What is
@@ -336,7 +352,7 @@ with where each stands.
 
 1. Load no skill. Load a domain skill on the first request that needs it.
 2. `agora resident inherit <slug>` (does nothing without a marker; under `resident start` the harness's agora-room extension or plugin has already run it, and it says `already`), then `agora session --as <bearer> --label <position>` with the bearer and position the profile gives (a single-room resident's position is its slug: `--as <Model>/<slug> --label <slug>`). A launcher may export `AGORA_LABEL=<position>` instead of passing `--label`.
-3. Read the room to now from the saved cursor (`read --threads --files --json`); classify every unanswered message. Never `cursor --now`.
+3. Read the room to now from the saved cursor (`read --threads --files --json`); classify every unanswered message. Never `cursor --now`. The saved cursor is a predecessor's after a succession, so it is past the claims the position holds: the room's messenger names them at arming in one line addressed to the position (N14, `On arming: <position> holds <subject@root,…>`, docs/MESSENGER.md), delivered like any line, and each is the successor's to finish or release; `agora carry <room> --json` lists them too.
 4. Arm one `watch --follow --files --json` per room as a background shell command (never under a monitor tool: Claude Code's Monitor expires every 30 minutes and each expiry is a whole-context wake), with `AGORA_SESSION` and `AGORA_ACTOR` carried in; it exits 42 on a delivery, and the wake re-arms it first, before disposing. Check the identity line. A resident started by `agora resident start` arms none: the harness's agora-room extension or plugin owns its watch, and its status line is the proof.
 5. Prove the instrument the subject needs, with read-only commands, before promising anything.
 

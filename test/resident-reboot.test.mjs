@@ -16,7 +16,7 @@ import * as residentStart from "../src/resident-start.mjs";
 import { ensure, readLedger } from "../src/resident-grant.mjs";
 import * as grants from "../src/resident-grant.mjs";
 import { readSucceedRequest } from "../src/resident.mjs";
-import { parseNotice } from "../src/messenger.mjs";
+import { formatAge, parseNotice } from "../src/messenger.mjs";
 import { bootEpoch } from "../src/session.mjs";
 import * as lib from "../plugins/claude/agora-room/hooks/lib.js";
 
@@ -160,6 +160,8 @@ function fakeDeps(now) {
   const running = new Set();
   /** @type {Map<string, { startedAt: string, host?: string }>} */
   const runs = new Map();
+  /** the seat's own measure of a dead position's absence (residentState's `absent`) @type {Map<string, { since: number, cause: 'reboot' | 'host' }>} */
+  const gone = new Map();
   /** @type {Array<{ room: string, text: string, raw: string }>} */
   const posts = [];
   /** @type {string[]} */
@@ -180,7 +182,8 @@ function fakeDeps(now) {
       const run = runs.get(p) ?? null;
       // a tern row whose host does not answer cannot be read either way
       if (run && !running.has(p) && !world.ternUp) return { running: true, run, reason: "the tern handle of the last start cannot be checked", host: "unknown" };
-      return { running: running.has(p), run, reason: running.has(p) ? "live" : null, host: run ? (running.has(p) ? "live" : "gone") : null };
+      const absent = run && !running.has(p) ? gone.get(p) : undefined;
+      return { running: running.has(p), run, reason: running.has(p) ? "live" : null, host: run ? (running.has(p) ? "live" : "gone") : null, ...(absent ? { absent } : {}) };
     },
     marker: async () => false,
     turn: async () => ({ status: "none" }),
@@ -195,22 +198,31 @@ function fakeDeps(now) {
       world.ternUp = true;
       return { up: true, started: true, reason: null };
     },
-    sleep: async (ms) => { slept.push(ms); },
+    sleep: async (ms) => { slept.push(ms); world.now += ms; }, // the stagger takes time: each start happens later
   };
-  return { deps, running, runs, posts, acts, slept, world };
+  return { deps, running, runs, gone, posts, acts, slept, world };
 }
 
 test("ensure after a reboot: every standing row with a run record and nothing running is started once, staggered, with one N8 line each; an on-demand row and a row stopped by hand are left; the next pass starts nothing (red legs inline)", async (t) => {
   const s = await seat(t);
-  const f = fakeDeps(Date.parse("2026-01-01T00:00:00.000Z"));
+  const t0 = Date.parse("2026-01-01T00:00:00.000Z");
+  const f = fakeDeps(t0);
   const stood = ["lab.messenger", "lab.orchestrator", "lab.coding", "lab.review"];
   for (const p of [...stood, "lab.helper"]) f.runs.set(p, { startedAt: "2025-12-31T23:00:00.000Z" });
+  // the machine went down 25 minutes before this pass: every standing position was last seen then
+  const lastLive = t0 - 25 * 60_000 - 5_000;
+  for (const p of stood) f.gone.set(p, { since: lastLive, cause: "reboot" });
   let rows = await ensure(s.manifest, s.state, f.deps);
   assert.deepEqual(rows.map((x) => [x.position, x.action]), stood.map((p) => [p, "restarted"]), "the messenger and every standing model row");
   assert.deepEqual(f.acts, stood.map((p) => `start ${p}`), "red leg: the on-demand row is a grant's to start, never the supervisor's");
   assert.deepEqual(f.slept, [10_000, 10_000, 10_000], "a stagger between starts, none before the first");
-  assert.deepEqual(f.posts.map((x) => x.text), stood.map((p) => `${p}: absent by host 0s; path restart; outcome started.`));
-  assert.deepEqual((await readLedger(s.state)).filter((e) => e.ev === "start").map((e) => [e.position, e.path, e.outcome]), stood.map((p) => [p, "restart", "started"]));
+  const startRows = (await readLedger(s.state)).filter((e) => e.ev === "start");
+  assert.deepEqual(startRows.map((e) => [e.position, e.path, e.outcome]), stood.map((p) => [p, "restart", "started"]));
+  assert.deepEqual(startRows.map((e) => Date.parse(e.at) - t0), [0, 10_000, 20_000, 30_000], "each start's own time, not the pass's");
+  assert.deepEqual(startRows.map((e) => [e.cause, e.absentSince]), stood.map(() => ["reboot", new Date(lastLive).toISOString()]));
+  // the age on each line is that start's distance from the last sign of life (25m05s to 25m35s), never 0s
+  assert.deepEqual(f.posts.map((x) => x.text), startRows.map((e) => `${e.position}: absent by reboot ${formatAge(Date.parse(e.at) - lastLive)}; path restart; outcome started.`));
+  assert.ok(f.posts.every((x) => /absent by reboot 25m;/.test(x.text)), "the gap measured, not assumed");
   rows = await ensure(s.manifest, s.state, f.deps);
   assert.deepEqual(rows, [], "running again: nothing to do");
   // a row the operator stopped has no run record, and stays stopped
@@ -294,10 +306,14 @@ test("ensure on host tern: a Tern that does not answer is brought up once per pa
   for (const p of ["lab.orchestrator", "lab.coding"]) f.running.delete(p);
   f.world.ternUp = false;
   f.world.ternStarts = false;
+  const codingStarted = Date.parse(String(f.runs.get("lab.coding")?.startedAt)); // the restart above: the last instant it was known live
+  f.world.now += 7 * 60_000; // it ran seven minutes, then died with Tern
   rows = await ensure(s.manifest, s.state, f.deps);
   assert.deepEqual(rows.map((x) => [x.position, x.action]), [["lab.orchestrator", "failed"], ["lab.coding", "failed"]]);
   assert.match(String(rows[0].reason), /Tern did not answer/);
-  assert.equal(f.posts.at(-1)?.text, "lab.coding: absent by host 0s; path restart; outcome failed.");
+  // no measure of its own: the absence runs from the run record's start
+  assert.equal(f.posts.at(-1)?.text, `lab.coding: absent by host ${formatAge(f.world.now - codingStarted)}; path restart; outcome failed.`);
+  assert.match(String(f.posts.at(-1)?.text), /absent by host 7m;/);
   assert.deepEqual((await readLedger(s.state)).filter((e) => e.outcome === "failed").map((e) => e.position), ["lab.orchestrator", "lab.coding"]);
 });
 
