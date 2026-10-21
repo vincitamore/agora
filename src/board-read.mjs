@@ -190,18 +190,18 @@ export function resolveAddress(address, ctx) {
   if (humans.has(lower)) return { ...base, kind: "person", holders: [] };
   const kindOf = /** @returns {'role' | 'position'} */ () => (a.includes(".") || a.includes("/") ? "position" : "role");
   const matched = present.filter((h) => names(a, h));
-  if (matched.length) return { ...base, kind: kindOf(), holders: matched };
   // a bearer that posted here from another account: a holder on another seat, never pinged
   const foreign = new Map();
   for (const m of ctx.messages) {
     if (m.author?.kind === "human" || !m.author?.id || m.author.id === ctx.accountId) continue;
     const bearer = m.signedAs ?? m.author.name;
-    if (typeof bearer === "string" && matchesAddress(a, bearer)) foreign.set(bearer, m.author.id);
+    if (typeof bearer === "string" && matchesAddress(a, bearer)) foreign.set(`${bearer}\n${m.author.id}`, [bearer, m.author.id]);
   }
-  if (foreign.size) return { ...base, kind: kindOf(), holders: [...foreign].map(([bearer, seat]) => {
+  const foreignHolders = [...foreign.values()].map(([bearer, seat]) => {
     const segs = bearer.split("/");
     return { seat, position: null, role: segs[0], model: segs.length > 1 ? segs[segs.length - 1] : null, bearer, session: null, process: /** @type {const} */ ("foreign"), verdict: /** @type {const} */ ("unknown") };
-  }) };
+  });
+  if (matched.length || foreignHolders.length) return { ...base, kind: kindOf(), holders: [...matched, ...foreignHolders] };
   // none here: say why, and the nearest live holder when one can be shown
   const gone = records.filter((r) => r.state === "gone").map((r) => localHolder(r, ctx.seatName)).filter((h) => names(a, h));
   const signedHere = ctx.messages.filter((m) => m.author?.kind !== "human" && (!ctx.accountId || m.author?.id === ctx.accountId)
