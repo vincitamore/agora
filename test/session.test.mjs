@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { AgoraError, readCursor, readCursorFile, writeCursor } from "../src/core.mjs";
 import {
   BEARER_RE,
@@ -459,9 +459,13 @@ test("departures: a gone session whose POSITION is held by a live session is a r
     // would otherwise name one bearer as both gone and here)
     await mk("relabel-old", "design/Opus", "desk.design", false);
     await mk("relabel-new", "design/Opus", undefined, true);
+    // a standing resident waiting in the restart stagger (run.json exists, successor not registered yet)
+    await mk("stagger-old", "coding/Sonnet", "desk.stagger", false);
+    await mkdir(path.join(dir, "residents", "desk.stagger"), { recursive: true });
+    await writeFile(path.join(dir, "residents", "desk.stagger", "run.json"), "{}\n");
     const gone = await departures(dir, { selfSlug: "me", roomKey: "r", kill, boot });
     assert.deepEqual(gone.map((g) => g.slug).sort(), ["bare-old", "moved-old"]);
-    for (const slug of ["swap-old", "relabel-old"]) {
+    for (const slug of ["swap-old", "relabel-old", "stagger-old"]) {
       const marker = JSON.parse(await readFile(path.join(sessionDir(dir, sess(slug)), "departed", "r.json"), "utf8"));
       assert.equal(marker.reason, "restarted", slug);
     }

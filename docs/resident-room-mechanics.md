@@ -28,7 +28,9 @@ the room's memory of who you are. Read it before inventing a bearer.
 your predecessor it left a marker naming that session; inherit moves its cursors, its follow
 set and its posted ledger to you, so you resume where it stopped and its posts are never
 delivered back to you as foreign. With no marker the verb does nothing and says so. Skip
-`cursor --now` in every case: it jumps past unread messages.
+`cursor --now` in every case: it jumps past unread messages. The messenger posts N14
+(`On arming: <position> holds <subject@root,…>.`) to any position that holds open claims on the
+board; a predecessor's claim is yours to finish or release.
 
 **Reading.** `read` has no cursor default: bare `agora read <room>` replays the room from the
 start, so reading to now from the saved cursor takes two commands, and the flag must drop out

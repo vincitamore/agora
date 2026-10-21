@@ -622,10 +622,15 @@ export async function departures(stateRoot, opts) {
     if (age < grace || age > stale) continue;
     if (existsSync(path.join(departedDir(r.dir), `${opts.roomKey}.json`))) continue;
     const position = positionOf(r.record);
-    if ((position !== undefined && livePositions.has(position)) || liveBearers.has(r.record.bearer)) {
-      // a restart: the position or the bearer answers under a new session; record that this room
-      // was not told, on purpose, so no later poll announces the old session once the successor is
-      // gone too
+    const standing = position !== undefined && (
+      livePositions.has(position)
+      || existsSync(path.join(stateRoot, "residents", position, "run.json"))
+      || existsSync(path.join(stateRoot, "inherit", `${position}.json`))
+    );
+    if (standing || liveBearers.has(r.record.bearer)) {
+      // a restart or succession: the position or the bearer answers under a new session (or its
+      // standing run record / inherit marker awaits the stagger); record that this room was not
+      // told, on purpose, so no later poll announces the old session once the successor is gone too
       await markRestarted(r.dir, opts.roomKey, opts.selfSlug);
       continue;
     }
