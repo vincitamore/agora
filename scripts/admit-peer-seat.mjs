@@ -93,7 +93,7 @@ const PLACEHOLDER_KEY = `nodekey:${"0".repeat(64)}`;
  */
 
 /** `humanName` marks the member seat's human key: its route is opened with that grant (docs/MEMBERSHIP.md).
- * @typedef {{ roomId: string, alias?: string, publicNodeKey: string, allowedKeyDigest: string, addedAt: string, humanName?: string }} RosterEntry */
+ * @typedef {{ roomId: string, alias?: string, publicNodeKey: string, allowedKeyDigest: string, addedAt: string, humanName?: string, seatName?: string }} RosterEntry */
 
 /**
  * @param {string} stateRoot
@@ -396,6 +396,10 @@ export async function admit(argv, overrides = {}) {
     const held = nextEntries.find((e) => e.roomId === roomId && e.allowedKeyDigest === digest);
     if (held && held.humanName !== name)
       throw new AgoraError(`${key} is already admitted to this room ${held.humanName ? `as the human ${JSON.stringify(held.humanName)}` : "as an agent key"}; one key holds one grant`, 2);
+    if (held && name === undefined && humanName !== undefined && held.seatName !== humanName) {
+      held.seatName = humanName;
+      rosterChanged = true;
+    }
     if (!held) {
       nextEntries.push({
         roomId,
@@ -404,6 +408,7 @@ export async function admit(argv, overrides = {}) {
         allowedKeyDigest: digest,
         addedAt: new Date().toISOString(),
         ...(name !== undefined ? { humanName: name } : {}),
+        ...(name === undefined && humanName !== undefined ? { seatName: humanName } : {}),
       });
       rosterChanged = true;
     }

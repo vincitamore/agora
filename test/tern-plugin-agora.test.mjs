@@ -14,7 +14,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   DATA_FILE, ENV, SEAT_ACTIONS, SESSION_KEY, THREAD_DEPTH_CAP, boardOf, childEnv, formatMessage, handle, loadView, pickAddressees, postFromPane, readDataFile,
-  resolvePaneConfig, residentRows, seatKindOf, threadTree, writeHuman,
+  resolvePaneConfig, resolveSeats, residentRows, seatKindOf, subjectsOf, threadTree, writeHuman,
 } from "../plugins/tern/agora/pane.mjs";
 import { localTransport } from "../src/transports/local.mjs";
 import { ROOM, seat as nativeSeat } from "./client-fixtures.mjs";
@@ -478,4 +478,56 @@ test("bridge.mjs: post --thread --re is a reply the next view nests", async () =
     const view = await call(["view", "--room", "ops"], { hasBaseline: false });
     assert.deepEqual(view.subjects[0].messages.map((/** @type {any} */ m) => [m.body, m.depth, m.parent]), [["a subject", 0, null], ["an answer", 0, null], ["an answer to it", 1, one.receipt.id]]);
   } finally { await s.cleanup(); }
+});
+
+test("seat attribution: host and member seats both show named seat labels, mark their own seat as yours, and keep same-named bearers distinct", () => {
+  const hostId = "a0e7ad17c2dee02fc4cee4fcd6a04a9a";
+  const memberAgentId = "m-5403013c911f3fc5a397ccaebb74dac7";
+  const memberHumanId = "m-38a6bb3b1c457a4cc18723628e74fee4";
+  const raw = [
+    { id: "c1", cursor: "1", ts: "2026-01-01T00:00:00Z", author: { id: hostId, name: "Lin", kind: "agent" }, text: "---\ntype: charter\nhost: Lin\ncollaborator: Grace\n---\n# Charter" },
+    { id: "m1", cursor: "2", ts: "2026-01-01T00:01:00Z", author: { id: hostId, name: "coding/Opus", kind: "agent" }, text: "host coding\n\nclaim: task:one\n\n-- coding/Opus" },
+    { id: "m2", thread: "m1", cursor: "3", ts: "2026-01-01T00:02:00Z", author: { id: memberAgentId, name: "coding/Opus", kind: "agent" }, text: "member coding\n\n-- coding/Opus" },
+    { id: "m3", thread: "m1", cursor: "4", ts: "2026-01-01T00:03:00Z", author: { id: memberHumanId, name: "Grace", kind: "human" }, text: "looks good\n\n-- Grace" },
+  ];
+
+  // From the host seat (Lin):
+  const hostCtx = resolveSeats({ rawMessages: raw, cfg: { rooms: { lab: { transport: "native", roomId: ROOM } } }, alias: "lab", serviceAccountId: hostId, humanName: "Lin", self: "Lin" });
+  const hostMsgs = raw.map((m) => formatMessage(m, hostCtx.hostAccountId, hostCtx));
+  assert.deepEqual(hostMsgs.slice(1).map((m) => [m.speaker, m.seatOwner, m.yours, m.seatLabel]), [
+    ["coding/Opus", "Lin", true, "Lin's seat · yours"],
+    ["coding/Opus", "Grace", false, "Grace's seat"],
+    ["Grace", "Grace", false, "Grace's seat"],
+  ]);
+  const hostBoard = boardOf(hostMsgs.slice(1), new Set(["coding/Opus"]));
+  assert.deepEqual(hostBoard.who.map((w) => [w.speaker, w.seatOwner, w.origin, w.watching]), [
+    ["Grace", "Grace", "Grace's seat", false],
+    ["coding/Opus", "Grace", "Grace's seat", false],
+    ["coding/Opus", "Lin", "Lin's seat · yours", true],
+  ], "only this seat's coding/Opus is marked watching from this seat, and the two seats stay distinct rows");
+  assert.equal(hostBoard.claims[0].holder, "coding/Opus (Lin's seat)");
+  const hostSubjects = subjectsOf(hostMsgs.slice(1), { room: "lab", self: "Lin", hostAccountId: hostCtx.hostAccountId, now: Date.parse("2026-01-01T00:04:00Z") });
+  assert.equal(hostSubjects[0].rootFrom, "coding/Opus (Lin's seat)");
+
+  // From the member seat (Grace):
+  const memberCtx = resolveSeats({
+    rawMessages: raw,
+    cfg: { rooms: { lab: { transport: "native-remote" } } },
+    alias: "lab",
+    serviceAccountId: "",
+    self: "Grace",
+  });
+  memberCtx.ownAccountIds.add(memberAgentId);
+  const memberMsgs = raw.map((m) => formatMessage(m, memberCtx.hostAccountId, memberCtx));
+  assert.deepEqual(memberMsgs.slice(1).map((m) => [m.speaker, m.seatOwner, m.yours, m.seatLabel]), [
+    ["coding/Opus", "Lin", false, "Lin's seat"],
+    ["coding/Opus", "Grace", true, "Grace's seat · yours"],
+    ["Grace", "Grace", true, "Grace's seat · yours"],
+  ]);
+  const memberBoard = boardOf(memberMsgs.slice(1), new Set(["coding/Opus"]));
+  assert.deepEqual(memberBoard.who.map((w) => [w.speaker, w.seatOwner, w.origin, w.watching]), [
+    ["Grace", "Grace", "Grace's seat · yours", false],
+    ["coding/Opus", "Grace", "Grace's seat · yours", true],
+    ["coding/Opus", "Lin", "Lin's seat", false],
+  ]);
 });

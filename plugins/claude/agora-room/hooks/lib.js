@@ -21,9 +21,9 @@ export const DELIVERED_KEEP = 500;
 export const SESSION_RE = /^(?!\.\.?$)[A-Za-z0-9._-]{1,64}$/;
 const ROOM_RE = /^[A-Za-z0-9][^\s\u0000-\u001f]{0,127}$/;
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
-const ADDR_RE = /^(?:\*|[A-Za-z0-9][A-Za-z0-9._/@*-]{0,63})$/;
+const ADDR_RE = /^(?:\*|@?[A-Za-z0-9][A-Za-z0-9._/@*-]{0,63})$/;
 
-/** @typedef {{ room: string, id: string, thread: string | null, from: string, text: string, cursor: string | null, ts: string | null, to: string[], title: string | null, signedAs: string | null, trailers?: Array<{ key: string, value: string }> }} Msg */
+/** @typedef {{ room: string, id: string, thread: string | null, from: string, text: string, cursor: string | null, ts: string | null, to: string[], title: string | null, signedAs: string | null, authorId?: string, kind?: string, seatLabel?: string, trailers?: Array<{ key: string, value: string }> }} Msg */
 
 // ---- configuration ----
 
@@ -154,6 +154,8 @@ export function normaliseMessage(j, room) {
     to: Array.isArray(j.to) ? j.to.map(String) : [],
     title: titleText,
     signedAs: j.signedAs ?? null,
+    ...(typeof j.author?.id === "string" && j.author.id ? { authorId: j.author.id } : {}),
+    ...(typeof j.author?.kind === "string" && j.author.kind ? { kind: j.author.kind } : {}),
     ...(Array.isArray(j.trailers) && j.trailers.length ? { trailers: j.trailers.filter((/** @type {any} */ x) => x && typeof x.key === "string").map((/** @type {any} */ x) => ({ key: x.key, value: String(x.value ?? "") })) } : {}),
   };
 }
@@ -662,10 +664,36 @@ export function subjectTitle(m, max = 80) {
  * @param {Msg[]} messages ascending @param {{ self?: string | null, seen?: Record<string, string>, baselineId?: string | null }} [opts]
  */
 export function buildSubjects(messages, { self = null, seen = {}, baselineId = null } = {}) {
+  let hostOwner = "";
+  /** @type {Set<string>} */
+  const memberOwners = new Set();
+  for (const m of messages) {
+    const match = String(m.text || "").match(/^---\r?\n([\s\S]*?)\r?\n---/);
+    if (match && /^\s*type:\s*charter\b/m.test(match[1])) {
+      const h = match[1].match(/^\s*host:\s*([^\r\n#]+)/m)?.[1]?.trim() || "";
+      const c = match[1].match(/^\s*collaborator:\s*([^\r\n#]+)/m)?.[1]?.trim() || "";
+      if (h) hostOwner = h;
+      if (c) memberOwners.add(c);
+    }
+    if (m.kind === "human" && m.authorId && /^(?:m-)?[a-f0-9]{32}$/.test(m.authorId)) {
+      if (m.authorId.startsWith("m-")) memberOwners.add(m.from);
+      else hostOwner = m.from;
+    }
+  }
+  const soleMember = memberOwners.size === 1 ? [...memberOwners][0] : "";
+  /** @param {Msg} m @returns {Msg} */
+  const withSeat = (m) => {
+    if (m.seatLabel || !m.authorId || !/^(?:m-)?[a-f0-9]{32}$/.test(m.authorId)) return m;
+    const isMember = m.authorId.startsWith("m-");
+    const owner = isMember ? soleMember : hostOwner;
+    const seatLabel = owner ? `${owner}'s seat` : isMember ? "member seat" : "host seat";
+    return { ...m, seatLabel };
+  };
   /** @type {Map<string, Msg[]>} */
   const groups = new Map();
   const index = new Map(messages.map((m, i) => [m.id, i]));
-  for (const m of messages) {
+  for (const raw of messages) {
+    const m = withSeat(raw);
     const id = m.thread ?? m.id;
     const g = groups.get(id);
     if (g) g.push(m); else groups.set(id, [m]);
@@ -920,6 +948,7 @@ export function paneTree(els, m, act) {
       const mine = m.self !== null && m.self !== undefined && (msg.from === m.self || msg.signedAs === m.self);
       const head = [Text({ weight: "semibold", ...(mine ? { color: COLOR.accent } : {}), wrap: "truncate-end", children: [msg.from] })];
       if (mine) head.push(caption("you"));
+      if (msg.seatLabel && (!mine || msg.kind !== "human")) head.push(caption(msg.seatLabel));
       head.push(caption(`${ago(msg.ts, m.now)}${msg.to.length ? ` · to ${msg.to.join(", ")}` : ""}`, { tabular: true }));
       thread.push(col([row(head, { alignItems: "center" }), body(bodyText(msg))], { gap: SPACE.tight, ...(mine ? { paddingLeft: SPACE.row } : {}) }));
     }

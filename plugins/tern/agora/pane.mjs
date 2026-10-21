@@ -291,10 +291,143 @@ export function seatKindOf(authorId, hostAccountId) {
   return "";
 }
 
+/**
+ * @typedef {{
+ *   hostAccountId: string,
+ *   ownAccountIds: Set<string>,
+ *   hostOwner: string,
+ *   memberOwnerById: Map<string, string>,
+ * }} SeatContext
+ */
+
+/** Extract `host` and `collaborator` from the newest charter frontmatter in `rawMessages` (body or inline attachment). @param {any[]} rawMessages */
+export function charterParties(rawMessages) {
+  let host = "";
+  let collaborator = "";
+  for (let i = rawMessages.length - 1; i >= 0; i--) {
+    const m = rawMessages[i];
+    const candidates = [String(m?.text || "")];
+    for (const a of Array.isArray(m?.attachments) ? m.attachments : []) {
+      if (typeof a?.inlineBytes === "string") {
+        try { candidates.push(Buffer.from(a.inlineBytes, "base64").toString("utf8")); } catch { /* ignore */ }
+      }
+    }
+    for (const raw of candidates) {
+      const match = raw.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+      if (!match) continue;
+      const fm = match[1];
+      if (!/^\s*type:\s*charter\b/m.test(fm)) continue;
+      const h = fm.match(/^\s*host:\s*([^\r\n#]+)/m)?.[1]?.trim() || "";
+      const c = fm.match(/^\s*collaborator:\s*([^\r\n#]+)/m)?.[1]?.trim() || "";
+      if (h && !host) host = h;
+      if (c && !collaborator) collaborator = c;
+      if (host && collaborator) return { host, collaborator };
+    }
+  }
+  return { host, collaborator };
+}
+
+/**
+ * Resolve which account ids belong to this seat (`ownAccountIds`), which is the host's (`hostAccountId`),
+ * and which person owns the host seat (`hostOwner`) and each member account (`memberOwnerById`), from
+ * the room's human messages, its pinned charter, the route descriptors, and `admitted-peers.json`.
+ * @param {{ rawMessages?: any[], cfg?: any, alias?: string | null, stateRoot?: string | null, serviceAccountId?: string, humanName?: string, self?: string | null, pc?: PaneConfig | null }} [o]
+ * @returns {SeatContext}
+ */
+export function resolveSeats({ rawMessages = [], cfg = null, alias = null, stateRoot = null, serviceAccountId = "", humanName = "", self = null, pc = null } = {}) {
+  const rc = alias && cfg?.rooms?.[alias] ? cfg.rooms[alias] : null;
+  let hostAccountId = String(serviceAccountId || "");
+  /** @type {Set<string>} */
+  const ownAccountIds = new Set();
+  if (rc?.descriptor) {
+    const desc = readJson(String(rc.descriptor));
+    if (!hostAccountId && typeof desc?.binding?.host?.id === "string") hostAccountId = desc.binding.host.id;
+    const memberId = String(desc?.binding?.accountId || desc?.binding?.member?.id || "");
+    if (memberId) ownAccountIds.add(memberId);
+  }
+  if (!hostAccountId && (rc?.transport === "native" || rc?.transport === "native-remote")) {
+    const hostMsg = rawMessages.find((m) => m?.author?.id && !String(m.author.id).startsWith("m-"));
+    if (hostMsg) hostAccountId = String(hostMsg.author.id);
+  }
+  if (rc?.transport === "native-remote") {
+    const cmd = pc?.post?.command ?? [];
+    const cfgIdx = cmd.indexOf("--config");
+    if (cfgIdx >= 0 && cmd[cfgIdx + 1]) {
+      const hCfg = readJson(String(cmd[cfgIdx + 1]));
+      const hDesc = hCfg?.rooms?.[alias ?? ""]?.descriptor ? readJson(String(hCfg.rooms[alias ?? ""].descriptor)) : null;
+      const hId = String(hDesc?.binding?.accountId || hDesc?.binding?.member?.id || "");
+      if (hId) ownAccountIds.add(hId);
+    }
+    if (self) {
+      for (const m of rawMessages) {
+        if (m?.author?.kind === "human" && m?.author?.name === self && m?.author?.id) ownAccountIds.add(String(m.author.id));
+      }
+    }
+  } else {
+    if (serviceAccountId) ownAccountIds.add(String(serviceAccountId));
+    if (hostAccountId) ownAccountIds.add(hostAccountId);
+  }
+
+  const charter = charterParties(rawMessages);
+  let hostOwner = "";
+  for (const m of rawMessages) {
+    const id = String(m?.author?.id || "");
+    if (m?.author?.kind === "human" && id && !id.startsWith("m-") && m?.author?.name) hostOwner = String(m.author.name).trim();
+  }
+  if (!hostOwner && charter.host) hostOwner = charter.host;
+  if (!hostOwner && rc?.transport !== "native-remote" && (humanName || self)) hostOwner = String(humanName || self).trim();
+
+  /** @type {Map<string, string>} */
+  const memberOwnerById = new Map();
+  /** @type {Set<string>} */
+  const memberOwners = new Set();
+  for (const m of rawMessages) {
+    const id = String(m?.author?.id || "");
+    const name = String(m?.author?.name || "").trim();
+    if (m?.author?.kind === "human" && id.startsWith("m-") && name) {
+      memberOwnerById.set(id, name);
+      memberOwners.add(name);
+    }
+  }
+  if (rc?.transport === "native-remote" && self) {
+    for (const id of ownAccountIds) {
+      if (id.startsWith("m-")) {
+        memberOwnerById.set(id, self);
+        memberOwners.add(self);
+      }
+    }
+  }
+  if (stateRoot) {
+    const peers = readJson(path.join(stateRoot, "native", "admitted-peers.json"));
+    for (const e of Array.isArray(peers?.entries) ? peers.entries : []) {
+      if (rc?.roomId && e?.roomId && e.roomId !== rc.roomId && e.alias !== alias) continue;
+      const d = String(e?.allowedKeyDigest || "");
+      const acct = d.startsWith("sha256:") && d.length >= 39 ? `m-${d.slice(7, 39)}` : "";
+      const who = String(e?.seatName || e?.humanName || "").trim();
+      if (acct && who) {
+        memberOwnerById.set(acct, who);
+        memberOwners.add(who);
+      }
+    }
+  }
+  if (charter.collaborator && charter.collaborator !== hostOwner) memberOwners.add(charter.collaborator);
+  if (memberOwners.size === 1) {
+    const sole = [...memberOwners][0];
+    for (const m of rawMessages) {
+      const id = String(m?.author?.id || "");
+      if (id.startsWith("m-") && !memberOwnerById.has(id)) memberOwnerById.set(id, sole);
+    }
+    for (const id of ownAccountIds) {
+      if (id.startsWith("m-") && !memberOwnerById.has(id)) memberOwnerById.set(id, sole);
+    }
+  }
+  return { hostAccountId, ownAccountIds, hostOwner, memberOwnerById };
+}
+
 /** @typedef {ReturnType<typeof formatMessage>} PaneMessage */
 
-/** One message as the pane shows it, everything rendered passed through `redact`. @param {any} m @param {string} hostAccountId */
-export function formatMessage(m, hostAccountId) {
+/** One message as the pane shows it, everything rendered passed through `redact`. @param {any} m @param {string} hostAccountId @param {SeatContext | null} [seatCtx] */
+export function formatMessage(m, hostAccountId, seatCtx = null) {
   const d = /** @type {any} */ (decorate(m));
   const text = redact(String(m.text || ""));
   const trailers = Array.isArray(d.trailers) ? d.trailers.map((/** @type {any} */ t) => ({ key: String(t.key), value: redact(String(t.value)) })) : [];
@@ -305,13 +438,27 @@ export function formatMessage(m, hostAccountId) {
   // the messages an `re:` names (ids or cursors, comma separated), and the trailers the thread view still states: `to` is in the header and `re` is the indentation
   const re = trailers.filter((/** @type {{ key: string }} */ t) => t.key === "re").flatMap((/** @type {{ value: string }} */ t) => t.value.split(",").map((/** @type {string} */ v) => v.trim()).filter(Boolean));
   const noteParts = formatTrailers(trailers.filter((/** @type {{ key: string }} */ t) => t.key !== "to" && t.key !== "re")).split("\n").filter(Boolean).map((/** @type {string} */ l) => l.replace(": ", " "));
+  const effectiveHostId = seatCtx?.hostAccountId || hostAccountId;
+  const seat = seatKindOf(author.id, effectiveHostId);
+  const yours = seatCtx ? (author.id ? seatCtx.ownAccountIds.has(author.id) : null) : (seat === "host" ? true : seat === "member" ? false : null);
+  const seatOwner = seat === "host" ? (seatCtx?.hostOwner || "") : seat === "member" ? (seatCtx?.memberOwnerById?.get(author.id) || "") : "";
+  const seatLabel = seatOwner
+    ? (yours === true ? `${seatOwner}'s seat · yours` : `${seatOwner}'s seat`)
+    : seat === "member"
+      ? (yours === true ? "this seat" : "member seat")
+      : seat === "host"
+        ? (yours === false ? "host seat" : "this seat")
+        : "";
   return {
     id: String(m.id || ""),
     thread: m.thread && String(m.thread) !== String(m.id) ? String(m.thread) : null,
     author,
     signedAs,
     speaker: signedAs && signedAs !== author.name ? `${author.name} as ${signedAs}` : author.name,
-    seat: seatKindOf(author.id, hostAccountId),
+    seat,
+    yours,
+    seatOwner,
+    seatLabel,
     ts: shortTs(m.ts),
     rawTs: String(m.ts || ""),
     cursor: String(m.cursor ?? ""),
@@ -343,14 +490,14 @@ export function pickAddressees(messages, threadId, sender, hostAccountId) {
   for (const m of messages) {
     if (m.id !== threadId && m.thread !== threadId) continue;
     if (m.author.kind === "human") continue;
-    if (seatKindOf(m.author.id, hostAccountId) !== rootSeat) continue;
+    const sameSeat = root.seatOwner && m.seatOwner ? m.seatOwner === root.seatOwner : seatKindOf(m.author.id, hostAccountId) === rootSeat;
+    if (!sameSeat) continue;
     const name = String(m.signedAs || m.author.name || "").trim();
     if (!name || name === sender || names.includes(name)) continue;
     names.push(name);
   }
   return names;
 }
-
 /** How deep a reply is drawn. A reply deeper than this stays at this depth, with a cue naming whom it answers. */
 export const THREAD_DEPTH_CAP = 4;
 
@@ -421,7 +568,7 @@ export function subjectsOf(messages, { room, self, seen = {}, baselineId = null,
   const who = new Map();
   for (const m of messages) who.set(m.id, m.speaker);
   for (const m of messages) if (m.cursor && !who.has(m.cursor)) who.set(m.cursor, m.speaker);
-  const msgs = messages.map((m) => ({ room, id: m.id, thread: m.thread, from: m.author.name, text: m.body, cursor: m.cursor, ts: m.rawTs || null, to: m.to, title: m.title, signedAs: m.signedAs }));
+  const msgs = messages.map((m) => ({ room, id: m.id, thread: m.thread, from: m.author.kind !== "human" && m.seatOwner ? `${m.author.name} (${m.seatOwner}'s seat)` : m.author.name, text: m.body, cursor: m.cursor, ts: m.rawTs || null, to: m.to, title: m.title, signedAs: m.signedAs }));
   return buildSubjects(msgs, { self, seen, baselineId }).map((s) => ({
     id: s.id,
     title: s.title,
@@ -442,6 +589,9 @@ export function subjectsOf(messages, { room, self, seen = {}, baselineId = null,
       from: m.speaker,
       kind: m.author.kind,
       seat: m.seat,
+      yours: m.yours ?? null,
+      seatOwner: m.seatOwner ?? "",
+      seatLabel: m.seatLabel ?? "",
       age: ago(m.rawTs || null, now),
       ts: m.ts,
       to: m.to,
@@ -479,27 +629,43 @@ export function boardOf(messages, watchingBearers) {
   for (const m of messages) for (const t of m.trailers) if (t.key === "withdraws") withdrawn.add(t.value.trim());
   messages.forEach((m, at) => {
     const gone = withdrawn.has(m.id) || withdrawn.has(m.cursor);
-    const w = who.get(m.speaker) ?? { speaker: m.speaker, authorName: m.author.name, kind: m.author.kind, origin: ORIGIN_LABEL[/** @type {"member" | "host" | ""} */ (m.seat)] ?? "", count: 0, watching: false };
+    const whoKey = m.seatOwner ? `${m.speaker}\n${m.seatOwner}` : m.seat ? `${m.speaker}\n${m.seat}` : m.speaker;
+    const origin = m.seatLabel || ORIGIN_LABEL[/** @type {"member" | "host" | ""} */ (m.seat)] || "";
+    const w = who.get(whoKey) ?? {
+      speaker: m.speaker,
+      authorName: m.author.name,
+      kind: m.author.kind,
+      seat: m.seat ?? "",
+      seatOwner: m.seatOwner ?? "",
+      yours: m.yours ?? null,
+      origin,
+      count: 0,
+      watching: false,
+    };
     w.count++;
     w.kind = m.author.kind;
+    if (origin) w.origin = origin;
+    if (m.seatOwner) w.seatOwner = m.seatOwner;
+    if (m.yours !== undefined && m.yours !== null) w.yours = m.yours;
     w.lastTs = m.ts;
     w.lastCursor = m.cursor;
     w.order = at;
-    who.set(m.speaker, w);
+    who.set(whoKey, w);
+    const holderLabel = m.author.kind !== "human" && m.seatOwner ? `${m.speaker} (${m.seatOwner}'s seat)` : m.speaker;
     let verdict = "";
     let because = "";
     /** @type {string[]} */
     const exhibits = [];
     for (const t of m.trailers) {
-      if (t.key === "claim") claims.set(t.value, { subject: t.value, holder: m.speaker, status: gone ? "withdrawn" : "held", cursor: m.cursor, ts: m.ts, messageId: m.id });
-      else if (t.key === "release") claims.set(t.value, { subject: t.value, holder: m.speaker, status: "released", cursor: m.cursor, ts: m.ts, messageId: m.id });
+      if (t.key === "claim") claims.set(t.value, { subject: t.value, holder: holderLabel, status: gone ? "withdrawn" : "held", cursor: m.cursor, ts: m.ts, messageId: m.id });
+      else if (t.key === "release") claims.set(t.value, { subject: t.value, holder: holderLabel, status: "released", cursor: m.cursor, ts: m.ts, messageId: m.id });
       else if (t.key === "verdict") verdict = t.value;
       else if (t.key === "exhibit") exhibits.push(t.value);
       else if (t.key === "because") because = t.value;
     }
-    if (verdict) verdicts.push({ verdict, exhibit: exhibits.join(" · "), because, author: m.speaker, status: gone ? "withdrawn" : "standing", cursor: m.cursor, ts: m.ts, messageId: m.id });
+    if (verdict) verdicts.push({ verdict, exhibit: exhibits.join(" · "), because, author: holderLabel, status: gone ? "withdrawn" : "standing", cursor: m.cursor, ts: m.ts, messageId: m.id });
   });
-  for (const w of who.values()) w.watching = w.kind !== "human" && (watchingBearers.has(w.speaker) || watchingBearers.has(w.authorName));
+  for (const w of who.values()) w.watching = w.yours !== false && w.kind !== "human" && (watchingBearers.has(w.speaker) || watchingBearers.has(w.authorName));
   return {
     claims: [...claims.values()].reverse(),
     verdicts: verdicts.reverse(),
@@ -522,19 +688,42 @@ export async function seatSessions(stateRoot) {
   } catch { /* no watches */ }
   const records = await listRecords(stateRoot);
   const sessions = records.map((r) => {
+    const slug = String(r.slug || "");
     const rec = /** @type {any} */ (r.record);
     const rooms = Array.isArray(/** @type {any} */ (r).rooms) ? /** @type {string[]} */ (/** @type {any} */ (r).rooms) : [];
+    const plainRooms = rooms.filter((x) => !x.includes("#"));
+    const list = [...(armedBySlug.get(slug) ?? [])];
+    if (r.state === "live") {
+      const omp = readJson(path.join(path.dirname(stateRoot), "omp-room", `${slug}.json`));
+      if (omp?.watch === true && Array.isArray(omp.rooms)) {
+        for (const rm of omp.rooms) {
+          const roomName = String(rm?.room || "");
+          if (roomName && !list.some((x) => x.room === roomName && !x.thread)) {
+            list.push({ key: `omp-room:${roomName}`, room: roomName, thread: "", mode: "omp-room", wake: String(omp.wake || "addressed"), pid: Number(rec?.pid) || 0 });
+          }
+        }
+      }
+      const candidateRooms = new Set(plainRooms);
+      const lbl = String(rec?.label || "");
+      if (lbl.endsWith(".messenger")) candidateRooms.add(lbl.slice(0, -".messenger".length));
+      for (const roomName of candidateRooms) {
+        const m = readJson(path.join(stateRoot, "messenger", `${slug}.${roomName}.json`));
+        if (m?.ready === true && pidAlive(Number(m.pid) || 0) && !list.some((x) => x.room === roomName && !x.thread)) {
+          list.push({ key: `messenger:${roomName}`, room: roomName, thread: "", mode: "messenger", wake: "all", pid: Number(m.pid) || 0 });
+        }
+      }
+    }
     return {
-      slug: String(r.slug || ""),
+      slug,
       record: rec,
       bearer: String(rec?.bearer || "(unregistered)"),
       label: String(rec?.label || ""),
       pid: Number(rec?.pid) || 0,
       state: r.state === "live" ? "live" : r.state === "gone" ? "dark" : "unknown",
       lastSeen: shortTs(rec?.lastSeen).slice(0, 16),
-      rooms: rooms.filter((x) => !x.includes("#")),
+      rooms: plainRooms,
       threadCount: rooms.filter((x) => x.includes("#")).length,
-      armed: armedBySlug.get(String(r.slug || "")) ?? [],
+      armed: list,
     };
   });
   const order = { live: 0, unknown: 1, dark: 2 };
@@ -684,13 +873,14 @@ export async function loadView({ pc, room = null, input = {}, dataDir = null, re
   if (read.annotations.length) {
     for (const m of /** @type {any[]} */ (foldAnnotations(read.messages, read.annotations))) if (m.title && typeof m.title.text === "string") titleById.set(String(m.id), m.title.text);
   }
-  const messages = read.messages.map((m) => formatMessage(titleById.has(String(m.id)) ? { ...m, title: titleById.get(String(m.id)) } : m, service.accountId));
-
   let self = pc.post.command ? (typeof input.self === "string" && input.self ? input.self : null) : human.name || null;
   if (pc.post.command && self === null) {
     const me = await run([...pc.post.command, "whoami", alias, "--json"], { env: childEnv(env, pc.post.env) });
     if (me.code === 0) self = jsonLines(me.stdout)[0]?.name ?? null;
   }
+  const seatCtx = resolveSeats({ rawMessages: read.messages, cfg, alias, stateRoot, serviceAccountId: service.accountId, humanName: human.name, self, pc });
+  const messages = read.messages.map((m) => formatMessage(titleById.has(String(m.id)) ? { ...m, title: titleById.get(String(m.id)) } : m, seatCtx.hostAccountId, seatCtx));
+
   const newest = messages.length ? messages[messages.length - 1].id : null;
   const hasBaseline = input.hasBaseline === true;
   const baselineId = hasBaseline ? (input.baselineId ?? null) : newest;
@@ -709,7 +899,7 @@ export async function loadView({ pc, room = null, input = {}, dataDir = null, re
     hasBaseline: true,
     newest,
     windowSize: messages.length,
-    subjects: subjectsOf(messages, { room: alias, self, seen, baselineId, hostAccountId: service.accountId, now }),
+    subjects: subjectsOf(messages, { room: alias, self, seen, baselineId, hostAccountId: seatCtx.hostAccountId, now }),
     board: boardOf(messages, new Set(watching.map((w) => w.bearer))),
     watching,
   };

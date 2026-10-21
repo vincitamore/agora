@@ -632,7 +632,11 @@ local function render_presence(state: any): Node
 			table.insert(names, "+" .. tostring(#who - 5))
 			break
 		end
-		table.insert(names, tostring(w.speaker))
+		local wname = tostring(w.speaker)
+		if w.kind ~= "human" and type(w.seatOwner) == "string" and w.seatOwner ~= "" then
+			wname = wname .. " (" .. w.seatOwner .. ")"
+		end
+		table.insert(names, wname)
 	end
 	local summary = (state.who_open and "▾ " or "▸ ") .. tostring(#who) .. " spoke · " .. table.concat(names, ", ")
 	if #watching > 0 then
@@ -679,7 +683,11 @@ local function render_compose(state: any): Node
 	local where = state.thread == nil and "new subject" or ((subject and (subject.fullTitle or subject.title)) or state.thread)
 	local target = "Posting to " .. tostring(state.room or "?") .. " › " .. tostring(where)
 	if replying ~= nil then
-		target = target .. " › reply to " .. tostring(replying.from)
+		local rfrom = tostring(replying.from)
+		if replying.kind ~= "human" and type(replying.seatOwner) == "string" and replying.seatOwner ~= "" then
+			rfrom = rfrom .. " (" .. replying.seatOwner .. "'s seat)"
+		end
+		target = target .. " › reply to " .. rfrom
 	end
 	local kids = {
 		ui.el("div", { key = "target", class = "ag-target", text = target }),
@@ -699,7 +707,8 @@ local function render_compose(state: any): Node
 		if w.kind ~= "human" and name ~= (view and view.self) and not string.find(name, " as ", 1, true) and shown < TO_CHIPS then
 			shown += 1
 			present = present or name == state.to
-			table.insert(chips, chip("to_" .. name, name, "to=" .. name, name == state.to))
+			local label = (type(w.seatOwner) == "string" and w.seatOwner ~= "") and (name .. " · " .. w.seatOwner) or name
+			table.insert(chips, chip("to_" .. name .. "_" .. tostring(shown), label, "to=" .. name, name == state.to))
 		end
 	end
 	if state.to ~= "" and state.to ~= "*" and state.to ~= "auto" and not present then
@@ -812,8 +821,10 @@ local function message_card(state: any, m: any): Node
 	if m.kind == "human" and not m.mine then
 		table.insert(head, ui.el("span", { key = "hum", class = "ag-tag", text = "human" }))
 	end
-	if m.seat == "member" then
-		table.insert(head, ui.el("span", { key = "seat", class = "ag-tag", text = "member seat" }))
+	local seat_label = (type(m.seatLabel) == "string" and m.seatLabel ~= "") and m.seatLabel or ((m.seat == "member") and "member seat" or "")
+	if seat_label ~= "" and (m.kind ~= "human" or not m.mine) then
+		local seat_cls = (m.yours == false) and "ag-tag accent" or "ag-tag"
+		table.insert(head, ui.el("span", { key = "seat", class = seat_cls, text = seat_label }))
 	end
 	local when = tostring(m.age)
 	if type(m.to) == "table" and #m.to > 0 then
@@ -982,7 +993,7 @@ local function render_search(state: any): { Node }
 				local preview = string.gsub(tostring(m.body or ""), "%s+", " ")
 				table.insert(rows, {
 					ui.span(short_ts(m.ts), "muted"),
-					ui.span(tostring(m.from or "") .. ((m.kind == "human") and " (human)" or ""), m.kind == "human" and "accent" or "strong"),
+					ui.span(tostring(m.from or "") .. ((m.kind == "human") and " (human)" or ((type(m.seatLabel) == "string" and m.seatLabel ~= "") and (" · " .. m.seatLabel) or "")), m.kind == "human" and "accent" or "strong"),
 					ui.span(tostring(m.derived ~= "" and m.derived or (hit.subject.id ~= m.id and ("in " .. string.sub(tostring(hit.subject.title), 1, 40)) or "subject")), "muted"),
 					ui.span(string.sub(preview, 1, 160)),
 					ui.span(cursor_tail(m.cursor), "muted"),
@@ -1152,7 +1163,7 @@ local function render_peers(state: any): { Node }
 	table.insert(out, section("service", "Seat service", nil, {
 		ui.kv({
 			{ ui.span("service", "muted"), svc.pidAlive and ui.span(string.format("● running · pid %d · seat %s · build %s · since %s", tonumber(svc.pid) or 0, tostring(svc.seatLabel), tostring(svc.build), tostring(svc.startedAt)), "ok") or ui.span(svc.present and string.format("▲ stopped (last pid %d, seat %s)", tonumber(svc.pid) or 0, tostring(svc.seatLabel)) or "▲ no service on this seat", "bad") },
-			{ ui.span("this seat's human", "muted"), ui.span(human.name ~= "" and (tostring(human.name) .. " (native/human.json)") or "no name yet", human.name ~= "" and "strong" or "warn") },
+			{ ui.span("this seat's human", "muted"), ui.span((human.name ~= "") and (tostring(human.name) .. " (native/human.json)") or ((view.self and view.self ~= "") and (tostring(view.self) .. " (post command)") or "no name yet"), (human.name ~= "" or (view.self and view.self ~= "")) and "strong" or "warn") },
 			{ ui.span("posts from this pane", "muted"), ui.span(tostring((view.posting and view.posting.detail) or ""), "muted") },
 		}),
 		button("name2", "Set your name", "name", "quiet"),
