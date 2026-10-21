@@ -240,7 +240,7 @@ function oneEditFrom(lower, present) {
 }
 
 /** Are two different strings exactly one insertion, deletion or substitution apart? @param {string} a @param {string} b */
-function oneEdit(a, b) {
+export function oneEdit(a, b) {
   if (a === b || Math.abs(a.length - b.length) > 1) return false;
   const [s, l] = a.length <= b.length ? [a, b] : [b, a];
   let i = 0;

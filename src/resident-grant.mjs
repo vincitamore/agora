@@ -28,9 +28,10 @@ import { existsSync } from "node:fs";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { AgoraError, EXIT } from "./core.mjs";
-import { fileLock, formatAge, formatNotice } from "./messenger.mjs";
+import { annotationState, fileLock, formatAge, formatNotice, roomSubjectRoot } from "./messenger.mjs";
 import { positionTurn, readInheritMarker, RESIDENT_SLUG_RE } from "./resident.mjs";
 import { manifestRow, planResident, residentState, startResident, stopResident } from "./resident-start.mjs";
+import { oneEdit } from "./board-read.mjs";
 import { POSITION_RE, listRecords, positionOf } from "./session.mjs";
 import { withTrailers } from "./trailers.mjs";
 
@@ -174,15 +175,6 @@ export function familyNear(manifest, room, segment) {
     else if (segment.length >= 3 && name.length >= 3 && oneEdit(segment, name)) near.push({ name: slug, row: slug });
   }
   return near;
-}
-
-/** Are two different strings exactly one insertion, deletion or substitution apart? @param {string} a @param {string} b */
-function oneEdit(a, b) {
-  if (a === b || Math.abs(a.length - b.length) > 1) return false;
-  const [s, l] = a.length <= b.length ? [a, b] : [b, a];
-  let i = 0;
-  while (i < s.length && s[i] === l[i]) i++;
-  return s.length === l.length ? s.slice(i + 1) === l.slice(i + 1) : s.slice(i) === l.slice(i + 1);
 }
 
 /**
@@ -500,16 +492,8 @@ export function seatEnsureDeps(a) {
  * @param {any[]} messages @param {any[]} annotations @returns {string | null}
  */
 export function roomSubject(messages, annotations) {
-  const pinned = new Set();
-  const titled = new Set();
-  for (const a of annotations) {
-    if (a?.act === "pin") pinned.add(String(a.target));
-    else if (a?.act === "unpin") pinned.delete(String(a.target));
-    else if (a?.act === "title") titled.add(String(a.target));
-  }
-  const roots = messages.filter((m) => !m.thread && pinned.has(String(m.id)));
-  const pick = roots.find((m) => titled.has(String(m.id))) ?? roots[0];
-  return pick ? String(pick.id) : null;
+  const { titles, pinned } = annotationState(annotations);
+  return roomSubjectRoot(messages, titles, pinned);
 }
 
 /**

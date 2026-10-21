@@ -429,6 +429,14 @@ and this config (and `--manifest`, when given): a Windows scheduled task `agora-
 `PATH`), or a launchd agent `agora.resident-cycle` (logging to `<state>/residents/cycle.log`).
 `--interval <seconds>` sets the period in whole minutes (default 900).
 
+Install then runs the entry once through the scheduler itself (the `timer run` call; systemd
+starts the oneshot service and waits for it), waits for that run to end (up to two minutes), and
+prints the `timer check` that follows, so the install's own output is the proof the timer can run
+the cycle. It exits 1 unless that check is `ok`, with the check's reason (`failing 0x80070005`,
+`failing exit 2`, `differs`); a first run still going at the deadline is said so and does not fail
+it. `--json` carries the check as `check` and `firstRun` (`ended` or `running`). On launchd the
+run's end is read from `launchctl print`'s state and last exit code.
+
 On Windows the task runs `conhost.exe --headless cmd.exe /d /c "<state>\residents\cycle.cmd"`, a
 wrapper install writes: Task Scheduler refuses to start node itself under `conhost --headless`
 (Last Result 0x80070005, and no cycle ever runs), and starts `cmd.exe` there. The wrapper runs the

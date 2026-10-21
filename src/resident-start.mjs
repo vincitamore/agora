@@ -1267,15 +1267,33 @@ export function parseTaskCsv(text) {
 /** A Task Scheduler result as Windows prints it, `0x80070005`. @param {number} code */
 export const hresult = (code) => `0x${(code >>> 0).toString(16).toUpperCase().padStart(8, "0")}`;
 
+/** How long install waits for its first run to end, and how often it asks. */
+const FIRST_RUN_MS = 120_000;
+const FIRST_RUN_POLL_MS = 500;
+
+/**
+ * What `runTimer` returns: the entry's state (`installed`, `kicked`, `removed`, `failed`, or a check's `ok`,
+ * `missing`, `differs`, `failing`), why not, the commands it ran, and for install the check after its first run.
+ * @typedef {{ type: string, action: string, kind: string, name: string, interval: string, command: string[], state: string, problems: string[],
+ *   ran: Array<{ argv: string[], code: number, stderr: string }>, lastResult?: number, lastRun?: string, cycleExit?: number | null,
+ *   firstRun?: string, check?: TimerResult }} TimerResult
+ */
+
 /**
  * install | check | run | remove. `check` changes nothing and reports ok, missing, differs (the
  * registered entry or its wrapper is not what install writes) or, for a Windows task, failing: the
  * scheduler could not start its last run (Last Result), or that run ended without running the cycle
  * or with the cycle exiting non-zero (the wrapper's exit record). A task not yet run, or running, is
  * ok. `run` asks the scheduler to run the installed entry once now (kicked), or names that none is
- * installed (missing); it never runs the cycle in this process.
+ * installed (missing); it never runs the cycle in this process. `install` writes the entry, runs it
+ * once through the scheduler, waits for that run to end (`settleMs`, default two minutes) and returns
+ * the `check` that follows as `check`: the install's state is `installed` only when that check is ok,
+ * else the check's own state (`failing`, `differs`, `missing`), so a timer that cannot run the cycle
+ * is never reported installed. A first run still going at the deadline is `firstRun: "running"`.
  * @param {'install' | 'check' | 'run' | 'remove'} action @param {TimerSpec} spec
- * @param {{ run?: Runner, writeFile?: (file: string, data: Buffer | string) => Promise<void>, readFile?: (file: string) => Promise<string>, rm?: (file: string) => Promise<void>, mkdir?: (dir: string) => Promise<void> }} [deps]
+ * @param {{ run?: Runner, writeFile?: (file: string, data: Buffer | string) => Promise<void>, readFile?: (file: string) => Promise<string>, rm?: (file: string) => Promise<void>, mkdir?: (dir: string) => Promise<void>,
+ *   sleep?: (ms: number) => Promise<void>, settleMs?: number }} [deps]
+ * @returns {Promise<TimerResult>}
  */
 export async function runTimer(action, spec, deps = {}) {
   const exec = deps.run ?? runCommand;
@@ -1365,10 +1383,63 @@ export async function runTimer(action, spec, deps = {}) {
     } finally {
       for (const f of spec.files) if (f.temporary) await remove(f.path);
     }
-    return { ...base, state: failed ? "failed" : "installed", problems: failed ? [failed] : [], ran };
+    if (failed) return { ...base, state: "failed", problems: [failed], ran };
+    // the proof: one run by the scheduler, waited for, then the same check `timer check` makes
+    const sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+    const settleMs = deps.settleMs ?? FIRST_RUN_MS;
+    const first = await firstRun(spec, go, ran, exec, sleep, settleMs);
+    const check = await runTimer("check", spec, deps);
+    const state = first.failure ? "failing" : check.state === "ok" ? "installed" : check.state;
+    return { ...base, state, problems: first.failure ? [first.failure] : [], ran, firstRun: first.running ? "running" : "ended", check };
   }
   for (const argv of spec.remove) await go(argv);
   for (const f of spec.files) if (!f.temporary) await remove(f.path);
   if (spec.exitFile) await remove(spec.exitFile);
   return { ...base, state: "removed", problems: [], ran };
+}
+
+/**
+ * One run of an installed entry by its scheduler, waited for: `failure` names a scheduler that
+ * refused the run (or, on launchd, a run that exited non-zero); `running` is a run still going at the
+ * deadline. A Windows run's own outcome is left to the check that follows, which reads its exit record.
+ * @param {TimerSpec} spec @param {(argv: string[]) => Promise<{ code: number, stdout: string, stderr: string }>} go
+ * @param {Array<{ argv: string[], code: number, stderr: string }>} ran @param {Runner} exec
+ * @param {(ms: number) => Promise<void>} sleep @param {number} settleMs
+ * @returns {Promise<{ failure: string | null, running: boolean }>}
+ */
+async function firstRun(spec, go, ran, exec, sleep, settleMs) {
+  if (spec.kind === "systemd") {
+    // a oneshot service: start without --no-block returns when the cycle has ended, non-zero when it failed
+    const argv = spec.run[0].filter((/** @type {string} */ a) => a !== "--no-block");
+    const r = await exec(argv, { timeoutMs: settleMs });
+    ran.push({ argv, code: r.code, stderr: r.stderr.trim().slice(0, 300) });
+    if (r.code === 0) return { failure: null, running: false };
+    // killed at the deadline: the unit goes on running
+    if (r.code === -1 && !r.stderr.trim()) return { failure: null, running: true };
+    return { failure: `${argv.join(" ")}: exit ${r.code} ${(r.stderr || r.stdout).trim().slice(0, 300)}; its lines are in journalctl --user -u ${argv[argv.length - 1]}`, running: false };
+  }
+  for (const argv of spec.run) {
+    const r = await go(argv);
+    if (r.code !== 0) return { failure: `${argv.join(" ")}: exit ${r.code} ${(r.stderr || r.stdout).trim().slice(0, 300)}`, running: false };
+  }
+  const ask = spec.kind === "schtasks" ? spec.check[1] : spec.check[0];
+  for (let waited = 0; ; waited += FIRST_RUN_POLL_MS) {
+    const q = await go(ask);
+    // a status that cannot be read ends the wait: the check that follows says why
+    if (q.code !== 0) return { failure: null, running: false };
+    if (spec.kind === "schtasks") {
+      const last = parseTaskCsv(q.stdout);
+      if (!last) return { failure: null, running: false };
+      if (last.lastResult !== 0x41301 && last.lastResult !== 0x41303) return { failure: null, running: false };
+    } else {
+      // launchd: a job that has never exited, or is running, has not finished its run
+      const state = q.stdout.match(/\bstate = ([^\r\n]+)/)?.[1]?.trim();
+      const code = q.stdout.match(/\blast exit code = (-?\d+)/)?.[1];
+      if (state !== "running" && code !== undefined) {
+        return { failure: Number(code) === 0 ? null : `its run exited ${code}; its own lines are in ${spec.log}`, running: false };
+      }
+    }
+    if (waited >= settleMs) return { failure: null, running: true };
+    await sleep(FIRST_RUN_POLL_MS);
+  }
 }

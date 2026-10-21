@@ -525,13 +525,57 @@ test("timer: one spec per OS, and check reads without writing", async (t) => {
   assert.equal((await runTimer("check", linux, { ...deps(() => ({ code: 0 })), readFile: async () => { throw new Error("absent"); } })).state, "missing");
   assert.deepEqual(writes, [], "check writes nothing");
 
-  const installed = await runTimer("install", win, deps(() => ({ code: 0 })));
+  const installed = await runTimer("install", win, deps(sched(win.files[0].content, "0")));
   assert.equal(installed.state, "installed");
+  assert.equal(installed.check?.state, "ok", "install's own output carries the check after its first run");
+  assert.deepEqual(installed.ran.slice(0, 3).map((x) => x.argv[1]), ["/Delete", "/Create", "/Run"], "the entry is created, then run once by the scheduler");
   assert.deepEqual(writes, [win.files[0].path, wrapper, `rm ${exitFile}`, `rm ${win.files[0].path}`], "the XML is written, used, and removed; the wrapper stays; an older exit record cannot vouch for the new entry");
   writes.length = 0;
-  const first = await runTimer("install", win, deps((argv) => ({ code: argv[1] === "/Delete" ? 1 : 0 })));
+  const first = await runTimer("install", win, deps((argv) => argv[1] === "/Delete" ? { code: 1 } : sched(win.files[0].content, "0")(argv)));
   assert.equal(first.state, "installed", "a first install has nothing to delete");
-  assert.equal((await runTimer("install", win, deps((argv) => ({ code: argv[1] === "/Create" ? 1 : 0 })))).state, "failed");
+  assert.equal((await runTimer("install", win, deps((argv) => argv[1] === "/Create" ? { code: 1 } : { code: 0 }))).state, "failed");
+  // the first run is waited for: not yet run and running read as pending until a result lands
+  /** @type {string[]} */
+  const results = ["267011", "267009", "0"];
+  const slept = /** @type {number[]} */ ([]);
+  const waiting = await runTimer("install", win, { ...deps((argv) => argv.includes("/XML") ? { code: 0, stdout: win.files[0].content } : argv.includes("/V") ? { code: 0, stdout: csv(results.length > 1 ? /** @type {string} */ (results.shift()) : results[0]) } : { code: 0 }), sleep: async (ms) => { slept.push(ms); } });
+  assert.equal(waiting.state, "installed");
+  assert.equal(slept.length, 2, "it asked twice more before the run ended");
+  // a run still going at the deadline is said so, not failed
+  const long = await runTimer("install", win, { ...deps(sched(win.files[0].content, "267009")), sleep: async () => {}, settleMs: 1000 });
+  assert.deepEqual([long.state, long.firstRun], ["installed", "running"]);
+  // the trial's case: the scheduler takes the run and the cycle never runs, or exits 2; install says so and is not ok
+  const refused = await runTimer("install", win, deps(sched(win.files[0].content, "-2147024891")));
+  assert.deepEqual([refused.state, refused.check?.state], ["failing", "failing"]);
+  assert.match(String(refused.check?.problems.join(" ")), /0x80070005/);
+  files.set(exitFile, "2\r\n");
+  const exits2 = await runTimer("install", win, deps(sched(win.files[0].content, "0")));
+  assert.deepEqual([exits2.state, exits2.check?.cycleExit], ["failing", 2]);
+  files.set(exitFile, "0\r\n");
+  // the scheduler refusing the run itself
+  const noRun = await runTimer("install", win, deps((argv) => argv[1] === "/Run" ? { code: 1, stderr: "ERROR: nope" } : sched(win.files[0].content, "0")(argv)));
+  assert.equal(noRun.state, "failing");
+  assert.match(noRun.problems.join(" "), /schtasks \/Run \/TN agora-resident-cycle: exit 1 ERROR: nope/);
+  // systemd: the oneshot service is started and waited for; a non-zero start is the failure
+  const lcontents = new Map(linux.files.map((f) => [f.path, f.content]));
+  const ldeps = (/** @type {(argv: string[]) => { code: number, stdout?: string, stderr?: string }} */ answer) => ({ ...deps(answer), readFile: async (/** @type {string} */ f) => String(lcontents.get(f)), sleep: async () => {} });
+  const lok = await runTimer("install", linux, ldeps(() => ({ code: 0, stdout: "enabled" })));
+  assert.deepEqual([lok.state, lok.check?.state], ["installed", "ok"]);
+  assert.deepEqual(lok.ran.map((x) => x.argv.slice(2, 5).join(" ")), ["daemon-reload", "enable --now agora-resident-cycle.timer", "start agora-resident-cycle.service"], "start carries no --no-block");
+  assert.deepEqual(lok.check?.ran.map((x) => x.argv[2]), ["is-enabled", "is-active"]);
+  const lfail = await runTimer("install", linux, ldeps((argv) => argv[2] === "start" ? { code: 1, stderr: "Job failed" } : { code: 0, stdout: "enabled" }));
+  assert.equal(lfail.state, "failing");
+  assert.match(lfail.problems.join(" "), /systemctl --user start agora-resident-cycle\.service: exit 1 Job failed; its lines are in journalctl --user -u agora-resident-cycle\.service/);
+  // launchd: kickstart, then print until the job has exited; a non-zero exit is the failure
+  const mcontents = new Map(mac.files.map((f) => [f.path, f.content]));
+  const mdeps = (/** @type {string} */ printed) => ({ ...deps((argv) => argv[1] === "print" ? { code: 0, stdout: printed } : { code: 0 }), readFile: async (/** @type {string} */ f) => String(mcontents.get(f)), sleep: async () => {} });
+  const mok = await runTimer("install", mac, mdeps("state = not running\n\tlast exit code = 0\n"));
+  assert.deepEqual([mok.state, mok.firstRun], ["installed", "ended"]);
+  const mbad = await runTimer("install", mac, mdeps("state = not running\n\tlast exit code = 2\n"));
+  assert.equal(mbad.state, "failing");
+  assert.match(mbad.problems.join(" "), /its run exited 2; its own lines are in .*cycle\.log/);
+  const mnever = await runTimer("install", mac, { ...mdeps("state = not running\n\tlast exit code = (never exited)\n"), settleMs: 1000 });
+  assert.deepEqual([mnever.state, mnever.firstRun], ["installed", "running"]);
   writes.length = 0;
   await runTimer("remove", win, deps(() => ({ code: 0 })));
   assert.deepEqual(writes, [`rm ${wrapper}`, `rm ${exitFile}`], "remove takes the wrapper and its record with the task");
