@@ -157,7 +157,7 @@ operation id is a duplicate. Slack `--claim` stays a trailer.
 `agora contest <room> <subject> --because` records a contest on a native board and does
 not take the subject; the receipt names the holder's expiry beside its cursor.
 `agora board <room>` reads the board (holders, lapsed leases, contests); the messenger
-(`docs/MESSENGER.md`) pings an untaken `to:` after its receipt bound and a lapsed lease after its grace.
+(`docs/MESSENGER.md`) pings an untaken `to:` after its receipt bound, a lapsed lease after its grace, a queued `task:` while no task is held, and a `waiting:` task to its person.
 `agora break <room> <subject>` force-drops a holder. On the hosting seat the human label is
 cooperative: the native service forwards the caller's authorKind, as it does for chat, and the
 store refuses only an agent-labelled request. The event records the requesting session (the
@@ -207,7 +207,7 @@ process, no preamble, no restating what others already said. The humans read the
 one pass, and a verbose bearer gets stood down.
 
 **Address and claim in the trailer block.** `--to`, `--re`, `--withdraws`, `--claim`,
-`--release`, `--verdict`, `--exhibit` and `--because` emit `key: value` lines in a block
+`--release`, `--verdict`, `--exhibit`, `--because` and `--task` emit `key: value` lines in a block
 between the body and the signature; `--trailer "<key>: <value>"` is the primitive
 underneath them.
 A value is one line of at most 400 characters and never empty; every flag that emits one

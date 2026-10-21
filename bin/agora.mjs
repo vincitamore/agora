@@ -204,6 +204,7 @@ const SCHEMA = {
         "--verdict <line>": "a settled result; needs at least one --exhibit",
         "--exhibit <locator>": `what settles it, repeatable (same ${TRAILER_VALUE_MAX}-character cap as --trailer)`,
         "--because <text>": `the reasoning behind it (same ${TRAILER_VALUE_MAX}-character cap as --trailer)`,
+        "--task <slug>": `mark this subject a queued task: emits task: <slug>, which the messenger's queue reads (docs/MESSENGER.md § The queue); alone it is a block (same ${TRAILER_VALUE_MAX}-character cap as --trailer)`,
         "--fyi": "emit ack: none, licensing the reader's silence. Honouring it is a judgement; the tool never filters, suppresses or delays on an incoming ack:",
         "--face <name>": "native rooms: also publish this post to the named face of the room (slack, github), whatever the room's policy would have chosen; repeatable or comma-separated. A name that is not a face of the room, a transport with no audience, or a face that is off is a refused row on the receipt, never an exit code: the native post is the outcome",
         "--no-face": "native rooms: this post stays native only, whatever the room's policy says",
@@ -234,7 +235,7 @@ const SCHEMA = {
     messenger: {
       args: ["<room>"],
       options: {
-        "--human-name <name>": "the host human: the N3 and N9 notices name them (required)",
+        "--human-name <name>": "the host human: the N3, N9 and N10 notices name them (required)",
         "--bounds <spec>": "R=2h,R2=4h,I=1h,Bo=4h,H=24h,L=10m,T=30s,G=10m,G2=30m,S=2h,D=5m (any subset; ms, s, m, h). On evidence (each session's activity record): an idle or dark holder past G → N2 or N4, past G2 → N3; a working holder is held, never pinged; S: a busy turn with no progress is stalled; D: a silent watch is dark. R, R2, I are the time-only backstops for a session with no activity record. Open subject at Bo → N6; nothing older than H is raised, nor anything older than the messenger's first start in the room less L (its starting point, recorded once in <state>/messenger/<roomId>.start.json); T is the stream's interval",
         "--once": "one tick, then exit (the default without --stream)",
         "--stream": "tick now, on every room event, and every T, until --for or a stop; writes a liveness file",
@@ -243,7 +244,7 @@ const SCHEMA = {
         "--dry-run": "print the due notices and post nothing; records no starting point",
         "--json": "one messenger-tick line per tick (since, due, posted, held)",
       },
-      does: "the room's supervision in code (docs/MESSENGER.md): a fold over the room, the board and this seat's sessions that posts fixed-form notices (N1 routed, N2 not taken, N3 to the host human, N4 lease lapsed, N5 unmatched address, N6 open subject, N7 top-level reply, N9 no role fits). Its own posts are its incident record: a restart duplicates nothing. No model; it never answers, claims or quotes",
+      does: "the room's supervision in code (docs/MESSENGER.md): a fold over the room, the board and this seat's sessions that posts fixed-form notices (N1 routed, N2 not taken, N3 to the host human, N4 lease lapsed, N5 unmatched address, N6 open subject, N7 top-level reply, N9 no role fits, N10 queued task not started, N11 waiting on a person, N12 a waiting task named at arming). Its own posts are its incident record: a restart duplicates nothing. No model; it never answers, claims or quotes",
     },
     room: {
       args: ["faces <room> | add-remote <alias> <descriptor-path> | upgrade <room> | purge <room>"],
@@ -510,6 +511,7 @@ const OPTIONS = /** @type {const} */ ({
   to: { type: "string", multiple: true },
   re: { type: "string" },
   withdraws: { type: "string", multiple: true },
+  task: { type: "string" },
   claim: { type: "string", multiple: true },
   lease: { type: "string" },
   release: { type: "string", multiple: true },
@@ -882,7 +884,7 @@ function trailerEntries(values) {
       throw new AgoraError(`--trailer takes "<key>: <value>" (a lower-case key of up to 24 characters, a value of up to ${TRAILER_VALUE_MAX} UTF-16 code units, so an emoji spends two)`, EXIT.usage);
     out.push({ key, value });
   }
-  for (const key of ["to", "re", "withdraws", "claim", "release", "verdict", "exhibit", "because"]) {
+  for (const key of ["to", "re", "withdraws", "claim", "release", "verdict", "exhibit", "because", "task"]) {
     const v = values[key];
     for (const value of Array.isArray(v) ? v : v === undefined ? [] : [String(v)]) {
       const trimmed = String(value).trim();
@@ -2870,7 +2872,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       const ms = await import("../src/messenger.mjs");
       const bounds = ms.parseBounds(values.bounds === undefined ? undefined : String(values.bounds));
       const host = values["human-name"] === undefined ? "" : String(values["human-name"]).trim();
-      if (!host || /\s/.test(host)) throw new AgoraError("messenger needs --human-name <name>: the host human its N3 and N9 lines name (one word)", EXIT.usage);
+      if (!host || /\s/.test(host)) throw new AgoraError("messenger needs --human-name <name>: the host human its N3, N9 and N10 lines name (one word)", EXIT.usage);
       if (SPELLS_POSITION.test(host.toLowerCase())) throw new AgoraError(`messenger --human-name ${JSON.stringify(host)} spells a position (<room>.<role>): an address to it would name both the person and the position's holder; give the host human a name that is not a position`, EXIT.usage);
       if (values.stream && (values.once || values.at !== undefined)) throw new AgoraError("--stream runs on the clock; --once and --at belong to a single tick", EXIT.usage);
       const at = values.at === undefined ? undefined : Date.parse(String(values.at));

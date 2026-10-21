@@ -27,11 +27,15 @@ import { parseSignature } from "./core.mjs";
  * body is the readable fallback); `waiting` marks a question as waiting on a person; `context`
  * says where in the app a post was written. Known so that a block carrying only them is a block,
  * and so an app can index them. The tool renders them and never acts on them.
+ *
+ * `task: <slug>` marks the subject it is posted in as a queued task. It is known so that a block
+ * carrying only it is a block: an intake reply need not borrow an address to be read. The
+ * messenger's queue fold reads it; the parser carries it and acts on nothing.
  * @typedef {{ key: string, value: string }} Trailer
  */
 
 /** The keys this tool knows. Order is the order the emitter writes them in. */
-export const KNOWN_KEYS = Object.freeze(["to", "re", "withdraws", "claim", "release", "verdict", "exhibit", "because", "ack", "card", "waiting", "context"]);
+export const KNOWN_KEYS = Object.freeze(["to", "re", "withdraws", "claim", "release", "verdict", "exhibit", "because", "ack", "task", "card", "waiting", "context"]);
 
 /** One cap for parse and emit: a value past this, empty, or containing a newline, is not a trailer. */
 export const TRAILER_VALUE_MAX = 400;

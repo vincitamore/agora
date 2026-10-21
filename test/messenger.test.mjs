@@ -331,6 +331,12 @@ test("the queue is a fold over trailers: a task: mark queues, a claim makes it a
   assert.equal(queueOf([...head, park, strayRelease], new Set()).tasks[0].state, "queued", "red leg: the same release of a held task hands it back");
 });
 
+test("the queue reads a task from a trailer block holding only `task: <slug>` (no to:, no re:)", () => {
+  const a = ask(T0, "fix the parser");
+  const bare = msg({ at: T0 + MIN, name: "orchestrator/Opus", text: "queued parser-fix, position 1", thread: a.id, extra: [{ key: "task", value: "parser-fix" }] });
+  assert.deepEqual(queueOf([a, bare], new Set()).tasks.map((t) => [t.slug, t.root, t.state]), [["parser-fix", a.id, "queued"]]);
+});
+
 test("the queue clock: no task held and the orchestrator idle, one N10 for the queue head after G and the human line (N3 started) after G2 (red legs: a task held; the orchestrator working; no task: mark)", () => {
   const a = ask(T0, "fix the parser"), b = ask(T0 + MIN, "add slugify");
   const ms = [a, b, intake(T0 + 2 * MIN, a.id, "parser-fix"), takeTask(T0 + 3 * MIN, a.id, "parser-fix"), intake(T0 + 4 * MIN, b.id, "slugify"), closeTask(T0 + 10 * MIN, a.id, "parser-fix")];

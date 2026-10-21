@@ -732,6 +732,36 @@ test("cli: the trailer block is emitted above the signature, rendered above the 
   }
 });
 
+test("cli: --task <slug> emits a task trailer, alone it is a block the reader parses, and the messenger help names N10-N12", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const cfgPath = path.join(dir, "agora.json");
+    await writeFile(cfgPath, JSON.stringify({
+      actor: { name: "Grace/watch", kind: "agent" },
+      rooms: { down: { transport: "local", path: path.join(dir, "down.ndjson") } },
+    }));
+    const env = { AGORA_CONFIG: cfgPath, AGORA_STATE: path.join(dir, "state"), AGORA_SESSION: "a", CLAUDE_PID: "" };
+
+    let r = await agora(["post", "down", "--task", "parser-fix", "queued parser-fix, position 1"], env);
+    assert.equal(r.code, 0);
+    r = await agora(["read", "down", "--json"], env);
+    const posted = JSON.parse(r.stdout.trim().split(/\r?\n/).at(-1) ?? "");
+    assert.equal(posted.text, "queued parser-fix, position 1\n\ntask: parser-fix\n\n-- Grace/watch");
+    assert.deepEqual(posted.trailers, [{ key: "task", value: "parser-fix" }], "alone, still a block");
+
+    r = await agora(["post", "down", "--task", "x".repeat(401), "too long"], env);
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /--task takes a non-empty single-line value of at most 400/);
+
+    r = await agora(["schema"], env);
+    assert.match(r.stdout, /--task <slug>/);
+    assert.match(r.stdout, /N3, N9 and N10 notices/);
+    assert.match(r.stdout, /N10 queued task not started, N11 waiting on a person, N12 a waiting task named at arming/);
+  } finally {
+    await cleanup();
+  }
+});
+
 test("cli: --withdraws emits the line, and a withdrawal-shaped verdict that links nothing is warned about and still posted", async () => {
   const { dir, cleanup } = await tmp();
   try {
