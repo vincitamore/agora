@@ -174,7 +174,7 @@ test("plan: omp under tern carries the extension overlay, the role env and a hos
   assert.match(p.firstPrompt, /arm none\. Run the arming sequence in your profile now/);
   assert.deepEqual(p.env, {
     SEAT_MARKER: "desk", AGORA_CONFIG: s.config, AGORA_STATE: s.state, AGORA_LABEL: "desk.messenger", AGORA_ROOM: "lab", AGORA_ROOM_WAKE: "all",
-    AGORA_ROOM_CMD: JSON.stringify(["node-bin", BIN]), AGORA_ROOM_PREAMBLE: "off", AGORA_ROLE: "messenger",
+    AGORA_ROOM_CMD: JSON.stringify(["node-bin", BIN]), AGORA_MODEL: "vendor/claude-haiku-9:medium", AGORA_ROOM_PREAMBLE: "off", AGORA_ROLE: "messenger",
   });
   assert.equal(p.overlayText, ompOverlay(path.join(CHECKOUT, "plugins", "omp", "agora-room").replace(/\\/g, "/"), path.join(s.mdir, "skills").replace(/\\/g, "/")));
   assert.match(String(p.overlayText), /^extensions:\n {2}- ".*plugins\/omp\/agora-room"\nskills:\n {2}customDirectories:\n {4}- ".*skills"\n$/);
@@ -601,4 +601,141 @@ test("stream: the liveness file is rewritten after every tick in the extension's
   await runStream(deps(true));
   const dark = JSON.parse(await readFile(file, "utf8"));
   assert.deepEqual([dark.ready, dark.errors, dark.lastError], [false, 3, "seat service dark"]);
+});
+
+// ---- lineage, the stop's departure, the timer kick ----
+
+/** A room with coding and a review that must be another family; `review` overrides the review row. @param {Record<string, unknown>} [review] */
+const lineageDoc = (review = {}) => {
+  const d = manifestDoc();
+  d.models = /** @type {any} */ ({ ...d.models, sonnet: "anthropic/claude-sonnet-5-5:high", opus: "google-antigravity/claude-opus-5-5:high", argon: "google-antigravity/gemini-4-argon:high" });
+  d.residents = /** @type {any} */ ({
+    "lab.coding": { role: "coding", wake: "mine", model: "sonnet" },
+    "lab.review": { role: "review", wake: "mine", model: "argon", lineage: "different-from-coding", ...review },
+  });
+  return d;
+};
+/** A pid that answers no signal: a gone session. */
+const deadKill = (/** @type {number} */ pid) => { if (pid >= 999_000) throw Object.assign(new Error("gone"), { code: "ESRCH" }); };
+
+test("manifest: a row's lineage is any or different-from-<role>, by name; rows that break their own rule are refused (red leg: review on coding's family through another provider)", async (t) => {
+  const s = await seat(t);
+  const m = validateManifest(lineageDoc(), s.manifestFile);
+  assert.deepEqual([m.residents["lab.review"].lineage, m.residents["lab.coding"].lineage], ["different-from-coding", "any"]);
+  assert.throws(() => validateManifest(lineageDoc({ lineage: "different from coding" }), s.manifestFile), /residents\.lab\.review\.lineage: lineage must be "any" or "different-from-<role>"/);
+  assert.throws(() => validateManifest(lineageDoc({ model: "opus" }), s.manifestFile),
+    /residents\.lab\.review\.lineage: lab\.review runs google-antigravity\/claude-opus-5-5:high, family claude, the family of lab\.coding \(anthropic\/claude-sonnet-5-5:high\); the manifest says lab\.review differs from coding/);
+});
+
+test("plan: the launcher gives the harness its model id (AGORA_MODEL), which the manifest may not set, and names the positions its lineage binds", async (t) => {
+  const s = await seat(t);
+  const m = validateManifest(lineageDoc(), s.manifestFile);
+  const p = planResident(m, "lab.review", ctxOf(s, { model: "opus" }));
+  assert.equal(p.env.AGORA_MODEL, "google-antigravity/claude-opus-5-5:high");
+  assert.ok(RESERVED_ENV.includes("AGORA_MODEL"));
+  assert.deepEqual(/** @type {any} */ (p).lineage, { family: "claude", against: [{ position: "lab.coding", rule: "lab.review differs from coding", rowModel: "anthropic/claude-sonnet-5-5:high" }] });
+  const bad = lineageDoc();
+  /** @type {any} */ (bad.residents)["lab.review"].env = { AGORA_MODEL: "x" };
+  assert.throws(() => validateManifest(bad, s.manifestFile), /lab\.review\.env\.AGORA_MODEL: is set by agora resident start itself/);
+});
+
+test("start: a relaunch onto the family a live counterpart runs is refused by name before anything is written; another family starts, and its run record keeps the model (red leg: the counterpart is gone)", async (t) => {
+  const s = await seat(t);
+  const m = validateManifest(lineageDoc(), s.manifestFile);
+  let session = 300;
+  const r = fakeRunner((argv) => (argv[1] === "new" ? { code: 0, stdout: JSON.stringify({ session: ++session }) } : { code: 0, stdout: ternLs(session, true) }));
+  const coding = path.join(s.state, "sessions", "omp-coding");
+  await mkdir(coding, { recursive: true });
+  await writeRecord(coding, /** @type {any} */ ({ slug: "omp-coding", source: "OMP_SESSION_ID" }), { bearer: "coding/Sonnet", label: "lab.coding", pid: process.pid, pidSource: "OMP_PID", model: "anthropic/claude-sonnet-5-5:high" });
+  const deps = { checkout: CHECKOUT, run: r.fn, home: s.home, kill: deadKill };
+  const refused = await startResident(planResident(m, "lab.review", ctxOf(s, { model: "opus" })), s.state, deps);
+  assert.equal(refused.row.action, "refused");
+  assert.match(String(refused.row.reason), /^lineage: lab\.review on google-antigravity\/claude-opus-5-5:high is family claude, the family lab\.coding runs \(anthropic\/claude-sonnet-5-5:high, from its session omp-coding\); the manifest says lab\.review differs from coding$/);
+  assert.deepEqual(r.calls, [], "the host was never asked");
+  assert.equal(existsSync(runFilePath(s.state, "lab.review")), false, "no run record");
+  const ok = await startResident(planResident(m, "lab.review", ctxOf(s)), s.state, deps);
+  assert.equal(ok.row.action, "started");
+  assert.equal(/** @type {any} */ (await readRun(s.state, "lab.review"))?.model, "google-antigravity/gemini-4-argon:high");
+  // the other way: a coding relaunch onto the family review runs, read from review's run record
+  await writeRecord(coding, /** @type {any} */ ({ slug: "omp-coding", source: "OMP_SESSION_ID" }), { bearer: "coding/Sonnet", pid: 999_101, pidSource: "OMP_PID" });
+  const back = await startResident(planResident(m, "lab.coding", ctxOf(s, { model: "argon" })), s.state, deps);
+  assert.equal(back.row.action, "refused");
+  assert.match(String(back.row.reason), /the family lab\.review runs \(google-antigravity\/gemini-4-argon:high, from its run record\)/);
+  // red leg: nothing in force at the counterpart, nothing to clash with
+  const s2 = await seat(t);
+  const m2 = validateManifest(lineageDoc(), s2.manifestFile);
+  const free = await startResident(planResident(m2, "lab.review", ctxOf(s2, { model: "opus" })), s2.state, { ...deps, home: s2.home });
+  assert.equal(free.row.action, "started", "a counterpart that is not running binds nothing");
+});
+
+test("restart: the cycle's relaunch checks lineage before it stops anything (red leg: an allowed family stops and starts)", async (t) => {
+  const s = await seat(t);
+  const m = validateManifest(lineageDoc(), s.manifestFile);
+  let session = 400;
+  /** @type {Set<number>} */
+  const live = new Set();
+  const r = fakeRunner((argv) => {
+    if (argv[1] === "new") { session += 1; live.add(session); return { code: 0, stdout: JSON.stringify({ session }) }; }
+    if (argv[1] === "ls") return { code: 0, stdout: JSON.stringify({ sessions: [...live].map((id) => ({ id, tabs: [{ blocks: [{ live: true, exited: null }] }] })) }) };
+    if (argv[1] === "kill") { live.delete(Number(argv[3])); return { code: 0 }; }
+    return { code: 1 };
+  });
+  const deps = { checkout: CHECKOUT, run: r.fn, sleep: async () => {}, kill: deadKill };
+  await startResident(planResident(m, "lab.coding", ctxOf(s)), s.state, deps);
+  await startResident(planResident(m, "lab.review", ctxOf(s)), s.state, deps);
+  const res = await restartResident(m, "lab.review", ctxOf(s, { model: "opus" }), deps);
+  assert.equal(res.code, 1);
+  assert.match(res.err, /^lineage: lab\.review on google-antigravity\/claude-opus-5-5:high is family claude, the family lab\.coding runs \(anthropic\/claude-sonnet-5-5:high, from its run record\)/);
+  assert.equal(r.calls.filter((c) => c[1] === "kill").length, 0, "nothing was stopped");
+  const ok = await restartResident(m, "lab.review", ctxOf(s), deps);
+  assert.deepEqual(ok, { code: 0, err: "" });
+  assert.equal(r.calls.filter((c) => c[1] === "kill").length, 1);
+});
+
+test("stop: a stopped position's sessions are marked as handled in every room they held, so no sibling posts a departure line for a stop (red leg: a session that was not stopped is still announced)", async (t) => {
+  const s = await seat(t);
+  const m = validateManifest(lineageDoc(), s.manifestFile);
+  let alive = true;
+  const r = fakeRunner((argv) => {
+    if (argv[1] === "new") return { code: 0, stdout: JSON.stringify({ session: 7 }) };
+    if (argv[1] === "ls") return { code: 0, stdout: ternLs(7, alive) };
+    if (argv[1] === "kill") { alive = false; return { code: 0 }; }
+    return { code: 1 };
+  });
+  await startResident(planResident(m, "lab.coding", ctxOf(s)), s.state, { checkout: CHECKOUT, run: r.fn });
+  const ago = new Date(Date.now() - 10 * 60_000);
+  const mk = async (/** @type {string} */ slug, /** @type {string} */ label) => {
+    const dir = path.join(s.state, "sessions", slug);
+    await mkdir(dir, { recursive: true });
+    await writeRecord(dir, /** @type {any} */ ({ slug, source: "OMP_SESSION_ID" }), { bearer: `${label.split(".")[1]}/Sonnet`, label, pid: 999_201, pidSource: "OMP_PID", now: ago });
+    await writeFile(path.join(dir, "lab.cursor"), "1");
+    await writeFile(path.join(dir, "lab#t1.cursor"), "1");
+  };
+  await mk("omp-coding", "lab.coding");
+  await mk("omp-other", "lab.other");
+  const stopped = await stopResident(s.state, "lab.coding", { run: r.fn, sleep: async () => {}, kill: deadKill });
+  assert.equal(stopped.action, "stopped");
+  const { departures } = await import("../src/session.mjs");
+  const gone = await departures(s.state, { selfSlug: "me", roomKey: "lab", kill: deadKill });
+  assert.deepEqual(gone.map((g) => g.slug), ["omp-other"], "the stopped position is not a departure; another gone session still is");
+  const marker = JSON.parse(await readFile(path.join(s.state, "sessions", "omp-coding", "departed", "lab.json"), "utf8"));
+  assert.deepEqual([marker.reason, marker.by], ["stopped", "resident stop lab.coding"]);
+});
+
+test("timer run: asks the OS scheduler to run the installed entry now, outside any session; an entry that is not installed is named, never run in-process", async (t) => {
+  const s = await seat(t);
+  const base = { home: s.home, node: "/opt/node/bin/node", entry: "/opt/agora/bin/agora.mjs", stateRoot: s.state, uid: 501 };
+  const win = timerSpec({ ...base, platform: "win32", node: "C:\\node.exe", entry: "C:\\agora\\bin\\agora.mjs" });
+  const linux = timerSpec({ ...base, platform: "linux" });
+  const mac = timerSpec({ ...base, platform: "darwin" });
+  assert.deepEqual(/** @type {any} */ (win).run, [["schtasks", "/Run", "/TN", "agora-resident-cycle"]]);
+  assert.deepEqual(/** @type {any} */ (linux).run, [["systemctl", "--user", "start", "--no-block", "agora-resident-cycle.service"]]);
+  assert.deepEqual(/** @type {any} */ (mac).run, [["launchctl", "kickstart", "gui/501/agora.resident-cycle"]]);
+  const ok = fakeRunner(() => ({ code: 0 }));
+  const kicked = await runTimer(/** @type {any} */ ("run"), win, { run: ok.fn });
+  assert.equal(kicked.state, "kicked");
+  assert.deepEqual(ok.calls, [["schtasks", "/Run", "/TN", "agora-resident-cycle"]]);
+  const missing = await runTimer(/** @type {any} */ ("run"), win, { run: fakeRunner(() => ({ code: 1, stderr: "ERROR: The system cannot find the file specified." })).fn });
+  assert.equal(missing.state, "missing");
+  assert.match(missing.problems.join(" "), /no cycle timer is installed \(schtasks \/Run \/TN agora-resident-cycle: exit 1 ERROR: The system cannot find the file specified\.\); install it with agora resident timer install/);
 });

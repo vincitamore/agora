@@ -186,6 +186,28 @@ test("want --dry-run: admits or refuses exactly as a want would and records noth
   assert.deepEqual((await readLedger(s.state)).map((e) => e.ev), ["want"]);
 });
 
+test("want --model: a slot onto the family a live counterpart runs is refused by name and recorded; another family is admitted (red leg: the counterpart is not running)", async (t) => {
+  const s = await seat(t);
+  const { lineageRefusal } = await import("../src/resident-start.mjs");
+  const doc = seedDoc({ roles: "open", models: ["sonnet", "opus", "argon"], maxLive: 2, maxHours: 8 });
+  /** @type {any} */ (doc.residents)["lab.review"].lineage = "different-from-coding";
+  const m = load(s, doc);
+  const t0 = Date.parse("2026-01-01T00:00:00.000Z");
+  const a = { requester: "lab.orchestrator", session: "orc", position: "lab.coding", because: "parallel units", now: t0 };
+  const deps = { held: async () => false, lineage: (/** @type {any} */ mm, /** @type {string} */ pos) => lineageRefusal(mm, pos, s.state, {}) };
+  // red leg: review is not running, so a coding slot on review's family binds nothing yet
+  assert.equal(/** @type {any} */ (await recordWant(m, s.state, { ...a, model: "argon", dryRun: true }, deps)).ok, true);
+  const dir = path.join(s.state, "sessions", "omp-review");
+  await mkdir(dir, { recursive: true });
+  await writeRecord(dir, /** @type {any} */ ({ slug: "omp-review", source: "OMP_SESSION_ID" }), { bearer: "review/Gemini", label: "lab.review", pid: process.pid, pidSource: "OMP_PID", model: "other/gemini-9:high" });
+  const refused = /** @type {any} */ (await recordWant(m, s.state, { ...a, model: "argon" }, deps));
+  assert.equal(refused.ok, false);
+  assert.match(refused.reason, /^lineage: lab\.coding-2 on other\/gemini-9:high is family gemini, the family lab\.review runs \(other\/gemini-9:high, from its session omp-review\); the manifest says lab\.review differs from coding$/);
+  assert.deepEqual((await readLedger(s.state)).map((e) => [e.ev, e.model]), [["refuse", "argon"]], "the refusal is on the ledger");
+  const admitted = /** @type {any} */ (await recordWant(m, s.state, { ...a, model: "sonnet" }, deps));
+  assert.deepEqual([admitted.ok, admitted.want.position], [true, "lab.coding-2"]);
+});
+
 test("want: the requester is the position the asking session holds by its own record, never an AGORA_LABEL it sets; a second holder refuses both (red leg: the holder asks)", async (t) => {
   const s = await seat(t);
   const register = async (/** @type {string} */ slug, /** @type {string | undefined} */ label, /** @type {number} */ pid) => {

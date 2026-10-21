@@ -37,7 +37,7 @@ import { configFaceTransports } from "../src/native-faces-wiring.mjs";
 import { INBOUND_MODES, inboundModeOf, setInboundMode, slackInboundTick } from "../src/faces-inbound.mjs";
 import { createServiceLog, readServiceLog, serviceLogPath } from "../src/service-log.mjs";
 import { connect as connectClient } from "../src/client.mjs";
-import { asBoardSubject } from "../src/board-subject.mjs";
+import { asBoardSubject, boardRelease } from "../src/board-subject.mjs";
 import { watch } from "../src/watch.mjs";
 
 /** the watch ended because every attempt to hand a delivery to the task's bridge failed */
@@ -359,7 +359,7 @@ const SCHEMA = {
     },
     session: {
       args: [],
-      options: { "--as <bearer>": "register this session as this bearer (idempotent)", "--label <position>": "this session's position (coding, desk.messenger: lower-case segments joined by .), kept when the bearer changes with the model; else AGORA_LABEL; else the record's own. resident cycle matches a labelled session by it", "--list": "every session with state here, with liveness", "--prune": "remove sessions whose process is gone and whose last write is older than session.staleAfterHours", "--dry-run": "with --prune or --inherit: say what would happen, change nothing", "--forget": "remove this session's record and state", "--inherit <key>": "take over another session's positions, follow set (aliases included) and posted ledger; the source is never touched and its record is not copied, so register with --as afterwards", "--force": "with --inherit: take the source's position in rooms this session already holds one in" },
+      options: { "--as <bearer>": "register this session as this bearer (idempotent)", "--label <position>": "this session's position (coding, desk.messenger: lower-case segments joined by .), kept when the bearer changes with the model; else AGORA_LABEL; else the record's own. resident cycle matches a labelled session by it", "--model <id>": "with --as: the model id this session runs, else AGORA_MODEL (resident start exports it); the record keeps it and its family (the id's model segment: google-antigravity/claude-opus-5-5 is claude), which --list shows, so a signer's family is read from the record, never guessed from the bearer", "--list": "every session with state here, with liveness, model and family", "--prune": "remove sessions whose process is gone and whose last write is older than session.staleAfterHours", "--dry-run": "with --prune or --inherit: say what would happen, change nothing", "--forget": "remove this session's record and state", "--inherit <key>": "take over another session's positions, follow set (aliases included) and posted ledger; the source is never touched and its record is not copied, so register with --as afterwards", "--force": "with --inherit: take the source's position in rooms this session already holds one in" },
       does: "this session's record: who it is, written once, read on every later call",
     },
     join: {
@@ -420,14 +420,14 @@ const SCHEMA = {
       does: "clear this session's stand-down record. This verb does not start a session or re-arm watches; a live session re-arms them itself. agora codex is the separate attached-session launcher",
     },
     resident: {
-      args: ["<prompt <profile-path> | start <slug>...|--all | stop <slug>...|--all | timer install|check|remove | cycle <slug>...|--all | inherit <slug> | succeed [<position>] | want <room>.<role> --because <text> | unwant <want-id|position> | ensure | grant>"],
+      args: ["<prompt <profile-path> | start <slug>...|--all | stop <slug>...|--all | timer install|check|run|remove | cycle <slug>...|--all | inherit <slug> | succeed [<position>] | want <room>.<role> --because <text> | unwant <want-id|position> | ensure | grant>"],
       options: {
         "--all": "start: every standing resident in the manifest (an on-demand row starts only when wanted); stop: every resident in the manifest and every granted position; cycle: every slug in the config's residents table, the manifest and the open wants, after one ensure pass",
         "--manifest <path>": "the resident manifest (default: the config's residentManifest, else <state>/residents.json); agora reads it and never writes it",
         "--plan": "start: print what it would do (prompt, working folder, overlay, harness argv and environment, host command) and whether the position is already held; do nothing",
         "--host <tern|tmux|none>": "start: the host instead of the manifest's; none runs the harness in this terminal (one resident)",
         "--room <alias>": "start: watch and post in this one room instead of the manifest's rooms (a test run)",
-        "--model <id>": "start: this model (or an alias from the manifest's models) instead of the row's; want: the alias the wanted resident runs (one of the grant's models; default the row's)",
+        "--model <id>": "start: this model (or an alias from the manifest's models) instead of the row's; want: the alias the wanted resident runs (one of the grant's models; default the row's). start, want and the cycle's relaunch refuse by name a model whose family breaks a row's lineage rule against a position in force",
         "--run <run.json>": "start: run a recorded start in this terminal (the program a tern or tmux host is given; not typed by hand)",
         "--interval <seconds>": "timer: how often the cycle runs, in whole minutes given as seconds (default 900)",
         "--dry-run": "cycle: print the verdicts, write no marker, restart nothing; ensure: print what it would start and stop, do nothing; want: admit or refuse as the want would, record nothing, start nothing; inherit: say what would be inherited, change nothing",
@@ -442,7 +442,7 @@ const SCHEMA = {
         "--hours <n>": "want: how long the want lasts (default and cap: the grant's maxHours)",
         "--grace <seconds>": "ensure, want, unwant, cycle --all: a granted position whose want ended stops once its turn has ended and been quiet this long (default 60)",
       },
-      does: "standing sessions. prompt prints a profile with the shipped room-mechanics block appended (the resident-sized discipline, so no skill loads at arming). start reads one row of the resident manifest, renders the prompt, builds the working folder, writes the harness overlay (omp: the checkout's agora-room extension; claude: its plugin dir) and starts the harness under its host with one fixed first prompt; a position that already holds a live session, or whose last start is still running under its host, is not started twice. stop ends a resident by the host handle its start recorded (<state>/residents/<slug>/run.json). timer install|check|remove the OS scheduler entry that runs cycle --all (Windows Task Scheduler, systemd user timer, launchd); check changes nothing. cycle finds the newest live session holding the position <slug> (its session --label), or for a session with no position the newest signing as /<slug>, measures its last real inference and context from the harness transcript (harness-written error entries are skipped), and when it is deaf (no live watch, idle past --deaf), past the ceiling (--max-context, idle past --deaf), cold (past --idle) AND large (past --min-context), or asked to succeed and between turns, writes <state>/residents/<slug>/inherit.json naming it and restarts the unit (--restart, the manifest row's restart, the config row's restart, else for a manifest resident stop and start): a successor pays its floor, a cold wake pays the whole context. inherit consumes that marker (the same inheritance as session --inherit) and is a no-op without one. succeed asks the cycle to hand a position (default: this session's) to a fresh session once its turn ends. want, from the session holding a grant (the manifest's grants[<position>]), asks for a resident at <room>.<role>: refused by name past maxLive, outside the grant's models or roles, for a new role with no card, or when every slot is held; admitted, it is recorded and ensure runs. ensure (also run by want, unwant and cycle --all) starts admitted wants, restarts a granted position or messenger row whose host died, and stops a granted position whose want ended (unwanted, expired, the grant removed or narrowed) at its next idle, posting one N8 line per start or stop in the room's Room subject; every want, refusal, start and stop is kept in <state>/residents/grants.jsonl. grant prints the grants and their open wants. Never writes the shared config or the manifest; docs/RESIDENTS.md",
+      does: "standing sessions. prompt prints a profile with the shipped room-mechanics block appended (the resident-sized discipline, so no skill loads at arming). start reads one row of the resident manifest, renders the prompt, builds the working folder, writes the harness overlay (omp: the checkout's agora-room extension; claude: its plugin dir) and starts the harness under its host with one fixed first prompt; a position that already holds a live session, or whose last start is still running under its host, is not started twice, and a start whose model family breaks a row's lineage rule (lineage: different-from-<role>) against a position in force is refused by name. stop ends a resident by the host handle its start recorded (<state>/residents/<slug>/run.json) and marks its sessions as handled, so no departure line follows a stop. timer install|check|run|remove the OS scheduler entry that runs cycle --all (Windows Task Scheduler, systemd user timer, launchd); check changes nothing; run asks the scheduler to run it once now, outside any session (the agora-room extension and plugin do, once per succeed request, at the turn end after it). cycle finds the newest live session holding the position <slug> (its session --label), or for a session with no position the newest signing as /<slug>, measures its last real inference and context from the harness transcript (harness-written error entries are skipped), and when it is deaf (no live watch, idle past --deaf), past the ceiling (--max-context, idle past --deaf), cold (past --idle) AND large (past --min-context), or asked to succeed, between turns and holding no claim it took after the request, writes <state>/residents/<slug>/inherit.json naming it and restarts the unit (--restart, the manifest row's restart, the config row's restart, else for a manifest resident stop and start): a successor pays its floor, a cold wake pays the whole context. inherit consumes that marker (the same inheritance as session --inherit) and is a no-op without one. succeed asks the cycle to hand a position (default: this session's) to a fresh session once its turn ends. want, from the session holding a grant (the manifest's grants[<position>]), asks for a resident at <room>.<role>: refused by name past maxLive, outside the grant's models or roles, for a new role with no card, when every slot is held, or when its model's family breaks a lineage rule; admitted, it is recorded and ensure runs. ensure (also run by want, unwant and cycle --all) starts admitted wants, restarts a granted position or messenger row whose host died, and stops a granted position whose want ended (unwanted, expired, the grant removed or narrowed) at its next idle, posting one N8 line per start or stop in the room's Room subject; every want, refusal, start and stop is kept in <state>/residents/grants.jsonl. grant prints the grants and their open wants. Never writes the shared config or the manifest; docs/RESIDENTS.md",
     },
     doctor: { args: [], options: { "--offline": "skip the identity check", "--repair-tailcat": "restore the cached runtime from its hash-verified bundled capsule" }, does: "config, token presence per room, identity per room, this session and bearer and where each came from, the harness prompt-cache TTL where this seat can read one, and the reads a minute this seat spends with the arithmetic behind the number; three preflights for a resident bearer warn when a watch is armed against a five-minute TTL (cache-ttl), when a watch polls within half to one and a half times a TTL that was read (interval-near-ttl), and when no live watch in a room wakes on all (no-all-watch). Room and watch reports are derived. Tailcat integrity is verified locally; first use expands the bundled capsule into state, and --repair-tailcat explicitly restores a corrupt cache" },
     schema: { args: [], options: { "--json": "the whole surface as JSON, protocol included" }, does: "this description" },
@@ -678,7 +678,7 @@ function faceChoice(values) {
 function recordLine(rec, state) {
   const age = ageHours(rec);
   const seen = age < 1 ? `${Math.round(age * 60)}m ago` : age < 48 ? `${Math.round(age)}h ago` : `${Math.round(age / 24)}d ago`;
-  return `${rec.bearer.padEnd(18)} ${rec.slug.padEnd(30)} ${state.padEnd(6)} pid ${String(rec.pid ?? "-").padEnd(7)} seen ${seen}${rec.label ? `  "${rec.label}"` : ""}`;
+  return `${rec.bearer.padEnd(18)} ${rec.slug.padEnd(30)} ${state.padEnd(6)} pid ${String(rec.pid ?? "-").padEnd(7)} seen ${seen}${rec.label ? `  "${rec.label}"` : ""}${rec.model ? `  ${rec.model} (family ${rec.family})` : ""}`;
 }
 
 /**
@@ -1262,7 +1262,12 @@ async function main(argv) {
     for (const t of twin)
       console.error(`agora: WARNING a live session on this seat already carries the bearer ${bearer.name} (session ${t.slug}, pid ${t.record?.pid ?? "-"}); the room cannot tell them apart. Give each a role segment (${bearer.name}/watch, ${bearer.name}/review).`);
     const hp = harnessPid(cfg, process.env);
-    const rec = await writeRecord(sdir, session, { bearer: bearer.name, label, build, ...hp });
+    // the model id: --model, then the launcher's AGORA_MODEL; neither keeps the record's own
+    const modelArg = values.model !== undefined ? String(values.model) : process.env.AGORA_MODEL;
+    const model = modelArg === undefined || !modelArg.trim() ? undefined : modelArg.trim();
+    if (model !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$/.test(model))
+      throw new AgoraError(`${values.model !== undefined ? "--model" : "AGORA_MODEL"} must be a model id (provider/model:thinking), not ${JSON.stringify(modelArg)}`, EXIT.usage);
+    const rec = await writeRecord(sdir, session, { bearer: bearer.name, label, build, ...hp, ...(model ? { model } : {}) });
     const line = `registered ${rec.bearer} as session ${session.slug} (from ${session.source})${rec.pid ? `  pid ${rec.pid} from ${rec.pidSource}` : `  no harness pid found (looked for ${hp.looked.join(", ")}); liveness unknown`}`;
     if (toStderr) console.error(`agora: ${line}`);
     else if (json) console.log(JSON.stringify({ ...rec, dir: sdir }));
@@ -1710,7 +1715,7 @@ async function main(argv) {
           requester: asked.ok ? asked.requester : undefined, requesterRefusal: asked.ok ? undefined : asked.reason,
           session: session.slug, position: String(rest[0]), model: values.model === undefined ? undefined : String(values.model),
           cards: values.card === undefined ? [] : [resolvePath(String(values.card))], hours, because: String(values.because ?? ""), now, dryRun,
-        }, { held: async (slot) => (await rs.residentState(stateRoot, slot)).running });
+        }, { held: async (slot) => (await rs.residentState(stateRoot, slot)).running, lineage: (mm, slot) => rs.lineageRefusal(mm, slot, stateRoot) });
         if (!r.ok) {
           if (json) console.log(JSON.stringify({ type: "resident-want", action: "refused", position: String(rest[0]), by: asked.ok ? asked.requester : null, reason: r.reason, ...(dryRun ? { dryRun } : {}) }));
           else console.error(`agora: want ${rest[0]} refused${dryRun ? " (dry run)" : ""}: ${r.reason}`);
@@ -1747,19 +1752,19 @@ async function main(argv) {
       const nodeExe = process.versions.bun ? rs.which("node") ?? "node" : process.execPath;
       if (action === "timer") {
         const sub = String(rest[0] ?? "");
-        if (rest.length !== 1 || !["install", "check", "remove"].includes(sub)) throw new AgoraError("agora resident timer install|check|remove [--interval <seconds>]", EXIT.usage);
+        if (rest.length !== 1 || !["install", "check", "run", "remove"].includes(sub)) throw new AgoraError("agora resident timer install|check|run|remove [--interval <seconds>]", EXIT.usage);
         const seconds = values.interval === undefined ? undefined : Number(values.interval);
         const spec = rs.timerSpec({
           platform: process.platform, home: homedir(), env: process.env, node: nodeExe, entry: entryFile, config: cfg.path,
           manifest: values.manifest === undefined ? undefined : resolvePath(String(values.manifest)), seconds, uid: process.getuid?.(), stateRoot,
         });
-        const res = await rs.runTimer(/** @type {'install' | 'check' | 'remove'} */ (sub), spec);
+        const res = await rs.runTimer(/** @type {'install' | 'check' | 'run' | 'remove'} */ (sub), spec);
         if (json) console.log(JSON.stringify(res));
         else {
           console.log(`${res.kind} ${res.name}: ${res.state} (every ${res.interval}: ${res.command.join(" ")})`);
           for (const p of res.problems) console.log(`  ${p}`);
         }
-        return res.state === "ok" || res.state === "installed" || res.state === "removed" ? EXIT.ok : EXIT.error;
+        return res.state === "ok" || res.state === "installed" || res.state === "removed" || res.state === "kicked" ? EXIT.ok : EXIT.error;
       }
       /** @param {Record<string, any>} r */
       const rowLine = (r) => `${String(r.resident).padEnd(18)} ${String(r.action).padEnd(12)} ${r.host ?? ""}${r.handle ? ` ${JSON.stringify(r.handle)}` : ""}${r.bearer ? `  ${r.bearer} in ${r.rooms.join(",")} (wake ${r.wake})` : ""}${r.reason ? `  ${r.reason}` : ""}`;
@@ -1818,7 +1823,11 @@ async function main(argv) {
             console.error(`agora: ${rowLine(row)}`);
             return await exec();
           }
-          console.log(json ? JSON.stringify(row) : rowLine(row));
+          // a lineage refusal starts nothing and is the caller's failure, named in the row
+          if (row.action === "refused") rc = EXIT.error;
+          if (json) console.log(JSON.stringify(row));
+          else if (row.action === "refused") console.error(`agora: ${rowLine(row)}`);
+          else console.log(rowLine(row));
         } catch (e) {
           if (!(e instanceof AgoraError)) throw e;
           rc = EXIT.error;
@@ -2747,6 +2756,26 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       const r = last;
       if (!r) throw new AgoraError(`nothing posted`, EXIT.error);
       if (boardIntent) await completeCarryPost(sdir, boardIntent, r);
+      // A `release:` trailer from the claim's holder releases the board claim, after the message that
+      // carries it has landed; a claim this session does not hold stays, and the line says why.
+      /** @type {string[] | undefined} */
+      let released;
+      const releases = entries.filter((t) => t.key === "release");
+      if ((room.transport === "native" || room.transport === "native-remote") && typeof transport.board === "function" && releases.length) {
+        released = [];
+        const br = await import("../src/board-read.mjs");
+        const fold = br.foldBoard((await br.readBoard(transport)).records, Date.now());
+        const authors = br.claimAuthors(fold, [...(await readWithinFrame(transport, { limit: 1000 }, () => {}))]);
+        /** @type {string | null} */ let accountId = null;
+        try { accountId = (await transport.whoami()).id; } catch { accountId = null; }
+        const me = { accountId, bearer: bearer.name, posted: await readPosted(sdir) };
+        for (const t of releases) {
+          const d = boardRelease(fold, authors, me, t.value);
+          if (!("act" in d)) { console.error(`agora: release ${t.value}: ${d.reason}`); continue; }
+          try { await transport.board(d.act); released.push(d.subject); }
+          catch (e) { console.error(`agora: release ${t.value}: the board refused the release of ${d.subject}: ${e instanceof Error ? e.message : String(e)}`); }
+        }
+      }
       // A native room's stream and a local room's read carry every reply, so a watch there has no
       // thread to follow and the post joins none; everything below is for a room read that omits replies.
       if (transport.repliesInRoom) { /* nothing to follow */ }
@@ -2774,7 +2803,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         const { faces: ackRows, ...receipt } = r;
         if (Array.isArray(ackRows)) faceRows.push(...ackRows.filter((row) => !faceRefusals.some((f) => f.transport === row.transport)));
         else faceRows.push(...(await listFaceRecords(stateRoot, transport.room, { originId: r.id })).filter((row) => !faceRefusals.some((f) => f.transport === row.transport && !row.part)));
-        if (json) console.log(JSON.stringify({ ...receipt, alias: roomAlias, room: transport.room, thread, ...(ids.length > 1 ? { ids } : {}), faces: faceRows.map((row) => faceRowJson(row, { alias: roomAlias, roomId: transport.room })) }));
+        if (json) console.log(JSON.stringify({ ...receipt, alias: roomAlias, room: transport.room, thread, ...(ids.length > 1 ? { ids } : {}), ...(released ? { released } : {}), faces: faceRows.map((row) => faceRowJson(row, { alias: roomAlias, roomId: transport.room })) }));
         else {
           console.log(`posted ${ids.join(" ")}  cursor ${r.cursor}`);
           for (const row of faceRows) console.log(faceRowText(row));
@@ -2782,7 +2811,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         if (!faceRows.length) console.error(`agora: no face rows for ${r.cursor}${wireChoice === "none" ? " (--no-face)" : ""}: ${wireChoice === "none" ? "the post is native only" : "the seat service wrote none (no face of the room selected it, or the service that publishes faces has not run over it); agora faces " + roomAlias + " --for " + r.cursor + " reads them later"}`);
         return EXIT.ok;
       }
-      console.log(json ? JSON.stringify({ ...r, alias: roomAlias, room: transport.room, thread, ...(ids.length > 1 ? { ids } : {}) }) : `posted ${ids.join(" ")}${r.url ? `  ${r.url}` : ""}  cursor ${r.cursor}${r.files?.length ? `  files ${r.files.join(" ")}` : ""}`);
+      console.log(json ? JSON.stringify({ ...r, alias: roomAlias, room: transport.room, thread, ...(ids.length > 1 ? { ids } : {}), ...(released ? { released } : {}) }) : `posted ${ids.join(" ")}${r.url ? `  ${r.url}` : ""}  cursor ${r.cursor}${r.files?.length ? `  files ${r.files.join(" ")}` : ""}`);
       return EXIT.ok;
     }
     case "board":

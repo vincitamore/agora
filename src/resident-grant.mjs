@@ -152,10 +152,13 @@ export function withGranted(manifest, fold) {
 }
 
 /**
- * Admit or refuse one want. Pure but for `held` (is a slot's position running?) and the card files'
- * existence.
+ * Admit or refuse one want. Pure but for `held` (is a slot's position running?), the card files'
+ * existence and `lineage` (would a start of the picked slot on the want's model break a lineage rule
+ * against what runs now? `resident-start.mjs` `lineageRefusal`, asked of the manifest with every open
+ * want and this one as rows).
  * @param {{ manifest: Manifest, fold: Map<string, WantState>, requester: string | undefined, requesterRefusal?: string, session?: string | null,
- *   position: string, model?: string, cards?: string[], hours?: number, because: string, now: number, held: (slot: string) => Promise<boolean> }} a
+ *   position: string, model?: string, cards?: string[], hours?: number, because: string, now: number, held: (slot: string) => Promise<boolean>,
+ *   lineage?: (manifest: Manifest, slot: string) => Promise<string | null> }} a
  * @returns {Promise<{ ok: true, want: Want } | { ok: false, reason: string }>}
  */
 export async function admitWant(a) {
@@ -214,6 +217,11 @@ export async function admitWant(a) {
   try {
     const row = grantedRow(a.manifest, want);
     if (row.host === "none") return refuse(`${a.position} runs on host none: a supervisor has no handle to start it into`);
+    if (a.lineage) {
+      const granted = withGranted(a.manifest, a.fold);
+      const why = await a.lineage({ ...granted, residents: { ...granted.residents, [pick]: row } }, pick);
+      if (why) return refuse(why);
+    }
   } catch (e) {
     return refuse(`the row ${pick} would not validate: ${e instanceof Error ? e.message : String(e)}`);
   }
@@ -233,12 +241,12 @@ export async function withGrantsLock(stateRoot, fn) {
  * Admit and record one want (or its refusal), under the grants lock. A dry run admits or refuses
  * exactly as a want would and records nothing, so it spends no part of the grant.
  * @param {Manifest} manifest @param {string} stateRoot
- * @param {Omit<Parameters<typeof admitWant>[0], 'manifest' | 'fold' | 'held'> & { dryRun?: boolean }} a @param {{ held: (slot: string) => Promise<boolean> }} deps
+ * @param {Omit<Parameters<typeof admitWant>[0], 'manifest' | 'fold' | 'held' | 'lineage'> & { dryRun?: boolean }} a @param {{ held: (slot: string) => Promise<boolean>, lineage?: Parameters<typeof admitWant>[0]['lineage'] }} deps
  */
 export async function recordWant(manifest, stateRoot, a, deps) {
   return withGrantsLock(stateRoot, async () => {
     const fold = foldLedger(await readLedger(stateRoot));
-    const r = await admitWant({ ...a, manifest, fold, held: deps.held });
+    const r = await admitWant({ ...a, manifest, fold, held: deps.held, lineage: deps.lineage });
     if (a.dryRun) return { ...r, dryRun: true };
     if (r.ok) await appendLedger(stateRoot, r.want);
     else await appendLedger(stateRoot, { ev: "refuse", at: new Date(a.now).toISOString(), by: a.requester ?? null, session: a.session ?? null, position: a.position, model: a.model ?? null, reason: r.reason });
@@ -432,7 +440,9 @@ export function seatEnsureDeps(a) {
   const stateRoot = a.ctx.stateRoot;
   return {
     start: async (position, row) => {
-      const plan = planResident({ ...a.manifest, residents: { ...a.manifest.residents, [position]: row } }, position, a.ctx);
+      // the plan sees every open want as a row, so a granted slot's lineage is checked against the others
+      const granted = withGranted(a.manifest, foldLedger(await readLedger(stateRoot)));
+      const plan = planResident({ ...granted, residents: { ...granted.residents, [position]: row } }, position, a.ctx);
       if (plan.host === "none") return { action: "failed", reason: `${position} is on host none: a supervisor has no handle to start it into` };
       const { row: started } = await startResident(plan, stateRoot, { checkout: a.ctx.checkout, home: a.home, run: a.run });
       return { ...started, action: String(started.action) };

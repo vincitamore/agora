@@ -66,6 +66,7 @@ is `defaults` with the row's own fields over it. Fields:
 | `command` | | the harness executable and leading arguments, when it is not `omp` or `claude` on `PATH` |
 | `tenure` | | `standing` (default): `start --all` starts it; `on-demand`: started only when a grant holder wants it ([Grants](#grants)) |
 | `max` | | how many positions of this row may run (default 1): the row's own and, by a want, `-2` .. `-<max>` |
+| `lineage` | | `any` (default) or `different-from-<role>`: this position must run another model family than every position of that role in its room ([Lineage](#lineage)) |
 
 `vars` are text, or `{ "path": ... }` for an absolute path (forward slashes) resolved against the
 manifest. An unknown key, a missing required field, a bad value, a working-folder file outside the
@@ -73,6 +74,33 @@ folder or a skill name with a separator is refused with the file and the field n
 covers all of a row's rooms: the extension and the plugin take one `AGORA_ROOM_WAKE`, so a
 different wake per room needs a per-room form of that setting in both. The manifest's top-level
 `grants` is described under [Grants](#grants).
+
+### Lineage
+
+A model's **family** is read from its model id, never from a bearer: the model segment of
+`provider/model:thinking`, by its leading word (`google-antigravity/claude-opus-5-5:high` is
+`claude`, `gemini-4-argon` is `gemini`, `gpt-*` is `openai`, `grok-*` is `xai`, anything else its
+first word). A bearer names the model (`review/Opus`) and so hides the family; a provider can
+serve several families, so it is no evidence either.
+
+A row's `lineage: "different-from-<role>"` binds it against every position of `<role>` in the same
+room (the position less its last segment), both ways, granted slots included:
+
+- the file itself: rows whose own models break their rule are refused at load, naming both;
+- `start` (and `start --model`), the cycle's relaunch, and the supervisor's start of a want refuse a
+  start whose family equals the family a counterpart **in force** runs, by name and before anything
+  is written or stopped (`action: refused`, exit 1). In force is a session at the position that is
+  not gone (read by its record's `model`), else the run record the last start left (its `model`;
+  a dead host still counts, because the supervisor restarts it on that model). A counterpart that is
+  not running binds nothing, so both positions can be moved to other families one after the other;
+- `want --model` is refused the same way, against the open wants as well, and the refusal is on the
+  ledger.
+
+Every session record carries the model id its session runs and its family (`model`, `family`):
+the agora-room extension registers `session --as <role>/<Model> --model <id>` and registers again
+when the model changes, even when the bearer reads the same; `resident start` exports `AGORA_MODEL`
+for any other registration. So a resident checks a signer's family with `agora session --list
+--json` (the record of the session that holds the signer's position), never by the bearer.
 
 ## Start and stop
 
@@ -95,7 +123,8 @@ agora resident stop <slug>... | --all [--json]
    `AGORA_ROOM_PREAMBLE`, `AGORA_ROOM_CMD` naming this checkout's CLI), the position
    (`AGORA_LABEL=<slug>`), the bearer (omp: `AGORA_ROLE=<role>`, or `<role>-<n>` at a numbered
    slot, so the extension registers `<AGORA_ROLE>/<Model>` itself and follows a model change;
-   Claude Code, or an explicit `bearer`: `AGORA_ACTOR`), and `AGORA_CONFIG` / `AGORA_STATE`;
+   Claude Code, or an explicit `bearer`: `AGORA_ACTOR`), the model id (`AGORA_MODEL`, which
+   `session --as` records with its family), and `AGORA_CONFIG` / `AGORA_STATE`;
 5. starts the harness under its host with **one fixed first prompt** ("You are the `<slug>`
    resident: role, bearer, position. Rooms … Wake … The harness's agora-room extension owns your
    watch: arm none. Run the arming sequence in your profile now, then report in one line."). That is
@@ -151,7 +180,10 @@ and writes no marker.
 `stop` ends a resident by its recorded handle (`tern kill session <id>`, `tmux kill-server`, or the
 harness pid under `none`), waits until the handle is gone, and removes the run record. A resident
 no start recorded is reported as `none`. The session's agora state is kept: the next start at the
-position is a restart, not a departure. `stop --all` also stops every granted position.
+position is a restart, not a departure. A stop is not a departure either: the sessions that held
+the position are marked handled (`reason: stopped`) in every room they held a place in, so no
+sibling's watch posts a "no longer running" line for them. `stop --all` also stops every granted
+position.
 
 Under systemd, the unit owns the process and the tmux server; `--host none` runs the resident in
 it:
@@ -216,7 +248,8 @@ refused, by name and with the cap it hit, when:
 - every slot is held: a row's slots are the row itself when it is `on-demand`, then `-2` .. `-<max>`
   (so a standing row with no `max` cannot be granted at all); a new role's are `<role>`, `-2` ..
   `-<maxLive>`;
-- the row runs on host `none`, which has no handle a supervisor can start into.
+- the row runs on host `none`, which has no handle a supervisor can start into;
+- its model's family breaks a lineage rule against a position in force ([Lineage](#lineage)).
 
 An admitted want becomes a row: the base row (or the defaults, for a new role) with the want's role
 and model, the base's `append` then the want's cards, its own working folder, the default bearer
@@ -343,11 +376,22 @@ slugs from the config's `residents` table, the manifest and the open wants.
 
 **Succeed.** `agora resident succeed [<position>]` (default: this session's position) writes
 `<state>/residents/<position>/succeed.json`, a request to be handed to a fresh session. A resident
-makes it when a piece of work closes past its working size. The next cycle honours it only between
+makes it when a piece of work closes past its working size. The cycle honours it only between
 turns: the transcript's last entry is an assistant message that called no tool, so no tool call,
-child job or delivery in flight is cut off; a turn it cannot read defers it. Honoured, the request
-is removed; a request older than the session that now holds the position was already honoured and
-is cleared.
+child job or delivery in flight is cut off; a turn it cannot read defers it. Nor while the session
+holds a claim it took after the request (read from its own carry evidence: every `claim:` and
+`release:` trailer it posted): it asked at a close and then took the next task, so it is mid-task
+however idle its turn, and the request waits for that claim's release. Honoured, the request is
+removed; a request older than the session that now holds the position was already honoured and is
+cleared.
+
+The request is honoured at the next idle, not at the timer's next tick: at the end of the first
+turn after a request, the agora-room extension (omp) and plugin (Claude Code) run `agora resident
+timer run`, once per request, which asks the OS scheduler to run the installed cycle entry now.
+The cycle runs outside the session's process tree, which matters: its restart stops the session,
+and a child of the session would be stopped with it, so the session never runs the cycle itself.
+With no timer installed the kick says so once (the extension's notice, the plugin's log) and the
+request waits for the next cycle run.
 
 Idle is the age of the last **assistant** message, never the transcript's mtime: hooks and
 monitors append without an inference. A session from a harness whose transcript this cannot read
@@ -371,10 +415,12 @@ and this config (and `--manifest`, when given): a Windows scheduled task `agora-
 `PATH`), or a launchd agent `agora.resident-cycle` (logging to `<state>/residents/cycle.log`).
 `--interval <seconds>` sets the period in whole minutes (default 900). `timer check` compares what
 is installed with what install would write and exits 1 on `missing` or `differs`, changing
-nothing; `timer remove` takes it out.
+nothing; `timer run` asks the scheduler to run the entry once now (`schtasks /Run`, `systemctl
+--user start --no-block`, `launchctl kickstart`) and exits 1 naming `missing` when none is
+installed; `timer remove` takes it out.
 
 ```
-agora resident timer install|check|remove [--interval <seconds>] [--manifest <path>] [--json]
+agora resident timer install|check|run|remove [--interval <seconds>] [--manifest <path>] [--json]
 ```
 
 ## The marker

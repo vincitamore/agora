@@ -33,6 +33,7 @@ import readline from "node:readline";
 import { AgoraError, EXIT, writeFileAtomic } from "./core.mjs";
 import { ACTIVITY_FILE, DEFAULT_BOUNDS, parseActivity } from "./messenger.mjs";
 import { armedAlive, inheritSession, listArmed, listRecords, positionOf } from "./session.mjs";
+import { readCarryEvidence } from "./carry-check.mjs";
 
 export const RESIDENT_SLUG_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 export const DEFAULT_IDLE_SECONDS = 3900; // a one-hour prompt-cache TTL plus a margin
@@ -250,7 +251,7 @@ export function matchesResidentRecord(record, slug) {
  * @param {number} [a.deafSeconds] the grace a resident with no live watch gets before it is deaf
  * @param {number} [a.watching] live watches the session holds (armed records whose pid answers, plus a fresh harness-owned watch heartbeat); absent = not measured, no deaf verdict
  * @param {string | null} [a.activityAt] the heartbeat of the session's harness-owned watch, when it keeps an activity record
- * @param {{ at: string, turn: Awaited<ReturnType<typeof positionTurn>> }} [a.succeed] a pending succeed request and the session's turn
+ * @param {{ at: string, turn: Awaited<ReturnType<typeof positionTurn>>, held?: Array<{ subject: string, at: string }> }} [a.succeed] a pending succeed request, the session's turn, and the claims it took after the request and still holds
  */
 export async function cycleVerdict({ slug, sessions, measure, now = new Date(), idleSeconds = DEFAULT_IDLE_SECONDS, minContext = DEFAULT_MIN_CONTEXT, maxContext = DEFAULT_MAX_CONTEXT, deafSeconds = DEFAULT_DEAF_SECONDS, watching, activityAt, succeed }) {
   assertResidentSlug(slug);
@@ -264,14 +265,17 @@ export async function cycleVerdict({ slug, sessions, measure, now = new Date(), 
   row.bearer = s.record.bearer;
   const m = await measure({ slug: s.slug, ...s.record });
   // Succeed: the resident asked to be handed to a fresh session. Honoured only between turns, so no
-  // tool call, child job or delivery in flight is cut off; a request older than the session that
-  // holds the position now was already honoured.
+  // tool call, child job or delivery in flight is cut off, and never while the session holds a claim
+  // it took after the request (it asked at a close and then took the next task: mid-task, however
+  // idle its turn); a request older than the session that holds the position now was already honoured.
   if (succeed) {
     row.succeed = succeed.at;
     if (m.status === "measured") Object.assign(row, { lastInference: m.lastInference, context: m.context, transcript: m.file });
     if (s.record.startedAt && Date.parse(succeed.at) < Date.parse(s.record.startedAt))
       return { ...row, action: "none", stale: true, reason: `the succeed request of ${succeed.at} predates this session (started ${s.record.startedAt}): it was honoured` };
     const t = succeed.turn;
+    if (succeed.held?.length)
+      return { ...row, action: "none", reason: `succeed requested ${succeed.at}; waits while this session holds ${succeed.held.map((h) => `${h.subject}, claimed ${h.at}`).join("; ")} after the request` };
     if (t.status !== "read") return { ...row, action: "none", reason: `succeed requested ${succeed.at}; its turn cannot be read (${t.status === "unsupported" ? t.reason : "no live session"}), so it waits` };
     if (!t.turnEnded) return { ...row, action: "none", reason: `succeed requested ${succeed.at}; waits for the running turn to end` };
     return { ...row, action: "cycle", reason: `succeed: requested ${succeed.at}; the turn ended ${Math.max(0, Math.floor((now.getTime() - Date.parse(t.at)) / 1000))}s ago` };
@@ -340,8 +344,27 @@ export async function planCycle(stateRoot, slug, opts = {}) {
   const ev = live.length ? await watchEvidence(stateRoot, live[0].slug, { ...deps, now: (opts.now ?? new Date()).getTime() }) : undefined;
   const watching = ev ? ev.armed + (ev.heard ? 1 : 0) : undefined;
   const request = await readSucceedRequest(stateRoot, slug);
-  const succeed = request ? { at: request.at, turn: await positionTurn(stateRoot, slug, { home: opts.home, ...deps }) } : undefined;
+  const succeed = request ? { at: request.at, turn: await positionTurn(stateRoot, slug, { home: opts.home, ...deps }), held: live.length ? await claimsSince(live[0].dir, request.at) : [] } : undefined;
   return cycleVerdict({ slug, sessions, measure: transcriptMeasure({ home: opts.home }), now: opts.now, idleSeconds: opts.idleSeconds, minContext: opts.minContext, maxContext: opts.maxContext, deafSeconds: opts.deafSeconds, watching, activityAt: ev?.activityAt, succeed });
+}
+
+/**
+ * The claims a session took after `since` and has not released, from its own carry evidence (every
+ * `claim:` and `release:` trailer it posted is captured there at the post), oldest first.
+ * @param {string} dir the session's directory @param {string} since an ISO instant
+ * @returns {Promise<Array<{ subject: string, at: string }>>}
+ */
+export async function claimsSince(dir, since) {
+  const from = Date.parse(since);
+  const events = (await readCarryEvidence(dir)).events.filter((e) => e.kind === "claim" || e.kind === "release").sort((a, b) => a.at.localeCompare(b.at));
+  /** @type {Map<string, string>} */
+  const open = new Map();
+  for (const e of events) {
+    const subject = String(e.subject);
+    if (e.kind === "release") open.delete(subject);
+    else if (Date.parse(e.at) > from && !open.has(subject)) open.set(subject, e.at);
+  }
+  return [...open].map(([subject, at]) => ({ subject, at }));
 }
 
 /** @param {string} stateRoot @param {string} slug */

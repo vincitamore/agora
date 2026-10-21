@@ -10,7 +10,7 @@ import path from "node:path";
 import * as messenger from "../src/messenger.mjs";
 import {
   ACTIVITY_FILE, DEFAULT_BOUNDS, NOTICE_TEMPLATES, SEEN_FILE, evidenceOf, fileLock, formatAge, formatNotice, noticeKey, parseBounds, parseNotice, parseSeen,
-  readActivity, readEvidence, readSeen, runTick, seenKey, tick,
+  queueOf, readActivity, readEvidence, readSeen, runTick, seenKey, tick,
 } from "../src/messenger.mjs";
 import { ACTIVITY_FILE as PLUGIN_ACTIVITY_FILE, ActivityTracker, SEEN_FILE as PLUGIN_SEEN_FILE, SeenLog, seenRecord } from "../plugins/claude/agora-room/hooks/lib.js";
 import { resolveAddress } from "../src/board-read.mjs";
@@ -19,7 +19,7 @@ import { withTrailers } from "../src/trailers.mjs";
 // A notice is a pointer, never a paraphrase: it carries ids, ages and names and never the words of
 // the message it points at. This pin is the whole set, by exact equality, so a form that grows a
 // slot for a message's text (or a new form) is a red bar here and a reviewed change, not drift.
-test("the notice set is exactly these nine forms", () => {
+test("the notice set is exactly these twelve forms", () => {
   assert.deepEqual({ ...NOTICE_TEMPLATES }, {
     N1: "Routed: unaddressed request {id}.",
     N2: "Not taken {age} since {since}: {id}.",
@@ -30,6 +30,9 @@ test("the notice set is exactly these nine forms", () => {
     N7: "Reply posted at top level; its subject is {root}.",
     N8: "{position}: {verdict} by {attestor} {age}; path {path}; outcome {outcome}.",
     N9: "No role fits {id}; for {human}.",
+    N10: "Queued {task} not started after {age}, with no task held: {id}.",
+    N11: "Waiting on {person} for {task} after {age}: {id}.",
+    N12: "On arming: {task} waits on {person} after {age}: {id}.",
   });
   assert.ok(Object.isFrozen(NOTICE_TEMPLATES));
   assert.deepEqual({ ...DEFAULT_BOUNDS }, { R: 7_200_000, R2: 14_400_000, I: 3_600_000, Bo: 14_400_000, H: 86_400_000, L: 600_000, T: 30_000, G: 600_000, G2: 1_800_000, S: 7_200_000, D: 300_000 });
@@ -37,7 +40,8 @@ test("the notice set is exactly these nine forms", () => {
 
 test("every form reads back as itself; a slot is one token (red leg: a slot with a space is refused)", () => {
   const sample = { id: "a".repeat(64), age: "16m", since: "posted", position: "desk.coding", verb: "taken", verdict: "unknown", subject: "work:msg:x",
-    addr: "builder", kind: "retired", nearest: "desk.coding", root: "b".repeat(64), attestor: "observe", path: "ensure", outcome: "ready", human: "Ada" };
+    addr: "builder", kind: "retired", nearest: "desk.coding", root: "b".repeat(64), attestor: "observe", path: "ensure", outcome: "ready", human: "Ada",
+    task: "task:parser-fix", person: "Ada" };
   for (const kind of /** @type {(keyof typeof NOTICE_TEMPLATES)[]} */ (Object.keys(NOTICE_TEMPLATES))) {
     const text = withTrailers(formatNotice(kind, sample), [{ key: "re", value: "c".repeat(64) }]) + "\n\n-- messenger/Code";
     const back = parseNotice(text);
@@ -91,6 +95,8 @@ const RECORDS = [
 const SHORT = { ...DEFAULT_BOUNDS, R: 15 * 60_000, R2: 45 * 60_000, I: 2 * 60_000, Bo: 30 * 60_000, H: 4 * 60 * 60_000 };
 /** an activity record as the reader gives it, quiet and fresh unless said otherwise @param {string} session @param {Partial<import("../src/messenger.mjs").Activity>} [o] @returns {import("../src/messenger.mjs").Activity} */
 const ACT = (session, o = {}) => ({ session, turn: "idle", since: T0, lastToolAt: null, lastOutputAt: null, progressAt: null, progress: 0, updatedAt: T0, intervalMs: 2000, ...o });
+/** a holder's record, written just now (a live watch) @param {string} session @param {number} now @param {Partial<import("../src/messenger.mjs").Activity>} o */
+const fresh = (session, now, o) => ACT(session, { updatedAt: now - 30_000, ...o });
 /** @param {any[]} messages @param {{ now: number, board?: any[], records?: any[], titles?: Map<string, string>, pinned?: Set<string>, bounds?: any, seen?: Array<[string, string, number]>, activity?: import("../src/messenger.mjs").Activity[], since?: number }} o */
 function runFull(messages, o) {
   const records = o.records ?? RECORDS;
@@ -234,6 +240,17 @@ test("a foreign addressee, a person, everyone and ack: none draw no clock; an un
   assert.deepEqual(kinds(run([typo], { now: T0 + 1, records: [...RECORDS, { slug: "s-cod", state: live, record: { bearer: "cod/Haiku", label: "desk.cod" }, posted: new Set() }] })), [], "red leg: a holder named cod");
 });
 
+test("N5 names the one live holder a typo is one letter from, and says ambiguous for two (red leg: two letters off names none)", () => {
+  const typo = msg({ at: T0, name: "orchestrator/Opus", text: "please", to: ["desk.codng"] });
+  assert.deepEqual(run([typo], { now: T0 + 1 }).map((a) => a.text), ["to: desk.codng names no holder here (unknown); nearest: desk.coding."]);
+  const far = msg({ at: T0, name: "orchestrator/Opus", text: "please", to: ["desk.cdng"] });
+  assert.deepEqual(run([far], { now: T0 + 1 }).map((a) => a.text), ["to: desk.cdng names no holder here (unknown); nearest: none."]);
+  const twin = { slug: "s-codes", state: live, record: /** @type {any} */ ({ bearer: "codes/Opus", label: "desk.codes" }), posted: new Set() };
+  const both = msg({ at: T0, name: "orchestrator/Opus", text: "please", to: ["desk.codex"] });
+  const coder = { slug: "s-coder", state: live, record: /** @type {any} */ ({ bearer: "coder/Opus", label: "desk.coder" }), posted: new Set() };
+  assert.deepEqual(run([both], { now: T0 + 1, records: [...RECORDS, twin, coder] }).map((a) => a.text), ["to: desk.codex names no holder here (unknown); nearest: ambiguous."]);
+});
+
 test("routing with no model: holder of the subject, else the orchestrator, else N9 to the host human (red leg: no orchestrator stood)", () => {
   const q = msg({ at: T0, kind: "human", name: "Ada", text: "can someone run the suite?" });
   const r = run([q], { now: T0 + 1 });
@@ -274,6 +291,115 @@ test("N7 for a top-level reply naming its subject; N6 for an open titled subject
   assert.deepEqual(kinds(run([root], { now: T0 + 30 * MIN, titles: new Map([[root.id, "Q"]]), board })), []);
 });
 
+// ---- the queue: tasks folded from trailers, the queued-stall clock, the waiting record ----
+/** @param {number} at @param {string} root @param {string} slug @param {string} [text] the orchestrator's intake reply, marking the subject `task: <slug>` */
+const intake = (at, root, slug, text = `queued ${slug}, position 1`) => msg({ at, name: "orchestrator/Opus", text, thread: root, to: ["Ada"], re: root, extra: [{ key: "task", value: slug }] });
+/** @param {number} at @param {string} root @param {string} slug */
+const takeTask = (at, root, slug) => msg({ at, name: "orchestrator/Opus", text: `taking ${slug}`, thread: root, to: ["Ada"], claim: `task:${slug}` });
+/** @param {number} at @param {string} root @param {string} slug */
+const closeTask = (at, root, slug) => msg({ at, name: "orchestrator/Opus", text: `closing ${slug}`, thread: root, to: ["Ada"], release: `task:${slug}`,
+  extra: [{ key: "verdict", value: "pass" }, { key: "exhibit", value: "review 1" }] });
+/** @param {number} at @param {string} root @param {string} slug @param {string} [text] */
+const parkTask = (at, root, slug, text = "waiting: Ada; needs: the operation that is slow") => msg({ at, name: "orchestrator/Opus", text, thread: root, to: ["Ada"], release: `task:${slug}` });
+/** @param {number} at @param {string} text a human request addressed to the orchestrator, so its own clock stops at the intake reply */
+const ask = (at, text) => msg({ at, kind: "human", name: "Ada", text, to: ["orchestrator"] });
+
+test("the queue is a fold over trailers: a task: mark queues, a claim makes it active, a release with a verdict closes it, a release with a waiting line parks it until the person answers (red leg: a reply with no task: mark is no task)", () => {
+  const a = ask(T0, "fix the parser"), b = ask(T0 + MIN, "make it faster"), c = ask(T0 + 2 * MIN, "add slugify");
+  const head = [a, b, c, intake(T0 + 3 * MIN, a.id, "parser-fix"), takeTask(T0 + 4 * MIN, a.id, "parser-fix"),
+    msg({ at: T0 + 5 * MIN, name: "orchestrator/Opus", text: "queued slugify, position 1", thread: c.id, re: c.id, to: ["Ada"] }),
+    takeTask(T0 + 6 * MIN, b.id, "faster")];
+  const park = parkTask(T0 + 7 * MIN, b.id, "faster");
+  const q1 = queueOf([...head, park], new Set());
+  assert.deepEqual(q1.tasks.map((t) => [t.slug, t.root, t.state, t.holder]), [["parser-fix", a.id, "active", "orchestrator/Opus"], ["faster", b.id, "waiting", null]], "red leg: slugify's reply carries no task: mark, so it is no task");
+  assert.deepEqual(q1.tasks[1].waiting, { person: "Ada", id: park.id, ts: T0 + 7 * MIN, seq: Number(park.cursor.split(":")[1]) });
+  const close = closeTask(T0 + 8 * MIN, a.id, "parser-fix");
+  const answer = msg({ at: T0 + 9 * MIN, kind: "human", name: "Ada", text: "the import, under 2s", thread: b.id });
+  const q2 = queueOf([...head, park, close, answer], new Set());
+  assert.deepEqual(q2.tasks.map((t) => [t.slug, t.state, t.since]), [["parser-fix", "done", T0 + 8 * MIN], ["faster", "queued", T0 + 9 * MIN]], "the answer puts it back in the queue");
+  assert.equal(q2.free.ts, T0 + 8 * MIN, "no task held since the close");
+  const prose = parkTask(T0 + 7 * MIN, b.id, "faster", "I will wait for Ada to say which operation is slow.");
+  assert.equal(queueOf([...head, prose], new Set()).tasks[1].state, "queued", "red leg: a waiting in prose is no waiting line; the release hands it back to the queue");
+  // a verdict by the holder in the task's subject closes it even with no release trailer
+  const verdictOnly = msg({ at: T0 + 8 * MIN, name: "orchestrator/Opus", text: "closing", thread: a.id, extra: [{ key: "verdict", value: "pass" }, { key: "exhibit", value: "review 1" }] });
+  assert.equal(queueOf([...head, park, verdictOnly], new Set()).tasks[0].state, "done");
+  const reviewVerdict = msg({ at: T0 + 8 * MIN, name: "review/Argon", text: "pass", thread: a.id, extra: [{ key: "verdict", value: "pass" }, { key: "exhibit", value: "node --test exit 0" }] });
+  assert.equal(queueOf([...head, park, reviewVerdict], new Set()).tasks[0].state, "active", "red leg: another bearer's verdict in the subject does not close the holder's task");
+  // a release after the close (the lease left held by a close with no release trailer) does not reopen it
+  const strayRelease = msg({ at: T0 + 9 * MIN, name: "orchestrator/Opus", text: "releasing the lease", thread: a.id, release: "task:parser-fix" });
+  assert.equal(queueOf([...head, park, verdictOnly, strayRelease], new Set()).tasks[0].state, "done", "a closed task stays closed");
+  assert.equal(queueOf([...head, park, strayRelease], new Set()).tasks[0].state, "queued", "red leg: the same release of a held task hands it back");
+});
+
+test("the queue clock: no task held and the orchestrator idle, one N10 for the queue head after G and the human line (N3 started) after G2 (red legs: a task held; the orchestrator working; no task: mark)", () => {
+  const a = ask(T0, "fix the parser"), b = ask(T0 + MIN, "add slugify");
+  const ms = [a, b, intake(T0 + 2 * MIN, a.id, "parser-fix"), takeTask(T0 + 3 * MIN, a.id, "parser-fix"), intake(T0 + 4 * MIN, b.id, "slugify"), closeTask(T0 + 10 * MIN, a.id, "parser-fix")];
+  const idle = (/** @type {number} */ now) => [fresh("s-orch", now, { since: T0 + 10 * MIN })];
+  assert.deepEqual(kinds(run(ms, { now: T0 + 20 * MIN - 1, activity: idle(T0 + 20 * MIN - 1) })), [], "quiet for less than G since the close");
+  const atG = run(ms, { now: T0 + 20 * MIN, activity: idle(T0 + 20 * MIN) });
+  assert.deepEqual(atG.map((x) => [x.kind, x.text, x.thread]), [["N10", `Queued task:slugify not started after 10m, with no task held: ${b.id}.`, b.id]]);
+  assert.deepEqual(atG[0].trailers, [{ key: "to", value: "orchestrator" }, { key: "re", value: b.id }]);
+  const n10 = notice(T0 + 20 * MIN, "N10", { task: "task:slugify", age: "10m", id: b.id }, atG[0].trailers, b.id);
+  assert.deepEqual(kinds(run([...ms, n10], { now: T0 + 30 * MIN, activity: idle(T0 + 30 * MIN) })), [], "its own post is the record: once");
+  const atG2 = run([...ms, n10], { now: T0 + 40 * MIN, activity: idle(T0 + 40 * MIN) });
+  assert.deepEqual(atG2.map((x) => [x.kind, x.text, x.trailers]), [["N3", `desk.orchestrator has not started ${b.id} after 30m; observe: idle.`, [{ key: "to", value: "Ada" }, { key: "re", value: b.id }]]]);
+  // red leg: the task is still held
+  assert.deepEqual(kinds(run(ms.slice(0, -1), { now: T0 + 60 * MIN, activity: [fresh("s-orch", T0 + 60 * MIN, { since: T0 + 10 * MIN })] })), [], "a task held: the queue waits behind it");
+  // red leg: the orchestrator is working
+  const busy = runFull(ms, { now: T0 + 60 * MIN, activity: [fresh("s-orch", T0 + 60 * MIN, { turn: "busy", since: T0 + 50 * MIN, progressAt: T0 + 59 * MIN })] });
+  assert.deepEqual([busy.acts, busy.held], [[], [{ clock: 3, id: b.id, position: "desk.orchestrator", state: "working" }]], "working: held, never pinged");
+  // red leg: no task: mark on the intake reply
+  const unmarked = [...ms.slice(0, 4), msg({ at: T0 + 4 * MIN, name: "orchestrator/Opus", text: "queued slugify, position 1", thread: b.id, re: b.id, to: ["Ada"] }), ms[5]];
+  assert.deepEqual(kinds(run(unmarked, { now: T0 + 60 * MIN, activity: idle(T0 + 60 * MIN) })), [], "no mark, no task: nothing is queued");
+  // the head only: pinned first, then oldest
+  const c = ask(T0 + 5 * MIN, "add chunk");
+  const three = [...ms, c, intake(T0 + 6 * MIN, c.id, "chunk")];
+  assert.deepEqual(run(three, { now: T0 + 20 * MIN, activity: idle(T0 + 20 * MIN) }).map((x) => [x.kind, x.trailers[1].value]), [["N10", b.id]]);
+  assert.deepEqual(run(three, { now: T0 + 20 * MIN, activity: idle(T0 + 20 * MIN), pinned: new Set([c.id]) }).map((x) => [x.kind, x.trailers[1].value]), [["N10", c.id]], "a pinned task is the head");
+  // a queued task from before the starting point is not raised, and does not hide a newer one (pinned
+  // here, so it would be the head)
+  const old = ask(T0 - 3 * MIN, "old request");
+  const withOld = [old, intake(T0 - 3 * MIN, old.id, "old"), ...ms];
+  const pinOld = new Set([old.id]);
+  assert.deepEqual(run(withOld, { now: T0 + 20 * MIN, activity: idle(T0 + 20 * MIN), since: T0 - MIN, pinned: pinOld }).map((x) => [x.kind, x.trailers[1].value]), [["N10", b.id]], "the head is the first task the messenger may raise");
+  assert.deepEqual(run(withOld, { now: T0 + 20 * MIN, activity: idle(T0 + 20 * MIN), pinned: pinOld }).map((x) => [x.kind, x.trailers[1].value]), [["N10", old.id]], "red leg: with no starting point the old task is the head");
+  // no activity record: the time-only backstops from the later of the queueing and the close
+  assert.deepEqual(kinds(run(ms, { now: T0 + 25 * MIN - 1 })), []);
+  assert.deepEqual(kinds(run(ms, { now: T0 + 25 * MIN })), ["N10"]);
+  assert.deepEqual(kinds(run(ms, { now: T0 + 55 * MIN })), ["N10", "N3"]);
+  // no orchestrator stood: the host human is told at R, once, with no second line
+  const alone = run(ms, { now: T0 + 60 * MIN, records: [RECORDS[0]] });
+  assert.deepEqual(alone.map((x) => [x.kind, x.trailers[0].value]), [["N10", "Ada"]]);
+});
+
+test("the waiting record: one N11 to the person after R, the task queued again once the person answers, one N12 to each orchestrator session that armed after the line (red legs: the line as prose; a session armed before it)", () => {
+  const b = ask(T0, "make it faster");
+  const taken = [b, intake(T0 + MIN, b.id, "faster"), takeTask(T0 + MIN, b.id, "faster")];
+  const park = parkTask(T0 + 2 * MIN, b.id, "faster");
+  const ms = [...taken, park];
+  assert.deepEqual(kinds(run(ms, { now: T0 + 17 * MIN - 1 })), []);
+  const atR = run(ms, { now: T0 + 17 * MIN });
+  assert.deepEqual(atR.map((x) => [x.kind, x.text, x.thread, x.trailers]), [["N11", `Waiting on Ada for task:faster after 15m: ${park.id}.`, b.id, [{ key: "to", value: "Ada" }, { key: "re", value: park.id }]]]);
+  const n11 = notice(T0 + 17 * MIN, "N11", { person: "Ada", task: "task:faster", age: "15m", id: park.id }, atR[0].trailers, b.id);
+  assert.deepEqual(kinds(run([...ms, n11], { now: T0 + 90 * MIN })), [], "once");
+  const prose = [...ms.slice(0, 3), parkTask(T0 + 2 * MIN, b.id, "faster", "I will wait for Ada to say which operation is slow.")];
+  assert.ok(!kinds(run(prose, { now: T0 + 17 * MIN })).includes("N11"), "red leg: a waiting in prose records nothing to surface");
+  // the person answered: no N11, and the task is the queue's again
+  const answer = msg({ at: T0 + 5 * MIN, kind: "human", name: "Ada", text: "the import, under 2s", thread: b.id, to: ["orchestrator"] });
+  const after = kinds(run([...ms, answer], { now: T0 + 30 * MIN }));
+  assert.ok(!after.includes("N11") && after.includes("N10"), after.join(","));
+  // arming: a session that took the position after the line is told once; the one that wrote it is not
+  const armed = (/** @type {string} */ slug, /** @type {number} */ at) => ({ slug, state: live, record: /** @type {any} */ ({ bearer: "orchestrator/Sonnet", label: "desk.orchestrator", startedAt: new Date(at).toISOString() }), posted: new Set() });
+  const writer = [RECORDS[0], armed("s-orch", T0 - 60 * MIN)];
+  assert.deepEqual(kinds(run(ms, { now: T0 + 10 * MIN, records: writer })), [], "red leg: the session that wrote the line armed before it");
+  const successor = [RECORDS[0], armed("s-orch2", T0 + 8 * MIN)];
+  const onArm = run(ms, { now: T0 + 10 * MIN, records: successor });
+  assert.deepEqual(onArm.map((x) => [x.kind, x.text, x.trailers]), [["N12", `On arming: task:faster waits on Ada after 8m: ${park.id}.`, [{ key: "to", value: "orchestrator" }, { key: "re", value: park.id }]]]);
+  const n12 = notice(T0 + 10 * MIN, "N12", { task: "task:faster", person: "Ada", age: "8m", id: park.id }, onArm[0].trailers, b.id);
+  assert.deepEqual(kinds(run([...ms, n12], { now: T0 + 12 * MIN, records: successor })), [], "once per arming");
+  assert.deepEqual(kinds(run([...ms, n12], { now: T0 + 14 * MIN, records: [RECORDS[0], armed("s-orch3", T0 + 13 * MIN)] })), ["N12"], "the next arming is told again");
+});
+
 test("clock 2: a lapsed lease of this seat's gives N4 after I and N3 at R2; a release or verdict settles it; a foreign lease never (red leg: no release)", () => {
   const take = msg({ at: T0, name: "coding/Opus", text: "taking", claim: "parser" });
   const claimRec = (/** @type {string} */ account) => [{ cursor: `${EPOCH}:${seq - 1}`, accountId: account, operationId: "op4", board: { action: "claim", subject: "work:parser" }, expiresAt: new Date(T0 + 60 * MIN).toISOString(), leaseMs: 3_600_000 }];
@@ -292,8 +418,6 @@ test("clock 2: a lapsed lease of this seat's gives N4 after I and N3 at R2; a re
 
 
 // ---- the clocks on evidence ----
-/** a holder's record, written just now (a live watch) @param {string} session @param {number} now @param {Partial<import("../src/messenger.mjs").Activity>} o */
-const fresh = (session, now, o) => ACT(session, { updatedAt: now - 30_000, ...o });
 
 test("clock 1 on evidence: a busy addressee draws no notice however old the delivery; an idle one draws N2 after G and N3 after G2 (red legs: the same delivery with no record; idle)", () => {
   const q = msg({ at: T0, kind: "human", name: "Ada", text: "Parser fails on the fixture", to: ["coding"] });

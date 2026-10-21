@@ -41,7 +41,8 @@ import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { AgoraError, EXIT, expandHome, writeFileAtomic } from "./core.mjs";
 import { ROOM_MECHANICS_DOC, RESIDENT_SLUG_RE, markSuccession, renderResidentPrompt, residentDir } from "./resident.mjs";
-import { POSITION_RE, listRecords, pidAlive, positionOf } from "./session.mjs";
+import { POSITION_RE, listRecords, markRestarted, pidAlive, positionOf, roomOfKey, sessionScope } from "./session.mjs";
+import { LINEAGE_RE, counterparts, differentFrom, lineageClash, modelFamily } from "./lineage.mjs";
 import { modelLabel } from "../plugins/omp/agora-room/index.mjs";
 import { livenessPath } from "./messenger.mjs";
 
@@ -50,7 +51,7 @@ export const HARNESSES = Object.freeze(["omp", "claude", "agora"]);
 export const HOSTS = Object.freeze(["tern", "tmux", "none"]);
 export const WAKES = Object.freeze(["all", "addressed", "mine"]);
 const TOP_KEYS = new Set(["version", "models", "vars", "defaults", "residents", "grants"]);
-const ROW_KEYS = new Set(["role", "harness", "model", "thinking", "rooms", "wake", "profile", "append", "workdir", "skills", "host", "env", "args", "preamble", "bearer", "restart", "command", "tenure", "max"]);
+const ROW_KEYS = new Set(["role", "harness", "model", "thinking", "rooms", "wake", "profile", "append", "workdir", "skills", "host", "env", "args", "preamble", "bearer", "restart", "command", "tenure", "max", "lineage"]);
 const REQUIRED = ["role", "harness", "model", "rooms", "profile", "host"];
 /** `standing`: started by `start --all` and kept; `on-demand`: started only when a grant holder wants it. */
 export const TENURES = Object.freeze(["standing", "on-demand"]);
@@ -61,7 +62,7 @@ const NOT_REQUIRED_FOR_AGORA = new Set(["model", "profile"]);
 /** The model a messenger row records when it names none: its bearer is `<role>/Code`. */
 export const MESSENGER_MODEL = "code";
 /** What the verb itself sets for the harness; a manifest may not set these. */
-export const RESERVED_ENV = Object.freeze(["AGORA_CONFIG", "AGORA_STATE", "AGORA_SESSION", "AGORA_LABEL", "AGORA_ACTOR", "AGORA_ROLE", "AGORA_ROOM", "AGORA_ROOM_WAKE", "AGORA_ROOM_PREAMBLE", "AGORA_ROOM_CMD"]);
+export const RESERVED_ENV = Object.freeze(["AGORA_CONFIG", "AGORA_STATE", "AGORA_SESSION", "AGORA_LABEL", "AGORA_ACTOR", "AGORA_ROLE", "AGORA_MODEL", "AGORA_ROOM", "AGORA_ROOM_WAKE", "AGORA_ROOM_PREAMBLE", "AGORA_ROOM_CMD"]);
 /** A manifest names paths and switches, never a credential. */
 const SECRET_NAME = /TOKEN|SECRET|PASSW(OR)?D|API_?KEY|PRIVATE_?KEY|CREDENTIAL/i;
 const ROLE_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -83,7 +84,7 @@ export const DEFAULT_TIMER_SECONDS = 900;
  *   workdir: { path: string | null, files: Array<{ path: string, parts: FilePart[] }> },
  *   skills: { dir: string, names: string[] } | null, host: 'tern' | 'tmux' | 'none',
  *   env: Record<string, string>, args: string[], preamble: 'on' | 'off' | null, bearer: string | null,
- *   restart: string | null, command: string[] | null, tenure: 'standing' | 'on-demand', max: number,
+ *   restart: string | null, command: string[] | null, tenure: 'standing' | 'on-demand', max: number, lineage: string,
  * }} ManifestResident
  */
 /**
@@ -191,6 +192,9 @@ export function validateManifest(raw, file) {
     if (agoraRow && rooms.length !== 1) bad(`${at}.rooms`, "a messenger row (harness agora) watches one room; give each room its own row");
     const bearer = optStr("bearer");
     if (bearer !== null && !BEARER_RE.test(bearer)) bad(`${at}.bearer`, "a bearer is letters, digits, . _ - in segments joined by /");
+    // which family this position may run on: "any", or "different-from-<role>" in its own room (src/lineage.mjs)
+    const lineage = row.lineage === undefined ? "any" : row.lineage;
+    if (typeof lineage !== "string" || !LINEAGE_RE.test(lineage)) bad(`${at}.lineage`, `lineage must be "any" or "different-from-<role>", not ${JSON.stringify(lineage)}`);
 
     /** @type {Record<string, string>} */
     const env = {};
@@ -263,8 +267,20 @@ export function validateManifest(raw, file) {
       slug, role, harness, model: agoraRow ? MESSENGER_MODEL : str("model"), thinking: agoraRow ? null : optStr("thinking"), rooms: [...new Set(rooms)], wake,
       // a messenger row has no prompt: a profile or an append inherited from defaults is not read
       profile: agoraRow ? "" : resolveIn(str("profile")), append: agoraRow ? [] : strList("append", null).map(resolveIn), workdir, skills: agoraRow ? null : skills, host, env,
-      args: strList("args", null), preamble, bearer, restart: optStr("restart"), command, tenure, max,
+      args: strList("args", null), preamble, bearer, restart: optStr("restart"), command, tenure, max, lineage: /** @type {string} */ (lineage),
     };
+  }
+
+  // the rows' own models must keep their own lineage rules: what `start --all` would refuse, the file refuses first
+  for (const slug of Object.keys(residents)) {
+    const row = residents[slug];
+    if (row.harness === "agora" || differentFrom(row.lineage) === null) continue;
+    const mine = models[row.model] ?? row.model;
+    for (const c of counterparts(lineageRows({ models, residents }), slug)) {
+      const theirs = models[residents[c.position].model] ?? residents[c.position].model;
+      if (modelFamily(theirs) === modelFamily(mine))
+        bad(`residents.${slug}.lineage`, `${slug} runs ${mine}, family ${modelFamily(mine)}, the family of ${c.position} (${theirs}); the manifest says ${c.rule}`);
+    }
   }
 
   /** @type {Record<string, Grant>} */
@@ -475,6 +491,8 @@ export function planResident(manifest, slug, ctx) {
       AGORA_ROOM: rooms.join(","),
       AGORA_ROOM_WAKE: row.wake,
       AGORA_ROOM_CMD: JSON.stringify([ctx.node, ctx.entry]),
+      // the model id the session runs: its registration records it, so the family is read from the id
+      AGORA_MODEL: model,
     };
   if (!ctx.cfg.path) delete harnessEnv.AGORA_CONFIG;
   if (row.preamble && !messenger) harnessEnv.AGORA_ROOM_PREAMBLE = row.preamble;
@@ -541,7 +559,56 @@ export function planResident(manifest, slug, ctx) {
     restart: row.restart,
     // where the messenger's stream keeps its liveness (docs/MESSENGER.md); null for a model harness
     liveness: messenger ? livenessPath(ctx.stateRoot, slug, rooms[0]) : null,
+    // the family this start runs and the positions the manifest's lineage rules bind it against
+    lineage: { family: modelFamily(model), against: counterparts(lineageRows(manifest), slug) },
   };
+}
+
+/**
+ * The rows as the lineage rules read them: each with its model id (the alias resolved).
+ * @param {Pick<Manifest, 'models' | 'residents'>} manifest
+ * @returns {Record<string, import("./lineage.mjs").LineageRow>}
+ */
+export function lineageRows(manifest) {
+  return Object.fromEntries(Object.values(manifest.residents).map((r) => [r.slug, { slug: r.slug, role: r.role, harness: r.harness, lineage: r.lineage, model: manifest.models[r.model] ?? r.model }]));
+}
+
+/**
+ * The counterparts in force, each with the model it runs: a session at the position that is not
+ * gone (its record's model), else the run record the last start left (its model; a host that died
+ * still counts, because the supervisor restarts it on that model), else nothing. A session with no
+ * model recorded is read by its row's model.
+ * @param {string} stateRoot @param {import("./lineage.mjs").Counterpart[]} against
+ * @param {{ kill?: (pid: number, sig: 0) => void, boot?: number }} [deps]
+ */
+export async function modelsInForce(stateRoot, against, deps = {}) {
+  if (!against.length) return [];
+  const records = await listRecords(stateRoot, { kill: deps.kill, boot: deps.boot });
+  /** @type {Array<import("./lineage.mjs").Counterpart & { model: string, source: string }>} */
+  const out = [];
+  for (const c of against) {
+    const held = records.filter((r) => r.state !== "gone" && positionOf(r.record) === c.position)
+      .sort((a, b) => String(b.record?.startedAt ?? "").localeCompare(String(a.record?.startedAt ?? "")))[0];
+    if (held?.record?.model) { out.push({ ...c, model: held.record.model, source: `session ${held.slug}` }); continue; }
+    const run = await readRun(stateRoot, c.position);
+    if (run?.model) out.push({ ...c, model: run.model, source: "run record" });
+    else if (held || run) out.push({ ...c, model: c.rowModel, source: "manifest row" });
+  }
+  return out;
+}
+
+/**
+ * Why a start of `slug` on `model` (its row's model when omitted) would break a lineage rule of the
+ * manifest, or null. What `start`, the cycle's relaunch and the grant's `want --model` all ask.
+ * @param {Pick<Manifest, 'models' | 'residents'>} manifest @param {string} slug @param {string} stateRoot
+ * @param {{ model?: string, kill?: (pid: number, sig: 0) => void, boot?: number }} [deps]
+ */
+export async function lineageRefusal(manifest, slug, stateRoot, deps = {}) {
+  const rows = lineageRows(manifest);
+  const row = rows[slug];
+  if (!row) return null;
+  const model = deps.model === undefined ? row.model : manifest.models[deps.model] ?? deps.model;
+  return lineageClash({ slug, model }, await modelsInForce(stateRoot, counterparts(rows, slug), deps));
 }
 
 /** @typedef {ReturnType<typeof planResident>} ResidentPlan */
@@ -696,7 +763,7 @@ export const runCommand = (argv, opts = {}) => new Promise((resolve) => {
 
 /**
  * @typedef {{ type: 'resident-run', id: string, resident: string, host: 'tern' | 'tmux' | 'none', startedAt: string,
- *   hostInfo: Record<string, string>, handle: Record<string, unknown> | null, pid?: number,
+ *   model?: string, hostInfo: Record<string, string>, handle: Record<string, unknown> | null, pid?: number,
  *   exec: { argv: string[], env: Record<string, string>, cwd: string } }} RunRecord
  */
 
@@ -895,6 +962,9 @@ export async function startResident(plan, stateRoot, deps) {
       await hostKill(state.run, deps).catch(() => {}); // a finished host session left behind (an empty Tern session)
       await removeRun(plan.runFile);
     }
+    // lineage: a start onto the family a counterpart in force runs is refused before anything is written
+    const clash = lineageClash({ slug: plan.resident, model: plan.model }, await modelsInForce(stateRoot, plan.lineage.against, { kill: deps.kill, boot: deps.boot }));
+    if (clash) return { row: { ...base, action: "refused", reason: clash } };
     // a messenger row runs as its position's own session key, so it has nothing to inherit
     const succession = plan.harness === "agora" ? null : await markSuccession(stateRoot, plan.resident, { kill: deps.kill, boot: deps.boot });
     if (succession) base.inherit = { from: succession.from, by: succession.by, at: succession.at };
@@ -902,7 +972,7 @@ export async function startResident(plan, stateRoot, deps) {
     /** @type {RunRecord} */
     const run = {
       type: "resident-run", id: randomUUID(), resident: plan.resident, host: plan.host, startedAt: (deps.now?.() ?? new Date()).toISOString(),
-      hostInfo: plan.hostInfo, handle: null, exec: { argv: plan.argv, env: plan.env, cwd: plan.workdir },
+      model: plan.model, hostInfo: plan.hostInfo, handle: null, exec: { argv: plan.argv, env: plan.env, cwd: plan.workdir },
     };
     await writeFileAtomic(plan.runFile, JSON.stringify(run) + "\n");
     if (plan.host === "none") {
@@ -958,7 +1028,23 @@ export async function stopResident(stateRoot, slug, deps = {}) {
     return { ...base, action: "failed", host: run.host, handle: run.handle, reason: `the ${run.host} handle is still ${now} after the stop (${(killed.stderr || killed.stdout).trim().slice(0, 200) || `exit ${killed.code}`})` };
   }
   await removeRun(runFilePath(stateRoot, slug));
+  await markStopped(stateRoot, slug, deps);
   return { ...base, action: "stopped", host: run.host, handle: run.handle };
+}
+
+/**
+ * A stop is not a departure: the sessions that held the position (now gone or unknown) are marked
+ * as handled in every room they held a place in, so no sibling's watch announces them later. The
+ * stop's own record (the supervisor's N8 line, or the operator's act) is the account of it.
+ * @param {string} stateRoot @param {string} slug @param {{ kill?: (pid: number, sig: 0) => void, boot?: number }} deps
+ */
+async function markStopped(stateRoot, slug, deps) {
+  for (const r of await listRecords(stateRoot, { kill: deps.kill, boot: deps.boot })) {
+    if (r.state === "live" || positionOf(r.record) !== slug) continue;
+    const scope = await sessionScope(r.dir);
+    const rooms = new Set([...scope.rooms, ...scope.armed.map((a) => a.key)].map(roomOfKey));
+    for (const room of rooms) await markRestarted(r.dir, room, `resident stop ${slug}`, "stopped");
+  }
 }
 
 /**
@@ -973,6 +1059,9 @@ export async function restartResident(manifest, slug, ctx, deps = { checkout: ct
   try {
     const plan = planResident(manifest, slug, ctx);
     if (plan.host === "none") return { code: EXIT.error, err: `resident ${slug} is on host none; give it a restart command in the manifest` };
+    // a relaunch that would break lineage is refused before the running session is stopped
+    const clash = lineageClash({ slug, model: plan.model }, await modelsInForce(ctx.stateRoot, plan.lineage.against, { kill: deps.kill, boot: deps.boot }));
+    if (clash) return { code: EXIT.error, err: clash };
     const stopped = await stopResident(ctx.stateRoot, slug, deps);
     if (stopped.action === "failed") return { code: EXIT.error, err: "reason" in stopped ? String(stopped.reason) : "the stop failed" };
     const sleep = deps.sleep ?? ((/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms)));
@@ -1004,8 +1093,9 @@ const shArg = (a) => `'${a.replace(/'/g, "'\\''")}'`;
  */
 
 /**
- * The scheduler entry for this OS, as data: the files it writes and the commands install, check and
- * remove run. Nothing is written here.
+ * The scheduler entry for this OS, as data: the files it writes and the commands install, check,
+ * run (one run now, by the scheduler, outside any session's process tree) and remove run. Nothing is
+ * written here.
  * @param {TimerContext} ctx
  */
 export function timerSpec(ctx) {
@@ -1033,6 +1123,7 @@ export function timerSpec(ctx) {
       install: [["schtasks", "/Create", "/TN", TIMER_NAME, "/XML", xmlFile, "/F"]],
       check: [["schtasks", "/Query", "/TN", TIMER_NAME, "/XML", "ONE"]],
       remove: [["schtasks", "/Delete", "/TN", TIMER_NAME, "/F"]],
+      run: [["schtasks", "/Run", "/TN", TIMER_NAME]],
     };
   }
   for (const a of command) if (/['"\\%$`\n]/.test(a)) throw new AgoraError(`the timer's command cannot carry ${JSON.stringify(a)} (a quote, backslash, % or $ in a path); move the file`, EXIT.usage);
@@ -1062,6 +1153,7 @@ export function timerSpec(ctx) {
       install: [["launchctl", "bootout", `gui/${uid}/${LAUNCHD_LABEL}`], ["launchctl", "bootstrap", `gui/${uid}`, file]],
       check: [["launchctl", "print", `gui/${uid}/${LAUNCHD_LABEL}`]],
       remove: [["launchctl", "bootout", `gui/${uid}/${LAUNCHD_LABEL}`]],
+      run: [["launchctl", "kickstart", `gui/${uid}/${LAUNCHD_LABEL}`]],
     };
   }
   const unitDir = path.join(ctx.env?.XDG_CONFIG_HOME || path.join(ctx.home, ".config"), "systemd", "user");
@@ -1095,6 +1187,7 @@ export function timerSpec(ctx) {
     install: [["systemctl", "--user", "daemon-reload"], ["systemctl", "--user", "enable", "--now", `${TIMER_NAME}.timer`]],
     check: [["systemctl", "--user", "is-enabled", `${TIMER_NAME}.timer`], ["systemctl", "--user", "is-active", `${TIMER_NAME}.timer`]],
     remove: [["systemctl", "--user", "disable", "--now", `${TIMER_NAME}.timer`], ["systemctl", "--user", "daemon-reload"]],
+    run: [["systemctl", "--user", "start", "--no-block", `${TIMER_NAME}.service`]],
   };
 }
 
@@ -1108,8 +1201,10 @@ export function parseTaskXml(doc) {
 }
 
 /**
- * install | check | remove. `check` changes nothing and reports ok, missing or differs.
- * @param {'install' | 'check' | 'remove'} action @param {TimerSpec} spec
+ * install | check | run | remove. `check` changes nothing and reports ok, missing or differs. `run`
+ * asks the scheduler to run the installed entry once now (kicked), or names that none is installed
+ * (missing); it never runs the cycle in this process.
+ * @param {'install' | 'check' | 'run' | 'remove'} action @param {TimerSpec} spec
  * @param {{ run?: Runner, writeFile?: (file: string, data: Buffer | string) => Promise<void>, readFile?: (file: string) => Promise<string>, rm?: (file: string) => Promise<void>, mkdir?: (dir: string) => Promise<void> }} [deps]
  */
 export async function runTimer(action, spec, deps = {}) {
@@ -1123,6 +1218,13 @@ export async function runTimer(action, spec, deps = {}) {
   const ran = [];
   const go = async (/** @type {string[]} */ argv) => { const r = await exec(argv, { timeoutMs: 30_000 }); ran.push({ argv, code: r.code, stderr: r.stderr.trim().slice(0, 300) }); return r; };
 
+  if (action === "run") {
+    for (const argv of spec.run) {
+      const r = await go(argv);
+      if (r.code !== 0) return { ...base, state: "missing", problems: [`no cycle timer is installed (${argv.join(" ")}: exit ${r.code} ${(r.stderr || r.stdout).trim().slice(0, 300)}); install it with agora resident timer install`], ran };
+    }
+    return { ...base, state: "kicked", problems: [], ran };
+  }
   if (action === "check") {
     /** @type {string[]} */
     const problems = [];

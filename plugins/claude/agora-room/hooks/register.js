@@ -19,9 +19,9 @@
 // scope, and the other hooks reach them through `api`. What can be decided from data lives in
 // ./lib.js.
 import {
-  PANE_ID, SUBJECTS_PAGE, TOOL_NAME, COMMAND, ActivityTracker, DeliveryQueue, SeenLog, activityPath, buildSubjects, chooseRoom, childEnvFor, deliveryText,
+  PANE_ID, SUBJECTS_PAGE, TOOL_NAME, COMMAND, ActivityTracker, DeliveryQueue, SeenLog, SucceedKick, activityPath, buildSubjects, chooseRoom, childEnvFor, deliveryText,
   isStopReason, jsonLines, paneTree, parseReadOutput, parseWatchOutput, postArgs, receiptText,
-  resolveConfig, seenPath, seenRecord, statusLine, TO_NOBODY, whoRows,
+  resolveConfig, seenPath, seenRecord, statusLine, succeedPath, TO_NOBODY, whoRows,
 } from './lib.js'
 
 const PROJECT_FILE = '.agora-room.json'
@@ -96,11 +96,26 @@ export function register(on, options) {
     const activityFile = activityPath({ env, childEnv: cfg.childEnv, home, session: key })
     let activity = new ActivityTracker()
     const activityState = { written: 0, lastError: null }
+    // The succeed kick (lib.js SucceedKick): a requested succession happens at this session's next
+    // idle. At a turn end, a request not yet kicked asks the OS scheduler to run the cycle now, once
+    // per request; never the cycle itself, whose restart stops this session and its children.
+    const kick = new SucceedKick()
+    const succeedFile = succeedPath({ env, childEnv: cfg.childEnv, home, position })
 
     const stamp = () => new Date().toISOString()
 
     async function run(args, { pane = false, timeoutMs = POLL_TIMEOUT_MS } = {}) {
       return $.process.run([...cfg.command, ...args], { env: childEnvFor(cfg, { pane, as: cfg.paneAs }), timeoutMs })
+    }
+
+    async function kickSucceed() {
+      if (!succeedFile) return
+      let text = null
+      try { if (await $.fs.exists(succeedFile)) text = await $.fs.read(succeedFile) } catch { text = null }
+      const at = kick.due(text)
+      if (!at) return
+      const said = kick.outcome(at, await run(['resident', 'timer', 'run', '--json']))
+      if (said) $.ui.log(said)
     }
 
     async function persist() {
@@ -414,7 +429,11 @@ export function register(on, options) {
       turnComplete() { if (blocked) { blocked = false; kickDrain() } },
       // evidence of what the session is doing: the main loop's turn start and end, and every row it keeps
       turnStart: async () => { if (activity.turnStart()) await writeActivity(true) },
-      turnEnd: async () => { if (activity.turnEnd()) await writeActivity(true) },
+      turnEnd: async () => {
+        if (activity.turnEnd()) await writeActivity(true)
+        // a turn just ended: a pending succeed request is honoured now, not at the timer's next tick
+        try { await kickSucceed() } catch (err) { lastError = 'succeed kick: ' + String(err?.message ?? err) }
+      },
       appended(door, type) {
         if (door === 'tool-result') activity.tool()
         else if (type === 'assistant') activity.output(true)

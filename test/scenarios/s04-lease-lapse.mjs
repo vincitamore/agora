@@ -2,12 +2,15 @@
 /**
  * S04 · lease-lapse. A position on this seat claims a subject with a short lease and then goes
  * quiet; a second claim by the same position is answered with its release (the control). The
- * board read (`agora board --json`) shows the first lease lapsed, attributed to the bearer whose
- * post carried the claim; the messenger ticks just before expiry + I, just after it, and once more.
+ * release trailer frees the board claim at once (`agora board --json` read right after it shows the
+ * subject free, not held). The board read after the leases run out shows the first lease lapsed,
+ * attributed to the bearer whose post carried the claim; the messenger ticks just before expiry + I,
+ * just after it, and once more.
  *
- * Bars: the board names the lapse and its holder; exactly one N4 to the holder from a tick within I
- * of the grace; the released control draws none. The renew control of the compass's bar has no
- * CLI verb yet (the CLI never renews a lease), so it is not exercised here.
+ * Bars: the board names the lapse and its holder; the release frees its claim on the board; exactly
+ * one N4 to the holder from a tick within I of the grace; the released control draws none. The renew
+ * control of the compass's bar has no CLI verb yet (the CLI never renews a lease), so it is not
+ * exercised here.
  */
 
 import { DEFAULT_BOUNDS } from "../../src/messenger.mjs";
@@ -35,6 +38,10 @@ export const scenario = {
       bar: "0 notices for the claim its holder released by trailer",
       redLeg: "the release names another subject",
     },
+    "release-frees-board": {
+      bar: "a post carrying `release: fixture` from the claim's holder leaves work:fixture free on the board at once",
+      redLeg: "the release names another subject, so work:fixture is still held right after the post",
+    },
   },
   async run(ctx) {
     const seat = await openSeat();
@@ -44,7 +51,12 @@ export const scenario = {
       const long = ctx.red("board-shows-lapse");
       await coding.ok(["post", seat.alias, "Taking the parser fix.", "--claim", "parser", "--lease", String(long ? 600 : LEASE_SECONDS), "--json"]);
       await coding.ok(["post", seat.alias, "Taking the fixture refresh.", "--claim", "fixture", "--lease", String(LEASE_SECONDS), "--json"]);
-      await coding.ok(["post", seat.alias, "Fixture refreshed.", "--release", ctx.red("release-control-quiet") ? "fixtures" : "fixture", "--json"]);
+      const otherSubject = ctx.red("release-control-quiet") || ctx.red("release-frees-board");
+      await coding.ok(["post", seat.alias, "Fixture refreshed.", "--release", otherSubject ? "fixtures" : "fixture", "--json"]);
+      const afterRelease = await seat.cli(["board", seat.alias, "--json"]);
+      if (afterRelease.code !== 0) throw new Error(`board exited ${afterRelease.code}: ${afterRelease.stderr}`);
+      const fixture = afterRelease.stdout.split(/\r?\n/).filter((l) => l.includes('"board-subject"')).map((l) => JSON.parse(l)).find((s) => s.subject === "work:fixture");
+      ctx.check("release-frees-board", "free", fixture?.holder ? "held" : fixture?.lapsed ? "lapsed" : fixture ? "free" : "absent");
       // the leases run on the host's own clock: wait them out once, then read the board
       await new Promise((r) => setTimeout(r, LEASE_SECONDS * 1000 + 500));
       const board = await seat.cli(["board", seat.alias, "--json"]);

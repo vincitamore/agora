@@ -1,13 +1,20 @@
 {
   "scenario": "S34",
-  "recordedOn": "2026-10-20",
-  "build": "f97007f",
+  "recordedOn": "2026-10-21",
+  "build": "a187db1",
   "checks": {
     "deferred-mid-turn": {
       "today": "green",
       "observed": {
         "action": "none",
         "requestKept": true
+      }
+    },
+    "deferred-holding-claim": {
+      "today": "green",
+      "observed": {
+        "action": "none",
+        "names": "task:next"
       }
     },
     "honoured-between-turns": {

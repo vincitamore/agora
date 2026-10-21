@@ -471,3 +471,29 @@ test("CLI: inherit takes the predecessor's place for the successor whose watch a
   assert.equal(again.code, 0);
   assert.match(again.stdout, /already inherited resident lab\.orchestrator from omp-pred/);
 });
+
+test("succeed: a session that took a claim after its request is mid-task, so the cycle defers until that claim is released, then honours at its next idle (red leg: a claim taken before the request)", async (t) => {
+  const s = await seat(t, { bearer: "orchestrator/Opus", turns: [["2026-01-01T00:00:10.000Z", 10, 50_000, 0]] });
+  const dir = path.join(s.state, "sessions", s.slug);
+  await writeRecord(dir, /** @type {any} */ ({ slug: s.slug, source: "CLAUDE_CODE_SESSION_ID" }), { bearer: "orchestrator/Opus", label: "lab.orchestrator" });
+  const { appendCarryEvent } = await import("../src/carry-check.mjs");
+  const t0 = Math.floor(Date.now() / 1000) * 1000 + 5_000; // after the session started, so the request is not stale
+  const iso = (/** @type {number} */ ms) => new Date(t0 + ms).toISOString();
+  let n = 0;
+  const event = (/** @type {string} */ kind, /** @type {string} */ subject, /** @type {number} */ ms) => appendCarryEvent(dir, {
+    version: 1, id: `00000000-0000-4000-8000-${String(++n).padStart(12, "0")}`, kind, at: iso(ms), session: s.slug, bearer: "orchestrator/Opus",
+    ref: { room: "lab", id: `m${n}`, cursor: String(n) }, subject,
+  });
+  const plan = () => /** @type {Promise<any>} */ (resident.planCycle(s.state, "lab.orchestrator", { home: s.home }));
+  await event("claim", "task:before", -60_000); // red leg: a claim taken before the request does not hold it
+  await resident.writeSucceedRequest(s.state, "lab.orchestrator", { by: s.slug, now: new Date(t0) });
+  let v = await plan();
+  assert.equal(v.action, "cycle", `a claim older than the request is the task the close ended: ${v.reason}`);
+  await event("claim", "task:orphans-report", 100_000);
+  v = await plan();
+  assert.equal(v.action, "none");
+  assert.equal(v.reason, `succeed requested ${iso(0)}; waits while this session holds task:orphans-report, claimed ${iso(100_000)} after the request`);
+  await event("release", "task:orphans-report", 400_000);
+  v = await plan();
+  assert.deepEqual([v.action, /^succeed: /.test(v.reason)], ["cycle", true], "released: honoured at the next idle");
+});

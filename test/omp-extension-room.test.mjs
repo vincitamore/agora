@@ -463,7 +463,7 @@ test("room_post: an essential, exec-tier tool; it lands in its thread with to an
   } finally { await r.cleanup(); }
 });
 
-test("role: the session registers as <role>/<Model> and again on a model change; --wake mine delivers only what is addressed to it", async () => {
+test("role: the session registers as <role>/<Model> with its model id, and again on a model change, even one the bearer cannot show; --wake mine delivers only what is addressed to it", async () => {
   const r = await room({ wake: "mine" });
   try {
     const s = await start(r, { env: { AGORA_ROLE: "coding" } });
@@ -472,6 +472,7 @@ test("role: the session registers as <role>/<Model> and again on a model change;
     assert.equal(rec?.bearer, "coding/Haiku");
     assert.equal(rec?.source, "AGORA_SESSION (OMP_SESSION_ID)", "recorded as the omp session the CLI names from OMP_SESSION_ID");
     assert.equal(rec?.label, "coding");
+    assert.deepEqual([rec?.model, rec?.family], ["claude-haiku-4-5", "claude"], "the record carries the model id the session runs, and its family");
 
     await r.say("for Lin", ["--to", "Lin"]);
     await r.say("for the coder", ["--to", "coding/Haiku"]);
@@ -484,6 +485,57 @@ test("role: the session registers as <role>/<Model> and again on a model change;
     rec = await list();
     assert.equal(rec?.bearer, "coding/Sonnet", "the role is the address; the model part follows the model");
     assert.equal(rec?.label, "coding");
+    assert.deepEqual([rec?.model, rec?.family], ["claude-sonnet-5-5", "claude"]);
+
+    // a swap the bearer cannot show: same model name, another provider and family segment intact; then another family
+    s.ctx.model = { id: "google-antigravity/claude-sonnet-5-5" };
+    await s.rt.tick();
+    rec = await list();
+    assert.deepEqual([rec?.bearer, rec?.model, rec?.family], ["coding/Sonnet", "google-antigravity/claude-sonnet-5-5", "claude"], "re-registered for the model, not only the bearer");
+    s.ctx.model = { id: "google-antigravity/gemini-4-argon" };
+    await s.rt.tick();
+    rec = await list();
+    assert.deepEqual([rec?.bearer, rec?.model, rec?.family], ["coding/Argon", "google-antigravity/gemini-4-argon", "gemini"]);
+  } finally { await r.cleanup(); }
+});
+
+test("succeed kick: a turn end with a pending succeed request at this position asks the OS scheduler for a cycle run once per request, never every turn end; no timer installed is said once and nothing crashes (red leg: no request, no kick)", async () => {
+  const r = await room();
+  try {
+    const log = path.join(r.dir, "calls.log");
+    const answer = path.join(r.dir, "timer-answer.json");
+    const wrapper = path.join(r.dir, "wrapper.mjs");
+    await writeFile(answer, JSON.stringify({ code: 0, out: { type: "resident-timer", action: "run", state: "kicked", problems: [] } }));
+    await writeFile(wrapper, [
+      'import { spawnSync } from "node:child_process";',
+      'import { appendFileSync, readFileSync } from "node:fs";',
+      "const args = process.argv.slice(2);",
+      `appendFileSync(${JSON.stringify(log)}, args.join(" ") + "\\n");`,
+      `if (args[0] === "resident" && args[1] === "timer") { const a = JSON.parse(readFileSync(${JSON.stringify(answer)}, "utf8")); process.stdout.write(JSON.stringify(a.out) + "\\n"); process.exit(a.code); }`,
+      `const c = spawnSync(process.execPath, [${JSON.stringify(bin)}, ...args], { stdio: "inherit" }); process.exit(c.status ?? 1);`,
+    ].join("\n"));
+    const state = path.join(r.dir, "state");
+    const s = await start(r, { env: { AGORA_ROOM_CMD: JSON.stringify([process.execPath, wrapper]), AGORA_LABEL: "desk.coding", AGORA_ROLE: "coding", AGORA_STATE: state } });
+    const kicks = async () => (await readFile(log, "utf8")).split("\n").filter((l) => l.startsWith("resident timer run")).length;
+    await turn(s);
+    assert.equal(await kicks(), 0, "red leg: no request, no kick");
+    const { writeSucceedRequest } = await import("../src/resident.mjs");
+    await writeSucceedRequest(state, "desk.coding", { by: "omp-x", now: new Date("2026-01-01T00:00:00.000Z") });
+    await turn(s);
+    assert.equal(await kicks(), 1, "the turn that ended after the request kicks the cycle");
+    await turn(s);
+    await turn(s);
+    assert.equal(await kicks(), 1, "once per request, not every turn end");
+    // a second request (another close) is a new one: one more kick, and the scheduler has no entry
+    await writeFile(answer, JSON.stringify({ code: 1, out: { type: "resident-timer", action: "run", state: "missing", problems: ["no cycle timer is installed"] } }));
+    await writeSucceedRequest(state, "desk.coding", { by: "omp-x", now: new Date("2026-01-01T01:00:00.000Z") });
+    await turn(s);
+    assert.equal(await kicks(), 2);
+    assert.match(String(s.rt.state().succeedKick?.notice), /no cycle timer is installed: the succession requested at 2026-01-01T01:00:00\.000Z waits for the next cycle \(agora resident timer install\)/);
+    await writeSucceedRequest(state, "desk.coding", { by: "omp-x", now: new Date("2026-01-01T02:00:00.000Z") });
+    await turn(s);
+    assert.equal(await kicks(), 3);
+    assert.equal(s.rt.state().succeedKick?.notices, 1, "said once, not at every kick that finds no timer");
   } finally { await r.cleanup(); }
 });
 

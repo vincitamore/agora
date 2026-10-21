@@ -4,8 +4,10 @@
  * session whose transcript is fabricated in the seat's fake home) closes a task and asks to be
  * handed to a fresh session (`resident succeed`), while a tool call is still running: its
  * transcript's last entry is an assistant message that called a tool. The cycle defers the request.
- * The tool returns and the turn ends; the next cycle honours the request: it writes the inherit
- * marker by `succeed`, runs the restart and clears the request.
+ * The tool returns and the turn ends, but the orchestrator has taken the next task (a claim posted
+ * after the request): it is mid-task however idle its turn, and the cycle defers again. It releases
+ * the task; the next cycle honours the request: it writes the inherit marker by `succeed`, runs the
+ * restart and clears the request.
  *
  * The context is small and the session warm, so no other rule of the cycle would act: the request
  * alone is what the cycle honours.
@@ -39,6 +41,10 @@ export const scenario = {
       bar: "once the turn has ended the cycle cycles the position for the succeed request",
       redLeg: "no succeed request was made, so a small, warm session is left alone",
     },
+    "deferred-holding-claim": {
+      bar: "between turns, while the session holds a claim it took after the request, the cycle defers the request and names the claim",
+      redLeg: "the claim was taken before the request (the task the close ended), so the cycle hands it on at once",
+    },
     "marker-and-request": {
       bar: "the honouring cycle writes the inherit marker by succeed and clears the request",
       redLeg: "the honouring cycle runs with --dry-run, so it writes no marker and the request stays",
@@ -54,6 +60,7 @@ export const scenario = {
       await writeFile(transcript, line({ type: "user", timestamp: new Date(t0).toISOString(), message: { role: "user", content: "close the task" } })
         + assistant(new Date(t0 + 30_000).toISOString(), !ctx.red("deferred-mid-turn")));
       const orc = await Agent.start(seat, { session: SESSION, bearer: "orchestrator/Opus", label: POSITION, harness: "claude" });
+      if (ctx.red("deferred-holding-claim")) await orc.post("Taking the next task.", { claim: "task:next" });
       if (!ctx.red("honoured-between-turns")) await orc.ok(["resident", "succeed", "--json"]);
 
       /** @param {string[]} extra */
@@ -69,6 +76,12 @@ export const scenario = {
       // the tool returns and the turn ends
       await appendFile(transcript, line({ type: "user", timestamp: new Date(t0 + 40_000).toISOString(), message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t1" }] } })
         + assistant(new Date(t0 + 50_000).toISOString(), false));
+      // between turns, it takes the next task after asking to be handed on
+      if (!ctx.red("deferred-holding-claim")) await orc.post("Taking the next task.", { claim: "task:next" });
+      const holding = await cycle(["--dry-run"]);
+      ctx.check("deferred-holding-claim", { action: "none", names: "task:next" },
+        { action: holding.action, names: /holds task:next/.test(String(holding.reason ?? "")) ? "task:next" : null }, { note: String(holding.reason ?? "") });
+      await orc.ok(["post", seat.alias, "--json", "--release", "task:next", "--", "Next task closed."]);
       const second = await cycle(ctx.red("marker-and-request") ? ["--dry-run"] : []);
       ctx.check("honoured-between-turns", { action: "cycle", reason: "succeed:" }, { action: second.action === "would-cycle" ? "cycle" : second.action, reason: String(second.reason ?? "").split(" ")[0] }, { note: String(second.reason ?? "") });
       const marker = existsSync(inheritMarkerPath(seat.state, POSITION)) ? JSON.parse(await readFile(inheritMarkerPath(seat.state, POSITION), "utf8")) : null;

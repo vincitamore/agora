@@ -309,6 +309,25 @@ test("the session record: written once, bearer replaced on re-register, startedA
   }
 });
 
+test("the session record carries the model id and its family, read from the id and never from the bearer; kept when a re-register names none (red leg: a bearer whose model name hides the family)", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const s = { slug: "s1", source: "AGORA_SESSION", explicit: true };
+    const sdir = sessionDir(dir, s);
+    const first = await writeRecord(sdir, s, { bearer: "review/Opus", label: "lab.review", model: "google-antigravity/claude-opus-5-5:high" });
+    assert.deepEqual([first.model, first.family], ["google-antigravity/claude-opus-5-5:high", "claude"], "a provider that serves several families does not hide the family");
+    const kept = await writeRecord(sdir, s, { bearer: "review/Opus" });
+    assert.deepEqual([kept.model, kept.family], [first.model, "claude"], "a re-register that names no model keeps the record's");
+    const swapped = await writeRecord(sdir, s, { bearer: "review/Argon", model: "gemini-4-argon" });
+    assert.deepEqual([swapped.model, swapped.family], ["gemini-4-argon", "gemini"]);
+    assert.deepEqual([(await readRecord(sdir))?.model, (await readRecord(sdir))?.family], ["gemini-4-argon", "gemini"], "on disk, as written");
+    const none = await writeRecord(sessionDir(dir, { slug: "s2", source: "x", explicit: true }), { slug: "s2", source: "x", explicit: true }, { bearer: "Grace/watch" });
+    assert.equal("model" in none || "family" in none, false, "no model named, none recorded");
+  } finally {
+    await cleanup();
+  }
+});
+
 test("liveness: a matching boot and an answering pid is live; ESRCH or a reboot is gone; EPERM counts as alive; no pid is unknown", () => {
   const rec = { slug: "s", source: "x", bearer: "Grace", pid: 100, bootEpoch: 1000, startedAt: "t", lastSeen: "t" };
   const esrch = () => { const e = /** @type {NodeJS.ErrnoException} */ (new Error("no such process")); e.code = "ESRCH"; throw e; };

@@ -25,8 +25,8 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  ActivityTracker, DeliveryQueue, SESSION_RE, SeenLog, TOOL_NAME, activityPath, chooseRoom, childEnvFor, deliveryText, jsonLines, parseWatchOutput, postArgs, receiptText,
-  resolveConfig, seenPath, seenRecord, statusLine,
+  ActivityTracker, DeliveryQueue, SESSION_RE, SeenLog, SucceedKick, TOOL_NAME, activityPath, chooseRoom, childEnvFor, deliveryText, jsonLines, parseWatchOutput, postArgs, receiptText,
+  resolveConfig, seenPath, seenRecord, statusLine, succeedPath,
 } from "../../claude/agora-room/hooks/lib.js";
 
 export const CUSTOM_TYPE = "agora-room";
@@ -233,7 +233,7 @@ export function createAgoraRoom(pi, deps = {}) {
   pi.on("session_start", async (/** @type {any} */ _e, /** @type {any} */ ctx) => begin(ctx));
   pi.on("session_switch", async (/** @type {any} */ _e, /** @type {any} */ ctx) => begin(ctx));
   pi.on("agent_start", async () => { rt?.agentStart(); });
-  pi.on("agent_end", async () => { rt?.agentEnd(); });
+  pi.on("agent_end", async () => { await rt?.agentEnd(); });
   // Activity evidence: these handlers only count. They return nothing (a returned value would steer the
   // tool call or rewrite the result) and ignore a subagent's or an advisor's events, which are not this
   // session's own work.
@@ -299,6 +299,8 @@ async function startSession(pi, ctx, deps) {
   let deferring = acp;
   /** @type {string | null} */
   let registeredAs = null;
+  /** The bearer and model id last registered: a model change re-registers even when the bearer reads the same. @type {string | null} */
+  let registeredKey = null;
   let registerWarned = false;
   /** @type {any[]} */
   const timers = [];
@@ -380,14 +382,34 @@ async function startSession(pi, ctx, deps) {
 
   async function register() {
     if (cfg.actor || !cfg.role) return;
-    const bearer = `${cfg.role}/${cfg.modelLabel ?? modelLabel(currentModelId())}`;
-    if (bearer === registeredAs) return;
+    const model = currentModelId();
+    const bearer = `${cfg.role}/${cfg.modelLabel ?? modelLabel(model)}`;
+    // the record carries the model id, so a signer's family is read from it, never from the bearer
+    const key = `${bearer}\n${model ?? ""}`;
+    if (key === registeredKey) return;
     // A launcher's AGORA_LABEL is the session's position; the CLI reads it when --label is absent.
-    const r = await run(["session", "--as", bearer, ...(env.AGORA_LABEL ? [] : ["--label", cfg.role]), "--json"]);
-    if (r.exitCode === 0) { registeredAs = bearer; return; }
+    const r = await run(["session", "--as", bearer, ...(model ? ["--model", String(model)] : []), ...(env.AGORA_LABEL ? [] : ["--label", cfg.role]), "--json"]);
+    if (r.exitCode === 0) { registeredAs = bearer; registeredKey = key; return; }
     lastError = `agora session --as ${bearer} exit ${r.exitCode}: ${r.stderr.slice(0, 200)}`;
     errors += 1;
     if (!registerWarned) { registerWarned = true; notify(lastError, "warning"); } // say it once; try again each tick
+  }
+
+  // ---- the succeed kick: a requested succession happens at this session's next idle ----
+  // `agora resident succeed` leaves a request the cycle honours between turns; the cycle timer may be
+  // a quarter of an hour away. At each turn end a request not yet kicked asks the OS scheduler to run
+  // the cycle now (`agora resident timer run`), once per request. Never the cycle itself: its restart
+  // stops this session, and a child of this process would be stopped with it.
+  const kick = new SucceedKick();
+  const succeedFile = succeedPath({ env, childEnv: cfg.childEnv, home: deps.home ?? env.HOME ?? env.USERPROFILE ?? os.homedir(), position: launched });
+  async function kickSucceed() {
+    if (!succeedFile) return;
+    let text = null;
+    try { if (existsSync(succeedFile)) text = readFileSync(succeedFile, "utf8"); } catch { text = null; }
+    const at = kick.due(text);
+    if (!at) return;
+    const said = kick.outcome(at, await run(["resident", "timer", "run", "--json"]));
+    if (said) notify(said, "warning");
   }
 
   // ---- succession: take the predecessor's place before the first read ----
@@ -577,11 +599,15 @@ async function startSession(pi, ctx, deps) {
       awaiting = null;
       if (activity.turnStart()) writeActivity(true);
     },
-    agentEnd() {
-      if (stopped || !cfg.watchEnabled) return;
-      if (activity.turnEnd()) writeActivity(true);
-      // agent_end runs before the session reports idle; the drain runs right after it.
-      timers.push(ctx.setTimeout(() => drain(), 0));
+    async agentEnd() {
+      if (stopped) return;
+      if (cfg.watchEnabled) {
+        if (activity.turnEnd()) writeActivity(true);
+        // agent_end runs before the session reports idle; the drain runs right after it.
+        timers.push(ctx.setTimeout(() => drain(), 0));
+      }
+      // a turn just ended: a pending succeed request is honoured now, not at the timer's next tick
+      try { await kickSucceed(); } catch (err) { lastError = `succeed kick: ${msgOf(err)}`; }
     },
     /** a tool call began or ended in this session */
     noteTool() { if (!stopped) activity.tool(); },
@@ -598,7 +624,7 @@ async function startSession(pi, ctx, deps) {
       writeActivity(true);
       flush();
     },
-    state: () => ({ queue: dq.queue.length, delivered: dq.deliveredCount, awaiting: awaiting !== null, deferring, registeredAs, inherit: inherited, lastError, rooms: Object.fromEntries(rooms) }),
+    state: () => ({ queue: dq.queue.length, delivered: dq.deliveredCount, awaiting: awaiting !== null, deferring, registeredAs, inherit: inherited, lastError, rooms: Object.fromEntries(rooms), succeedKick: kick.state() }),
   };
 }
 

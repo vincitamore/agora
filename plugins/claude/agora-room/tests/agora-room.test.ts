@@ -20,26 +20,30 @@ const msg = (id: string, text: string, extra: Record<string, unknown> = {}) =>
   JSON.stringify({ type: 'message', alias: 'lab', id, author: { name: 'Ada' }, text: text + '\n\n-- Ada', signedAs: 'Ada', ts: '2026-10-20T10:00:00.000Z', cursor: id, ...extra })
 
 /** Stubs for everything the mod reaches outside itself. `agora` answers each CLI call with `script`. */
-function stubs(on: On, opts: { env?: Record<string, string>; verdict?: 'allow' | 'ask' | 'deny'; script: (a: string[], call: Call) => { exitCode?: number; stdout?: string; stderr?: string } }) {
+function stubs(on: On, opts: { env?: Record<string, string>; verdict?: 'allow' | 'ask' | 'deny'; files?: Map<string, string>; script: (a: string[], call: Call) => { exitCode?: number; stdout?: string; stderr?: string } }) {
   const calls: Call[] = []
   const submitted: string[] = []
   const written = new Map<string, string>()
   const registered: string[] = []
   const statuses: string[] = []
+  const logs: string[] = []
   const asked: string[] = []
   let answer = 'Post'
   mock.env(on, { AGORA_ROOM: 'lab', AGORA_SESSION: 'k', AGORA_ROOM_INTERVAL_MS: '1000', AGORA_ROOM_LIVENESS: '/live/k.json', AGORA_ROOM_PREAMBLE: 'off', HOME: '/home/u', ...(opts.env ?? {}) })
   on('session.start', () => ({ cwd: '/work' }))
   on('session.id', () => ({ value: 'abcdef12-0000' }))
   on('session.messages', () => ({ value: [] }))
-  on('fs.exists', () => ({ value: false }))
+  // the kit resolves a path against the platform root (C:\home\u\... on Windows): match the file by its POSIX tail
+  const file = (p: string) => [...(opts.files ?? new Map<string, string>())].find(([k]) => p.replace(/\\/g, '/').endsWith(k))
+  on('fs.exists', ($: unknown, e: Ev) => ({ value: file(e.path) !== undefined }))
+  on('fs.read', ($: unknown, e: Ev) => ({ value: file(e.path)?.[1] ?? '' }))
   on('fs.write', ($: unknown, e: Ev) => { written.set(e.path, e.text); return { value: undefined } })
   on('store.get', () => ({ value: undefined }))
   on('store.set', () => ({ value: undefined }))
   on('tool.register', ($: unknown, e: Ev) => { registered.push(e.name); return { value: undefined } })
   on('command.register', () => ({ value: undefined }))
   on('ui.status', ($: unknown, e: Ev) => { statuses.push(e.text); return { value: undefined } })
-  on('ui.log', () => ({ value: undefined }))
+  on('ui.log', ($: unknown, e: Ev) => { logs.push(e.text); return { value: undefined } })
   on('ui.toast', () => ({ value: undefined }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('tool.check', () => ({ decision: opts.verdict ?? 'allow', reason: 'a test rule' }))
@@ -54,7 +58,7 @@ function stubs(on: On, opts: { env?: Record<string, string>; verdict?: 'allow' |
     calls.push(call)
     return { value: { exitCode: 0, stdout: '', stderr: '', ...opts.script(call.argv, call) } }
   })
-  return { calls, submitted, written, registered, statuses, asked, answerWith: (a: string) => { answer = a } }
+  return { calls, submitted, written, registered, statuses, logs, asked, answerWith: (a: string) => { answer = a } }
 }
 
 const liveness = (written: Map<string, string>) => JSON.parse([...written].filter(([path]) => path.endsWith('k.json')).map(([, text]) => text).pop() ?? '{}')
@@ -171,6 +175,42 @@ test('activity: the record follows the main loop\'s turns at once and every row 
   await $.turn.complete({ answer: 'done', durationMs: 5, isAborted: false, turnId: 't1', reason: 'answer' } as never)
   expect(rec().turn).toBe('idle')
   expect(liveness(s.written).activity.lastError).toBe(null)
+})
+
+test('succeed kick: a turn end with a pending succeed request asks the OS scheduler for a cycle run once per request; no timer installed is logged once (red leg: no request, no kick)', async ($, on) => {
+  mock.clock(on)
+  const files = new Map<string, string>()
+  const request = '/home/u/.agora/state/residents/desk.orchestrator/succeed.json'
+  let timer = { exitCode: 0, stdout: '{"type":"resident-timer","action":"run","state":"kicked","problems":[]}\n' }
+  const s = stubs(on, {
+    env: { AGORA_LABEL: 'desk.orchestrator' },
+    files,
+    script: (a) => (a[0] === 'cursor' ? { stdout: '{"room":"lab","cursor":"9"}\n' } : a[0] === 'resident' && a[1] === 'timer' ? timer : {}),
+  })
+  on('turn.start', ($: unknown, e: { turnId: string }) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: '' }))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  const kicks = () => s.calls.filter((c) => cli(c.argv) === 'resident timer run').length
+  const turnOnce = async (id: string) => {
+    await $.turn.start({ text: 'go', turnId: id })
+    await $.turn.complete({ answer: 'done', durationMs: 5, isAborted: false, turnId: id, reason: 'answer' } as never)
+  }
+  await turnOnce('t0')
+  expect(kicks()).toBe(0) // red leg: no request, no kick
+  files.set(request, JSON.stringify({ type: 'resident-succeed', slug: 'desk.orchestrator', at: '2026-01-01T00:00:00.000Z', by: 'k' }))
+  await turnOnce('t1')
+  expect(kicks()).toBe(1)
+  await turnOnce('t2')
+  await turnOnce('t3')
+  expect(kicks()).toBe(1) // once per request, not every turn end
+  timer = { exitCode: 1, stdout: '{"type":"resident-timer","action":"run","state":"missing","problems":["no cycle timer is installed"]}\n' }
+  files.set(request, JSON.stringify({ type: 'resident-succeed', slug: 'desk.orchestrator', at: '2026-01-01T01:00:00.000Z', by: 'k' }))
+  await turnOnce('t4')
+  files.set(request, JSON.stringify({ type: 'resident-succeed', slug: 'desk.orchestrator', at: '2026-01-01T02:00:00.000Z', by: 'k' }))
+  await turnOnce('t5')
+  expect(kicks()).toBe(3)
+  const said = s.logs.filter((l) => /no cycle timer is installed/.test(l))
+  expect(said).toEqual(['no cycle timer is installed: the succession requested at 2026-01-01T01:00:00.000Z waits for the next cycle (agora resident timer install)']) // once
 })
 
 test('watch: the delivered text is a short preamble and then the message line', async ($, on) => {

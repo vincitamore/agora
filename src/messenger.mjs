@@ -48,6 +48,9 @@ export const NOTICE_TEMPLATES = Object.freeze({
   N7: "Reply posted at top level; its subject is {root}.",
   N8: "{position}: {verdict} by {attestor} {age}; path {path}; outcome {outcome}.",
   N9: "No role fits {id}; for {human}.",
+  N10: "Queued {task} not started after {age}, with no task held: {id}.",
+  N11: "Waiting on {person} for {task} after {age}: {id}.",
+  N12: "On arming: {task} waits on {person} after {age}: {id}.",
 });
 
 /** @typedef {keyof typeof NOTICE_TEMPLATES} NoticeKind */
@@ -167,6 +170,7 @@ export function noticeKey(kind, f, t) {
     case "N6": return `N6:${f.id}`;
     case "N7": return `N7:${t.re ?? ""}`;
     case "N8": return `N8:${f.position}:${f.path}:${f.outcome}`;
+    case "N10": case "N11": case "N12": return `${kind}:${f.id}`;
   }
   return `${kind}`;
 }
@@ -189,7 +193,8 @@ export function noticeKey(kind, f, t) {
  * a line from which position, and when a session that has ended was last seen alive.
  * `since` is the messenger's starting point in the room (`messengerStart`): nothing that began
  * before it is raised.
- * @typedef {{ clock: 1 | 2, id: string, position: string, state: "working" }} Held
+ * @typedef {{ clock: 1 | 2 | 3, id: string, position: string, state: "working" }} Held
+ * Clock 3 is the queue's: `id` is the head task's subject root.
  */
 
 /** @param {string} cursor */
@@ -233,18 +238,118 @@ export function evidenceOf(holders, activity, now, bounds) {
 }
 
 /**
+ * A room read as the fold reads it: each line's trailers, addresses, subject root and whether it is
+ * a notice, in log order.
+ * @param {any[]} messages
+ */
+function readMessages(messages) {
+  return messages.map((m) => {
+    const text = String(m.text ?? "");
+    const { trailers, to } = parseTrailers(text);
+    return { raw: m, text, id: String(m.id), cursor: String(m.cursor), seq: seqOf(String(m.cursor)), ts: Date.parse(m.ts), thread: m.thread,
+      root: m.thread ?? String(m.id), human: m.author?.kind === "human", accountId: m.author?.id, bearer: String(m.signedAs ?? m.author?.name ?? ""),
+      trailers, to, notice: parseNotice(text) };
+  }).sort((a, b) => a.seq - b.seq);
+}
+
+/** `waiting: <person>; needs: <thing>`, as a line of the body or as the `waiting` trailer. */
+const WAITING_LINE = /^waiting:[ \t]*([^\s;]+)[ \t]*(?:;.*)?$/im;
+
+/**
+ * The person a line says a task waits on: its `waiting` trailer, else a body line of the form
+ * `waiting: <person>; needs: <thing>`. Undefined for anything else (a waiting in prose records none).
+ * @param {{ text: string, trailers: Array<{ key: string, value: string }> }} m
+ */
+function waitingOf(m) {
+  const t = m.trailers.find((x) => x.key === "waiting");
+  return WAITING_LINE.exec(t ? `waiting: ${t.value}` : parseTrailers(m.text).body)?.[1];
+}
+
+/**
+ * @typedef {{
+ *   subject: string, slug: string, root: string, order: number, pinned: boolean,
+ *   state: "queued" | "active" | "waiting" | "done", since: number, sinceSeq: number,
+ *   holder: string | null, waiting: { person: string, id: string, ts: number, seq: number } | null,
+ * }} Task
+ * @typedef {{ tasks: Task[], free: { ts: number, seq: number } }} Queue
+ * A task is a subject (its root's thread) that some line marks `task: <slug>`, or whose
+ * `task:<slug>` some line claims or releases. `order` is its root's place in the log; `since` and
+ * `sinceSeq` are when it entered its state; `holder` is the claim's bearer while active; `waiting`
+ * is the waiting line while parked. `free` is since when no task has been held (`-Infinity` and 0
+ * when none ever was).
+ */
+
+/**
+ * The room's task queue, a fold over trailers and stored nowhere (docs/MESSENGER.md § The queue).
+ * In log order: a `task:` mark queues its subject; `claim: task:<slug>` makes it active, held by the
+ * claim's bearer; `release: task:<slug>` closes it with a `verdict:` on the same line, and of an active
+ * task otherwise parks it with a waiting line or hands it back to the queue; a verdict the holder posts in the task's
+ * subject closes it with no release; and a human's line in a parked task's subject (or citing the
+ * waiting line) is the answer, which hands it back to the queue. The messenger's own notices are
+ * not acts.
+ * @param {ReturnType<typeof readMessages>} ms @param {Set<string>} pinned @returns {Queue}
+ */
+function foldQueue(ms, pinned) {
+  /** @type {Map<string, Task>} */
+  const tasks = new Map();
+  const rootSeq = new Map(ms.map((m) => [m.id, m.seq]));
+  const PREFIX = "work:task:";
+  /** @param {string | undefined} s */
+  const isTask = (s) => s !== undefined && s.startsWith(PREFIX) && s.length > PREFIX.length;
+  let free = { ts: -Infinity, seq: 0 };
+  /** @param {Task} t @param {Task["state"]} state @param {typeof ms[number]} m */
+  const move = (t, state, m) => { t.state = state; t.since = m.ts; t.sinceSeq = m.seq; t.holder = null; t.waiting = null; };
+  for (const m of ms) {
+    if (m.notice) continue;
+    const marked = m.trailers.map((t) => t.key === "task" ? safeSubject(`task:${t.value}`) : t.key === "claim" || t.key === "release" ? safeSubject(t.value) : undefined);
+    for (const s of marked) if (isTask(s) && !tasks.has(/** @type {string} */ (s))) {
+      tasks.set(/** @type {string} */ (s), { subject: /** @type {string} */ (s), slug: /** @type {string} */ (s).slice(PREFIX.length), root: m.root, order: rootSeq.get(m.root) ?? m.seq,
+        pinned: pinned.has(m.root), state: "queued", since: m.ts, sinceSeq: m.seq, holder: null, waiting: null });
+    }
+    const heldBefore = [...tasks.values()].some((t) => t.state === "active");
+    const verdict = m.trailers.some((t) => t.key === "verdict");
+    /** @type {Set<Task>} */
+    const released = new Set();
+    for (const t of m.trailers) {
+      if (t.key !== "claim" && t.key !== "release") continue;
+      const task = tasks.get(/** @type {string} */ (safeSubject(t.value)));
+      if (!task) continue;
+      if (t.key === "claim") { move(task, "active", m); task.holder = m.bearer; continue; }
+      released.add(task);
+      // a release closes any task with a verdict on the line; otherwise it acts only on a held task (a
+      // stray release after a close, freeing the lease, does not reopen it)
+      if (!verdict && task.state !== "active") continue;
+      const person = verdict ? undefined : waitingOf(m);
+      move(task, verdict ? "done" : person ? "waiting" : "queued", m);
+      if (person) task.waiting = { person, id: m.id, ts: m.ts, seq: m.seq };
+    }
+    for (const task of tasks.values()) {
+      if (released.has(task)) continue;
+      if (verdict && task.state === "active" && task.root === m.root && task.holder === m.bearer) move(task, "done", m);
+      else if (m.human && task.state === "waiting" && (task.root === m.root || m.trailers.some((t) => t.key === "re" && t.value === task.waiting?.id))) move(task, "queued", m);
+    }
+    if (heldBefore && ![...tasks.values()].some((t) => t.state === "active")) free = { ts: m.ts, seq: m.seq };
+  }
+  return { tasks: [...tasks.values()], free };
+}
+
+/**
+ * The room's task queue from a read (`foldQueue`): every task with its state, and since when no
+ * task has been held.
+ * @param {any[]} messages @param {Set<string>} pinned the pinned roots (a pinned task is the head)
+ */
+export function queueOf(messages, pinned) {
+  return foldQueue(readMessages(messages), pinned);
+}
+
+/**
  * The acts due at `now`. Pure.
  * @param {TickInput} input
  * @returns {{ acts: Act[], notices: number, held: Held[] }}
  */
 export function tick(input) {
   const { now, bounds, human } = input;
-  const ms = input.messages.map((m) => {
-    const { trailers, to } = parseTrailers(String(m.text ?? ""));
-    return { raw: m, id: String(m.id), cursor: String(m.cursor), seq: seqOf(String(m.cursor)), ts: Date.parse(m.ts), thread: m.thread,
-      root: m.thread ?? String(m.id), human: m.author?.kind === "human", accountId: m.author?.id, bearer: String(m.signedAs ?? m.author?.name ?? ""),
-      trailers, to, notice: parseNotice(String(m.text ?? "")) };
-  }).sort((a, b) => a.seq - b.seq);
+  const ms = readMessages(input.messages);
   const byRef = new Map();
   for (const m of ms) { byRef.set(m.id, m); byRef.set(m.cursor, m); }
   /** key -> the highest sequence a notice for it stands at */
@@ -443,6 +548,57 @@ export function tick(input) {
     if (quiet >= second) {
       const verdict = ev.state !== "none" ? ev.verdict : holders.length ? [...new Set(holders.map((h) => h.verdict))].join("+") : "absent";
       emit("N3", from, { position, verb: "renewed", id: s.subject, age: formatAge(since), verdict }, [{ key: "to", value: human }], author.root);
+    }
+  }
+
+  // clock 3, the queue: with no task held, the head of the queue (pinned first, then oldest) waits on
+  // the orchestrator from the later of its queueing and the last task's end. A working orchestrator
+  // is held; an idle or dark one is told after G of quiet (N10) and the human after G2 (N3
+  // `started`); with no activity record, R and R2 from that instant. With no orchestrator stood the
+  // host human is told at R, once.
+  const queue = foldQueue(ms, input.pinned);
+  const head = queue.tasks.some((t) => t.state === "active") ? undefined
+    : queue.tasks.filter((t) => t.state === "queued" && t.since >= horizon).sort((a, b) => Number(b.pinned) - Number(a.pinned) || a.order - b.order)[0];
+  if (head) {
+    const startTs = Math.max(head.since, queue.free.ts);
+    const after = Math.max(head.sinceSeq, queue.free.seq);
+    const age = now - startTs;
+    const fields = { task: `task:${head.slug}`, age: formatAge(age), id: head.root };
+    const re = { key: "re", value: head.root };
+    const holders = orchestrator();
+    if (!holders.length) { if (age >= bounds.R) emit("N10", after, fields, [{ key: "to", value: human }, re], head.root); }
+    else {
+      const ev = evidenceOf(holders, input.activity, now, bounds);
+      const position = [...new Set(holders.map((h) => h.position ?? h.bearer))].join("+");
+      if (ev.state === "working") { if (age >= bounds.G) held.push({ clock: 3, id: head.root, position, state: "working" }); }
+      else {
+        const quiet = ev.state === "none" ? age : now - Math.max(startTs, ev.since ?? startTs);
+        const [first, second] = ev.state === "none" ? [bounds.R, bounds.R2] : [bounds.G, bounds.G2];
+        if (quiet >= first) emit("N10", after, fields, [{ key: "to", value: "orchestrator" }, re], head.root);
+        if (quiet >= second) {
+          const verdict = ev.state === "none" ? [...new Set(holders.map((h) => h.verdict))].join("+") : ev.verdict;
+          emit("N3", after, { position, verb: "started", id: head.root, age: formatAge(age), verdict }, [{ key: "to", value: human }, re], head.root);
+        }
+      }
+    }
+  }
+
+  // the waiting record: a parked task is named to the person it waits on once, R after the waiting
+  // line (a person keeps no activity record); and to each orchestrator session that took the
+  // position after the line was written (its record's start), once per session, so a successor
+  // learns it from the room and not from memory
+  /** @param {string | null} session */
+  const armedAt = (session) => Date.parse((input.records ?? []).find((r) => r.slug === session)?.record?.startedAt ?? "");
+  for (const t of queue.tasks) {
+    const w = t.waiting;
+    if (t.state !== "waiting" || !w) continue;
+    const fields = { person: w.person, task: `task:${t.slug}`, age: formatAge(now - w.ts), id: w.id };
+    const re = { key: "re", value: w.id };
+    if (w.ts >= horizon && now - w.ts >= bounds.R) emit("N11", w.seq, fields, [{ key: "to", value: w.person }, re], t.root);
+    const arm = Math.max(-Infinity, ...orchestrator().map((h) => armedAt(h.session)).filter((a) => a > w.ts && a <= now));
+    if (arm >= horizon) {
+      const armSeq = ms.reduce((s, x) => (x.ts <= arm ? Math.max(s, x.seq) : s), w.seq);
+      emit("N12", armSeq, fields, [{ key: "to", value: "orchestrator" }, re], t.root);
     }
   }
   return { acts, notices: done.size, held };

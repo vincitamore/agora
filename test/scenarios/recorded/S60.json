@@ -1,7 +1,7 @@
 {
   "scenario": "S60",
-  "recordedOn": "2026-10-20",
-  "build": "df835fe",
+  "recordedOn": "2026-10-21",
+  "build": "a187db1",
   "checks": {
     "form-set-pinned": {
       "today": "green",
@@ -14,7 +14,10 @@
         "N6": "Open subject {id} unclaimed after {age}.",
         "N7": "Reply posted at top level; its subject is {root}.",
         "N8": "{position}: {verdict} by {attestor} {age}; path {path}; outcome {outcome}.",
-        "N9": "No role fits {id}; for {human}."
+        "N9": "No role fits {id}; for {human}.",
+        "N10": "Queued {task} not started after {age}, with no task held: {id}.",
+        "N11": "Waiting on {person} for {task} after {age}: {id}.",
+        "N12": "On arming: {task} waits on {person} after {age}: {id}."
       }
     },
     "no-words-carried": {
@@ -23,6 +26,9 @@
         "carrying": 0,
         "kinds": [
           "N1",
+          "N10",
+          "N11",
+          "N12",
           "N2",
           "N3",
           "N4",

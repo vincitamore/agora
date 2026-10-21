@@ -120,6 +120,10 @@ Beside the seen record the plugin keeps `<state>/sessions/<session key>/activity
 
 The plugin observes with hooks it passes through unchanged: `turn.start` and `turn.complete` of the main loop (a subagent's carry an `agentId` and are ignored) change `turn` and are written at once; `session.append`, which fires once for every row the conversation keeps, marks a tool result (`door: tool-result`) as a tool call, an assistant row as output, and any other row as a transcript entry, and the record is written on the poll tick the plugin already runs, or as a 30 s heartbeat when nothing changed. It adds no timer and no wake. On session end it records `idle`.
 
+### Succeed kick
+
+At the end of the main loop's first turn after a succeed request at the session's position (`<state>/residents/<position>/succeed.json`, written by `agora resident succeed`; same state-root rule as the seen record), the plugin runs `agora resident timer run --json`, once per request: the OS scheduler runs the cycle now, outside this session's process tree, so the request is honoured at this idle and not at the timer's next tick. It never runs the cycle itself, whose restart stops this session and its children. With no timer installed it logs so once and the request waits for the next cycle. The plugin registers no session itself: a Claude Code resident registers by its profile's `agora session --as`, which records the launcher's `AGORA_MODEL` and its family (`docs/RESIDENTS.md` § Lineage).
+
 ### `room_post`
 
 The model sees the tool as `mcp__agora-room__room_post`:

@@ -12,7 +12,7 @@ import { promisify } from "node:util";
 import {
   ACTIVITY_FILE, ACTIVITY_HEARTBEAT_MS, ActivityTracker, DeliveryQueue, SEEN_FILE, SEEN_KEEP, SeenLog, TO_NOBODY, activityPath, ago, bodyText, buildSubjects, chooseRoom, childEnvFor, clip, deliveryText, formatLine, isStopReason, normaliseMessage,
   paneSessionKey, paneTree, parseCommand, parseList, parseReadOutput, parseSwitch, parseWatchOutput, preambleText, presenceLine,
-  postArgs, receiptText, resolveConfig, seenPath, seenRecord, statusLine, subjectTitle, targetChip, whoRows, MAX_POST_CHARS,
+  postArgs, receiptText, resolveConfig, seenPath, seenRecord, statusLine, subjectTitle, targetChip, whoRows, MAX_POST_CHARS, SucceedKick, succeedPath,
 } from "../plugins/claude/agora-room/hooks/lib.js";
 import { tmp } from "./helpers.mjs";
 
@@ -180,6 +180,27 @@ test("seenPath: the session's own state directory, under the state root the CLI 
   assert.equal(seenPath({ env: { AGORA_STATE: "  " }, home, session: "k" }), "C:/Users/g/.agora/state/sessions/k/seen.jsonl", "an empty value does not shadow the default");
   assert.equal(seenPath({ home: null, session: "k" }), null, "no home and no state: nowhere to write");
   assert.equal(seenPath({ home, session: "../x" }), null, "a session key is one safe directory name");
+});
+
+test("succeed kick: the request file under the state root by position; a request is kicked once, a new request again; no timer is said once (red leg: no file, nothing due)", () => {
+  const home = "C:\\Users\\g";
+  assert.equal(succeedPath({ home, position: "desk.orchestrator" }), "C:/Users/g/.agora/state/residents/desk.orchestrator/succeed.json");
+  assert.equal(succeedPath({ env: { AGORA_STATE: "/s/state" }, home, position: "desk.orchestrator" }), "/s/state/residents/desk.orchestrator/succeed.json");
+  assert.equal(succeedPath({ home, position: null }), null, "a session at no position kicks nothing");
+  assert.equal(succeedPath({ home, position: "../x" }), null);
+  const k = new SucceedKick();
+  const req = (/** @type {string} */ at) => JSON.stringify({ type: "resident-succeed", slug: "desk.orchestrator", at, by: "s" });
+  assert.equal(k.due(null), null, "red leg: no file");
+  assert.equal(k.due("not json"), null);
+  assert.equal(k.due(req("2026-01-01T00:00:00.000Z")), "2026-01-01T00:00:00.000Z");
+  assert.equal(k.due(req("2026-01-01T00:00:00.000Z")), null, "the same request is not kicked twice");
+  const kicked = { exitCode: 0, stdout: '{"type":"resident-timer","state":"kicked"}\n', stderr: "" };
+  const missing = { exitCode: 1, stdout: '{"type":"resident-timer","state":"missing"}\n', stderr: "" };
+  assert.equal(k.outcome("2026-01-01T00:00:00.000Z", kicked), null);
+  assert.equal(k.due(req("2026-01-01T01:00:00.000Z")), "2026-01-01T01:00:00.000Z", "a new request is kicked");
+  assert.match(String(k.outcome("2026-01-01T01:00:00.000Z", missing)), /^no cycle timer is installed: the succession requested at 2026-01-01T01:00:00\.000Z waits for the next cycle/);
+  assert.equal(k.outcome("2026-01-01T02:00:00.000Z", missing), null, "said once");
+  assert.deepEqual([k.state().notices, k.state().kickedFor], [1, "2026-01-01T01:00:00.000Z"]);
 });
 
 test("seen record: the line a messenger reads; the log keeps the newest SEEN_KEEP, continues a file, and drops a torn line", () => {

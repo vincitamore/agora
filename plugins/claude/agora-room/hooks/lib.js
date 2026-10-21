@@ -290,24 +290,95 @@ export const SEEN_FILE = "seen.jsonl";
 export const SEEN_KEEP = 200;
 
 /**
- * A file in a session's own state directory. The state root is the one the agora CLI uses for the
- * same child: AGORA_STATE (the project file's `env` object counts) or `<home>/.agora/state`. A
- * session whose state root comes from the agora config's `state` key must have AGORA_STATE set to it,
- * or its records land where the seat's messenger does not look and its clocks run on the time-only
- * backstops.
- * @param {{ env?: Record<string, string | undefined>, childEnv?: Record<string, string>, home: string | null, session: string }} p @param {string} name
+ * The state root the agora CLI uses for the same child: AGORA_STATE (the project file's `env` object
+ * counts) or `<home>/.agora/state`. A session whose state root comes from the agora config's `state`
+ * key must have AGORA_STATE set to it, or its records land where the seat's messenger does not look
+ * and its clocks run on the time-only backstops.
+ * @param {{ env?: Record<string, string | undefined>, childEnv?: Record<string, string>, home: string | null }} p
  * @returns {string | null} null when no home or state is known
  */
-function sessionFile({ env = {}, childEnv = {}, home, session }, name) {
+function stateRoot({ env = {}, childEnv = {}, home }) {
   const norm = (/** @type {string} */ s) => s.replace(/\\/g, "/").replace(/\/+$/, "");
   const named = [childEnv.AGORA_STATE, env.AGORA_STATE].find((v) => typeof v === "string" && v.trim());
   let root = named ? String(named).trim() : home ? `${norm(String(home))}/.agora/state` : null;
   if (root && home && (root === "~" || root.startsWith("~/") || root.startsWith("~\\"))) root = `${norm(String(home))}${root.slice(1)}`;
-  return root && SESSION_RE.test(session) ? `${norm(root)}/sessions/${session}/${name}` : null;
+  return root ? norm(root) : null;
+}
+
+/**
+ * A file in a session's own state directory, under the CLI's state root (`stateRoot`).
+ * @param {{ env?: Record<string, string | undefined>, childEnv?: Record<string, string>, home: string | null, session: string }} p @param {string} name
+ * @returns {string | null} null when no home or state is known
+ */
+function sessionFile({ env = {}, childEnv = {}, home, session }, name) {
+  const root = stateRoot({ env, childEnv, home });
+  return root && SESSION_RE.test(session) ? `${root}/sessions/${session}/${name}` : null;
 }
 
 /** The seen file of a session. @param {Parameters<typeof sessionFile>[0]} p */
 export function seenPath(p) { return sessionFile(p, SEEN_FILE); }
+
+/** A position, as the CLI writes it under `<state>/residents/`. */
+const POSITION_RE = /^(?=.{1,64}$)[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9][a-z0-9_-]*)*$/;
+
+/**
+ * The succeed request a position's cycle reads (`agora resident succeed`): `<state>/residents/<position>/succeed.json`.
+ * @param {{ env?: Record<string, string | undefined>, childEnv?: Record<string, string>, home: string | null, position: string | null }} p
+ * @returns {string | null}
+ */
+export function succeedPath({ env = {}, childEnv = {}, home, position }) {
+  const root = stateRoot({ env, childEnv, home });
+  return root && position && POSITION_RE.test(position) ? `${root}/residents/${position}/succeed.json` : null;
+}
+
+/**
+ * The succeed kick: a session that asked to be handed on (`resident succeed`) is handed on at its
+ * next idle, not at the cycle timer's next tick. At each turn end the watch reads the request file;
+ * a request it has not kicked yet is kicked once (`agora resident timer run`: the OS scheduler runs
+ * the cycle now, outside this session's process tree, which the cycle's restart ends). A kick that
+ * finds no timer installed is said once; the cycle then honours the request when it next runs.
+ */
+export class SucceedKick {
+  constructor() {
+    /** The request time already kicked. @type {string | null} */
+    this.kickedFor = null;
+    /** @type {string | null} */
+    this.notice = null;
+    this.notices = 0;
+    /** @type {string | null} */
+    this.lastError = null;
+  }
+
+  /** The request to kick now, from the file's text (null when there is no file), or null. @param {string | null} text */
+  due(text) {
+    if (text === null) return null;
+    let at = null;
+    try { const rec = JSON.parse(text); at = rec && rec.type === "resident-succeed" && typeof rec.at === "string" ? rec.at : null; } catch { at = null; }
+    if (!at || at === this.kickedFor) return null;
+    this.kickedFor = at;
+    return at;
+  }
+
+  /**
+   * The kick's outcome; returns the line to say, once, when the scheduler did not take it.
+   * @param {string} at @param {{ exitCode: number, stdout: string, stderr: string }} r
+   * @returns {string | null}
+   */
+  outcome(at, r) {
+    let state = null;
+    for (const line of String(r.stdout).split(/\r?\n/)) { try { const j = JSON.parse(line); if (j && j.type === "resident-timer") state = j.state; } catch { /* not JSON */ } }
+    if (r.exitCode === 0 && state === "kicked") { this.lastError = null; return null; }
+    this.lastError = `agora resident timer run exit ${r.exitCode}${state ? ` (${state})` : ""}: ${String(r.stderr).slice(0, 200)}`;
+    if (this.notices > 0) return null;
+    this.notices += 1;
+    this.notice = state === "missing"
+      ? `no cycle timer is installed: the succession requested at ${at} waits for the next cycle (agora resident timer install)`
+      : `the succession requested at ${at} could not kick the cycle (${this.lastError}); it waits for the next cycle`;
+    return this.notice;
+  }
+
+  state() { return { kickedFor: this.kickedFor, notice: this.notice, notices: this.notices, lastError: this.lastError }; }
+}
 
 /**
  * One seen line. `position` is the session's label (its place on the seat), `readAt` when the poll

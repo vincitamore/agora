@@ -163,5 +163,16 @@ test("resolve: position, role, seat, everyone, person, foreign holder, retired, 
   assert.deepEqual([r("triage").kind, r("triage").why], ["none", "retired"]);
   assert.deepEqual([r("cod").kind, r("cod").why, r("cod").nearest], ["none", "half-name", "desk.coding"], "half a segment is never a match");
   assert.deepEqual([r("nobody").kind, r("nobody").why, r("nobody").nearest], ["none", "unknown", null]);
+  // one letter off a live holder's name: the nearest is that holder, never a guess between two
+  assert.deepEqual([r("desk.codng").kind, r("desk.codng").why, r("desk.codng").nearest], ["none", "unknown", "desk.coding"], "a dropped letter");
+  assert.deepEqual([r("revew").why, r("revew").nearest], ["unknown", "desk.review"], "a dropped letter in a role");
+  assert.deepEqual(r("desk.revieq").nearest, "desk.review", "a substituted letter");
+  assert.deepEqual(r("desk.codingg").nearest, "desk.coding", "an added letter");
+  assert.deepEqual(r("desk.triag").nearest, null, "red leg: a gone holder is no neighbour (its retired name is the retired branch's)");
+  assert.deepEqual(r("desk.cdng").nearest, null, "red leg: two letters off is no neighbour");
+  const twin = (/** @type {string} */ role) => ({ slug: `s-${role}`, state: live, record: /** @type {any} */ ({ bearer: `${role}/Opus`, label: `desk.${role}` }), posted: new Set() });
+  const twins = { ...ctx, records: [...records, twin("coder"), twin("codes")] };
+  assert.equal(resolveAddress("desk.coder", twins).kind, "position");
+  assert.deepEqual([resolveAddress("desk.codex", twins).why, resolveAddress("desk.codex", twins).nearest], ["unknown", "ambiguous"], "two holders one letter off: ambiguous, never a guess");
   assert.equal(resolveAddress("coding", { ...ctx, records: null }).context, "room-only");
 });

@@ -1,0 +1,31 @@
+{
+  "scenario": "S64",
+  "recordedOn": "2026-10-21",
+  "build": "a187db1",
+  "checks": {
+    "queued-stall-notice": {
+      "today": "green",
+      "observed": {
+        "n10": 1,
+        "to": "orchestrator",
+        "atG": true,
+        "inThread": true,
+        "n3": 1,
+        "n3To": "Ada"
+      }
+    },
+    "active-task-quiet": {
+      "today": "green",
+      "observed": 0
+    },
+    "waiting-surfaced": {
+      "today": "green",
+      "observed": {
+        "n11": 1,
+        "n11To": "Ada",
+        "n12": 1,
+        "n12To": "orchestrator"
+      }
+    }
+  }
+}

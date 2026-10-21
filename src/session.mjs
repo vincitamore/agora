@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { AgoraError, EXIT, readCursorFile, writeCursor, writeFileAtomic } from "./core.mjs";
 import { inheritCarryEvidence } from './carry-check.mjs';
+import { modelFamily } from "./lineage.mjs";
 
 /**
  * A session is the unit of state: one running agent, on one machine, for as long as it lives.
@@ -324,6 +325,8 @@ export function hasLegacyState(stateRoot) {
  * @property {string} bearer
  * @property {number} [pid]
  * @property {string} [pidSource]
+ * @property {string} [model] the model id the session runs (`session --model`, else the launcher's AGORA_MODEL)
+ * @property {string} [family] the model family, read from `model` (src/lineage.mjs), never from the bearer
  * @property {number} bootEpoch
  * @property {import('./harness.mjs').BuildIdentity} [build] code the last command in this session loaded
  * @property {string} startedAt
@@ -366,14 +369,15 @@ export async function readRecord(dir) {
 }
 
 /**
- * Write or update this session's record (idempotent). `bearer` and `label` replace what is there;
- * `startedAt` is kept from the first write.
+ * Write or update this session's record (idempotent). `bearer`, `label` and `model` replace what is
+ * there (the family is derived from the model in the same write); `startedAt` is kept from the first write.
  * @param {string} dir @param {Session} session
- * @param {{ bearer: string, label?: string, pid?: number, pidSource?: string, build?: import('./harness.mjs').BuildIdentity, now?: Date }} fields
+ * @param {{ bearer: string, label?: string, model?: string, pid?: number, pidSource?: string, build?: import('./harness.mjs').BuildIdentity, now?: Date }} fields
  */
 export async function writeRecord(dir, session, fields) {
   const now = (fields.now ?? new Date()).toISOString();
   const prev = await readRecord(dir);
+  const model = fields.model ?? prev?.model;
   /** @type {SessionRecord} */
   const rec = {
     slug: session.slug,
@@ -381,6 +385,7 @@ export async function writeRecord(dir, session, fields) {
     ...(fields.label !== undefined ? { label: fields.label } : prev?.label !== undefined ? { label: prev.label } : {}),
     bearer: fields.bearer,
     ...(fields.pid !== undefined ? { pid: fields.pid, pidSource: fields.pidSource } : prev?.pid !== undefined ? { pid: prev.pid, pidSource: prev.pidSource } : {}),
+    ...(model !== undefined ? { model, family: modelFamily(model) } : {}),
     bootEpoch: prev?.bootEpoch ?? bootEpoch(),
     ...(fields.build !== undefined ? { build: fields.build } : prev?.build !== undefined ? { build: prev.build } : {}),
     startedAt: prev?.startedAt ?? now,
@@ -431,7 +436,7 @@ export async function removeSession(dir, stateRoot) {
 }
 
 /** The room a cursor key or a follow file belongs to: the key up to its thread separator. @param {string} key */
-function roomOfKey(key) {
+export function roomOfKey(key) {
   const at = key.indexOf("#");
   return at < 0 ? key : key.slice(0, at);
 }
@@ -678,14 +683,17 @@ export async function sessionScope(dir) {
 }
 
 /**
- * Mark a gone session as superseded by a live successor of the same position or bearer in one room, so it is
- * never announced there. Same file as `claimDeparture` (that is what silences it), with a reason.
+ * Mark a gone session as handled in one room, so it is never announced there: superseded by a live
+ * successor of the same position or bearer (`restarted`), or stopped on purpose by `resident stop`
+ * or the supervisor (`stopped`, whose own record line already said so). Same file as
+ * `claimDeparture` (that is what silences it), with the reason.
  * @param {string} dir the gone session's directory @param {string} roomKey @param {string} by
+ * @param {"restarted" | "stopped"} [reason]
  */
-export async function markRestarted(dir, roomKey, by) {
+export async function markRestarted(dir, roomKey, by, reason = "restarted") {
   await mkdir(departedDir(dir), { recursive: true });
   try {
-    await writeFile(path.join(departedDir(dir), `${roomKey}.json`), JSON.stringify({ roomKey, by, at: new Date().toISOString(), reason: "restarted" }) + "\n", { encoding: "utf8", flag: "wx" });
+    await writeFile(path.join(departedDir(dir), `${roomKey}.json`), JSON.stringify({ roomKey, by, at: new Date().toISOString(), reason }) + "\n", { encoding: "utf8", flag: "wx" });
   } catch (e) {
     if (/** @type {NodeJS.ErrnoException} */ (e).code !== "EEXIST") throw e;
   }

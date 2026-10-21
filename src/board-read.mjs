@@ -217,5 +217,33 @@ export function resolveAddress(address, ctx) {
   const half = present.find((h) => [...(h.position ? h.position.split(".") : []), ...h.bearer.toLowerCase().split("/")]
     .some((seg) => seg.length > lower.length && seg.startsWith(lower)));
   if (half) return { ...base, kind: "none", holders: [], why: "half-name", nearest: half.position ?? half.bearer };
-  return { ...base, kind: "none", holders: [], why: "unknown", nearest: null };
+  return { ...base, kind: "none", holders: [], why: "unknown", nearest: oneEditFrom(lower, present) };
+}
+
+/**
+ * The live holder an unknown address is one letter off (one letter dropped, added or changed) in its
+ * position, its role, its bearer or the bearer's first segment: that holder's name; `ambiguous` when
+ * two holders are, so a typo is never answered with a guess; null when none is, or the address is
+ * under three letters (every short name is one letter from another).
+ * @param {string} lower the address, lower case @param {ResolvedHolder[]} present
+ * @returns {string | null}
+ */
+function oneEditFrom(lower, present) {
+  if (lower.length < 3) return null;
+  const near = new Set();
+  for (const h of present) {
+    const bearer = h.bearer.toLowerCase();
+    const names = [h.position, h.position ? roleOfPosition(h.position) : null, bearer, bearer.split("/")[0]];
+    if (names.some((n) => n && n.length >= 3 && oneEdit(lower, n))) near.add(h.position ?? h.bearer);
+  }
+  return near.size === 1 ? [...near][0] : near.size > 1 ? "ambiguous" : null;
+}
+
+/** Are two different strings exactly one insertion, deletion or substitution apart? @param {string} a @param {string} b */
+function oneEdit(a, b) {
+  if (a === b || Math.abs(a.length - b.length) > 1) return false;
+  const [s, l] = a.length <= b.length ? [a, b] : [b, a];
+  let i = 0;
+  while (i < s.length && s[i] === l[i]) i++;
+  return s.length === l.length ? s.slice(i + 1) === l.slice(i + 1) : s.slice(i) === l.slice(i + 1);
 }

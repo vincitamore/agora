@@ -1,8 +1,12 @@
 {
   "scenario": "S04",
-  "recordedOn": "2026-10-20",
-  "build": "df835fe",
+  "recordedOn": "2026-10-21",
+  "build": "a187db1",
   "checks": {
+    "release-frees-board": {
+      "today": "green",
+      "observed": "free"
+    },
     "board-shows-lapse": {
       "today": "green",
       "observed": {
