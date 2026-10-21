@@ -224,6 +224,11 @@ and model, the base's `append` then the want's cards, its own working folder, th
 tell it from the base row) and no restart command of its own, checked exactly as a file row is.
 Then `ensure` runs.
 
+**unwant** is asked as a want is: by the session that holds the grant that asked the want (its own
+record's position, never an `AGORA_LABEL` set on the call). A session with no position, or another
+holder, is refused and the want stands; the refusal is in the ledger (`refuse`, `act: unwant`). The
+operator ends a want by removing or narrowing the grant, or by stopping the position by hand.
+
 **ensure** is the seat's one start authority; `want`, `unwant` and `cycle --all` run it, and it can
 be run directly. Under the seat's grants lock it:
 
@@ -253,8 +258,8 @@ desk.messenger: absent by host 0s; path restart; outcome started.
 ```
 
 The age is from the want to its start, or from the end of the want (first seen, for a revocation) to
-the stop. **The record** is `<state>/residents/grants.jsonl`, append-only: every want, refusal,
-unwant, ending (when a revocation or expiry was first seen), start, stop and end, one JSON line
+the stop. **The record** is `<state>/residents/grants.jsonl`, append-only: every want, refusal (of a
+want or of an unwant), unwant, ending (when a revocation or expiry was first seen), start, stop and end, one JSON line
 each. What is open is a fold over it; nothing else is kept. `grant` prints each grant's caps and its
 open wants with where each stands.
 

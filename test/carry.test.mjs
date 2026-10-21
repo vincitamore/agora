@@ -130,6 +130,19 @@ test("carry: an address naming the seat, the model or everyone reaches this bear
   assert.deepEqual(c.owed.map((o) => o.id), ["m7", "m8"]);
 });
 
+test("carry: a line addressed to the position this session holds is owed, whole or by its role, never by a part of it", () => {
+  const whole = msg("m10", "to the position\n\nto: desk.coding\n\n-- Peer/dev", { who: "peer" });
+  const role = msg("m11", "to the role\n\nto: coding\n\n-- Peer/dev", { who: "peer" });
+  const part = msg("m12", "to a part\n\nto: desk\n\n-- Peer/dev", { who: "peer" });
+  const cut = msg("m13", "to half a segment\n\nto: desk.cod\n\n-- Peer/dev", { who: "peer" });
+  const other = msg("m14", "to another position\n\nto: desk.review\n\n-- Peer/dev", { who: "peer" });
+  const all = [whole, role, part, cut, other];
+  assert.deepEqual(foldRoom(all, new Set(), { bearer: "Sonnet/x", position: "desk.coding" }).owed.map((o) => o.id), ["m10", "m11"]);
+  // red legs: without the position nothing here names the bearer
+  assert.deepEqual(foldRoom(all, new Set(), { bearer: "Sonnet/x" }).owed, []);
+  assert.deepEqual(foldRoom(all, new Set(), { bearer: "Sonnet/x", position: null }).owed, []);
+});
+
 test("carry: the window folds the room's live threads, so a release posted as a thread reply closes its claim", async () => {
   // the measured defect: on Slack a room read never contains replies, so a claim taken at the top
   // level and handed back in the thread under it read as still open ninety minutes later

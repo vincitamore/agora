@@ -170,7 +170,8 @@ it signs against the digest, so the signer reads the name in the challenge file
 (`request.binding.author`, also printed by `route challenge`) before signing. A revoke takes the
 live route's own binding, grant included; `--human-name` goes only with an enroll (otherwise
 `route-human-invalid`, as is a name with leading or trailing space, a control character, or over
-120 bytes). The human's key needs a policy entry like any member key; a policy change is a restart
+120 bytes; a name that spells a position, `<word>.<word>`, is `route-human-position`, because `to:`
+would then name both the person and the position's holder). The human's key needs a policy entry like any member key; a policy change is a restart
 (see "Admission is a retained counter-seat operator act").
 
 **What it does not claim.** The host proves that a post came through the human's key; it cannot

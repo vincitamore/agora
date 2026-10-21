@@ -228,7 +228,7 @@ function namedIds(v) {
  * line `read` has always drawn under an incoming block.
  * @param {Message[]} msgs the window, ascending
  * @param {Set<string>} posted this session's ledger
- * @param {{ bearer: string, seat?: { id?: string, name?: string } }} who
+ * @param {{ bearer: string, seat?: { id?: string, name?: string }, position?: string | null }} who `position` is the position this session holds (`positionOf` its record): a line addressed to it is owed
  */
 export function foldRoom(msgs, posted, who) {
   /** @type {Array<Ref & { subject: string }>} */
@@ -378,7 +378,7 @@ export function foldRoom(msgs, posted, who) {
     if (posted.has(m.id) || answered.has(m.id)) continue;
     if (lane(m) !== ROOM_LANE && (spokeIn.get(lane(m)) ?? -1) > i) continue;
     const { to } = parseTrailers(m.text);
-    if (!to.some((a) => matchesAddress(a, who.bearer, who.seat))) continue;
+    if (!to.some((a) => matchesAddress(a, who.bearer, who.seat, who.position ?? null))) continue;
     owed.push({ from: m.signedAs ?? m.author.name, to, id: m.id, cursor: m.cursor, ts: m.ts, ...(m.thread ? { thread: m.thread } : {}) });
   }
 

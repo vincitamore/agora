@@ -4,7 +4,7 @@ import { once } from "node:events";
 import { chmod, link, lstat, mkdir, open, readFile, realpath, rename, rm, stat } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
-import { AgoraError } from "./core.mjs";
+import { AgoraError, SPELLS_POSITION } from "./core.mjs";
 import { NativeFrameDecoder, NATIVE_FRAME_MAX, NATIVE_PROTOCOL, encodeNativeFrame, nativeFramePayloadBytes,
   nativeHandshakeProof, parseNativeCursor,
   validateNativeEnvelope, validateNativeId, verifyNativeHandshakeProof } from "./native-protocol.mjs";
@@ -1133,7 +1133,9 @@ export class NativeRoomService {
    * `humanName` admits the key as the member seat's HUMAN under that name: the binding carries
    * `author: { kind: 'human', name }`, the act's request digest covers it, so the counter-seat
    * authority's signature is over the grant itself. Only an enroll takes one; a revoke names the
-   * live route's own binding. Refused `route-human-invalid` otherwise.
+   * live route's own binding. Refused `route-human-invalid` otherwise, and `route-human-position`
+   * for a name that spells a position (`<word>.<word>`): `to:` would name both the person and the
+   * position's holder.
    * @param {{action: string, roomId: string, publicNodeKey: string, humanName?: unknown}} input */
   async createRouteChallenge(input) {
     const { authority, journal, target } = this.#authorityContext();
@@ -1144,6 +1146,7 @@ export class NativeRoomService {
       if (input.action !== 'room-enroll') throw new AuthorityError('route-human-invalid');
       try { author = validateRouteAuthor({ kind: 'human', name: input.humanName }); }
       catch { throw new AuthorityError('route-human-invalid'); }
+      if (SPELLS_POSITION.test(author.name.toLowerCase())) throw new AuthorityError('route-human-position');
     }
     const store = await this.openRoom(input.roomId);
     this.#authorityContext();

@@ -122,16 +122,17 @@ export function rootsOf(msgs) {
 /**
  * Messages whose conversation this reader should start following. A human's delivery always
  * qualifies: the answer lands under what they said. Agent and system traffic qualifies only when
- * its `to:` names this bearer, its model, the seat, or everyone. The message is still delivered
- * when it does not qualify; this decides only whether later replies spend the reader's follow
- * budget.
+ * its `to:` names this bearer, the position this session holds, its model, the seat, or everyone.
+ * The message is still delivered when it does not qualify; this decides only whether later replies
+ * spend the reader's follow budget.
  * @param {import('./core.mjs').Message[]} msgs
  * @param {string} bearer
  * @param {{ id?: string, name?: string }} [seat]
+ * @param {string | null} [position] the position this session holds (`positionOf` its record)
  */
-export function followableMessages(msgs, bearer, seat) {
+export function followableMessages(msgs, bearer, seat, position) {
   return msgs.filter((m) => m.author.kind === "human"
-    || parseTrailers(m.text).to.some((address) => matchesAddress(address, bearer, seat)));
+    || parseTrailers(m.text).to.some((address) => matchesAddress(address, bearer, seat, position)));
 }
 
 /** Oldest activity first: the order the cap evicts in. @param {FollowSet} set */

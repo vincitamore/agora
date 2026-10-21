@@ -3,7 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
 import { homedir } from "node:os";
-import { cursorKey, fragilePath, jitter, parseSignature, readCursor, redact, roomInterval, roomThreadInterval, sign, stateDir, validateConfig, writeCursor } from "../src/core.mjs";
+import { SPELLS_POSITION, cursorKey, fragilePath, jitter, parseSignature, readCursor, redact, roomInterval, roomThreadInterval, sign, stateDir, validateConfig, writeCursor } from "../src/core.mjs";
 import { actor, tmp } from "./helpers.mjs";
 
 test("validateConfig accepts a minimal config", () => {
@@ -22,6 +22,20 @@ test("validateConfig requires actor and rooms", () => {
   assert.throws(() => validateConfig({ actor: { name: "x", kind: "robot" }, rooms: {} }, "t"), /actor.kind/);
   assert.throws(() => validateConfig({ actor, rooms: {} }, "t"), /at least one room/);
   assert.throws(() => validateConfig({ actor, rooms: { a: {} } }, "t"), /needs a transport/);
+});
+
+test("validateConfig refuses a human actor whose name spells a position, so `to: <name>` is never both a person and a position", async () => {
+  const cfg = (/** @type {any} */ a) => ({ actor: a, rooms: { a: { transport: "local", path: "x" } } });
+  for (const name of ["main.coding", "Main.Coding", "desk.review-2", "a.b.c"]) {
+    assert.throws(() => validateConfig(cfg({ name, kind: "human" }), "t"), (/** @type {any} */ e) => e.message.includes(`actor.name ${JSON.stringify(name)} spells a position`), name);
+  }
+  // red legs: a plain name, a dotted name that is not a position, an agent actor, and an unknown actor
+  for (const a of [{ name: "Grace", kind: "human" }, { name: "Dr. Ada", kind: "human" }, { name: "Ada.", kind: "human" }, { name: "main.coding", kind: "agent" }, { name: "main.coding", kind: "unknown" }])
+    validateConfig(cfg(a), "t");
+  // the rule is the position grammar's own, with a dot: this copy may not drift from it
+  const { POSITION_RE } = await import("../src/session.mjs");
+  for (const s of ["a.b", "a", "a.b.c", "A.b", "a..b", ".a", "a.", "a b.c", "x_y-z.w", `${"x".repeat(70)}.y`, `${"x".repeat(30)}.${"y".repeat(33)}`, `${"x".repeat(30)}.${"y".repeat(34)}`])
+    assert.equal(SPELLS_POSITION.test(s.toLowerCase()), s.includes(".") && POSITION_RE.test(s.toLowerCase()), s);
 });
 
 test("sign appends one signature line and never doubles it", () => {

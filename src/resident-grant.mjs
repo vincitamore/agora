@@ -247,17 +247,18 @@ export async function recordWant(manifest, stateRoot, a, deps) {
 }
 
 /**
- * Who asks a want: the position the asking session holds, read from its own session record (the
- * label it registered with), never from the call's environment, which any session can set. That
- * session must not be gone, and it must be the position's only holder that is not gone: a second
- * session that registers itself at the holder's position can neither spend the grant nor, while it
- * stands, let the holder spend it unnoticed. A refusal carries its reason for `admitWant`.
+ * Who asks a want or an unwant: the position the asking session holds, read from its own session
+ * record (the label it registered with), never from the call's environment, which any session can
+ * set. That session must not be gone, and it must be the position's only holder that is not gone: a
+ * second session that registers itself at the holder's position can neither spend the grant nor,
+ * while it stands, let the holder spend it unnoticed. A refusal carries its reason for `admitWant`
+ * and `recordUnwant`. `act: "unwant"` words the refusals for a release; the check is the same.
  * @param {string} stateRoot @param {{ slug: string }} session
- * @param {{ env?: Record<string, string | undefined>, kill?: (pid: number, sig: 0) => void, boot?: number }} [deps]
+ * @param {{ env?: Record<string, string | undefined>, kill?: (pid: number, sig: 0) => void, boot?: number, act?: "want" | "unwant" }} [deps]
  * @returns {Promise<{ ok: true, requester: string } | { ok: false, reason: string }>}
  */
 export async function wantRequester(stateRoot, session, deps = {}) {
-  const lead = "a want is asked by the session that holds a grant";
+  const lead = deps.act === "unwant" ? "an unwant is asked by the session that holds the want's grant" : "a want is asked by the session that holds a grant";
   const records = await listRecords(stateRoot, { kill: deps.kill, boot: deps.boot });
   const mine = records.find((r) => r.slug === session.slug);
   const position = positionOf(mine?.record);
@@ -276,14 +277,26 @@ export async function wantRequester(stateRoot, session, deps = {}) {
 
 /**
  * Release a want: by its id, or by the position it holds. The stop follows at the position's next
- * idle (ensure).
- * @param {string} stateRoot @param {{ target: string, by: string, because?: string, now: number }} a
+ * idle (ensure). Authorised as a want is: `requester` is the position the asking session holds
+ * (`wantRequester`), and it must be the grant that asked the want. With no requester, or another
+ * holder's, the want stands and the refusal is recorded with the asking session, as a refused want
+ * is. The operator ends a want by the manifest (the grant removed or narrowed) or by stopping the
+ * position by hand, never by a session that holds no grant.
+ * @param {string} stateRoot
+ * @param {{ target: string, by: string, because?: string, now: number, requester?: string, requesterRefusal?: string, session?: string | null }} a
  */
 export async function recordUnwant(stateRoot, a) {
   return withGrantsLock(stateRoot, async () => {
+    /** @param {string} reason */
+    const refuse = async (reason) => {
+      await appendLedger(stateRoot, { ev: "refuse", act: "unwant", at: new Date(a.now).toISOString(), by: a.requester ?? null, session: a.session ?? null, target: a.target, reason });
+      return { ok: /** @type {const} */ (false), reason };
+    };
+    if (!a.requester) return refuse(a.requesterRefusal ?? "an unwant is asked by the session that holds the want's grant: run it from that position's session (its AGORA_LABEL, or session --label)");
     const open = openWants(foldLedger(await readLedger(stateRoot)));
     const w = open.find((x) => x.want.id === a.target) ?? open.find((x) => x.want.position === a.target);
     if (!w) return { ok: false, reason: `no open want ${a.target} (open: ${open.map((x) => `${x.want.id} ${x.want.position}`).join(", ") || "none"})` };
+    if (w.want.grant !== a.requester) return refuse(`${a.requester} did not ask this want: ${w.want.grant} holds it`);
     if (w.unwant) return { ok: true, want: w.want, already: true };
     await appendLedger(stateRoot, { ev: "unwant", id: w.want.id, at: new Date(a.now).toISOString(), by: a.by, ...(a.because ? { because: a.because } : {}) });
     return { ok: true, want: w.want, already: false };

@@ -147,7 +147,7 @@ export async function grantRig(seat, client, grant, rows = {}) {
         { held: async (slot) => (await deps().state(slot)).running });
     },
     /** @param {string} target */
-    unwant: (target) => recordUnwant(seat.state, { target, by: HOLDER, now: now() }),
+    unwant: (target) => recordUnwant(seat.state, { target, by: HOLDER, requester: HOLDER, now: now() }),
     /** @param {{ graceSeconds?: number }} [opts] */
     ensure: (opts = {}) => ensure(manifest, seat.state, deps(), opts),
     /** Does the host hold a running session for the position (started by agora's start, not yet stopped or dead)? @param {string} position */

@@ -222,6 +222,57 @@ test("want: the requester is the position the asking session holds by its own re
   assert.match(String((/** @type {any} */ (await grants.wantRequester(s.state, { slug: "impostor" }, { env: {}, kill: gone }))).reason), /is gone/);
 });
 
+test("unwant: authorised by the asking session's recorded position, the check want uses; a spoofed label, a stranger, another holder and no requester are refused and the want stands (red leg: the holder's own session releases)", async (t) => {
+  const s = await seat(t);
+  const register = async (/** @type {string} */ slug, /** @type {string | undefined} */ label) => {
+    const dir = path.join(s.state, "sessions", slug);
+    await mkdir(dir, { recursive: true });
+    await writeRecord(dir, /** @type {any} */ ({ slug, source: "AGORA_SESSION" }), { bearer: `${slug}/Model`, ...(label ? { label } : {}), pid: process.pid, pidSource: "OMP_PID" });
+  };
+  await register("orc", "lab.orchestrator");
+  await register("rev", "lab.review");
+  await register("probe", undefined);
+  const doc = /** @type {any} */ (seedDoc());
+  doc.grants["lab.review"] = { roles: "open", models: ["sonnet"], maxLive: 1, maxHours: 8 };
+  const m = load(s, doc);
+  const t0 = Date.parse("2026-01-01T00:00:00.000Z");
+  const w = /** @type {any} */ (await recordWant(m, s.state, { requester: "lab.orchestrator", session: "orc", position: "lab.coding", because: "b", now: t0 }, { held: async () => false })).want;
+  /** the CLI's act: the requester read off the asking session's own record, whatever AGORA_LABEL the call carries */
+  const unwantFrom = async (/** @type {string} */ slug, /** @type {Record<string, string>} */ env, /** @type {string} */ target = w.id) => {
+    const asked = /** @type {any} */ (await grants.wantRequester(s.state, { slug }, { env, act: "unwant" }));
+    return /** @type {any} */ (await recordUnwant(s.state, { target, by: asked.ok ? asked.requester : slug, requester: asked.ok ? asked.requester : undefined, requesterRefusal: asked.ok ? undefined : asked.reason, session: slug, now: t0 + 1000 }));
+  };
+  const open = async () => (await readLedger(s.state)).filter((e) => e.ev === "unwant").length;
+
+  // a session that only sets AGORA_LABEL holds no position: refused by name, nothing released
+  const spoof = await unwantFrom("probe", { AGORA_LABEL: "lab.orchestrator" });
+  assert.equal(spoof.ok, false);
+  assert.match(spoof.reason, /^an unwant is asked by the session that holds the want's grant: this session \(probe\) names lab\.orchestrator in AGORA_LABEL but holds no position on this seat/);
+  // another grant holder, by id and by position: refused, and the reason names who asked the want
+  for (const target of [w.id, w.position]) {
+    const other = await unwantFrom("rev", {}, target);
+    assert.equal(other.ok, false);
+    assert.match(other.reason, /lab\.review did not ask this want: lab\.orchestrator holds it/);
+  }
+  // no requester at all (a direct call that names none) is refused as well
+  const bare = /** @type {any} */ (await recordUnwant(s.state, { target: w.id, by: "orc", now: t0 + 1000 }));
+  assert.equal(bare.ok, false);
+  assert.match(bare.reason, /an unwant is asked by the session that holds the want's grant/);
+  assert.equal(await open(), 0, "no unwant was recorded");
+  // every refusal is on the record with the asking session, and spends nothing
+  assert.deepEqual((await readLedger(s.state)).filter((e) => e.ev === "refuse").map((e) => [e.act, e.session, e.target]), [["unwant", "probe", w.id], ["unwant", "rev", w.id], ["unwant", "rev", w.position], ["unwant", null, w.id]]);
+  assert.equal(foldLedger(await readLedger(s.state)).get(w.id)?.unwant, null, "the want stands");
+
+  // red leg: the holder's own session releases it, by position this time; a second call says already
+  const done = await unwantFrom("orc", {}, w.position);
+  assert.deepEqual([done.ok, done.already, done.want.id], [true, false, w.id]);
+  const ev = (await readLedger(s.state)).find((e) => e.ev === "unwant");
+  assert.equal(ev.by, "lab.orchestrator");
+  assert.equal((await unwantFrom("orc", {}, w.id)).already, true);
+  // and a stranger is still refused once it is already released
+  assert.equal((await unwantFrom("rev", {}, w.id)).ok, false);
+});
+
 test("wantEnding: unwanted, revoked by the grant's removal or narrowing, expired by its until or the grant's maxHours", async (t) => {
   const s = await seat(t);
   const m = load(s, seedDoc());
@@ -319,11 +370,11 @@ test("ensure: a dead granted position is restarted (absent by host); one stopped
   const b = await want("lab.coding");
   await ensure(m, s.state, f.deps);
   assert.notEqual(b.id, a.id);
-  const u = await recordUnwant(s.state, { target: b.position, by: "lab.orchestrator", now: t0 + 10_000 });
+  const u = await recordUnwant(s.state, { target: b.position, by: "lab.orchestrator", requester: "lab.orchestrator", now: t0 + 10_000 });
   assert.equal(u.ok, true);
   rows = await ensure(m, s.state, f.deps);
   assert.deepEqual(rows.map((x) => [x.action, x.notice]), [["stopped", "lab.coding-2: unwanted by lab.orchestrator 0s; path grant; outcome stopped."]]);
-  assert.equal(/** @type {any} */ (await recordUnwant(s.state, { target: b.id, by: "x", now: t0 })).ok, false, "an ended want cannot be unwanted");
+  assert.equal(/** @type {any} */ (await recordUnwant(s.state, { target: b.id, by: "x", requester: "lab.orchestrator", now: t0 })).ok, false, "an ended want cannot be unwanted");
 
   await want("lab.coding", { hours: 1 });
   const late = fakeDeps(t0 + 2 * 3_600_000);
@@ -439,6 +490,17 @@ test("CLI: want from the grant holder records and runs ensure (a start the host 
 
   const view = await agora(["resident", "grant", ...m], s.env);
   assert.match(view.stdout, /^lab\.orchestrator: roles open, models sonnet,opus, maxLive 1, maxHours 8/);
+});
+
+test("CLI: messenger refuses a --human-name that spells a position, by name (red leg: a plain name runs)", async (t) => {
+  const { openSeat } = await import("./scenarios/lib/seat.mjs");
+  const seat = await openSeat();
+  t.after(() => seat.close());
+  const bad = await seat.cli(["messenger", seat.alias, "--once", "--dry-run", "--human-name", "main.coding", "--json"]);
+  assert.equal(bad.code, 2, bad.stderr);
+  assert.match(bad.stderr, /--human-name "main\.coding" spells a position/);
+  const ok = await seat.cli(["messenger", seat.alias, "--once", "--dry-run", "--human-name", "Grace", "--json"]);
+  assert.equal(ok.code, 0, ok.stderr);
 });
 
 test("CLI: succeed writes the request for this session's position; ensure --dry-run acts on nothing", async (t) => {

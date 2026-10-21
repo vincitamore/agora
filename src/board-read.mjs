@@ -162,15 +162,13 @@ function localHolder(r, seatName) {
 }
 
 /**
- * Does an address name this holder? A position matches exactly, or by its role (last segment)
- * when the address is one segment; a bearer matches by segment prefix (`coding` reaches
- * `coding/Opus`), never half a segment.
+ * Does an address name this holder? The shared matcher (`matchesAddress`): a position matches
+ * exactly, or by its role (last segment) when the address is one segment; a bearer matches by
+ * segment prefix (`coding` reaches `coding/Opus`), never half a segment.
  * @param {string} address @param {{ position: string | null, bearer: string }} h
  */
 function names(address, h) {
-  const a = address.trim().toLowerCase();
-  if (h.position && (a === h.position || (!a.includes(".") && !a.includes("/") && a === roleOfPosition(h.position)))) return true;
-  return matchesAddress(address, h.bearer);
+  return matchesAddress(address, h.bearer, undefined, h.position);
 }
 
 /**

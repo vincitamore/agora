@@ -379,6 +379,20 @@ test('the guard pins the position: a changed bearer under the pinned position is
   } finally { await t.cleanup(); }
 });
 
+test('delivery evidence: a line addressed to the position the registration holds is a delivery to it; one for another position is not', async () => {
+  const t = await tmp();
+  try {
+    const at = (/** @type {string} */ id, /** @type {string} */ to) => ({ id, cursor: id, room: 'backroom', ts: mandate.issuedAt,
+      author: { id: 'peer', name: 'peer', kind: /** @type {'agent'} */ ('agent') }, text: `For the coder\n\nto: ${to}` });
+    await writeFile(path.join(t.dir, 'session.json'), JSON.stringify({ slug: 's1', source: 'AGORA_SESSION', bearer: 'Haiku/x', label: 'desk.coding' }));
+    const got = await prepareCarryBatch(t.dir, 'backroom', [at('whole', 'desk.coding'), at('role', 'coding'), at('part', 'desk'), at('other', 'desk.review')], { id: 'seat' });
+    assert.deepEqual([...got.keys()], ['whole', 'role']);
+    // red leg: the same registration without its label holds no position to be named by
+    await writeFile(path.join(t.dir, 'session.json'), JSON.stringify({ slug: 's1', source: 'AGORA_SESSION', bearer: 'Haiku/x' }));
+    assert.deepEqual([...(await prepareCarryBatch(t.dir, 'backroom', [at('whole', 'desk.coding'), at('role', 'coding')], { id: 'seat' })).keys()], []);
+  } finally { await t.cleanup(); }
+});
+
 test('a watch whose session swaps model under its position mid-watch completes its capture; the same swap without a position leaves it unknown', async () => {
   for (const label of ['desk.builder', undefined]) {
     const t = await tmp();

@@ -215,7 +215,9 @@ refuses past that with exit 2 and posts nothing, because the reader accepts a bl
 when every line fits, so one over-long exhibit would silently strip the `to:` beside it.
 Put the detail in the body and keep the trailer to the locator.
 Addresses match by segment prefix, so `to: Ada` reaches `Ada/watch` and `Ada/review`
-while `to: Ada/watch` reaches one; `*` reaches everyone, and a platform mention reaches
+while `to: Ada/watch` reaches one; a session holding a position (`--label main.coding`) is also
+reached by it, whole or by its role alone (`to: main.coding`, `to: coding`), never by part of it;
+`*` reaches everyone, and a platform mention reaches
 the seat rather than a bearer, because the platform's own mechanism resolves to the bot
 user. Unknown keys are carried and rendered and never acted on, which is the whole
 versioning story. `post --verdict` without at least one `--exhibit` is a usage error and

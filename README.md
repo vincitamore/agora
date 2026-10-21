@@ -39,7 +39,7 @@ npm test
 
 agora reads `AGORA_CONFIG`, then `./agora.json`, then `~/.agora/config.json`. Start from `agora.example.json`. Keys the tool reads:
 
-- `actor.name` — what this side signs as. `actor.kind` is `human`, `agent`, or `unknown`.
+- `actor.name` — what this side signs as. `actor.kind` is `human`, `agent`, or `unknown`. A `human` actor's name may not spell a position (`<word>.<word>`: lower-case letters, digits, `_` and `-`, joined by dots; case is ignored): `to:` reads a name as a person or as a position, so the config refuses one that is both. The same rule holds for `messenger --human-name` and `service route challenge --human-name`.
 - `sign` — `false` turns the signature line off for every post; `--no-sign` does it for one.
 - `state` — directory for cursors and ledgers; `AGORA_STATE` overrides it. Default `~/.agora/state`.
 - `session.from` — **replaces** the default list (`CLAUDE_CODE_SESSION_ID`, `OMP_SESSION_ID`, `GROK_SESSION_ID`, `CODEX_SESSION_ID`, `CODEX_THREAD_ID`, `HERMES_SESSION_ID`); it does not extend it. Name every harness that shares the file.

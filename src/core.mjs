@@ -144,6 +144,14 @@ export const EXIT = Object.freeze({ ok: 0, error: 1, usage: 2, fired: 42 });
 const ACTOR_KINDS = new Set(["human", "agent", "unknown"]);
 const SECRET_KEYS = /^(token|secret|password|apikey|api_key|bearer)$/i;
 
+/**
+ * A name that spells a position: the position grammar (src/session.mjs `POSITION_RE`) with at least
+ * one dot. `to:` reads a name as a person or as a position, so a human may not be named so that
+ * both readings hold. Copied, not imported: session.mjs imports this file. A test pins the two to
+ * agree.
+ */
+export const SPELLS_POSITION = /^(?=.{1,64}$)[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9][a-z0-9_-]*)+$/;
+
 /** @param {string} p */
 export function expandHome(p) {
   if (p === "~") return homedir();
@@ -173,6 +181,8 @@ export function validateConfig(cfg, where) {
     throw new AgoraError(`${where}: actor.name is required (the name this side signs as)`);
   if (!ACTOR_KINDS.has(String(actor.kind)))
     throw new AgoraError(`${where}: actor.kind must be one of human, agent, unknown`);
+  if (actor.kind === "human" && SPELLS_POSITION.test(actor.name.trim().toLowerCase()))
+    throw new AgoraError(`${where}: actor.name ${JSON.stringify(actor.name)} spells a position (<room>.<role>): a line addressed to it would name both the person and the position's holder; give the person a name that is not a position`);
   const rooms = /** @type {Record<string, unknown> | undefined} */ (c.rooms);
   if (!rooms || typeof rooms !== "object" || Object.keys(rooms).length === 0)
     throw new AgoraError(`${where}: rooms must name at least one room`);

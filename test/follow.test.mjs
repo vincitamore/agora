@@ -123,6 +123,15 @@ test("follow admission keeps human deliveries and agent traffic addressed to thi
   );
 });
 
+test("follow admission: a session holding a position is named by it, whole or by its role, never by a part; a line to an agent whose position is not its own does not qualify", () => {
+  /** @param {string} id @param {string} to */
+  const line = (id, to) => /** @type {import("../src/core.mjs").Message} */ ({ id, room: "r", author: { id: `u-${id}`, name: id, kind: "agent" }, text: `${id}\n\nto: ${to}`, ts: "", cursor: id });
+  const msgs = [line("whole", "desk.coding"), line("role", "coding"), line("part", "desk"), line("cut", "desk.cod"), line("other", "desk.review"), line("bearer", "Cal/codex")];
+  assert.deepEqual(followableMessages(msgs, "Cal/codex", undefined, "desk.coding").map((m) => m.id), ["whole", "role", "bearer"]);
+  assert.deepEqual(followableMessages(msgs, "Cal/codex", undefined, null).map((m) => m.id), ["bearer"], "no position: only the bearer is named");
+  assert.deepEqual(followableMessages(msgs, "Cal/codex").map((m) => m.id), ["bearer"], "the position is optional");
+});
+
 test("admission gates new roots without letting an active followed conversation age out", async () => {
   const { dir, cleanup } = await tmp();
   try {

@@ -538,7 +538,7 @@ export async function prepareCarryBatch(dir, room, messages, seat, pin) {
   /** @type {Map<string,ReturnType<typeof validateCarryEvent>>} */ const pending = new Map();
   for (const m of messages) {
     const to = parseTrailers(m.text).to;
-    if (!to.some(address => matchesAddress(address, record.bearer, seat))) {
+    if (!to.some(address => matchesAddress(address, record.bearer, seat, positionOf(record) ?? null))) {
       if (to.length && !seat) await appendCarryEvent(dir, { version: 1, id: randomUUID(), kind: 'gap',
         at: new Date().toISOString(), session: path.basename(dir), bearer: record.bearer,
         ref: { room, id: m.id, cursor: m.cursor }, subject: 'seat-address-context-unknown' });

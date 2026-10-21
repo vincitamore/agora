@@ -30,6 +30,7 @@ import {
   stateDir,
   writeCursor,
   readCursorFile,
+  SPELLS_POSITION,
 } from "../src/core.mjs";
 import { TRANSPORTS, createTransport, tokenSource } from "../src/transports/index.mjs";
 import { configFaceTransports } from "../src/native-faces-wiring.mjs";
@@ -1008,6 +1009,8 @@ export const ARGUMENT_PREFLIGHTS = Object.freeze([
         return '--human-name goes with route challenge --act room-enroll: the human grant is part of the act the authority signs, and open, close and revoke take it from that act';
       if (values['human-name'] !== undefined && !/^\S(?:[^]*\S)?$/u.test(String(values['human-name'])))
         return '--human-name is the name the human posts under: no leading or trailing space';
+      if (values['human-name'] !== undefined && SPELLS_POSITION.test(String(values['human-name']).toLowerCase()))
+        return `--human-name ${JSON.stringify(String(values['human-name']))} spells a position (<room>.<role>): an address to it would name both the person and the position's holder; give the human a name that is not a position`;
       if ((sub === 'open' || sub === 'close') && !values['proof-file'])
         return `route ${sub} needs --proof-file <detached-proof>`;
       return undefined;
@@ -1697,7 +1700,6 @@ async function main(argv) {
         }
         return EXIT.ok;
       }
-      const requester = resolveLabel({ env: process.env }) ?? positionOf(record);
       if (action === "want") {
         if (rest.length !== 1) throw new AgoraError("agora resident want <room>.<role> --because <text> [--model <alias>] [--card <path>] [--hours <n>] [--dry-run]", EXIT.usage);
         const hours = values.hours === undefined ? undefined : Number(values.hours);
@@ -1724,7 +1726,12 @@ async function main(argv) {
         else console.log(`wanted ${r.want.position} (${r.want.id}) for ${r.want.by}: role ${r.want.role}, model ${r.want.model}, until ${r.want.until}`);
       } else if (action === "unwant") {
         if (rest.length !== 1) throw new AgoraError("agora resident unwant <want-id|position> [--because <text>]", EXIT.usage);
-        const r = await rg.recordUnwant(stateRoot, { target: String(rest[0]), by: requester ?? session.slug, because: values.because === undefined ? undefined : String(values.because), now });
+        // released by the session that holds the grant, as a want is: its own record's position, never this call's AGORA_LABEL
+        const asked = await rg.wantRequester(stateRoot, session, { env: process.env, act: "unwant" });
+        const r = await rg.recordUnwant(stateRoot, {
+          target: String(rest[0]), by: asked.ok ? asked.requester : session.slug, requester: asked.ok ? asked.requester : undefined, requesterRefusal: asked.ok ? undefined : asked.reason,
+          session: session.slug, because: values.because === undefined ? undefined : String(values.because), now,
+        });
         if (!r.ok || !r.want) {
           if (json) console.log(JSON.stringify({ type: "resident-unwant", action: "refused", target: String(rest[0]), reason: r.reason }));
           else console.error(`agora: unwant ${rest[0]} refused: ${r.reason}`);
@@ -2543,7 +2550,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         seat = undefined;
       }
       const state = await carryState(sdir, stateRoot, roomAlias);
-      const folded = foldRoom(msgs, await readPosted(sdir), { bearer: bearer.name, seat });
+      const folded = foldRoom(msgs, await readPosted(sdir), { bearer: bearer.name, seat, position: positionOf(record) ?? null });
       const carry = {
         type: "carry",
         room: { alias: roomAlias, transport: transport.kind, room: transport.room, ...(typeof room.note === "string" ? { note: room.note } : {}) },
@@ -2835,6 +2842,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       const bounds = ms.parseBounds(values.bounds === undefined ? undefined : String(values.bounds));
       const host = values["human-name"] === undefined ? "" : String(values["human-name"]).trim();
       if (!host || /\s/.test(host)) throw new AgoraError("messenger needs --human-name <name>: the host human its N3 and N9 lines name (one word)", EXIT.usage);
+      if (SPELLS_POSITION.test(host.toLowerCase())) throw new AgoraError(`messenger --human-name ${JSON.stringify(host)} spells a position (<room>.<role>): an address to it would name both the person and the position's holder; give the host human a name that is not a position`, EXIT.usage);
       if (values.stream && (values.once || values.at !== undefined)) throw new AgoraError("--stream runs on the clock; --once and --at belong to a single tick", EXIT.usage);
       const at = values.at === undefined ? undefined : Date.parse(String(values.at));
       if (at !== undefined && !Number.isFinite(at)) throw new AgoraError(`--at takes an ISO instant, not ${JSON.stringify(values.at)}`, EXIT.usage);
@@ -3180,7 +3188,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
             // addresses this reader. Existing followed conversations still refresh on activity.
             note: async (msgs) => {
               const roots = transport.threads ? rootsOf(msgs) : threadsOf(msgs);
-              const admitted = followableMessages(msgs, bearer.name, seat);
+              const admitted = followableMessages(msgs, bearer.name, seat, position);
               const admittedRoots = transport.threads ? rootsOf(admitted) : threadsOf(admitted);
               const human = msgs.filter((m) => m.author.kind === "human");
               for (const id of transport.threads ? rootsOf(human) : threadsOf(human)) answered.add(id);

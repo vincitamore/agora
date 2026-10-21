@@ -20,7 +20,7 @@
     "wake": {
       "type": "string",
       "title": "What wakes the session",
-      "description": "agora watch --wake: all = every message; addressed = everything except messages addressed to someone else; mine = only messages addressed to this bearer, its seat or everyone.",
+      "description": "agora watch --wake: all = every message; addressed = everything except messages addressed to someone else; mine = only messages addressed to this bearer, its position, its seat or everyone.",
       "options": ["all", "addressed", "mine"],
       "default": "addressed"
     },

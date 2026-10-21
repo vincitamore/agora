@@ -213,6 +213,9 @@ test("the human grant is in the act the authority signs, and only an enroll take
 
   for (const name of ["", " Grace", "Grace ", "Gr\nace", "x".repeat(121), 7])
     await assert.rejects(service.createRouteChallenge({ action: "room-enroll", roomId: ROOM, publicNodeKey: AGENT_KEY, humanName: name }), /route-human-invalid/);
+  // a name that spells a position is refused by its own code: `to:` would name both the person and a position's holder
+  for (const name of ["main.coding", "Main.Coding", "desk.review-2"])
+    await assert.rejects(service.createRouteChallenge({ action: "room-enroll", roomId: ROOM, publicNodeKey: AGENT_KEY, humanName: name }), /route-human-position/, name);
   const opened = await service.openRoute({ roomId: ROOM, publicNodeKey: HUMAN_KEY, proof: fixtureProof(service, pending.challenge),
     routeOptions: { listen: async () => ({ port: 4242, close: async () => {} }),
       spawn: async (/** @type {string[]} */ args, /** @type {any} */ _r, /** @type {any} */ owner) => fakeChild({ exit: args[0] === "parse" ? 0 : null, signal: owner?.signal }),
@@ -264,4 +267,10 @@ test("--human-name goes only with route challenge --act room-enroll, refused bef
   const padded = await agora([...common, "challenge", ROOM, "--allow-key", HUMAN_KEY, "--act", "room-enroll", "--out", path.join(root, "c.json"), "--human-name", " Grace"]);
   assert.notEqual(padded.code, 0);
   assert.match(padded.stderr, /no leading or trailing space/);
+  const position = await agora([...common, "challenge", ROOM, "--allow-key", HUMAN_KEY, "--act", "room-enroll", "--out", path.join(root, "c.json"), "--human-name", "main.coding"]);
+  assert.notEqual(position.code, 0);
+  assert.match(position.stderr, /--human-name "main\.coding" spells a position/);
+  // red leg: a plain name passes this refusal (it fails later, with no service to ask)
+  const plain = await agora([...common, "challenge", ROOM, "--allow-key", HUMAN_KEY, "--act", "room-enroll", "--out", path.join(root, "c.json"), "--human-name", "Grace"]);
+  assert.doesNotMatch(plain.stderr, /spells a position|no leading or trailing space|--human-name goes with/);
 });
