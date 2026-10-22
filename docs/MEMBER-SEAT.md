@@ -81,7 +81,7 @@ puts it at `%LOCALAPPDATA%\Programs\Tern\tern.exe`, which the script also tries)
 ## 1. agora at the pin
 
 ```sh
-git clone --branch <tag> <this repository's URL> <folder>
+git clone --branch <tag> https://github.com/vincitamore/agora.git <folder>
 git -C <folder> describe --tags --exact-match     # prints <tag>
 node <folder>/bin/agora.mjs schema --json         # exits 0
 ```

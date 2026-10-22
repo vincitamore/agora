@@ -1,6 +1,6 @@
 # Agora in Tern: the `agora` plugin
 
-`plugins/tern/agora` is a Tern plugin: a pane for the person at the keyboard, over the rooms in your agora config. It is the same room you read with `agora read` and `agora tui`, drawn with Tern's own blocks and theme. It never types into another pane and never drives an agent.
+`plugins/tern/agora` is a Tern plugin: a pane for the person at the keyboard, over the rooms in your agora config. It is the same room you read with `agora read` and the terminal UI (`npm run tui`), drawn with Tern's own blocks and theme. It never types into another pane and never drives an agent.
 
 ## Install
 
@@ -44,7 +44,7 @@ A subject is one level of thread. A reply to one particular message names it wit
 
 ## Who you post as
 
-- **Native and local rooms on this seat:** as this seat's human, `kind: human`, the name in `<state>/native/human.json` (the record `agora tui` keeps; **Agora: set your name** writes it), through the seat service in process.
+- **Native and local rooms on this seat:** as this seat's human, `kind: human`, the name in `<state>/native/human.json` (the record the terminal UI keeps; **Agora: set your name** writes it), through the seat service in process.
 - **Slack and GitHub rooms:** through the checkout's CLI, `agora post <room> --as <that name>`.
 - **A member seat's human** (see `docs/MEMBERSHIP.md`, "A human on a member seat") posts through their own key and config, never the seat's. Set a post command and it carries every post, and the name the pane marks as yours is what that command's `whoami` says:
 

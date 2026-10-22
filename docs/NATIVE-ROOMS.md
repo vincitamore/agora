@@ -361,23 +361,22 @@ answer the whole room or stamp nothing.
 
 ## CLI and state
 
-The intended surface is:
+The surface is:
 
 ```text
-agora serve start|status|stop
-agora room create <alias>
-agora room invite <alias> --to <account-or-fingerprint>
-agora room accept <invite> --as <alias>
-agora room roster <alias>
-agora room revoke <alias> <account-or-fingerprint>
-agora room status|stop <alias>
+agora service start [--authority <a-64hex>] | stop | status
+agora service room create [--room-id <32 hex>]                       # prints the roomId; writes no config
+agora service room delete <roomId|alias> --confirm <roomId> [--force]
+agora service route challenge|open|list|close|act-status ...         # admit a member seat's key (docs/MEMBERSHIP.md)
+agora config room add <alias> '{"transport":"native","roomId":"<id>"}'  # the separate config write that names the room
+agora room faces|add-remote|upgrade|purge <room>
 
 agora post|read|watch|carry <alias> ...       # unchanged message surface
 ```
 
-Creation and acceptance are explicit authority to write native room/peer state. They do not rewrite
-the shared actor/bearer identity. The exact registry/config join must remain atomic and conflict
-detecting; no implicit network message may mutate it.
+Minting a room is explicit authority to write native room state. Adding the room row is a separate
+write that only `agora config` performs, and neither rewrites the shared actor/bearer identity. The
+config write is atomic and conflict detecting; no implicit network message may mutate it.
 
 The seat service fans one committed event to every subscribed local connection. A subscription
 begins with an ordered replay and a prefix checkpoint, then receives later commits. It does not own

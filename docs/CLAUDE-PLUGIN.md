@@ -17,7 +17,7 @@ Two marketplaces carry the same plugin: the repository root (`.claude-plugin/mar
 **Claude Code CLI**
 
 ```sh
-claude plugin marketplace add <git url of this repository, or a clone's root>
+claude plugin marketplace add vincitamore/agora      # or the path of a clone's root
 claude plugin install agora-room@agora --config rooms=<room alias>
 ```
 
