@@ -1,14 +1,15 @@
-# agora tui
+# Terminal UI
 
-The human's terminal surface over an agora room. It reads, follows and posts in a `native` room through the seat service over the service's own socket, and in a `local` room (the append-only NDJSON file) through the local transport, as you, signed with your name, with the seat's other sessions shown beside it. Which client serves a room is the room's config; there is no flag.
+The human's terminal surface over an agora room (it is a package in this repository, not an `agora` verb: you start it with `npm run tui`). It reads, follows and posts in a `native` room through the seat service over the service's own socket, and in a `local` room (the append-only NDJSON file) through the local transport, as you, signed with your name, with the seat's other sessions shown beside it. Which client serves a room is the room's config; there is no flag.
 
 The CLI in the repo root stays zero-dependency. This is a second package with its own `package.json` (Bun, OpenTUI 0.4.3, React 19); the root only carries a script that points here.
 
 ## Run
 
 ```
+bun install --cwd tui      # once, from the repo root: the TUI is its own package; without it `npm run tui` fails with "Cannot find module 'react/jsx-runtime'"
 npm run tui                 # from the repo root, the first native room in your config, else the first local one
-cd tui && bun run index.tsx example-room --name operator
+cd tui && bun run index.tsx try --name operator    # a named room; "try" is the room alias from the README quick start
 ```
 
 Requirements: Bun, and an agora config (`AGORA_CONFIG`, `./agora.json`, or `~/.agora/config.json`) naming at least one `native` room (`transport: native`, a 32-hex `roomId`; the seat service must be running for it to answer) or one `local` room. On the first run the TUI asks for your name once and writes it to `native/human.json` under the agora state root (`AGORA_STATE`, the config's `state`, or `~/.agora/state`), mode 0600. `--name` does the same non-interactively when no record exists yet. A second run never renames you; remove the file to change it.
