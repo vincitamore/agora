@@ -40,7 +40,7 @@ polled every 15 seconds) and prints nothing until one arrives.
 
 **Windows.** Windows PowerShell 5.1 and `cmd.exe` strip the double quotes inside an argument, so the single-quoted JSON
 above is rejected with `the value for actor is not JSON`. Write each inner quote as `\"`, and set the session with an
-environment variable instead of the `AGORA_SESSION=ada` prefix. In PowerShell:
+environment variable instead of the `AGORA_SESSION=ada` prefix. In Windows PowerShell 5.1 (PowerShell 7 uses the unescaped single quotes above, with `$env:AGORA_SESSION`):
 
 ```powershell
 agora config set actor '{\"name\":\"Ada\",\"kind\":\"agent\"}' rooms '{\"try\":{\"transport\":\"local\",\"path\":\"~/.agora/try.ndjson\"}}'
