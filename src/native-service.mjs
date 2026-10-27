@@ -405,9 +405,11 @@ function readHandshakeFrame(socket, timeoutMs, label) {
 }
 
 export class NativeRoomService {
-  /** @param {{ root: string, accountId: string, seatLabel: string, now?: () => Date, nonce?: string, build?: import("./harness.mjs").BuildIdentity, routeOptions?: Record<string, unknown>, authorityId?: string, readLocalIdentity?: (root: string) => Promise<{nodeKey: string}>, faces?: Omit<ConstructorParameters<typeof NativeFaceWiring>[0], "root" | "attestor"> }} options
+  /** @param {{ root: string, accountId: string, seatLabel: string, now?: () => Date, nonce?: string, build?: import("./harness.mjs").BuildIdentity, routeOptions?: Record<string, unknown>, authorityId?: string, readLocalIdentity?: (root: string) => Promise<{nodeKey: string}>, faces?: Omit<ConstructorParameters<typeof NativeFaceWiring>[0], "root" | "attestor">, memberSilenceMs?: number }} options
    * `faces`, when given, runs the room faces (src/native-faces-wiring.mjs): the daemon passes a
-   * `transportFor` built on the shared config; absent, the service publishes no face. */
+   * `transportFor` built on the shared config; absent, the service publishes no face.
+   * `memberSilenceMs` is how long a member channel may send nothing before the host closes it
+   * (default three minutes, three times a live subscription's probe interval). */
   constructor(options) {
     validateNativeId(options.accountId, "service account id");
     if (!options.seatLabel?.trim() || options.seatLabel.length > 120) throw new AgoraError("native service needs a bounded seat label");
@@ -433,6 +435,8 @@ export class NativeRoomService {
     // frame never carries them). Tests inject a faked listener and child here so the verbs can be
     // driven through a real client against a live service; production leaves it undefined.
     this.routeOptions = options.routeOptions;
+    this.memberSilenceMs = options.memberSilenceMs ?? 180_000;
+    if (!Number.isSafeInteger(this.memberSilenceMs) || this.memberSilenceMs < 1) throw new AgoraError("memberSilenceMs must be a positive integer");
     this.authorityId = options.authorityId;
     this.readLocalIdentity = options.readLocalIdentity ?? ((root) => localTransferIdentity(root, { create: false }));
     /** @type {Awaited<ReturnType<typeof readAuthorityRecord>> | undefined} */ this.authority = undefined;
@@ -1571,7 +1575,21 @@ export class NativeRoomService {
       return { ready, closed, stop: async () => { stream.destroy(); } };
     }
 
+    // A member's far end can vanish without a close: the remote process dies, and Tailcat keeps
+    // its local connection to this listener open, so the channel holds one of the route's slots
+    // forever. Enough of them fill the route's cap, and every later dial is dropped at accept.
+    // A live member is never quiet this long: its subscription probes the host after 60 s of
+    // silence, and a one-shot verb finishes in seconds. So silence past the bound is death, and
+    // the slot is given back.
+    let lastInbound = Date.now();
+    const silence = setInterval(() => {
+      if (Date.now() - lastInbound > this.memberSilenceMs) stream.destroy();
+    }, Math.max(25, Math.floor(this.memberSilenceMs / 3)));
+    silence.unref?.();
+    stream.once("close", () => clearInterval(silence));
+
     stream.on("data", (bytes) => {
+      lastInbound = Date.now();
       let frames;
       try { frames = decoder.push(bytes); }
       catch (error) { fail(error, undefined); stream.destroy(); return; }

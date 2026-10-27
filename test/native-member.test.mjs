@@ -1213,3 +1213,28 @@ test("a grant the record revoked stays down after a restart even when its files 
   assert.deepEqual(service.listRoutes(), [], "a revoked grant was re-admitted from files left on disk");
   assert.deepEqual(service.listRouteFailures(), []);
 });
+
+test("a member channel that goes silent is closed and gives its slot back; one that keeps speaking stays open", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "agora-member-silence-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const service = await authorityFixtureService({ root, accountId: ACCOUNT, seatLabel: "seat-a", memberSilenceMs: 150 },
+    [{ roomId: ROOM, publicNodeKeys: [KEY] }]);
+  await service.start();
+  t.after(() => service.stop());
+  await service.createRoom({ roomId: ROOM, epoch: EPOCH });
+  const { descriptor, accept } = await openFakedRoute(service);
+  const secret = await readRouteSecret(service.root, descriptor.binding, descriptor.proofRef);
+  const quiet = loopback(), talking = loopback();
+  accept(quiet.hostSide); accept(talking.hostSide);
+  assert.equal((await greet(quiet.clientSide, secret)).type, "member-welcome");
+  assert.equal((await greet(talking.clientSide, secret)).type, "member-welcome");
+  const quietClosed = new Promise((resolve) => quiet.hostSide.once("close", () => resolve(true)));
+  talking.clientSide.on("data", () => {});
+  const chatter = setInterval(() => talking.clientSide.write(encodeNativeFrame({ protocol: NATIVE_PROTOCOL, type: "status",
+    requestId: randomUUID().replaceAll("-", ""), roomId: ROOM })), 40);
+  t.after(() => clearInterval(chatter));
+  assert.equal(await Promise.race([quietClosed, new Promise((resolve) => setTimeout(() => resolve(false), 2000))]), true,
+    "a silent member channel was never closed, so its slot stays taken");
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  assert.equal(talking.hostSide.destroyed, false, "a member that kept sending was cut off");
+});
