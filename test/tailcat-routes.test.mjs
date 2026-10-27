@@ -301,3 +301,27 @@ test('offline real guardian printpub checks the actual enrolled private file',as
     // This is key resolution only: parser and resident tunnel remain local fakes, no DERP.
   }finally{await rm(stateRoot,{recursive:true,force:true});}
 });
+
+test('a full route gives up its stalest channel for a new dial, an unsubscribed one before a subscription',async()=>{
+  const f=fixture();f.options.maxChannels=2;
+  const made=/** @type {Array<ReturnType<typeof session>>} */([]);
+  const activities=[{lastInbound:100,subscribed:true},{lastInbound:200,subscribed:false},{lastInbound:300,subscribed:false}];
+  f.options.acceptChannel=async()=>{const s=session();s.admit();const a=activities[made.length];made.push(s);return Object.assign(s,{activity:()=>a});};
+  const route=startMemberRoute({binding:binding(),allowedNodeKey:publicKey},f.options);await route.ready;
+  f.connect();f.connect();await delay(5);
+  assert.equal(made.length,2);
+  const third=f.connect();await delay(5);
+  assert.equal(third.destroyed,false,'a full route dropped the new dial instead of giving up a stale channel');
+  assert.equal(made.length,3);
+  assert.deepEqual(made.map(s=>s.stopped()),[0,1,0],'the route gave up a channel other than the stalest unsubscribed one');
+  await route.stop();
+});
+
+test('a full route whose channels report no activity still drops the new dial',async()=>{
+  const f=fixture();f.options.maxChannels=1;
+  const route=startMemberRoute({binding:binding(),allowedNodeKey:publicKey},f.options);await route.ready;
+  f.connect();await delay(5);
+  const second=f.connect();await delay(5);
+  assert.equal(second.destroyed,true);
+  await route.stop();
+});

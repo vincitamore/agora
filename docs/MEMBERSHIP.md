@@ -71,14 +71,16 @@ no later start re-admits it, even from files restored to disk.
 One live route per key digest per room. A second `open` for a digest that already has a live route
 is refused `route-already-open`; close it first, which mints a new grant on the next open.
 
-**A route carries at most 64 channels, and a silent one is closed.** Every dial from the member seat
-(a read, a post, each watch) is its own channel on the route. When the member's process dies
-without closing, Tailcat keeps the host's end open, so a dead channel would hold its slot forever,
-and enough of them fill the route: every later dial is accepted and dropped, which the member sees
-as `member-channel-dark ... transport exited with code 0`. The host therefore closes a member
-channel that has sent nothing for three minutes (`memberSilenceMs`). A live member never goes that
-quiet: its subscription probes the host after 60 s of silence, and a one-shot verb is done in
-seconds.
+**A route carries at most 64 channels; a full one gives up its stalest, and a dead one is closed.**
+Every dial from the member seat (a read, a post, each watch) is its own channel on the route. When
+the member's process ends by being killed, its Tailcat client never passes a close on, so the host's
+end stays open; dead channels would hold their slots forever, and a full route would drop every
+later dial (the member sees `member-channel-dark ... transport exited with code 0`). So the host:
+gives a new dial on a full route the slot of its stalest channel, an unsubscribed one before any
+subscription; closes a channel that holds no subscription and has no request in flight once it has
+been quiet 30 seconds (`memberQuietMs`: a one-shot verb is done by then); and closes any channel
+silent for three minutes (`memberSilenceMs`: a live subscription probes the host after 60 s of
+silence). A closed live channel costs its client one redial.
 
 ## What the operator carries, and what never travels
 

@@ -13,7 +13,10 @@ import { AgoraError } from './core.mjs';
 
 /** @typedef {import('./protocol/route.mjs').RouteBinding} Binding */
 /** @typedef {import('./protocol/route.mjs').RouteDescriptor} Descriptor */
-/** @typedef {{ready:Promise<unknown>,closed:Promise<unknown>,stop:()=>Promise<unknown>}} Session */
+/** `activity`, when a session offers it, says when it last heard from the member and whether it
+ * holds a subscription; a full route uses it to choose which channel to give up.
+ * @typedef {{ready:Promise<unknown>,closed:Promise<unknown>,stop:()=>Promise<unknown>,
+ * activity?:()=>{lastInbound:number,subscribed:boolean}}} Session */
 /** @typedef {{port:number,close:()=>Promise<unknown>}} Listener */
 /** Trusted local dependency surface. None of these functions may be supplied by a wire envelope.
  * `serverKey` is the absolute path of the route's saved Tailcat server key: minted with a fixed
@@ -147,9 +150,29 @@ function resources(options){
     streamDisposals.add(disposed);void disposed.then(()=>{streams.delete(stream);streamDisposals.delete(disposed);});
     if(signal.aborted)stream.destroy();
   };
+  /** The channel a full route gives up for a new dial: never one still in its handshake, and of
+   * the admitted ones the stalest, an unsubscribed one before any subscription. A member whose
+   * process dies without closing leaves its channel open here (Tailcat never passes the close
+   * on), so without this a route fills with dead channels and every later dial is dropped.
+   * @returns {{session:Session,stop?:Promise<unknown>}|undefined} */
+  const stalest=()=>{
+    let victim,rank;
+    for(const entry of sessions){
+      if(entry.stop||typeof entry.session.activity!=='function')continue;
+      const a=entry.session.activity();
+      const r=[a.subscribed?1:0,a.lastInbound];
+      if(!rank||r[0]<rank[0]||(r[0]===rank[0]&&r[1]<rank[1])){victim=entry;rank=r;}
+    }
+    return victim;
+  };
   /** @param {Binding} binding @param {Duplex} stream */
   const accept=(binding,stream)=>{
-    if(signal.aborted||pending.size+sessions.size>=maxChannels){stream.destroy();return Promise.reject(cancelled());}
+    if(signal.aborted){stream.destroy();return Promise.reject(cancelled());}
+    if(pending.size+sessions.size>=maxChannels){
+      const victim=stalest();
+      if(!victim){stream.destroy();return Promise.reject(cancelled());}
+      stopSession(victim);
+    }
     ownStream(stream);
     const task=(async()=>{
       check();const session=await options.acceptChannel(binding,stream,signal);

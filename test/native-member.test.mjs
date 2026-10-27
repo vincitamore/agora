@@ -1238,3 +1238,29 @@ test("a member channel that goes silent is closed and gives its slot back; one t
   await new Promise((resolve) => setTimeout(resolve, 400));
   assert.equal(talking.hostSide.destroyed, false, "a member that kept sending was cut off");
 });
+
+test("a member channel holding no subscription is closed once quiet with nothing in flight; a subscribed one rides the longer bound", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "agora-member-quiet-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const service = await authorityFixtureService({ root, accountId: ACCOUNT, seatLabel: "seat-a", memberQuietMs: 150, memberSilenceMs: 60_000 },
+    [{ roomId: ROOM, publicNodeKeys: [KEY] }]);
+  await service.start();
+  t.after(() => service.stop());
+  await service.createRoom({ roomId: ROOM, epoch: EPOCH });
+  const { descriptor, accept } = await openFakedRoute(service);
+  const secret = await readRouteSecret(service.root, descriptor.binding, descriptor.proofRef);
+  const oneShot = loopback(), watcher = loopback();
+  accept(oneShot.hostSide); accept(watcher.hostSide);
+  assert.equal((await greet(oneShot.clientSide, secret)).type, "member-welcome");
+  assert.equal((await greet(watcher.clientSide, secret)).type, "member-welcome");
+  const requestId = randomUUID().replaceAll("-", "");
+  watcher.clientSide.write(encodeNativeFrame({ protocol: NATIVE_PROTOCOL, type: "subscribe", requestId, roomId: ROOM, since: `${EPOCH}:0` }));
+  const subscribedReply = await collect(watcher.clientSide, (f) => (f.requestId === requestId ? f : undefined));
+  assert.equal(subscribedReply.type, "subscribe-result", subscribedReply.message);
+  watcher.clientSide.on("data", () => {});
+  const oneShotClosed = new Promise((resolve) => oneShot.hostSide.once("close", () => resolve(true)));
+  assert.equal(await Promise.race([oneShotClosed, new Promise((resolve) => setTimeout(() => resolve(false), 2000))]), true,
+    "a finished one-shot channel kept its slot");
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  assert.equal(watcher.hostSide.destroyed, false, "a subscription was cut at the one-shot bound");
+});
