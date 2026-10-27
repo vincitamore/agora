@@ -71,8 +71,8 @@ function fakeRouteOptions(state) {
       return { port: 4545, close: async () => { state.listenersClosed = (state.listenersClosed ?? 0) + 1; } };
     },
     spawn: async (args, _runtime, owner) => {
-      const spawned = child(owner?.signal, args[0] === "parse" ? 0 : null);
-      if (args[0] !== "parse")
+      const spawned = child(owner?.signal, (args[0] === "parse" || args[0] === "genkey") ? 0 : null);
+      if ((args[0] !== "parse" && args[0] !== "genkey"))
         spawned.once("exit", () => { state.childrenExited = (state.childrenExited ?? 0) + 1; });
       return spawned;
     },

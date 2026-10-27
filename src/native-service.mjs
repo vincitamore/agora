@@ -1,7 +1,7 @@
 // @ts-check
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { chmod, link, lstat, mkdir, open, readFile, realpath, rename, rm, stat } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, open, readdir, readFile, realpath, rename, rm, stat } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
 import { AgoraError, SPELLS_POSITION } from "./core.mjs";
@@ -11,9 +11,9 @@ import { NativeFrameDecoder, NATIVE_FRAME_MAX, NATIVE_PROTOCOL, encodeNativeFram
 import { NativeRoomStore } from "./native-store.mjs";
 import { assertDurableAttachments, collectReleasedCustody, handleAttachmentFrame, isAttachmentFrame, releaseHolds, withCustodyLock } from "./native-attachments.mjs";
 import { MEMBER_PHASES, buildRouteBinding, buildRouteDescriptor, memberHandshakeProof, memberMayRequest,
-  memberTranscript, mintRouteSecret, removeRouteSecret, routeKey, settleMemberAuthor, validatePublicNodeKey,
+  memberTranscript, mintRouteSecret, readRouteSecret, removeRouteSecret, routeKey, settleMemberAuthor, validatePublicNodeKey,
   verifyMemberHandshakeProof, writeRouteSecret } from "./native-member.mjs";
-import { publicNodeKeyDigest, validateRouteAuthor } from "./protocol/route.mjs";
+import { publicNodeKeyDigest, validateRouteAuthor, validateRouteDescriptor } from "./protocol/route.mjs";
 import { receiveCapabilityOffer, validateCapabilityOffer } from "./protocol/capabilities.mjs";
 import { CLIENT_NAME_PATTERN } from "./protocol/common.mjs";
 import { localTransferIdentity } from "./tailcat.mjs";
@@ -47,6 +47,10 @@ const MEMBER_OFFER = validateCapabilityOffer({ advertised: ["threads-v1", "attac
 const MAX_PENDING_WRITE = 2 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 10_000;
 const ENDPOINT_PROBE_TIMEOUT_MS = 500;
+/** Beside each grant's secret: its saved Tailcat server key, and the record a restart re-adopts
+ * it from (the member's public key and the loopback port; the descriptor holds the rest). */
+const ROUTE_SERVER_KEY = "server.private.json";
+const ROUTE_RECORD = "route.json";
 
 /** Reserve before any effect await, releasing only the reservation this call took.
  * This component grants no authority: the service invokes it only after proof admission.
@@ -473,6 +477,14 @@ export class NativeRoomService {
     /** Fences every route resource to this service's own lifetime.
      * @type {AbortController | undefined} */
     this.routeOwner = undefined;
+    /** Grants the record says stand but this run could not bring back, by grantId: the reason is
+     * the one a peer's kit is failing for, so `route list` and `doctor` name it on this seat.
+     * @type {Map<string, { roomId: string, accountId: string, grantId: string, reason: string, at: string }>} */
+    this.routeFailures = new Map();
+    /** The startup re-adoption; settled once every saved grant is live or listed as failed.
+     * @type {Promise<void>} */
+    this.readoption = Promise.resolve();
+    this.readoptionPending = false;
     this.running = false;
     this.faceOptions = options.faces;
     /** @type {NativeFaceWiring | undefined} */
@@ -508,6 +520,8 @@ export class NativeRoomService {
         this.faces = new NativeFaceWiring({ ...this.faceOptions, root: this.root, attestor: { serviceId: this.accountId, serviceBootId: this.bootEpoch } });
         this.faces.start({ openRoom: (id) => this.openRoom(id) });
       }
+      this.readoptionPending = true;
+      this.readoption = this.#readoptRoutes().finally(() => { this.readoptionPending = false; });
       return this.descriptor();
     } catch (e) {
       await this.#releaseFiles();
@@ -755,7 +769,7 @@ export class NativeRoomService {
     }
     if (frame.type === "route-list") {
       sendFrame(socket, { protocol: NATIVE_PROTOCOL, type: "route-list-result", requestId: frame.requestId,
-        routes: this.listRoutes() });
+        routes: this.listRoutes(), failed: this.listRouteFailures(), readoption: this.readoptionPending ? "pending" : "settled" });
       return;
     }
     if (frame.type === "route-close") {
@@ -1251,6 +1265,9 @@ export class NativeRoomService {
     const activation = { active: false };
     const secret = mintRouteSecret();
     const { proofRef, file: secretPath } = await writeRouteSecret(this.root, binding, secret);
+    // The grant's own Tailcat server key, beside its secret: the same key on every start is the
+    // same address, so the descriptor a member installed keeps dialing across restarts.
+    const serverKey = path.join(path.dirname(secretPath), ROUTE_SERVER_KEY);
     if (!this.routeOwner || this.routeOwner.signal.aborted) this.routeOwner = new AbortController();
     const owner = { serviceId: this.accountId, serviceBootId: this.bootEpoch, signal: this.routeOwner.signal };
     let resource;
@@ -1266,6 +1283,7 @@ export class NativeRoomService {
       // refusal. The spread order lets a test override it and cannot drop it by accident.
       runtime: { stateRoot: this.root, ...(request.runtime ?? {}) },
       ...(request.routeOptions ?? this.routeOptions ?? {}),
+      serverKey,
       acceptChannel: (accepted, stream, signal) => this.#acceptMember({ binding: accepted, secret, activation }, stream, signal),
     });
       const published = /** @type {any} */ (await resource.ready);
@@ -1273,11 +1291,14 @@ export class NativeRoomService {
         issuedAt: this.now().toISOString() });
       await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
       await writeAtomic(file, descriptor);
+      await writeAtomic(path.join(path.dirname(secretPath), ROUTE_RECORD), {
+        version: 1, operationId, publicNodeKey, port: published.endpoint.port });
       const entry = { binding, secret, proofRef, descriptor, resource, descriptorPath: file,
         secretPath, state: /** @type {'live' | 'closing'} */ ("live"), openedAt: this.now().toISOString(), activation };
       await journal.finish(operationId, 'committed', this.now().toISOString());
       this.routes.set(key, entry);
       activation.active = true;
+      await this.#forgetSupersededGrants(roomId, allowedKeyDigest, binding.grantId);
       return { descriptor, descriptorPath: file, secretRef: proofRef, secretPath };
     } catch (error) {
       // A failed descriptor write must not leave a live listener nobody has a record of.
@@ -1306,6 +1327,154 @@ export class NativeRoomService {
       openedAt: route.openedAt, descriptorPath: route.descriptorPath, secretPath: route.secretPath,
       ...(route.binding.author ? { author: route.binding.author } : {}),
     }));
+  }
+
+  /** Grants the record says stand that this run could not bring back, each with its reason. */
+  listRouteFailures() {
+    return [...this.routeFailures.values()];
+  }
+
+  /** @param {{ roomId: string, accountId: string, grantId: string }} binding @param {unknown} error */
+  #routeFailed(binding, error) {
+    const carried = /** @type {any} */ (error)?.code;
+    const message = error instanceof Error ? error.message : String(error);
+    const reason = typeof carried === "string" && /^[a-z][a-z0-9-]+$/.test(carried) ? `${carried}: ${message.replace(/^[a-z][a-z0-9-]+: /, "")}` : message;
+    this.routeFailures.set(binding.grantId, { roomId: binding.roomId, accountId: binding.accountId,
+      grantId: binding.grantId, reason: reason.slice(0, 500), at: this.now().toISOString() });
+  }
+
+  /**
+   * Take back, at start, every member route the record still admits, under the key, port, grant,
+   * generation and secret it was opened with, so the descriptor and secret a member installed keep
+   * working across restarts and reboots. The record decides, never the last run: the authority
+   * journal's committed enroll (and no revoke) for the grant, the current policy naming the key,
+   * and the room at the epoch the grant names. A grant that should come back and cannot is listed
+   * in `routeFailures` with its reason; nothing is minted in its place, because a new grant means
+   * a new kit, and that is the operator's act, not a restart's.
+   *
+   * A grant directory without a route record was opened before keys were saved: its address died
+   * with the run that opened it, so it is left alone and never retried.
+   */
+  async #readoptRoutes() {
+    const journal = this.authorityJournal, authority = this.authority;
+    if (!journal || !authority) return;
+    const directory = path.join(this.root, "native", "routes");
+    /** @type {string[]} */ let names;
+    try { names = await readdir(directory); } catch { return; }
+    /** @type {Map<string, { record: any, descriptor: ReturnType<typeof validateRouteDescriptor> }>} */
+    const newest = new Map();
+    for (const name of names) {
+      let text;
+      try { text = await readFile(path.join(directory, name, ROUTE_RECORD), "utf8"); } catch { continue; }
+      let record, descriptor;
+      try {
+        record = JSON.parse(text);
+        descriptor = validateRouteDescriptor(JSON.parse(await readFile(path.join(directory, name, "descriptor.json"), "utf8")));
+        if (descriptor.binding.grantId !== name) throw codedRefusal("route-record-mismatch", "the grant directory and its descriptor name different grants");
+      } catch (error) {
+        if (/^[a-f0-9]{32}$/.test(name)) this.#routeFailed({ roomId: descriptor?.binding.roomId ?? "unknown", accountId: descriptor?.binding.accountId ?? "unknown", grantId: name },
+          /** @type {any} */ (error)?.code ? error : codedRefusal("route-record-unreadable", error instanceof Error ? error.message : String(error)));
+        continue;
+      }
+      // One grant per key: a later open supersedes the earlier, and only the later's kit is current.
+      const key = routeKey(descriptor.binding.roomId, descriptor.binding.allowedKeyDigest);
+      const held = newest.get(key);
+      if (!held || Date.parse(descriptor.issuedAt) > Date.parse(held.descriptor.issuedAt)) newest.set(key, { record, descriptor });
+    }
+    for (const saved of newest.values()) {
+      if (this.draining || !this.running) return;
+      try { await this.#readoptRoute(saved.record, saved.descriptor); }
+      catch (error) { this.#routeFailed(saved.descriptor.binding, error); }
+    }
+  }
+
+  /** @param {any} record @param {ReturnType<typeof validateRouteDescriptor>} descriptor */
+  async #readoptRoute(record, descriptor) {
+    const journal = /** @type {AuthorityJournal} */ (this.authorityJournal);
+    const authority = /** @type {NonNullable<typeof this.authority>} */ (this.authority);
+    const binding = descriptor.binding;
+    const standing = journal.grantStanding(binding.grantId);
+    // Revoked, or never committed: the record does not admit this key, so there is nothing owed.
+    if (!standing.standing && standing.reason !== "authority-journal-unavailable") return;
+    if (!standing.standing) throw codedRefusal(standing.reason, "the authority journal cannot be read, so no grant can be re-admitted");
+    if (journal.recoveryRooms.has(binding.roomId))
+      throw codedRefusal("operator-recovery-required", "an admission act on this room is unfinished; settle it before routes come back");
+    if (binding.host.id !== this.accountId)
+      throw codedRefusal("route-record-mismatch", "the grant names another host account");
+    const now = Date.parse(this.now().toISOString());
+    if (now < Date.parse(authority.policy.validFrom) || now >= Date.parse(authority.policy.expiresAt))
+      throw codedRefusal("authority-policy-expired", "the authority policy is outside its validity window");
+    if (!authority.policy.entries.some((entry) => entry.roomId === binding.roomId
+      && entry.allowedKeyDigest === binding.allowedKeyDigest && entry.actions.includes("room-enroll")))
+      throw codedRefusal("operator-scope-refused", "the current authority policy no longer names this key for the room");
+    if (!record || record.version !== 1) throw codedRefusal("route-record-unreadable", "the route record is not version 1");
+    const publicNodeKey = validatePublicNodeKey(record.publicNodeKey);
+    if (publicNodeKeyDigest(publicNodeKey) !== binding.allowedKeyDigest)
+      throw codedRefusal("route-record-mismatch", "the saved member key is not the one the grant binds");
+    const port = record.port;
+    if (!Number.isSafeInteger(port) || port < 1 || port > 65535)
+      throw codedRefusal("route-record-unreadable", "the saved route port is not a port");
+    const store = await this.openRoom(binding.roomId);
+    if (store.manifest.epoch !== binding.roomEpoch)
+      throw codedRefusal("room-epoch-changed", "the room was rewritten since this grant was issued; open a new grant");
+    const secret = await readRouteSecret(this.root, binding, descriptor.proofRef);
+    const grantDirectory = path.join(this.root, "native", "routes", binding.grantId);
+    const secretPath = path.join(grantDirectory, path.basename(descriptor.proofRef));
+    const key = routeKey(binding.roomId, binding.allowedKeyDigest);
+    await withRouteReservation(this, binding.roomId, key, async () => {
+      const activation = { active: false };
+      if (!this.routeOwner || this.routeOwner.signal.aborted) this.routeOwner = new AbortController();
+      const owner = { serviceId: this.accountId, serviceBootId: this.bootEpoch, signal: this.routeOwner.signal };
+      let resource;
+      try {
+        resource = startMemberRoute({ binding, allowedNodeKey: publicNodeKey }, {
+          owner,
+          runtime: { stateRoot: this.root },
+          ...(this.routeOptions ?? {}),
+          readopted: true,
+          serverKey: path.join(grantDirectory, ROUTE_SERVER_KEY),
+          port,
+          acceptChannel: (accepted, stream, signal) => this.#acceptMember({ binding: accepted, secret, activation }, stream, signal),
+        });
+        const published = /** @type {any} */ (await resource.ready);
+        // The member dials what its descriptor names. Coming back anywhere else is a route nobody
+        // can reach, and it would read as healthy here.
+        if (published.endpoint.address !== descriptor.endpoint.address || published.endpoint.port !== descriptor.endpoint.port)
+          throw codedRefusal("route-address-changed", "the route came back at a different address than its descriptor names; open a new grant");
+        if (this.draining || !this.running) throw codedRefusal("service-dark", "the service stopped while the route was coming back");
+        this.routes.set(key, { binding, secret, proofRef: descriptor.proofRef, descriptor, resource,
+          descriptorPath: path.join(grantDirectory, "descriptor.json"), secretPath,
+          state: /** @type {'live' | 'closing'} */ ("live"), openedAt: this.now().toISOString(), activation });
+        activation.active = true;
+        this.routeFailures.delete(binding.grantId);
+      } catch (error) {
+        try { await resource?.stop(); } catch { /* fenced to this service; its teardown goes on */ }
+        throw error;
+      }
+    });
+  }
+
+  /**
+   * After a new grant for a key is live, the earlier grants for that key are dead: their kits name
+   * an older grant, and the record keeps only one grant per key. Their directories go (secret,
+   * saved key, descriptor, record), so a restart never offers two grants for one principal.
+   * Best effort: a directory that cannot be removed is simply never re-adopted, as the newest wins.
+   * @param {string} roomId @param {string} allowedKeyDigest @param {string} keepGrantId
+   */
+  async #forgetSupersededGrants(roomId, allowedKeyDigest, keepGrantId) {
+    const directory = path.join(this.root, "native", "routes");
+    /** @type {string[]} */ let names;
+    try { names = await readdir(directory); } catch { return; }
+    for (const name of names) {
+      if (name === keepGrantId || !/^[a-f0-9]{32}$/.test(name)) continue;
+      try {
+        const binding = validateRouteDescriptor(JSON.parse(await readFile(path.join(directory, name, "descriptor.json"), "utf8"))).binding;
+        if (binding.roomId !== roomId || binding.allowedKeyDigest !== allowedKeyDigest || binding.grantId !== name) continue;
+        if ([...this.routes.values()].some((route) => route.binding.grantId === name)) continue;
+        await removeRouteSecret(this.root, binding);
+        this.routeFailures.delete(name);
+      } catch { /* unreadable or already gone: the newest grant wins at the next start either way */ }
+    }
   }
 
   /**
@@ -1473,7 +1642,8 @@ export class NativeRoomService {
     this.draining = true;
     // face work drains (bounded) while the rooms are still open; what it leaves is swept at the next start
     await this.faces?.stop();
-    await Promise.allSettled([...this.admissions.values()]);
+    // re-adoption checks `draining` between grants, so this waits for at most the grant in flight
+    await Promise.allSettled([...this.admissions.values(), this.readoption]);
     this.running = false;
     this.routeChallenges.clear();
     for (const route of this.routes.values()) {

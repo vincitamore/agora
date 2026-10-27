@@ -70,7 +70,7 @@ async function route(t, service, hostRoot, key, humanName) {
     routeOptions: {
       listen: async (/** @type {(socket: any) => void} */ hook) => { accept.fn = hook; return { port: 4242, close: async () => {} }; },
       spawn: async (/** @type {string[]} */ args, /** @type {any} */ _r, /** @type {any} */ owner) =>
-        fakeChild({ exit: args[0] === "parse" ? 0 : null, signal: owner?.signal }),
+        fakeChild({ exit: (args[0] === "parse" || args[0] === "genkey") ? 0 : null, signal: owner?.signal }),
       address: async () => ADDRESS,
     } });
   const secret = await readRouteSecret(hostRoot, opened.descriptor.binding, opened.descriptor.proofRef);
@@ -81,7 +81,7 @@ async function route(t, service, hostRoot, key, humanName) {
   const room = new RemoteRoom({ descriptor: opened.descriptor, secret, stateRoot: seatRoot, keyPath, nodeKey: key, timeoutMs: 4000,
     channelOptions: {
       spawn: async (/** @type {string[]} */ args, /** @type {any} */ _runtime, /** @type {any} */ owner) => {
-        if (args[0] === "parse") return fakeChild({ exit: 0, signal: owner?.signal });
+        if ((args[0] === "parse" || args[0] === "genkey")) return fakeChild({ exit: 0, signal: owner?.signal });
         if (args[1] === "printpub") {
           const stdout = new PassThrough();
           const child = fakeChild({ exit: 0, stdout, signal: owner?.signal });
@@ -218,7 +218,7 @@ test("the human grant is in the act the authority signs, and only an enroll take
     await assert.rejects(service.createRouteChallenge({ action: "room-enroll", roomId: ROOM, publicNodeKey: AGENT_KEY, humanName: name }), /route-human-position/, name);
   const opened = await service.openRoute({ roomId: ROOM, publicNodeKey: HUMAN_KEY, proof: fixtureProof(service, pending.challenge),
     routeOptions: { listen: async () => ({ port: 4242, close: async () => {} }),
-      spawn: async (/** @type {string[]} */ args, /** @type {any} */ _r, /** @type {any} */ owner) => fakeChild({ exit: args[0] === "parse" ? 0 : null, signal: owner?.signal }),
+      spawn: async (/** @type {string[]} */ args, /** @type {any} */ _r, /** @type {any} */ owner) => fakeChild({ exit: (args[0] === "parse" || args[0] === "genkey") ? 0 : null, signal: owner?.signal }),
       address: async () => ADDRESS } });
   assert.deepEqual(opened.descriptor.binding.author, { kind: "human", name: "Grace" });
   await assert.rejects(service.createRouteChallenge({ action: "room-revoke", roomId: ROOM, publicNodeKey: HUMAN_KEY, humanName: "Grace" }), /route-human-invalid/);

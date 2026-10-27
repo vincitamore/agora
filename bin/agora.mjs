@@ -98,7 +98,7 @@ import { buildLabel, buildPredates, cacheTtls, clearWatchMode, installedBuild, t
 import { SERVICE_DARK, ServiceDarkError, openNativeSubscription, serviceDescriptorStatus, validateNativeRoomId } from "../src/wake/subscriber.mjs";
 import { openRemoteSubscription } from "../src/native-remote.mjs";
 import { configVerb, verifiedRemoteRow } from "../src/config-write.mjs";
-import { closeServiceRoute, createServiceRoom, listServiceRoutes, openServiceRoute, runService,
+import { closeServiceRoute, createServiceRoom, openServiceRoute, runService, serviceRouteState,
   seatAccountId, seatLabel, serviceStatus, startService, startServiceAtLogon, stopService, readServiceStart,
   readAuthorityInput, writeAuthorityOutput, generateSeatAuthority, publicSeatAuthority, prepareSeatAuthorityEnrollment,
   signSeatAuthorityEnrollment, completeSeatAuthorityEnrollment, signSeatRouteAct,
@@ -1572,10 +1572,14 @@ async function main(argv) {
         return EXIT.ok;
       }
       if (sub === "list") {
-        const routes = await listServiceRoutes(stateRoot);
-        if (json) console.log(JSON.stringify({ type: "service", action: "route-list", routes }));
-        else if (!routes.length) console.log("no live member routes on this service");
-        else for (const r of routes) console.log(`${r.roomId} ${r.accountId} generation ${r.routeGeneration} since ${r.openedAt}${r.author ? ` human ${JSON.stringify(r.author.name)}` : ""}`);
+        const { routes, failed, readoption } = await serviceRouteState(stateRoot);
+        if (json) console.log(JSON.stringify({ type: "service", action: "route-list", routes, failed, readoption }));
+        else {
+          if (!routes.length) console.log("no live member routes on this service");
+          else for (const r of routes) console.log(`${r.roomId} ${r.accountId} generation ${r.routeGeneration} since ${r.openedAt}${r.author ? ` human ${JSON.stringify(r.author.name)}` : ""}`);
+          for (const f of failed) console.log(`DOWN ${f.roomId} ${f.accountId} grant ${f.grantId}: ${f.reason}`);
+          if (readoption === "pending") console.log("(the startup re-adoption is still running; list again in a moment)");
+        }
         return EXIT.ok;
       }
       if (sub === "close") {
@@ -2099,6 +2103,15 @@ async function main(argv) {
           code: "unknown-service-build",
           message: `seat service pid ${native.pid ?? "unknown"} recorded no build identity; restart it once so freshness becomes measurable`,
         });
+      }
+      // A grant the record admits that this run could not bring back is a member whose kit is
+      // failing right now; it is named here so the host sees it before the member reports it.
+      if (native.pidAlive) {
+        try {
+          const routeState = await serviceRouteState(stateRoot);
+          for (const f of routeState.failed)
+            warnings.push({ code: "member-route-down", message: `member route ${f.accountId} in room ${f.roomId} (grant ${f.grantId}) did not come back: ${f.reason}` });
+        } catch { /* the service did not answer the list; its status line above already says so */ }
       }
     }
     const downs = await listStandDowns(stateRoot);

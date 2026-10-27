@@ -41,11 +41,21 @@ allowed member key. Its captured `RouteBinding` is passed to the service's
 room or route generation. The service checks current authority again at serialized
 effects. Validation and the allowlisted transport alone are not that check.
 
+Host ingress takes three more trusted options. `serverKey` is the absolute path of the
+grant's saved Tailcat server key: absent on disk, it is minted with `genkey --fixed-region
+--embed-derp-map`; present, `serve` runs under it, so the published address is the same on
+every start. `port` is the loopback port to bind (0 or absent: the OS picks one). `readopted`
+admits a binding an earlier run of the service issued: the route is then fenced to this run
+by `owner` rather than by the binding's `serviceBootId`, it must name its saved key and port,
+and a missing key is refused `route-server-key-missing` instead of minted, because a new key
+is a new address. Without `readopted`, a binding whose `serviceBootId` is not the owner's is
+refused.
+
 An outbound descriptor must be accepted by trusted local service code before any
 network launch. A descriptor's `proofRef` is a reference, not proof merely because
 the DTO accepts it. Native key resolution is explicit and separate from offer
-discovery. The binding's service boot identifies the host; an outbound caller's
-resource owner is its own local service and can have a different boot.
+discovery. The binding's service boot names the run that issued the grant; an outbound
+caller's resource owner is its own local service and can have a different boot.
 
 The runtime guardian remains a nested owned resource, not another resident service.
 Stopping a route fences new local admission, cancels pending admission, destroys

@@ -6,7 +6,8 @@
 // never merely that something threw.
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough, Duplex } from "node:stream";
@@ -286,7 +287,7 @@ async function openFakedRoute(service, publicNodeKey = KEY) {
       listen: async (/** @type {(socket: any) => void} */ hook) => { accept = hook; return { port: 4242, close: async () => {} }; },
       // `serve` stays resident; `parse` must end and exit 0 for scope.command().
       spawn: async (/** @type {string[]} */ args, /** @type {any} */ _runtime, /** @type {any} */ owner) =>
-        fakeChild({ exit: args[0] === "parse" ? 0 : null, signal: owner?.signal }),
+        fakeChild({ exit: (args[0] === "parse" || args[0] === "genkey") ? 0 : null, signal: owner?.signal }),
       address: async () => address,
     },
   });
@@ -684,7 +685,7 @@ test("a descriptor-write failure leaves no live orphan route", async (t) => {
   const routeOptions = {
     listen: async (/** @type {(socket: any) => void} */ _hook) => ({ port: 4242, close: async () => { stopped = true; } }),
     spawn: async (/** @type {string[]} */ args, /** @type {any} */ _runtime, /** @type {any} */ owner) =>
-      fakeChild({ exit: args[0] === "parse" ? 0 : null, signal: owner?.signal }),
+      fakeChild({ exit: (args[0] === "parse" || args[0] === "genkey") ? 0 : null, signal: owner?.signal }),
     address: async () => `tc${"a".repeat(48)}`,
   };
   service.nativeDirectory = blocker;
@@ -838,7 +839,7 @@ test("openRoute hands Tailcat a runtime the REAL resolver accepts", async (t) =>
       listen: async (/** @type {(socket: any) => void} */ _hook) => ({ port: 4242, close: async () => {} }),
       spawn: async (/** @type {string[]} */ args, /** @type {any} */ runtime, /** @type {any} */ owner) => {
         handed ??= runtime;
-        return fakeChild({ exit: args[0] === "parse" ? 0 : null, signal: owner?.signal });
+        return fakeChild({ exit: (args[0] === "parse" || args[0] === "genkey") ? 0 : null, signal: owner?.signal });
       },
       address: async () => `tc${"a".repeat(48)}`,
     },
@@ -885,7 +886,7 @@ function fakeRouteOptions(counters = { opened: 0, closed: 0 }) {
         return { port: 4242, close: async () => { counters.closed += 1; } };
       },
       spawn: async (/** @type {string[]} */ args, /** @type {any} */ _r, /** @type {any} */ owner) =>
-        fakeChild({ exit: args[0] === "parse" ? 0 : null, signal: owner?.signal }),
+        fakeChild({ exit: (args[0] === "parse" || args[0] === "genkey") ? 0 : null, signal: owner?.signal }),
       address: async () => `tc${"a".repeat(48)}`,
     },
   };
@@ -1117,4 +1118,98 @@ test("a member reads its own room's board (boards-v1), and another room's board 
   const strayed = await ask({ type: "board", roomId: "1".repeat(32) });
   assert.equal(strayed.type, "error");
   assert.match(strayed.message, /member-room-refused/);
+});
+
+// ------------------------------------------------- restarts: a grant outlives the run that opened it
+
+/** A faked Tailcat that behaves like the real one where re-adoption depends on it: `genkey` leaves
+ * a key file, `serve` publishes whatever `address` names, and the listener binds the port asked for. */
+function durableRig() {
+  const rig = {
+    address: `tc${"a".repeat(48)}`,
+    /** @type {string[][]} */ spawned: [],
+    /** @type {number[]} */ ports: [],
+    /** @type {((socket: any) => void) | undefined} */ hook: undefined,
+    /** @param {any} stream */ accept(stream) { /** @type {any} */ (rig.hook)(stream); },
+    options: {
+      listen: async (/** @type {(socket: any) => void} */ hook, /** @type {number | undefined} */ port) => {
+        rig.hook = hook; rig.ports.push(port ?? 0);
+        return { port: port || 4242, close: async () => {} };
+      },
+      spawn: async (/** @type {string[]} */ args, /** @type {any} */ _r, /** @type {any} */ owner) => {
+        rig.spawned.push(args);
+        if (args[0] === "genkey") writeFileSync(String(args[1]).slice("--key=".length), "{}\n");
+        return fakeChild({ exit: (args[0] === "parse" || args[0] === "genkey") ? 0 : null, signal: owner?.signal });
+      },
+      address: async () => rig.address,
+    },
+  };
+  return rig;
+}
+
+/** A host, its admitted route, and a second run of the service on the same state root.
+ * @param {import('node:test').TestContext} t @param {ReturnType<typeof durableRig>} rig */
+async function restartedHost(t, rig) {
+  const root = await mkdtemp(path.join(tmpdir(), "agora-member-restart-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const first = await enrolledService(root, rig.options);
+  await first.start();
+  await first.createRoom({ roomId: ROOM, epoch: EPOCH });
+  const opened = await approvedOpen(first, { roomId: ROOM, publicNodeKey: KEY });
+  const secret = await readRouteSecret(root, opened.descriptor.binding, opened.descriptor.proofRef);
+  const restart = async () => {
+    await first.stop();
+    const second = new NativeRoomService({ root, accountId: ACCOUNT, seatLabel: "seat-a", authorityId: first.authorityId,
+      readLocalIdentity: async () => ({ nodeKey: `nodekey:${"1".repeat(64)}` }), routeOptions: rig.options });
+    await second.start();
+    t.after(() => second.stop());
+    await second.readoption;
+    return second;
+  };
+  t.after(() => first.stop());
+  return { root, first, opened, secret, restart };
+}
+
+test("a restart brings an admitted route back under its same grant, generation, port and saved key, and the member's installed secret still greets", async (t) => {
+  const rig = durableRig();
+  const { opened, secret, restart } = await restartedHost(t, rig);
+  const minted = rig.spawned.filter((args) => args[0] === "genkey");
+  assert.equal(minted.length, 1);
+  assert.ok(minted[0]?.includes("--fixed-region"), "the saved key was minted without a fixed relay region, so its address can move");
+  const service = await restart();
+  assert.deepEqual(service.listRouteFailures(), []);
+  const [row] = service.listRoutes();
+  assert.equal(row?.grantId, opened.descriptor.binding.grantId);
+  assert.equal(row?.routeGeneration, opened.descriptor.binding.routeGeneration);
+  assert.equal(rig.ports.at(-1), opened.descriptor.endpoint.port, "the route came back on another loopback port");
+  assert.equal(rig.spawned.filter((args) => args[0] === "genkey").length, 1, "a restart minted a new key, so the address moved");
+  const serve = rig.spawned.filter((args) => args[0] === "serve").at(-1);
+  assert.ok(serve?.some((arg) => arg.startsWith("--key=") && arg.endsWith("server.private.json")), `served without the saved key: ${JSON.stringify(serve)}`);
+  const { hostSide, clientSide } = loopback();
+  rig.accept(hostSide);
+  assert.equal((await greet(clientSide, secret)).type, "member-welcome");
+});
+
+test("a route that would come back at a different address is not served, and is listed as down with the reason", async (t) => {
+  const rig = durableRig();
+  const { opened, restart } = await restartedHost(t, rig);
+  rig.address = `tc${"b".repeat(48)}`;
+  const service = await restart();
+  assert.deepEqual(service.listRoutes(), []);
+  const [down] = service.listRouteFailures();
+  assert.equal(down?.grantId, opened.descriptor.binding.grantId);
+  assert.match(String(down?.reason), /^route-address-changed: /);
+});
+
+test("a grant the record revoked stays down after a restart even when its files survive, and is owed to nobody", async (t) => {
+  const rig = durableRig();
+  const { root, first, opened, restart } = await restartedHost(t, rig);
+  const grant = path.join(root, "native", "routes", opened.descriptor.binding.grantId);
+  const kept = path.join(root, "kept-grant");
+  await cp(grant, kept, { recursive: true });
+  await approvedClose(first, { roomId: ROOM, publicNodeKey: KEY });
+  await cp(kept, grant, { recursive: true });
+  const service = await restart();
+  assert.deepEqual(service.listRoutes(), [], "a revoked grant was re-admitted from files left on disk");
+  assert.deepEqual(service.listRouteFailures(), []);
 });

@@ -36,7 +36,7 @@ function transport() {
       const child = /** @type {any} */ (new EventEmitter());
       child.stdout = new PassThrough(); child.exitCode = null; child.signalCode = null; child.connected = false;
       const finish = () => { if (child.exitCode !== null) return; child.exitCode = 0; child.stdout.end(); child.emit('exit', 0, null); };
-      if (args[0] === 'parse') queueMicrotask(finish);
+      if ((args[0] === 'parse' || args[0] === 'genkey')) queueMicrotask(finish);
       else owner.signal.addEventListener('abort', finish, { once: true });
       return child;
     },

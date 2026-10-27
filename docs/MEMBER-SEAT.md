@@ -166,9 +166,10 @@ When the file does not exist yet, the step creates it with one `agora config set
 the default, and the room. The step is `ok` once the row names the installed descriptor.
 
 A row of another transport under the same alias is refused by name; choose another `--room`. After
-a new kit (the host's service restarted and every route was re-minted), run the script with the new
-`--kit`: the step replaces the row with `agora config room add partner '<row>' --replace`, with the
-diff and the backup.
+a new kit (the host closed this seat's route, or its grant could not come back after a restart and
+was opened anew), run the script with the new `--kit`: the step replaces the row with `agora config
+room add partner '<row>' --replace`, with the diff and the backup. A host restart alone needs
+nothing here: the route comes back under the same descriptor.
 
 ## 6. agora reaches the room (`doctor`)
 
@@ -330,9 +331,10 @@ node scripts/admit-peer-seat.mjs --room partner --allow-key nodekey:<64hex> --ou
 node scripts/admit-peer-seat.mjs --room partner --human-key nodekey:<64hex> --human-name Grace --out-dir ./kits
 ```
 
-A key the running service's policy does not cover needs `--restart`, which re-mints **every**
-member's route: announce it, and every member installs its new kit (step 4 with the new `--kit`).
-Then zip each kit folder and send it by the private channel. Pin the charter (step 11).
+A key the running service's policy does not cover needs `--restart`: announce it, because every
+member's channel drops until the service is back. The routes already admitted come back under their
+same descriptors, so only the new key gets a kit. Zip it and send it by the private channel. Pin the
+charter (step 11).
 
 ## What the script never does
 

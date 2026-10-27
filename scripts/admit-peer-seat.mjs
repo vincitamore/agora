@@ -10,11 +10,12 @@
  * `descriptor.json`, `<routeGeneration>.secret` and `install-peer-route.mjs`) for handoff to
  * that peer seat.
  *
- * A running service is never stopped as a side effect. Routes belong to the service and a
- * restart drops every one of them, so a restart re-mints every peer's grant and generation and
- * strands every kit already installed on a remote. The helper therefore restarts only when the
- * authority policy the service loaded at start no longer covers what must be admitted, and only
- * when asked to with `--restart`. Without the flag it refuses before changing anything.
+ * A running service is never stopped as a side effect. A restart ends every local native watch
+ * and, while the service comes back, every member's channel; each route the record still admits
+ * then comes back under its same descriptor and secret, so an installed kit keeps working. The
+ * helper restarts only when the authority policy the service loaded at start no longer covers
+ * what must be admitted, and only when asked to with `--restart`. Without the flag it refuses
+ * before changing anything.
  *
  * Usage:
  *   # 1. Admit peers in one run on a stopped service; it starts with a policy covering them all
@@ -23,11 +24,12 @@
  *
  *   # 2. Admit one more peer's nodeKey (from their `agora enroll --local --json`). A key the running
  *   #    service's policy does not yet cover needs a restart; that is announced by a refusal until
- *   #    `--restart --out-dir <dir>` is passed, and then EVERY admitted peer gets a new kit:
+ *   #    `--restart` is passed. The routes already admitted come back under their same descriptors,
+ *   #    so only the new peer gets a kit:
  *   node scripts/admit-peer-seat.mjs --room partner --allow-key nodekey:<64hex> --out-dir ./kits --restart
  *
- *   # 3. Open any admitted route that is not live (a stopped service, a closed route) without
- *   #    touching the routes that are:
+ *   # 3. Open any admitted route that is not live (a closed route, or a grant the service could not
+ *   #    bring back at start) without touching the routes that are; each one opened gets a new kit:
  *   node scripts/admit-peer-seat.mjs --reopen
  *
  *   # Bootstrap the host authority and ensure the native room exists, admitting nobody yet (the
@@ -72,6 +74,7 @@ import {
   signSeatRouteAct,
   startService,
   stopService,
+  serviceRouteState,
 } from "../src/service-cli.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -80,6 +83,19 @@ const entryFile = path.resolve(__dirname, "..", "bin", "agora.mjs");
 /** The all-zero key digest used only to give a policy its mandatory first entry. */
 const PLACEHOLDER_DIGEST = `sha256:${"0".repeat(64)}`;
 const PLACEHOLDER_KEY = `nodekey:${"0".repeat(64)}`;
+
+/** The routes a freshly started service holds once its startup re-adoption settles. Bounded: a
+ * re-adoption still running at the deadline is read as it stands, and any key it has not brought
+ * back is opened as a new grant (the service refuses that open while the key is still coming back).
+ * @param {string} stateRoot */
+async function settledRoutes(stateRoot) {
+  const deadline = Date.now() + 90_000;
+  for (;;) {
+    const state = await serviceRouteState(stateRoot);
+    if (state.readoption === "settled" || Date.now() >= deadline) return state.routes;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}
 
 /**
  * Everything the helper reaches outside itself through. A test replaces these to run the whole
@@ -456,19 +472,12 @@ export async function admit(argv, overrides = {}) {
     }
   }
 
-  if (restartReason) {
-    const affected = liveBefore.length;
-    if (!values.restart) {
-      throw new AgoraError(
-        `restart required, nothing changed: ${restartReason}. The service reads that policy only at start, ` +
-        `and a restart ends every local native watch and re-mints all ${affected} live route(s), so every ` +
-        `remote's installed kit stops working until it installs a new one. Announce it, then re-run with ` +
-        `--restart --out-dir <dir> to restart and reissue a kit for every admitted key.`, 2);
-    }
-    if (!outDir) {
-      throw new AgoraError(
-        "--restart requires --out-dir: every admitted key gets a new kit, and the kits have nowhere to go. Nothing changed.", 2);
-    }
+  if (restartReason && !values.restart) {
+    throw new AgoraError(
+      `restart required, nothing changed: ${restartReason}. The service reads that policy only at start, ` +
+      `and a restart ends every local native watch and drops the ${liveBefore.length} live member channel(s) ` +
+      `until the service is back; each admitted route then comes back under its same descriptor. Announce ` +
+      `it, then re-run with --restart (and --out-dir <dir> for the kits of any newly admitted key).`, 2);
   }
 
   if (rosterChanged) {
@@ -523,9 +532,10 @@ export async function admit(argv, overrides = {}) {
     }
   }
 
-  // A fresh service has no routes; a surviving one keeps every route it already had, and only
-  // the ones it lacks are opened.
-  const liveNow = started ? [] : liveBefore;
+  // A surviving service keeps every route it had. A fresh one re-adopts every grant the record
+  // still admits, under the same descriptor, once its startup re-adoption settles; only a key
+  // with no live route after that is opened anew and needs a kit.
+  const liveNow = started ? await settledRoutes(stateRoot) : liveBefore;
   /** @type {Array<Record<string, any>>} */
   const openedRoutes = [];
   /** @type {RosterEntry[]} */

@@ -1,5 +1,6 @@
 // @ts-check
 import { createServer } from 'node:net';
+import { access } from 'node:fs/promises';
 import { Duplex } from 'node:stream';
 import { finished } from 'node:stream/promises';
 import { addAbortListener } from 'node:events';
@@ -15,12 +16,18 @@ import { AgoraError } from './core.mjs';
 /** @typedef {{ready:Promise<unknown>,closed:Promise<unknown>,stop:()=>Promise<unknown>}} Session */
 /** @typedef {{port:number,close:()=>Promise<unknown>}} Listener */
 /** Trusted local dependency surface. None of these functions may be supplied by a wire envelope.
+ * `serverKey` is the absolute path of the route's saved Tailcat server key: minted with a fixed
+ * DERP region on first open, reused afterwards, so the published address is the same on every
+ * start. `port` is the loopback port to bind (0 or absent: the OS picks one). `readopted` marks a
+ * route this service took back from disk: its binding was issued by an earlier run, and the
+ * route is fenced to THIS run by `owner` instead; a readopted route never mints a key.
  * @typedef {{owner:import('./tailcat-lifetime.mjs').RuntimeOwner,runtime:Parameters<typeof spawnTailcat>[1],
  * acceptChannel:(binding:Binding,stream:Duplex,signal:AbortSignal)=>Session|Promise<Session>,
  * startupTimeoutMs?:number,stopTimeoutMs?:number,maxChannels?:number,commandTimeoutMs?:number,
  * firstDialAttempts?:number,firstDialTimeoutMs?:number,firstDialBackoffMs?:number,
  * spawn?:typeof spawnTailcat,address?:typeof readTailcatAddress,
- * listen?:(accept:(socket:Duplex)=>void)=>Promise<Listener>}} Options */
+ * serverKey?:string,port?:number,readopted?:boolean,
+ * listen?:(accept:(socket:Duplex)=>void,port?:number)=>Promise<Listener>}} Options */
 
 /** @template T @param {T} value @returns {T} */
 function freeze(value) {
@@ -31,7 +38,7 @@ function cancelled(){return Object.assign(Error('Native route stopped before rea
 /** @param {unknown} value @param {number} fallback */
 function duration(value,fallback){const n=value??fallback;if(typeof n!=='number'||!Number.isSafeInteger(n)||n<1||n>2147483647)throw Error('Invalid route bound.');return n;}
 /** @param {string[]} args */
-function commandVerb(args){return args.find(value=>value==='parse'||value==='printpub')??args[0]??'unknown';}
+function commandVerb(args){return args.find(value=>value==='parse'||value==='printpub'||value==='genkey')??args[0]??'unknown';}
 /** @param {unknown} error */
 function memberRefusal(error){
   const code=error instanceof AgoraError?/** @type {any} */(error).code:undefined;
@@ -49,10 +56,11 @@ function withStderrTail(text,tail){return tail?`${text}; stderr tail: ${JSON.str
 
 /** One TCP listener per admitted member. Request bytes never select its binding.
  * The local machine remains in the cooperative trust profile; loopback is not OS-user isolation.
- * @param {(socket:Duplex)=>void} accept @returns {Promise<Listener>} */
-async function listen(accept){
+ * @param {(socket:Duplex)=>void} accept @param {number} [port] 0 or absent: the OS picks one
+ * @returns {Promise<Listener>} */
+async function listen(accept,port=0){
   const server=createServer(accept);
-  await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',()=>{server.off('error',reject);resolve(undefined);});});
+  await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',()=>{server.off('error',reject);resolve(undefined);});});
   const addr=server.address();if(!addr||typeof addr==='string')throw Error('Native route listener unavailable.');
   return {port:addr.port,close:()=>new Promise((resolve,reject)=>server.close(error=>error?reject(error):resolve(undefined)))};
 }
@@ -213,11 +221,22 @@ function resources(options){
 export function startMemberRoute(request,options){
   const binding=freeze(validateRouteBinding(request.binding)),key=request.allowedNodeKey;
   if(publicNodeKeyDigest(key)!==binding.allowedKeyDigest)throw Error('Route allow key does not match binding.');
-  if(binding.serviceBootId!==options.owner?.serviceBootId)throw Error('Host route boot does not match local owner.');
+  if(options.readopted!==true&&binding.serviceBootId!==options.owner?.serviceBootId)throw Error('Host route boot does not match local owner.');
+  const serverKey=options.serverKey,port=options.port??0;
+  if(serverKey!==undefined&&(typeof serverKey!=='string'||!path.isAbsolute(serverKey)||/[\x00-\x1f\x7f]/.test(serverKey)))throw Error('Expected local absolute route server key path.');
+  if(options.readopted===true&&serverKey===undefined)throw Error('A readopted route needs its saved server key.');
+  if(!Number.isSafeInteger(port)||port<0||port>65535||(options.readopted===true&&port===0))throw Error('Invalid route port.');
   return owned(options,async scope=>{
-    const listener=await(options.listen??listen)(socket=>{void scope.accept(binding,socket).catch(()=>socket.destroy());});
+    if(serverKey!==undefined){
+      const saved=await access(serverKey).then(()=>true,()=>false);scope.check();
+      // A new key is a new address, and every kit carrying the old one stops dialing: a readopted
+      // route whose key is gone fails here rather than quietly publishing somewhere else.
+      if(!saved&&options.readopted===true)throw Object.assign(Error('route-server-key-missing: the saved Tailcat server key for this grant is gone'),{code:'route-server-key-missing'});
+      if(!saved){await scope.command(['genkey',`--key=${serverKey}`,'--fixed-region','--embed-derp-map']);scope.check();}
+    }
+    const listener=await(options.listen??listen)(socket=>{void scope.accept(binding,socket).catch(()=>socket.destroy());},port);
     scope.ownListener(listener);scope.check();
-    const {child}=await scope.spawn(['serve','--key=new','--full-address','--json',`--allow=${key}`,String(listener.port)],true);
+    const {child}=await scope.spawn(['serve',`--key=${serverKey??'new'}`,'--full-address','--json',`--allow=${key}`,String(listener.port)],true);
     const address=await scope.race((options.address??readTailcatAddress)(child));scope.check();
     if(typeof address!=='string'||!/^[A-Za-z0-9._:~+-]{20,1800}$/.test(address)||address.endsWith('\n'))throw Error('Invalid route endpoint.');
     await scope.command(['parse',address]);scope.check();

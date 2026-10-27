@@ -1,9 +1,11 @@
 // @ts-check
 // The peer admission helper against an in-process seat service and a fake Tailcat, in a temp
-// root. A service restart drops every route, so each cell below counts starts and stops and reads
-// the live route registry (grant id, route generation) rather than trusting the helper's output.
+// root. A restart re-adopts every admitted route under its same grant, so each cell below counts
+// starts and stops and reads the live route registry (grant id, route generation) rather than
+// trusting the helper's output.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -46,10 +48,14 @@ function fakeChild(options = {}) {
   return child;
 }
 
+/** A fake Tailcat: `serve` stays resident, `parse` and `genkey` exit at once, and `genkey` leaves
+ * its key file where the route asked for it, so a restart finds a saved key to re-adopt with. */
 const routeOptions = () => ({
   listen: async () => ({ port: 4242, close: async () => {} }),
-  spawn: async (/** @type {string[]} */ args, /** @type {any} */ _runtime, /** @type {any} */ owner) =>
-    fakeChild({ exit: args[0] === "parse" ? 0 : null, signal: owner?.signal }),
+  spawn: async (/** @type {string[]} */ args, /** @type {any} */ _runtime, /** @type {any} */ owner) => {
+    if (args[0] === "genkey") writeFileSync(String(args[1]).slice("--key=".length), "{}\n");
+    return fakeChild({ exit: (args[0] === "parse" || args[0] === "genkey") ? 0 : null, signal: owner?.signal });
+  },
   address: async () => ADDRESS,
 });
 
@@ -200,59 +206,63 @@ test("a second admission on a running service refuses, by name, before changing 
   assert.deepEqual(await s.roster(), [ADA], "the refused admission was recorded in the roster");
 });
 
-test("--restart refuses without --out-dir, and changes nothing", { timeout: 60_000 }, async (t) => {
+test("--restart for a new key brings every admitted route back under its same grant: only the new key gets a kit, and nobody must reinstall", { timeout: 60_000 }, async (t) => {
   const s = await seat(t);
   await s.run(["--room", "partner", "--allow-key", ADA, "--out-dir", s.kits]);
-  const routesBefore = await s.routes();
-  const countsBefore = { ...s.counts };
-  await assert.rejects(s.run(["--room", "partner", "--allow-key", LIN, "--restart"]), /--restart requires --out-dir/);
-  assert.deepEqual(s.counts, countsBefore);
-  assert.deepEqual(await s.routes(), routesBefore);
-  assert.deepEqual(await s.roster(), [ADA]);
-});
+  const [adaKit] = await kitsIn(s.kits);
+  assert.ok(adaKit);
+  const freshKits = path.join(s.home, "kits-2");
 
-test("--restart reissues a kit for EVERY admitted key, one folder each, and names every remote that must install it", { timeout: 60_000 }, async (t) => {
-  const s = await seat(t);
-  await s.run(["--room", "partner", "--allow-key", ADA, "--out-dir", s.kits]);
-  const [adaOld] = await kitsIn(s.kits);
-  assert.ok(adaOld);
-
-  const second = await s.run(["--room", "partner", "--allow-key", LIN, "--out-dir", s.kits, "--restart"]);
+  const second = await s.run(["--room", "partner", "--allow-key", LIN, "--out-dir", freshKits, "--restart"]);
   assert.deepEqual(s.counts, { starts: 2, stops: 1 });
   assert.equal(second.service.restarted, true);
 
   const routes = await s.routes();
   assert.equal(Object.keys(routes).length, 2);
-  const kits = await kitsIn(s.kits);
-  assert.equal(kits.length, 2, "one kit folder per admitted key");
-  assert.equal(new Set(kits.map((k) => k.name)).size, 2);
-  for (const kit of kits) {
-    assert.deepEqual(kit.files.filter((f) => f.endsWith(".secret")).length, 1);
-    assert.ok(kit.files.includes("descriptor.json") && kit.files.includes("install-peer-route.mjs"));
-    assert.ok(kitIsLive(kit, routes), `kit ${kit.name} names a route the service does not hold`);
-  }
-  // the first peer's old kit named the pre-restart generation, which no longer exists
-  assert.equal(Object.values(routes).some((r) => r.grantId === adaOld.grantId), false);
-  // the notice names the previously admitted remote, and only it: the new peer has no stale kit
-  assert.deepEqual(second.staleRemotes.map((r) => r.publicNodeKey), [ADA]);
-  assert.ok(second.staleRemotes[0]?.kitDir?.startsWith(s.kits));
+  assert.ok(kitIsLive(adaKit, routes), "the first peer's installed kit stopped working across the restart");
+  const written = await kitsIn(freshKits);
+  assert.equal(written.length, 1, "a kit was written for a route that came back unchanged");
+  assert.ok(written[0] && kitIsLive(written[0], routes));
+  assert.notEqual(written[0]?.grantId, adaKit.grantId);
+  assert.deepEqual(second.staleRemotes, [], "a remote was told to reinstall a kit that still works");
 });
 
-test("a stopped service is started and every admitted route re-opened with a kit for each, naming the remotes that must reinstall", { timeout: 60_000 }, async (t) => {
+test("a service that died comes back with every admitted route under its same grant: no kit is written and nobody must reinstall", { timeout: 60_000 }, async (t) => {
   const s = await seat(t);
   await admitTwo(s);
   const before = await kitsIn(s.kits);
   await s.killService();
+  const freshKits = path.join(s.home, "kits-2");
 
-  const out = await s.run(["--out-dir", s.kits]);
+  const out = await s.run(["--out-dir", freshKits]);
   assert.equal(out.service.started, true);
   assert.equal(out.service.restarted, false);
   const routes = await s.routes();
-  const after = await kitsIn(s.kits);
-  assert.equal(after.length, 2);
-  for (const kit of after) assert.ok(kitIsLive(kit, routes));
-  assert.equal(before.some((k) => kitIsLive(k, routes)), false, "old kits were expected to be stale after the service died");
-  assert.deepEqual(out.staleRemotes.map((r) => r.publicNodeKey).sort(), [ADA, LIN].sort());
+  assert.equal(Object.keys(routes).length, 2);
+  for (const kit of before) assert.ok(kitIsLive(kit, routes), `kit ${kit.name} stopped working after the service came back`);
+  assert.deepEqual(await kitsIn(freshKits), []);
+  assert.deepEqual(out.staleRemotes, []);
+});
+
+test("a grant whose saved key is gone does not come back at a new address: the helper re-opens only that one, with a kit, and the dead grant's files go", { timeout: 60_000 }, async (t) => {
+  const s = await seat(t);
+  await admitTwo(s);
+  const before = await s.routes();
+  const adaDigest = publicNodeKeyDigest(ADA), linDigest = publicNodeKeyDigest(LIN);
+  const adaGrant = /** @type {string} */ (before[adaDigest]?.grantId);
+  await s.killService();
+  await rm(path.join(s.state, "native", "routes", adaGrant, "server.private.json"));
+  const freshKits = path.join(s.home, "kits-2");
+
+  const out = await s.run(["--out-dir", freshKits]);
+  const routes = await s.routes();
+  assert.deepEqual(routes[linDigest], before[linDigest], "the intact grant did not come back unchanged");
+  assert.notEqual(routes[adaDigest]?.grantId, adaGrant, "a grant with no saved key was revived at a new address");
+  const written = await kitsIn(freshKits);
+  assert.deepEqual(written.map((k) => k.grantId), [routes[adaDigest]?.grantId]);
+  assert.deepEqual(out.staleRemotes.map((r) => r.publicNodeKey), [ADA]);
+  assert.deepEqual(await readdir(path.join(s.state, "native", "routes")).then((names) => names.includes(adaGrant)), false,
+    "the superseded grant's directory outlived the grant that replaced it");
 });
 
 test("one closed route is the only one re-opened: the other peer's grant, generation and kit stay valid and the service stays up", { timeout: 60_000 }, async (t) => {

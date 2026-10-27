@@ -483,13 +483,26 @@ export async function openServiceRoute(stateRoot, roomId, publicNodeKey, proof) 
   }
 }
 
-/** Live routes, read from the service's own registry. A service restart drops every route.
+/** Live routes, read from the service's own registry. A restart re-adopts every grant the record
+ * still admits, under its same descriptor; see `serviceRouteState` for the ones that failed to.
  * @param {string} stateRoot */
 export async function listServiceRoutes(stateRoot) {
+  return (await serviceRouteState(stateRoot)).routes;
+}
+
+/** The live routes, the grants the record admits that this run could not bring back (each with
+ * its reason), and whether the startup re-adoption is still running. An older service sends no
+ * `failed` or `readoption`; that reads as nothing failed and settled.
+ * @param {string} stateRoot */
+export async function serviceRouteState(stateRoot) {
   const { client } = await connectSeatService(stateRoot);
   try {
     const result = await client.request("route-list", {});
-    return Array.isArray(result.routes) ? result.routes : [];
+    return {
+      routes: Array.isArray(result.routes) ? result.routes : [],
+      failed: Array.isArray(result.failed) ? result.failed : [],
+      readoption: result.readoption === "pending" ? "pending" : "settled",
+    };
   } finally {
     client.close();
   }

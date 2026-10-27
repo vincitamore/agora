@@ -210,5 +210,23 @@ export class AuthorityJournal {
       actDigest: nativeDigest(proof.challenge.act), requestDigest: nativeDigest(request) };
   }
 
+  /** Whether a grant still stands on the record: an enroll act that committed this exact grant,
+   * and no revoke act naming it that got as far as `revoked`. A restart re-adopts a route only on
+   * this answer, so the record, not the process that happened to be running, decides who is
+   * admitted. @param {string} grantId @returns {{ standing: true, operationId: string } | { standing: false, reason: string }} */
+  grantStanding(grantId) {
+    validateNativeId(grantId);
+    if (this.unavailable || this.closed) return { standing: false, reason: 'authority-journal-unavailable' };
+    let enrolled;
+    for (const [operationId, op] of this.operations) {
+      const request = op.intent.request;
+      if (!request || request.binding.grantId !== grantId) continue;
+      if (request.action === 'room-revoke' && (op.state === 'revoked' || op.state === 'closed'))
+        return { standing: false, reason: 'route-revoked' };
+      if (request.action === 'room-enroll' && op.state === 'committed') enrolled = operationId;
+    }
+    return enrolled ? { standing: true, operationId: enrolled } : { standing: false, reason: 'route-not-enrolled' };
+  }
+
   async close() { await this.writes; this.closed = true; await this.handle.close(); }
 }

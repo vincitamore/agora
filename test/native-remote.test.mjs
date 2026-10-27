@@ -124,7 +124,7 @@ async function rig(t, over = {}) {
     routeOptions: {
       listen: async (/** @type {(socket: any) => void} */ hook) => { accept = hook; hostAccept.fn = hook; return { port: 4242, close: async () => {} }; },
       spawn: async (/** @type {string[]} */ args, /** @type {any} */ _r, /** @type {any} */ owner) =>
-        fakeChild({ exit: args[0] === "parse" ? 0 : null, signal: owner?.signal }),
+        fakeChild({ exit: (args[0] === "parse" || args[0] === "genkey") ? 0 : null, signal: owner?.signal }),
       address: async () => ADDRESS,
     },
   });
@@ -195,7 +195,7 @@ async function rig(t, over = {}) {
         spawn: async (/** @type {string[]} */ args, /** @type {any} */ runtime, /** @type {any} */ owner) => {
           spawned.push(args);
           over.onSpawn?.(runtime);
-          if (args[0] === "parse") return fakeChild({ exit: 0, signal: owner?.signal });
+          if ((args[0] === "parse" || args[0] === "genkey")) return fakeChild({ exit: 0, signal: owner?.signal });
           if (args[1] === "printpub") {
             const stdout = new PassThrough();
             const child = fakeChild({ exit: 0, stdout, signal: owner?.signal });
@@ -810,7 +810,7 @@ test("a client held across a route close fails by name on the next verb, and the
     routeOptions: {
       listen: async (/** @type {(socket:any)=>void} */ hook) => { hostAccept.fn = hook; return { port: 4243, close: async () => {} }; },
       spawn: async (/** @type {string[]} */ args, /** @type {any} */ _r, /** @type {any} */ owner) =>
-        fakeChild({ exit: args[0] === "parse" ? 0 : null, signal: owner?.signal }),
+        fakeChild({ exit: (args[0] === "parse" || args[0] === "genkey") ? 0 : null, signal: owner?.signal }),
       address: async () => ADDRESS,
     },
   });

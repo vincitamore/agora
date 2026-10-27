@@ -37,19 +37,36 @@ key the room's enrollment record published, and the absence of any other input i
 
 **The seat service owns the route, not the verb.** A route's resources are fenced to the service's
 own lifetime, so a listener started by a short-lived CLI process would die with it. `route open` is
-a request to the running service, the way `service room create` is. A service restart drops every
-route; `route list` reads the service's registry, never files on disk, so a route whose transport
-has gone is not reported as live.
+a request to the running service, the way `service room create` is. `route list` reads the
+service's registry, never files on disk, so a route whose transport has gone is not reported as
+live.
 
-That makes a service restart a **batch operation, never a casual repair**. Announce it first: every
-local native watch ends `service-dark` when the service stops. After the new service is up, run
-`route open` again for every previously authorized room/key pair and carry each fresh descriptor
-and secret to its remote seat — the old descriptor names a dead grant. `room add-remote` refuses an
-existing alias and writes nothing, so validate the new material under an unused alias; then the
-operator replaces the existing room row with `agora config room add <alias> --from-descriptor
-<new descriptor> --replace`, which verifies it again and keeps the old file as a backup. Only then re-arm the
-local native watches. The service-up post is the boundary that tells every local consumer which boot
-it is joining and tells every remote operator that new route material exists.
+**A grant outlives the run that opened it.** `route open` mints the grant's own Tailcat server key
+(`genkey --fixed-region --embed-derp-map`, kept beside the secret as `server.private.json`) and
+records the member's key and the loopback port beside it (`route.json`). Tailcat derives the
+address from that key and the pinned relay, so the same key gives the same address on every start
+(measured: byte-identical across server restarts, and a client dialing the old address connects).
+At start the service re-adopts every grant the record still admits: an enroll act the authority
+journal committed for that grant, no revoke act for it, a current policy naming the key for the
+room, and the room at the grant's epoch. Each comes back under its same key, port, grant,
+generation and secret, so the descriptor and secret a member installed keep working across
+restarts and reboots; the stored `serviceBootId` names the run that issued the grant, and the
+listener is fenced to the run that holds it now. A restart still ends every local native watch
+`service-dark`, and every member's channel until the service is back; the member's next dial
+connects. A grant directory without `route.json` was opened before keys were saved; its address
+died with that run and it is never retried.
+
+**What a restart cannot bring back, it names.** A grant the record admits that this run could not
+re-adopt (its saved key is gone, the policy no longer names the key, the room was rewritten, the
+route came back at a different address, the port is taken) is not served and is not replaced:
+`route list` prints it as `DOWN` with its reason, `--json` carries it under `failed`, and `agora
+doctor` warns `member-route-down`. A new grant for that key means a new kit, which is the
+operator's act (`scripts/admit-peer-seat.mjs --reopen`); the new grant's open removes the dead
+grant's files.
+
+**Revocation is `route close`, and only that.** A restart no longer revokes anything. To end a
+member's access, close its route: the journal records the revoke, the grant's directory goes, and
+no later start re-admits it, even from files restored to disk.
 
 One live route per key digest per room. A second `open` for a digest that already has a live route
 is refused `route-already-open`; close it first, which mints a new grant on the next open.
@@ -195,7 +212,7 @@ On the **member** seat, by its human:
 On the **host** seat, by its operator, with the counter-seat authority's signer at hand:
 
 2. Make sure the authority's policy names the human's key for the room (a policy that does not is a
-   service restart, announced, and every member kit is reissued).
+   service restart, announced; the routes already admitted come back under their same descriptors).
 3. `agora service route challenge <roomId> --allow-key <human nodeKey> --act room-enroll --human-name <name> --out human-challenge.json`.
    The printed line carries `author`; read it again in the file before signing.
 4. `agora authority sign --file human-challenge.json --out human-proof.json`, then
@@ -243,7 +260,7 @@ then stays, reported by `route list` as `closing`, and its key digest is held un
 closing state in its message (wait, rather than close again); an open that arrives while another
 open for the same digest is still a reservation is refused with the opening state, for the same
 reason (at that instant `route close` would say `route-not-open`). If the resource never settles, the
-digest stays unopenable until the service restarts (a restart drops every route). That is safety
+digest stays unopenable until the service restarts (the revoked grant is not re-adopted). That is safety
 over liveness: a route that is torn down while a new grant admits the same principal would be two
 listeners for one key, which is the orphan the reservation exists to prevent; a held key is visible
 in `route list` the whole time, and an orphan would not be.

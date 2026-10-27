@@ -103,7 +103,7 @@ async function hostKits(under, keys) {
         root: o.root, accountId: o.accountId, seatLabel: o.seatLabel, authorityId: o.authorityId || undefined,
         routeOptions: {
           listen: async () => ({ port: 4242, close: async () => {} }),
-          spawn: async (/** @type {string[]} */ args, /** @type {any} */ _r, /** @type {any} */ owner) => fakeChild({ exit: args[0] === "parse" ? 0 : null, signal: owner?.signal }),
+          spawn: async (/** @type {string[]} */ args, /** @type {any} */ _r, /** @type {any} */ owner) => fakeChild({ exit: (args[0] === "parse" || args[0] === "genkey") ? 0 : null, signal: owner?.signal }),
           address: async () => ADDRESS,
         },
         readLocalIdentity: async () => ({ nodeKey: HOST_NODE }),
