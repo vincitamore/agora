@@ -93,7 +93,11 @@ function fakeChild(options = {}) {
     for (const cb of listeners.exit ?? []) cb(code, null);
   };
   if (exit !== null) queueMicrotask(() => finish(exit));
-  else if (signal) signal.addEventListener("abort", () => finish(0), { once: true });
+  else {
+    if (signal) signal.addEventListener("abort", () => finish(0), { once: true });
+    // Tailcat closes the channel and exits 0 when its stdin ends (measured against the real binary).
+    if (stdin) { stdin.once("finish", () => finish(0)); stdin.once("close", () => finish(0)); }
+  }
   return child;
 }
 

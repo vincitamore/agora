@@ -13,10 +13,7 @@ import { AgoraError } from './core.mjs';
 
 /** @typedef {import('./protocol/route.mjs').RouteBinding} Binding */
 /** @typedef {import('./protocol/route.mjs').RouteDescriptor} Descriptor */
-/** `activity`, when a session offers it, says when it last heard from the member and whether it
- * holds a subscription; a full route uses it to choose which channel to give up.
- * @typedef {{ready:Promise<unknown>,closed:Promise<unknown>,stop:()=>Promise<unknown>,
- * activity?:()=>{lastInbound:number,subscribed:boolean}}} Session */
+/** @typedef {{ready:Promise<unknown>,closed:Promise<unknown>,stop:()=>Promise<unknown>}} Session */
 /** @typedef {{port:number,close:()=>Promise<unknown>}} Listener */
 /** Trusted local dependency surface. None of these functions may be supplied by a wire envelope.
  * `serverKey` is the absolute path of the route's saved Tailcat server key: minted with a fixed
@@ -24,12 +21,14 @@ import { AgoraError } from './core.mjs';
  * start. `port` is the loopback port to bind (0 or absent: the OS picks one). `readopted` marks a
  * route this service took back from disk: its binding was issued by an earlier run, and the
  * route is fenced to THIS run by `owner` instead; a readopted route never mints a key.
+ * `closeGraceMs` bounds how long a member dial's Tailcat may take to close the channel and exit
+ * after its stdin ends, before the guardian is disconnected (default 2000).
  * @typedef {{owner:import('./tailcat-lifetime.mjs').RuntimeOwner,runtime:Parameters<typeof spawnTailcat>[1],
  * acceptChannel:(binding:Binding,stream:Duplex,signal:AbortSignal)=>Session|Promise<Session>,
  * startupTimeoutMs?:number,stopTimeoutMs?:number,maxChannels?:number,commandTimeoutMs?:number,
  * firstDialAttempts?:number,firstDialTimeoutMs?:number,firstDialBackoffMs?:number,
  * spawn?:typeof spawnTailcat,address?:typeof readTailcatAddress,
- * serverKey?:string,port?:number,readopted?:boolean,
+ * serverKey?:string,port?:number,readopted?:boolean,closeGraceMs?:number,
  * listen?:(accept:(socket:Duplex)=>void,port?:number)=>Promise<Listener>}} Options */
 
 /** @template T @param {T} value @returns {T} */
@@ -89,6 +88,7 @@ function resources(options){
   // Copy trusted runtime configuration before deferred startup. Callers cannot override lifetime.
   const runtime={...options.runtime,lifetime};delete runtime.deadline;
   const stopTimeout=duration(options.stopTimeoutMs,10000),maxChannels=duration(options.maxChannels,64);
+  const closeGraceMs=duration(options.closeGraceMs,2000);
   const commandTimeoutMs=duration(options.commandTimeoutMs,5000);
   const firstDialAttempts=duration(options.firstDialAttempts,3);
   const firstDialTimeoutMs=duration(options.firstDialTimeoutMs,12000);
@@ -100,7 +100,10 @@ function resources(options){
   /** @type {Set<Promise<unknown>>} */ const pending=new Set();
   /** @type {Set<{session:Session,stop?:Promise<unknown>}>} */ const sessions=new Set();
   /** @type {Set<Promise<unknown>>} */ const sessionDisposals=new Set();
-  /** @type {Set<{child:Awaited<ReturnType<typeof spawnTailcat>>,closed:Promise<unknown>}>} */ const children=new Set();
+  /** `graceful` marks a member dial: its far end is another seat's route, which learns the channel
+   * is over only if Tailcat closes it, and Tailcat does that on stdin EOF (then exits 0). Killing
+   * it (the guardian's disconnect) sends nothing, and the host keeps a dead channel open.
+   * @type {Set<{child:Awaited<ReturnType<typeof spawnTailcat>>,closed:Promise<unknown>,graceful:boolean,kill?:AbortController,closing?:boolean}>} */ const children=new Set();
   /** @type {unknown[]} */ const failures=[];
   /** @type {Listener|undefined} */ let listener;
   /** @type {Promise<unknown>|undefined} */ let listenerClosed;
@@ -121,7 +124,16 @@ function resources(options){
     if(listener&&!listenerClosed){listenerClosed=Promise.resolve().then(()=>listener?.close());void listenerClosed.catch(()=>{});}
     for(const stream of streams)stream.destroy();
     for(const entry of sessions)stopSession(entry);
-    for(const {child} of children){child.stdout?.resume();if(child.connected)child.disconnect();}
+    for(const entry of children){
+      const {child}=entry;child.stdout?.resume();
+      if(!entry.graceful){if(child.connected)child.disconnect();continue;}
+      // End stdin and let Tailcat close the channel and exit; disconnect only if it has not by the
+      // grace bound. Ending a stream the dispose above already destroyed is a no-op.
+      if(entry.closing||child.exitCode!==null||child.signalCode!==null)continue;entry.closing=true;
+      try{child.stdin?.on?.('error',()=>{});child.stdin?.end();}catch{}
+      const timer=setTimeout(()=>{entry.kill?.abort();if(child.connected)child.disconnect();},closeGraceMs);timer.unref?.();
+      void entry.closed.then(()=>clearTimeout(timer),()=>clearTimeout(timer));
+    }
   };
   const cleanup=async()=>{
     dispose();await scope.startup;dispose();
@@ -150,29 +162,9 @@ function resources(options){
     streamDisposals.add(disposed);void disposed.then(()=>{streams.delete(stream);streamDisposals.delete(disposed);});
     if(signal.aborted)stream.destroy();
   };
-  /** The channel a full route gives up for a new dial: never one still in its handshake, and of
-   * the admitted ones the stalest, an unsubscribed one before any subscription. A member whose
-   * process dies without closing leaves its channel open here (Tailcat never passes the close
-   * on), so without this a route fills with dead channels and every later dial is dropped.
-   * @returns {{session:Session,stop?:Promise<unknown>}|undefined} */
-  const stalest=()=>{
-    let victim,rank;
-    for(const entry of sessions){
-      if(entry.stop||typeof entry.session.activity!=='function')continue;
-      const a=entry.session.activity();
-      const r=[a.subscribed?1:0,a.lastInbound];
-      if(!rank||r[0]<rank[0]||(r[0]===rank[0]&&r[1]<rank[1])){victim=entry;rank=r;}
-    }
-    return victim;
-  };
   /** @param {Binding} binding @param {Duplex} stream */
   const accept=(binding,stream)=>{
-    if(signal.aborted){stream.destroy();return Promise.reject(cancelled());}
-    if(pending.size+sessions.size>=maxChannels){
-      const victim=stalest();
-      if(!victim){stream.destroy();return Promise.reject(cancelled());}
-      stopSession(victim);
-    }
+    if(signal.aborted||pending.size+sessions.size>=maxChannels){stream.destroy();return Promise.reject(cancelled());}
     ownStream(stream);
     const task=(async()=>{
       check();const session=await options.acceptChannel(binding,stream,signal);
@@ -193,9 +185,20 @@ function resources(options){
     })();
     pending.add(task);void task.finally(()=>pending.delete(task)).catch(()=>{});return task;
   };
-  /** @param {string[]} args @param {boolean} [resident] */
-  const spawn=async(args,resident=false)=>{
-    check();const child=await(options.spawn??spawnTailcat)(args,runtime,{...owner,signal});
+  /** @param {string[]} args @param {boolean} [resident] @param {boolean} [graceful] a member dial,
+   * closed by stdin EOF before any disconnect */
+  const spawn=async(args,resident=false,graceful=false)=>{
+    check();
+    // The guardian disconnects itself the moment the signal it is handed aborts. A graceful child is
+    // handed its own: aborted with the route only while it is still starting, and afterwards only by
+    // the grace bound in `dispose`, so the route's stop cannot kill it before it closes the channel.
+    const kill=graceful?new AbortController():undefined;
+    let started=false;
+    const startingAbort=()=>{if(!started)kill?.abort();};
+    if(kill){if(signal.aborted)kill.abort();else signal.addEventListener('abort',startingAbort,{once:true});}
+    let child;
+    try{child=await(options.spawn??spawnTailcat)(args,runtime,{...owner,signal:kill?kill.signal:signal});}
+    finally{started=true;signal.removeEventListener('abort',startingAbort);}
     // Register exit observation before any await or cancellation dispatch.
     const exited=new Promise((resolve,reject)=>{
       /** @param {number|null} code @param {NodeJS.Signals|null} sig */
@@ -203,7 +206,7 @@ function resources(options){
       if(child.exitCode!==null||child.signalCode!==null)done(child.exitCode,child.signalCode);else child.once('exit',done);
     });
     const pipe=child.stdout?finished(child.stdout,{cleanup:true}).catch(()=>{}):Promise.resolve();
-    const ended=Promise.all([exited,pipe]);void ended.catch(()=>{});children.add({child,closed:ended});
+    const ended=Promise.all([exited,pipe]);void ended.catch(()=>{});children.add({child,closed:ended,graceful,kill});
     if(resident)void exited.then(()=>stop(),()=>stop()).catch(()=>{});
     if(signal.aborted){child.stdout?.resume();if(child.connected)child.disconnect();}
     check();return {child,exited};
@@ -290,7 +293,7 @@ export function startMemberChannel(request,options){
     const args=[`--key=${keyPath}`,descriptor.endpoint.address,String(descriptor.endpoint.port)];
     /** @type {{attempt:number,reason:string,tail:string}|undefined} */ let lastFailure;
     for(let attempt=1;attempt<=scope.firstDialAttempts;attempt++){
-      const {child,exited}=await scope.spawn(args);
+      const {child,exited}=await scope.spawn(args,false,true);
       if(!child.stdin||!child.stdout)throw Error('Native route pipes unavailable.');
       const stream=Duplex.from({readable:child.stdout,writable:child.stdin});
       const accepted=scope.accept(descriptor.binding,stream);

@@ -38,7 +38,7 @@ function fixture(){
   /** @type {Array<{args:string[],options:any,owner:any}>} */ const calls=[];
   /** @type {Array<any>} */ const children=[];
   /** @type {((stream:PassThrough)=>void)|undefined} */ let accept;
-  let listenerClosed=0,spawnBarrier=/** @type {Promise<void>|undefined} */(undefined),key=publicKey,parseExit=0;
+  let listenerClosed=0,spawnBarrier=/** @type {Promise<void>|undefined} */(undefined),key=publicKey,parseExit=0,ignoreEof=false;
   let hangingVerb='',commandTail='',dialFailures=0,hangingDials=0,dialTail='',dialCount=0,dialSessionStops=0;
   /** @type {import('../src/tailcat-routes.mjs').Options} */ const options={
     owner:{...ownerRef,signal:owner.signal},runtime:{stateRoot:path.resolve('test-state')},startupTimeoutMs:1000,stopTimeoutMs:50,
@@ -56,6 +56,10 @@ function fixture(){
         tailcatStderrTail(){return tail;},
         disconnect(){if(!child.connected)return;child.connected=false;child.exitCode=0;child.stdout.end();child.stdin.destroy();child.emit('exit',0,null);},
       });children.push(child);
+      // Tailcat closes the channel and exits 0 when its stdin ends (measured against the real binary).
+      if(dial&&!ignoreEof){const eof=()=>{if(!child.connected)return;child.connected=false;child.exitCode=0;child.stdout.end();child.emit('exit',0,null);};child.stdin.once('finish',eof);child.stdin.once('close',eof);}
+      // spawnTailcat's guardian disconnects itself the moment the signal it was handed aborts.
+      liveOwner?.signal?.addEventListener('abort',()=>child.disconnect(),{once:true});
       if(verb&&verb!==hangingVerb)setImmediate(()=>{child.stdout.end(verb==='parse'?'{}':`${key}\n`);child.exitCode=verb==='parse'?parseExit:0;child.connected=false;child.emit('exit',child.exitCode,null);});
       if(dial&&dialCount<=dialFailures)setImmediate(()=>{child.stdout.end();child.stdin.destroy();child.exitCode=1;child.connected=false;child.emit('exit',1,null);});
       return /** @type {Awaited<ReturnType<NonNullable<typeof options.spawn>>>} */(/** @type {unknown} */(child));
@@ -64,6 +68,7 @@ function fixture(){
   return {options,owner,calls,children,connect(){const socket=new PassThrough();accept?.(socket);return socket;},listenerClosed:()=>listenerClosed,
     /** @param {Promise<void>} value */ blockSpawn(value){spawnBarrier=value;},
     /** @param {string} value */ key(value){key=value;},
+    /** A dial child that keeps running after its stdin ends. */ ignoreEof(){ignoreEof=true;},
     /** @param {number} value */ parseCode(value){parseExit=value;},
     /** @param {string} verb @param {string} tail */ hangCommand(verb,tail){hangingVerb=verb;commandTail=tail;},
     /** @param {number} count @param {string} tail */ failDials(count,tail){
@@ -302,26 +307,29 @@ test('offline real guardian printpub checks the actual enrolled private file',as
   }finally{await rm(stateRoot,{recursive:true,force:true});}
 });
 
-test('a full route gives up its stalest channel for a new dial, an unsubscribed one before a subscription',async()=>{
-  const f=fixture();f.options.maxChannels=2;
-  const made=/** @type {Array<ReturnType<typeof session>>} */([]);
-  const activities=[{lastInbound:100,subscribed:true},{lastInbound:200,subscribed:false},{lastInbound:300,subscribed:false}];
-  f.options.acceptChannel=async()=>{const s=session();s.admit();const a=activities[made.length];made.push(s);return Object.assign(s,{activity:()=>a});};
-  const route=startMemberRoute({binding:binding(),allowedNodeKey:publicKey},f.options);await route.ready;
-  f.connect();f.connect();await delay(5);
-  assert.equal(made.length,2);
-  const third=f.connect();await delay(5);
-  assert.equal(third.destroyed,false,'a full route dropped the new dial instead of giving up a stale channel');
-  assert.equal(made.length,3);
-  assert.deepEqual(made.map(s=>s.stopped()),[0,1,0],'the route gave up a channel other than the stalest unsubscribed one');
+test('a member channel ends its Tailcat stdin and lets it exit, never disconnecting it, so the host sees the close',async()=>{
+  const f=fixture();const options={...f.outbound(),stopTimeoutMs:1000};
+  const route=startMemberChannel({descriptor:descriptor()},options);await route.ready;
+  const child=f.children.at(-1);
+  let disconnected=false;const disconnect=child.disconnect.bind(child);child.disconnect=()=>{disconnected=true;disconnect();};
   await route.stop();
+  assert.equal(child.exitCode,0,'Tailcat was not let exit on its own');
+  assert.equal(disconnected,false,'the member channel killed Tailcat, so the host never sees the channel close');
 });
 
-test('a full route whose channels report no activity still drops the new dial',async()=>{
-  const f=fixture();f.options.maxChannels=1;
-  const route=startMemberRoute({binding:binding(),allowedNodeKey:publicKey},f.options);await route.ready;
-  f.connect();await delay(5);
-  const second=f.connect();await delay(5);
-  assert.equal(second.destroyed,true);
+test('a member Tailcat that does not exit after its stdin ends is disconnected at the grace bound',async()=>{
+  const f=fixture();f.ignoreEof();const options={...f.outbound(),closeGraceMs:30,stopTimeoutMs:1000};
+  const route=startMemberChannel({descriptor:descriptor()},options);await route.ready;
+  const child=f.children.at(-1);
+  let disconnected=false;const disconnect=child.disconnect.bind(child);child.disconnect=()=>{disconnected=true;disconnect();};
   await route.stop();
+  assert.equal(disconnected,true,'a Tailcat that ignored EOF was left running');
+});
+
+test('host ingress still disconnects its resident Tailcat at once on stop',async()=>{
+  const f=fixture();const route=startMemberRoute({binding:binding(),allowedNodeKey:publicKey},f.options);await route.ready;
+  const child=f.children.find(c=>c.connected);
+  let disconnected=false;const disconnect=child.disconnect.bind(child);child.disconnect=()=>{disconnected=true;disconnect();};
+  await route.stop();
+  assert.equal(disconnected,true);
 });

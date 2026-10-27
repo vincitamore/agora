@@ -405,13 +405,11 @@ function readHandshakeFrame(socket, timeoutMs, label) {
 }
 
 export class NativeRoomService {
-  /** @param {{ root: string, accountId: string, seatLabel: string, now?: () => Date, nonce?: string, build?: import("./harness.mjs").BuildIdentity, routeOptions?: Record<string, unknown>, authorityId?: string, readLocalIdentity?: (root: string) => Promise<{nodeKey: string}>, faces?: Omit<ConstructorParameters<typeof NativeFaceWiring>[0], "root" | "attestor">, memberSilenceMs?: number, memberQuietMs?: number }} options
+  /** @param {{ root: string, accountId: string, seatLabel: string, now?: () => Date, nonce?: string, build?: import("./harness.mjs").BuildIdentity, routeOptions?: Record<string, unknown>, authorityId?: string, readLocalIdentity?: (root: string) => Promise<{nodeKey: string}>, faces?: Omit<ConstructorParameters<typeof NativeFaceWiring>[0], "root" | "attestor">, memberSilenceMs?: number }} options
    * `faces`, when given, runs the room faces (src/native-faces-wiring.mjs): the daemon passes a
    * `transportFor` built on the shared config; absent, the service publishes no face.
    * `memberSilenceMs` is how long a member channel may send nothing before the host closes it
-   * (default three minutes, three times a live subscription's probe interval); `memberQuietMs` is
-   * the same bound for a channel that holds no subscription and has no request in flight
-   * (default 30 seconds: a one-shot verb is done by then). */
+   * (default three minutes, three times a live subscription's probe interval). */
   constructor(options) {
     validateNativeId(options.accountId, "service account id");
     if (!options.seatLabel?.trim() || options.seatLabel.length > 120) throw new AgoraError("native service needs a bounded seat label");
@@ -438,9 +436,7 @@ export class NativeRoomService {
     // driven through a real client against a live service; production leaves it undefined.
     this.routeOptions = options.routeOptions;
     this.memberSilenceMs = options.memberSilenceMs ?? 180_000;
-    this.memberQuietMs = options.memberQuietMs ?? 30_000;
     if (!Number.isSafeInteger(this.memberSilenceMs) || this.memberSilenceMs < 1) throw new AgoraError("memberSilenceMs must be a positive integer");
-    if (!Number.isSafeInteger(this.memberQuietMs) || this.memberQuietMs < 1) throw new AgoraError("memberQuietMs must be a positive integer");
     this.authorityId = options.authorityId;
     this.readLocalIdentity = options.readLocalIdentity ?? ((root) => localTransferIdentity(root, { create: false }));
     /** @type {Awaited<ReturnType<typeof readAuthorityRecord>> | undefined} */ this.authority = undefined;
@@ -1579,20 +1575,14 @@ export class NativeRoomService {
       return { ready, closed, stop: async () => { stream.destroy(); } };
     }
 
-    // A member's far end can vanish without a close: the remote process dies, and Tailcat keeps
-    // its local connection to this listener open, so the channel holds one of the route's slots
-    // forever. Enough of them fill the route's cap, and every later dial is dropped at accept.
-    // A live subscription is never quiet past `memberSilenceMs`: it probes the host after 60 s of
-    // silence. A channel holding no subscription is a one-shot verb (a read, a post), whose
-    // client sends its next request at once or is done; past `memberQuietMs` with nothing in
-    // flight it is finished. Either way the slot is given back. `activity` lets a full route pick
-    // the stalest channel to give up for a new dial.
-    let lastInbound = Date.now(), inFlight = 0;
-    const subscribed = () => (this.subscriptions.get(/** @type {any} */ (stream))?.size ?? 0) > 0;
+    // A member that crashes or loses its network never closes its channel, and its Tailcat
+    // server keeps the loopback connection here open. A live member is never quiet this long:
+    // its subscription probes the host after 60 s of silence, and a one-shot verb is done in
+    // seconds. So silence past the bound is a dead channel, and it is closed.
+    let lastInbound = Date.now();
     const silence = setInterval(() => {
-      const quiet = Date.now() - lastInbound;
-      if (quiet > this.memberSilenceMs || (inFlight === 0 && !subscribed() && quiet > this.memberQuietMs)) stream.destroy();
-    }, Math.max(25, Math.floor(Math.min(this.memberSilenceMs, this.memberQuietMs) / 3)));
+      if (Date.now() - lastInbound > this.memberSilenceMs) stream.destroy();
+    }, Math.max(25, Math.floor(this.memberSilenceMs / 3)));
     silence.unref?.();
     stream.once("close", () => clearInterval(silence));
 
@@ -1602,7 +1592,6 @@ export class NativeRoomService {
       try { frames = decoder.push(bytes); }
       catch (error) { fail(error, undefined); stream.destroy(); return; }
       for (const raw of frames) {
-        inFlight += 1;
         chain = chain.then(async () => {
           const frame = validateNativeEnvelope(raw);
           if (!route.activation.active) throw new AuthorityError('member-route-not-active');
@@ -1655,14 +1644,13 @@ export class NativeRoomService {
           // this stream as soon as ready rejects, and a refusal the far side never receives is
           // indistinguishable from a hang.
           if (!greeted) setImmediate(() => { rejectReady(error); stream.end(); });
-        }).finally(() => { inFlight -= 1; });
+        });
       }
     });
     stream.on("close", () => { this.subscriptions.delete(/** @type {any} */ (stream)); });
     stream.on("error", () => {});
     if (signal.aborted) stream.destroy();
-    return { ready, closed, stop: async () => { stream.destroy(); await closed; },
-      activity: () => ({ lastInbound, subscribed: subscribed() }) };
+    return { ready, closed, stop: async () => { stream.destroy(); await closed; } };
   }
 
   async stop() {
