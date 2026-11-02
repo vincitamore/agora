@@ -326,6 +326,38 @@ test("start: a Tern session under the position's name that runs no harness (rest
   assert.deepEqual(r.calls.filter((c) => c[1] === "kill").map((c) => c.slice(1, 4)), [["kill", "session", "500"]], "by its id; the unrelated session is untouched");
   assert.deepEqual((await readRun(s.state, "desk.messenger"))?.handle, { session: 910, tab: 911, block: 912 });
 
+  // single-session window: `tern kill session` on the last session exits 0 and keeps the session
+  // under the same name; start renames it aside, creates the new session, then kills the leftover
+  const s1b = await seat(t);
+  const p1b = planResident(validateManifest(manifestDoc(), s1b.manifestFile), "desk.messenger", ctxOf(s1b));
+  const singleLive = new Map([["500", session("desk.messenger", 500, {})]]);
+  let singleNext = 900;
+  const singleTern = fakeRunner((argv) => {
+    if (argv[1] === "new") {
+      if ([...singleLive.values()].some((x) => x.name === argv[3])) return { code: 1, stderr: `tern new: a session is already called ${argv[3]}` };
+      singleNext += 10;
+      singleLive.set(String(singleNext), session(argv[3], singleNext, { command: argv.slice(argv.indexOf("--") + 1).join(" ") }));
+      return { code: 0, stdout: JSON.stringify({ session: singleNext, tab: singleNext + 1, block: singleNext + 2 }) };
+    }
+    if (argv[1] === "ls") return { code: 0, stdout: JSON.stringify({ sessions: [...singleLive.values()], detached: [] }) };
+    if (argv[1] === "kill") {
+      if (singleLive.size > 1) singleLive.delete(argv[3]);
+      return { code: 0, stdout: JSON.stringify({ session: Number(argv[3]) }) };
+    }
+    if (argv[1] === "rename") {
+      const cur = singleLive.get(argv[2]);
+      if (!cur) return { code: 1 };
+      cur.name = argv[3];
+      return { code: 0, stdout: JSON.stringify({ session: Number(argv[2]) }) };
+    }
+    return { code: 1 };
+  });
+  const resSingle = await startResident(p1b, s1b.state, { checkout: CHECKOUT, run: singleTern.fn, home: s1b.home });
+  assert.equal(resSingle.row.action, "started");
+  assert.deepEqual(resSingle.row.cleared, ["500"]);
+  assert.deepEqual(singleTern.calls.map((c) => c[1]), ["new", "ls", "kill", "new", "rename", "new", "kill"]);
+  assert.deepEqual([...singleLive.keys()], ["910"], "the renamed stale session is removed once the new session exists");
+
   // red leg: a session of that name running this position's wrapper on this run file is the host itself
   const s2 = await seat(t);
   const p2 = planResident(validateManifest(manifestDoc(), s2.manifestFile), "desk.messenger", ctxOf(s2));

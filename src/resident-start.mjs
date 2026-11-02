@@ -1208,7 +1208,25 @@ export async function startResident(plan, stateRoot, deps) {
           const k = await exec([plan.hostInfo.tern, "kill", "session", x.id, "--json", ...window], { timeoutMs: 15_000 });
           if (k.code === 0) cleared.push(x.id);
         }
-        if (cleared.length === namesakes.length) r = await exec(/** @type {string[]} */ (plan.hostArgv), { timeoutMs: 30_000 });
+        if (cleared.length === namesakes.length) {
+          r = await exec(/** @type {string[]} */ (plan.hostArgv), { timeoutMs: 30_000 });
+          if (r.code !== 0) {
+            // When the stale session is the only session in its window, `tern kill session` exits 0
+            // and Tern keeps/respawns the session under the same name so the window is not empty.
+            // Rename it aside first, start the new session, then kill the renamed leftover.
+            let renamed = true;
+            for (const x of namesakes) {
+              const mv = await exec([plan.hostInfo.tern, "rename", x.id, `${plan.name}-stale-${x.id}`, "--json", ...window], { timeoutMs: 15_000 });
+              if (mv.code !== 0) renamed = false;
+            }
+            if (renamed) {
+              r = await exec(/** @type {string[]} */ (plan.hostArgv), { timeoutMs: 30_000 });
+              if (r.code === 0) {
+                for (const x of namesakes) await exec([plan.hostInfo.tern, "kill", "session", x.id, "--json", ...window], { timeoutMs: 15_000 });
+              }
+            }
+          }
+        }
         else namesake = `tern session ${namesakes.filter((x) => !cleared.includes(x.id)).map((x) => x.id).join(", ")} called ${plan.name} holds no harness and would not close`;
       }
     }
