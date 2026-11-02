@@ -152,3 +152,62 @@ law refusal_changes_nothing:
     K.after(K.Nothing_to_break{}, stored), K.judge(K.Contest{}, stored, cursor, now))
    == (stored, stored, stored, stored, stored, K.Applied{stored})
    : K.Holder & K.Holder & K.Holder & K.Holder & K.Holder & K.Verdict}
+
+# The laws below pin the helpers that laws 4 to 7 read the board through. Those laws take
+# `owns`, `fence_of` and `live` as given, so on their own they describe whatever those helpers
+# say: a model whose `owns` ignored the lease id, or whose `fence_of` read every fence as 0,
+# passed every proof above while admitting a release under a stale lease (measured 2026-09-23,
+# 36 such models across five helpers). Each law below states what a helper must be, in Base's
+# own comparisons, so a change to a helper cannot change the meaning of the laws that use it.
+
+# LAW 10 (a holder is an account and a lease): an act names the holder exactly when its account
+# is the holder's account and its lease id is the holder's lease id; nobody holds an unheld
+# subject.
+law ownership_is_account_and_lease:
+  for +account: Nat
+  for +lease: Nat
+  for +a: Nat
+  for +l: Nat
+  for +f: Nat
+  for +e: Nat
+  {(K.owns(account, lease, K.Held{a, l, f, e}), K.owns(account, lease, K.NoHolder{}))
+   == (Nat.is_eq(account, a) && Nat.is_eq(lease, l), False{}) : Bool & Bool}
+
+# LAW 11 (the fence is the holder's own): an act is fenced against the fence the holder carries,
+# and an unheld subject carries fence 0.
+law fence_is_the_holders:
+  for +a: Nat
+  for +l: Nat
+  for +f: Nat
+  for +e: Nat
+  {(K.fence_of(K.Held{a, l, f, e}), K.fence_of(K.NoHolder{})) == (f, 0n) : Nat & Nat}
+
+# LAW 12 (a live lease is the holder, unchanged): while a lease has not expired, the live holder
+# is the stored holder with its account, lease, fence and expiry as they were.
+law live_lease_is_the_holder:
+  for +a: Nat
+  for +l: Nat
+  for +f: Nat
+  for +e: Nat
+  for +now: Nat
+  for live: {True{} == Nat.is_gt(e, now) : Bool}
+  {K.live(K.Held{a, l, f, e}, now) == K.Held{a, l, f, e} : K.Holder}
+
+# LAW 13 (an expired lease is no holder, and neither is none): once a lease has expired there is
+# no live holder, and an unheld subject has none at any instant.
+law expired_lease_is_no_holder:
+  for +a: Nat
+  for +l: Nat
+  for +f: Nat
+  for +e: Nat
+  for +now: Nat
+  for gone: {False{} == Nat.is_gt(e, now) : Bool}
+  {(K.live(K.Held{a, l, f, e}, now), K.live(K.NoHolder{}, now))
+   == (K.NoHolder{}, K.NoHolder{}) : K.Holder & K.Holder}
+
+# LAW 14 (an applied verdict's holder stands): after an applied act the subject's holder is
+# exactly the holder the verdict names, whatever was stored before.
+law applied_holder_stands:
+  for +h: K.Holder
+  for stored: K.Holder
+  {K.after(K.Applied{h}, stored) == h : K.Holder}
