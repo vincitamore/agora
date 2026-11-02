@@ -12,6 +12,9 @@
     "./client": "./src/client.mjs",
     "./package.json": "./package.json"
   },
+  "omp": {
+    "extensions": ["./plugins/omp/agora-room/index.mjs"]
+  },
   "engines": {
     "node": ">=22.13"
   },

@@ -44,6 +44,12 @@ so the messenger's own posts stay its incident record; for those notices to wake
 list must name that account too. A native room declared `"public": true` has no messenger without a
 list: `agora messenger` refuses it.
 
+**A notice sits at its line's hop.** A notice about a line (the one its `re:` names, or the id in its
+slots) carries that line's `hop:` when the line has one, so a pointer to a line too deep in an
+agent-to-agent wake chain to wake a resident (`--max-hops`, `docs/RESIDENTS.md` § Wake chains) is
+too deep as well, instead of starting a fresh chain at hop 0. A notice about a line without a hop
+carries none.
+
 ## The starting point
 
 A messenger first started on a room with history does not raise what came before it. At its first

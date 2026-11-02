@@ -40,6 +40,7 @@ import { connect as connectClient } from "../src/client.mjs";
 import { asBoardSubject, boardRelease } from "../src/board-subject.mjs";
 import { watch } from "../src/watch.mjs";
 import { authorMayWake, exposureRefusal, roomExposure, unlistedNote, wakeAllowlist } from "../src/exposure.mjs";
+import { HOP_KEY, hopOf, readWakeHop } from "../src/hop.mjs";
 
 /** the watch ended because every attempt to hand a delivery to the task's bridge failed */
 const DELIVERY_EXHAUSTED = "delivery-exhausted";
@@ -129,7 +130,7 @@ import { FACE_ATTACHMENT_MODES, FACE_BUILT, FACE_SELECTORS, appendFaceRecord, fa
 async function recordedPost(transport, sdir, text, opts = {}, origin) {
   const record = async (/** @type {string} */ id) => {
     if (origin) await ensureCarryOrigin(sdir, origin.session, origin.bearer);
-    await appendPosted(sdir, id);
+    await appendPosted(sdir, id, opts.thread);
   };
   let early = false;
   const r = await transport.post(text, { ...opts, beforeSend: async (id) => { early = true; await record(id); } });
@@ -310,6 +311,7 @@ const SCHEMA = {
         "--for <s>": "give up after this many seconds (default: never)",
         "--all": "deliver this side's own posts too (skipped by default)",
         "--wake <all|addressed|mine>": "what wakes this watch: everything (default); everything except messages addressed to someone else; only messages addressed to you, your model, your position (the session's --label, whole or its role alone), the seat, or everyone. Filtered messages still advance the cursor and still show in read. A room's wakeFrom list (author ids) is checked before any mode and no mode or `to:` widens it; a room the public can post in (github and github-events rooms, or `\"public\": true`) is refused here unless it has the list or `\"public\": false`",
+        "--max-hops <n>": "a message whose hop: trailer is above n wakes nothing here: it stays readable and advances the cursor like any filtered message. The hop is how many agent wakes deep a post sits (a post made while answering a wake carries one more than the highest hop that woke it; no trailer is hop 0). Off unless given; the agora-room extension and plugin arm every watch they own with 4",
         "--codex-queue": "queue each delivery into this Codex task through `codex queue`",
         "--print-only": "arm a printing watch on purpose under a Codex session; without it, or a Codex bridge, such a watch is refused because Codex does not treat terminal output as a wake",
         "--codex-server <url>": "deliver bounded batches through the authenticated loopback server owning the Codex TUI",
@@ -550,6 +552,7 @@ const OPTIONS = /** @type {const} */ ({
   batch: { type: "boolean", default: false },
   coalesce: { type: "string" },
   "max-batch": { type: "string" },
+  "max-hops": { type: "string" },
   digest: { type: "string" },
   interval: { type: "string" },
   for: { type: "string" },
@@ -2742,6 +2745,11 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       const entries = trailerEntries(values);
       if (entries.some((t) => t.key === "verdict") && !entries.some((t) => t.key === "exhibit"))
         throw new AgoraError(`--verdict needs at least one --exhibit: a claim is settled by an exhibit, not by agreement`, EXIT.usage);
+      // A post made while this session answers a wake is one hop deeper than what woke it. The
+      // harness that handed the wake over keeps its hop in the session's wake.json for the turn;
+      // a hop the caller wrote itself (--trailer "hop: n") stands.
+      const wakeHop = entries.some((t) => t.key === HOP_KEY) ? null : await readWakeHop(sdir);
+      if (wakeHop !== null) entries.push({ key: HOP_KEY, value: String(wakeHop + 1) });
       // Advice, never a gate. Measured on a live room: across twenty-two verdicts over one day and
       // four bearers, not one named the verdict it withdrew, so `carry` could not tell a withdrawn
       // verdict from a standing one and a successor would inherit the withdrawn claim as live. The
@@ -3228,6 +3236,8 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       // whose every watch is narrowed that nothing here will wake for an unaddressed request.
       const wakeMode = /** @type {'all' | 'addressed' | 'mine'} */ (values.wake ?? "all");
       if (!["all", "addressed", "mine"].includes(wakeMode)) throw new AgoraError(`--wake takes all, addressed, or mine`, EXIT.usage);
+      if (values["max-hops"] !== undefined && !/^\d{1,6}$/.test(String(values["max-hops"]))) throw new AgoraError(`--max-hops takes a whole number`, EXIT.usage);
+      const maxHops = values["max-hops"] === undefined ? null : Number(values["max-hops"]);
       let sessionWakes = 0;
       let bytesDelivered = 0;
       /** @param {string} s */
@@ -3354,10 +3364,11 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
        * Whether a message may wake this watch. The room's wakeFrom list is first and is the operator's,
        * not the reader's: it decides on who the transport says posted the message, so no `to:` line and
        * no --wake mode widens it, and what it drops still advances the cursor and still shows in read.
-       * Then the reader's own choice of what wakes it, which is never automatic.
+       * Then the reader's own choices of what wakes it, which are never automatic: the hop cap
+       * (`--max-hops`, which ends an agent-to-agent wake chain) and the wake mode.
        * @type {((m: import('../src/core.mjs').Message) => boolean) | undefined}
        */
-      const wakeRule = wakeFrom === null && wakeMode === "all" ? undefined : (m) => {
+      const wakeRule = wakeFrom === null && wakeMode === "all" && maxHops === null ? undefined : (m) => {
         if (!authorMayWake(wakeFrom, m.author)) {
           const who = String(m.author?.id ?? "");
           if (!unlisted.has(who) && unlisted.size < 64) {
@@ -3366,6 +3377,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
           }
           return false;
         }
+        if (maxHops !== null && hopOf(m.text) > maxHops) return false;
         if (wakeMode === "all") return true;
         const to = parseTrailers(m.text).to;
         const forMe = to.some((a) => matchesAddress(a, bearer.name, seat, position));

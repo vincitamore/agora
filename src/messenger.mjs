@@ -31,6 +31,7 @@ import { claimAuthors, foldBoard, safeSubject } from "./board-read.mjs";
 import { parseNativeCursor } from "./native-protocol.mjs";
 import { listSessions, pidAlive, positionOf } from "./session.mjs";
 import { matchesAddress, parseTrailers } from "./trailers.mjs";
+import { HOP_KEY, hopOf } from "./hop.mjs";
 
 /**
  * The notice set. Pinned by exact equality in test/messenger.test.mjs: a notice is a pointer,
@@ -428,7 +429,11 @@ export function tick(input) {
   const emit = (kind, after, fields, trailers, thread) => {
     const key = noticeKey(kind, fields, { re: trailers.find((t) => t.key === "re")?.value, to: trailers.filter((t) => t.key === "to").map((t) => t.value) });
     if ((done.get(key) ?? 0) > after || acts.some((a) => a.key === key)) return;
-    acts.push({ kind, key, text: formatNotice(kind, fields), trailers, thread });
+    // A notice about a line sits as deep in a wake chain as that line: a pointer that started a fresh
+    // chain would wake, at hop 0, a resident whose watch the line itself was too deep to wake.
+    const about = byRef.get(trailers.find((t) => t.key === "re")?.value ?? fields.id);
+    const hop = about ? hopOf(about.text) : 0;
+    acts.push({ kind, key, text: formatNotice(kind, fields), trailers: hop ? [...trailers, { key: HOP_KEY, value: String(hop) }] : trailers, thread });
   };
   /** @param {typeof ms[number]} m @param {string} k */
   const trailer = (m, k) => m.trailers.find((t) => t.key === k)?.value;

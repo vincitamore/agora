@@ -5,7 +5,8 @@
  * extension runs the seat's CLI as its own children, exactly as it does inside omp: it registers
  * `<AGORA_ROLE>/<Model>` at the launcher's position (AGORA_LABEL), takes its predecessor's place
  * (`resident inherit`), sets its starting point, and delivers what its watch admits as turns
- * (recorded here, never typed anywhere). Its timer is not run; the scenario ticks it.
+ * (recorded here, never typed anywhere). Its timer is not run; the scenario ticks it, and `poll`
+ * runs the drain each tick schedules (the coalescing window) at once.
  *
  * The session record names this process's pid (the extension sets OMP_PID to the process it runs
  * in), so the session reads as live while the scenario runs.
@@ -19,7 +20,7 @@ import { BIN, nodeExecutable } from "./seat.mjs";
 /**
  * Start one session's extension.
  * @param {import("./seat.mjs").Seat} seat
- * @param {{ sessionId: string, modelId: string, role: string, position?: string, wake?: string }} o
+ * @param {{ sessionId: string, modelId: string, role: string, position?: string, wake?: string, room?: string, preamble?: boolean }} o
  */
 export async function startOmpSession(seat, o) {
   const cwd = path.join(seat.root, `omp-${o.sessionId}`);
@@ -38,6 +39,8 @@ export async function startOmpSession(seat, o) {
     registerTool() {},
     /** @param {any} msg @param {any} opts */ sendMessage(msg, opts) { sent.push({ msg, opts }); },
   };
+  /** @type {Function[]} */
+  const timeouts = [];
   const ctx = {
     cwd, mode: "tui", hasUI: false, agent: { kind: "main", id: "Main" }, idle: true,
     model: { id: o.modelId },
@@ -46,14 +49,14 @@ export async function startOmpSession(seat, o) {
     sessionManager: { getSessionId: () => o.sessionId, getBranch: () => [] },
     ui: { setStatus() {}, notify() {} },
     setInterval: () => 0,
-    setTimeout: () => 0,
+    /** @param {Function} fn */ setTimeout: (fn) => { timeouts.push(fn); return timeouts.length; },
     clearTimer: () => {},
   };
   /** @type {Record<string, string | undefined>} */
   const env = {
     ...process.env,
     AGORA_CONFIG: seat.config, AGORA_STATE: seat.state, HOME: seat.home, USERPROFILE: seat.home,
-    AGORA_ROOM: seat.alias, AGORA_ROOM_WAKE: o.wake ?? "mine", AGORA_ROOM_PREAMBLE: "off",
+    AGORA_ROOM: o.room ?? seat.alias, AGORA_ROOM_WAKE: o.wake ?? "mine", AGORA_ROOM_PREAMBLE: o.preamble ? "on" : "off",
     AGORA_ROOM_CMD: JSON.stringify([nodeExecutable(), BIN]), AGORA_ROOM_LIVENESS: path.join(cwd, "liveness.json"),
     AGORA_ROLE: o.role, ...(o.position ? { AGORA_LABEL: o.position } : {}),
   };
@@ -64,7 +67,17 @@ export async function startOmpSession(seat, o) {
   const rt = /** @type {any} */ (ctl.runtime);
   if (!rt) throw new Error("the agora-room extension configured no room for the scenario's session");
   return {
-    rt, sent,
+    rt, sent, ctx,
+    /** One poll tick, then the drain it scheduled. */
+    poll: async () => { await rt.tick(); while (timeouts.length) await /** @type {Function} */ (timeouts.shift())(); },
+    /** One turn as omp runs it: it starts, the session is busy, it ends, the drain it scheduled runs. */
+    turn: async () => {
+      ctx.idle = false;
+      for (const h of handlers.agent_start ?? []) await h({ type: "agent_start" }, ctx);
+      ctx.idle = true;
+      for (const h of handlers.agent_end ?? []) await h({ type: "agent_end" }, ctx);
+      while (timeouts.length) await /** @type {Function} */ (timeouts.shift())();
+    },
     /** The CLI environment of this session: what the model's own shell carries inside omp. */
     cliEnv: { AGORA_SESSION: o.sessionId, OMP_SESSION_ID: o.sessionId },
     slug: `omp-${o.sessionId}`,

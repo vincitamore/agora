@@ -297,6 +297,17 @@ test("routing with no model: holder of the subject, else the orchestrator, else 
   assert.deepEqual(kinds(run([q], { now: T0 + 1, pinned: new Set([q.id]) })), []);
 });
 
+test("a notice about a line sits at that line's hop, so a watch the line was too deep to wake is not woken by the pointer either; a notice about a line with no hop carries none (red leg)", () => {
+  const deep = msg({ at: T0, name: "orchestrator/Opus", text: "please", to: ["desk.codng"], extra: [{ key: "hop", value: "5" }] });
+  const n5 = run([deep], { now: T0 + 1 });
+  assert.deepEqual(n5.map((a) => [a.kind, a.trailers]), [["N5", [{ key: "re", value: deep.id }, { key: "hop", value: "5" }]]]);
+  const late = msg({ at: T0, name: "orchestrator/Opus", text: "fix it", to: ["coding"], extra: [{ key: "hop", value: "6" }] });
+  const n2 = run([late], { now: T0 + 15 * MIN });
+  assert.deepEqual(n2.map((a) => [a.kind, a.trailers.find((t) => t.key === "hop")?.value]), [["N2", "6"]]);
+  const plain = msg({ at: T0, name: "orchestrator/Opus", text: "please", to: ["desk.codng"] });
+  assert.deepEqual(run([plain], { now: T0 + 1 }).map((a) => a.trailers), [[{ key: "re", value: plain.id }]], "red leg: no hop, none added");
+});
+
 test("N7 for a top-level reply naming its subject; N6 for an open titled subject at Bo (red legs: a reply in the thread; a claim)", () => {
   const root = msg({ at: T0, kind: "human", name: "Ada", text: "question", to: ["*"] });
   const top = msg({ at: T0 + MIN, name: "coding/Opus", text: "answer", re: root.id });

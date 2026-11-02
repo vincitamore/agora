@@ -246,14 +246,16 @@ async function rotateLedger(dir) {
 }
 
 /**
- * Record a message this session posted. The append itself is one O_APPEND write, which the
- * filesystem orders against every sibling process's; the ring is a rotation, never a rewrite.
+ * Record a message this session posted, and the thread it went into when it went into one (a
+ * harness reads that to tell the threads this session speaks in; own-post detection reads the id
+ * alone). The append itself is one O_APPEND write, which the filesystem orders against every
+ * sibling process's; the ring is a rotation, never a rewrite.
  * The read set is the two files together, so it holds between LEDGER_KEEP and LEDGER_MAX ids.
- * @param {string} dir @param {string} id
+ * @param {string} dir @param {string} id @param {string} [thread]
  */
-export async function appendPosted(dir, id) {
+export async function appendPosted(dir, id, thread) {
   await mkdir(dir, { recursive: true });
-  await appendFile(ledgerPath(dir), JSON.stringify({ id, pid: process.pid, at: new Date().toISOString() }) + "\n", "utf8");
+  await appendFile(ledgerPath(dir), JSON.stringify({ id, ...(thread ? { thread } : {}), pid: process.pid, at: new Date().toISOString() }) + "\n", "utf8");
   await rotateLedger(dir);
 }
 

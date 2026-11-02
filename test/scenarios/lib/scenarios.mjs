@@ -54,6 +54,7 @@ export const SCENARIO_FILES = Object.freeze({
   S66: "../s66-withdrawal-and-holder.mjs",
   S67: "../s67-reboot-recovery.mjs",
   S68: "../s68-claim-on-arming.mjs",
+  S69: "../s69-injection.mjs",
 });
 
 /** @param {string} id @returns {Promise<Scenario>} */

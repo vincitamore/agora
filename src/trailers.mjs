@@ -35,11 +35,16 @@ import { parseSignature } from "./core.mjs";
  * `withdrawn: <person>; <why>` says the request a task answered was taken back. The messenger's
  * queue fold ends the task with no verdict; the parser carries it and acts on nothing. It is not
  * `withdraws:` (which takes back one of the emitter's own posts).
+ *
+ * `hop: <n>` is how many agent wakes deep a post sits: a post made while answering a wake carries
+ * one more than the highest hop among the messages that woke it, and a message without it is hop 0
+ * (src/hop.mjs). Known so that a block carrying only it is a block. The parser acts on nothing: a
+ * watch reads it only under `--max-hops`, the cap its reader chose.
  * @typedef {{ key: string, value: string }} Trailer
  */
 
 /** The keys this tool knows. Order is the order the emitter writes them in. */
-export const KNOWN_KEYS = Object.freeze(["to", "re", "withdraws", "claim", "release", "verdict", "exhibit", "because", "ack", "task", "withdrawn", "card", "waiting", "context"]);
+export const KNOWN_KEYS = Object.freeze(["to", "re", "withdraws", "claim", "release", "verdict", "exhibit", "because", "ack", "task", "withdrawn", "hop", "card", "waiting", "context"]);
 
 /** One cap for parse and emit: a value past this, empty, or containing a newline, is not a trailer. */
 export const TRAILER_VALUE_MAX = 400;

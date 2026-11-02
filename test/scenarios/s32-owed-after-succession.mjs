@@ -135,7 +135,7 @@ async function runArm(ctx, arm) {
     if (red("resumes-at-predecessor-cursor")) await seat.cli(["cursor", seat.alias, "--now"], succ.cliEnv);
     if (red("owed")) for (const f of ["posted.jsonl", "posted.1.jsonl"]) await rm(path.join(seat.state, "sessions", succ.slug, f), { force: true });
     const succCursor = await cursorOf(seat, succ.slug);
-    await succ.rt.tick();
+    await succ.poll();
     const delivered = succ.sent.map((/** @type {any} */ x) => label(String(x.msg.content).split("\n").pop()?.split(" ")[2] ?? ""));
     ctx.check(`${arm}:resumes-at-predecessor-cursor`, { cursorEqual: true, delivered: ["R3"] }, { cursorEqual: predCursor !== null && succCursor === predCursor, delivered });
 

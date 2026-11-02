@@ -89,7 +89,7 @@ test('watch: starts at the head, one turn per new message, duplicates dropped, f
 
   await clock.advance(1000)
   await clock.settle()
-  expect(s.calls[2].argv).toEqual(['watch', 'lab', '--once', '--json', '--wake', 'addressed'])
+  expect(s.calls[2].argv).toEqual(['watch', 'lab', '--once', '--json', '--wake', 'addressed', '--max-hops', '4'])
   expect(s.submitted).toEqual(['agora lab m1 thread=none from=Ada: first / -- Ada', 'agora lab m2 thread=m1 from=Ada: second / -- Ada'])
 
   await clock.advance(1000)

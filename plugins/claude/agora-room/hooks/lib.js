@@ -565,6 +565,73 @@ export class ActivityTracker {
   }
 }
 
+// ---- the hop cap and the wake record ----
+
+/**
+ * Two agents that answer each other wake each other forever, so every watch this harness owns asks
+ * the CLI for a hop cap: a message whose `hop:` trailer is above it stays readable and wakes nothing
+ * (src/hop.mjs). The cap is this harness's choice for its reader, made the way `--wake` is.
+ */
+export const MAX_HOPS = 4;
+
+/** The poll this harness runs for a room. @param {string} room @param {string} wake */
+export function watchArgs(room, wake) {
+  return ["watch", room, "--once", "--json", "--wake", wake, "--max-hops", String(MAX_HOPS)];
+}
+
+/**
+ * While a turn this harness started or fed runs, `<state>/sessions/<key>/wake.json` holds the
+ * highest hop among the messages handed to the model in it; a post the model makes in that turn
+ * (`room_post`, or `agora post` from its shell under the same session) carries one more. It is
+ * removed when the turn ends, so a post the model makes for its human afterwards carries none.
+ * src/hop.mjs reads it; the file name and the `hop` field are the contract.
+ */
+export const WAKE_FILE = "wake.json";
+
+/** The wake record of a session. @param {Parameters<typeof sessionFile>[0]} p */
+export function wakePath(p) { return sessionFile(p, WAKE_FILE); }
+
+/** The hop a delivered message carries: the highest `hop:` trailer, 0 when it has none. @param {Pick<Msg, 'trailers'>} m */
+export function hopOfMessage(m) {
+  let hop = 0;
+  for (const t of m.trailers ?? []) if (t.key === "hop" && /^\d{1,6}$/.test(t.value.trim())) hop = Math.max(hop, Number(t.value.trim()));
+  return hop;
+}
+
+/**
+ * The wake record after handing `msgs` to the model: the highest hop of this turn so far.
+ * @param {{ session: string, prior: number | null, msgs: Array<Pick<Msg, 'room' | 'id' | 'trailers'>>, at: string }} r
+ */
+export function wakeRecord({ session, prior, msgs, at }) {
+  const hop = Math.max(prior ?? 0, ...msgs.map(hopOfMessage));
+  return { v: 1, type: "wake", session, hop, ids: msgs.map((m) => `${m.room} ${m.id}`), at };
+}
+
+/** The session's posted ledger, oldest file first (src/session.mjs). @param {Parameters<typeof sessionFile>[0]} p @returns {string[]} */
+export function postedPaths(p) {
+  return /** @type {string[]} */ (["posted.1.jsonl", "posted.jsonl"].map((n) => sessionFile(p, n)).filter(Boolean));
+}
+
+/**
+ * The threads a session speaks in, from its posted ledger: each reply's thread, and each top-level
+ * post's own id (the root its replies arrive under). A claim is a post, so a thread the session
+ * claimed in is one of them.
+ * @param {string} ledger the ledger files' text, concatenated
+ * @returns {Set<string>}
+ */
+export function ownThreads(ledger) {
+  const out = new Set();
+  for (const line of String(ledger).split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const rec = JSON.parse(line);
+      if (typeof rec?.thread === "string" && rec.thread) out.add(rec.thread);
+      else if (typeof rec?.id === "string" && rec.id) out.add(rec.id);
+    } catch { /* a torn line names nothing */ }
+  }
+  return out;
+}
+
 /** The refusal reasons that mean the user stopped a turn: park the queue until the turn is over. */
 export const STOPPED_REASONS = Object.freeze([
   "the session was stopped and nobody has sent input since",

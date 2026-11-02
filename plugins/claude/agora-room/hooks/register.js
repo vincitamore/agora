@@ -1,12 +1,14 @@
 // agora-room: an Agora room as a Claude Code mod.
 //
-//   watch   a timer polls `agora watch <room> --once --json --wake <mode>` for each configured room;
-//           each new message becomes one $.prompt.submit, the single line
+//   watch   a timer polls `agora watch <room> --once --json --wake <mode> --max-hops 4` for each
+//           configured room; each new message becomes one $.prompt.submit, the single line
 //             agora <room> <id> thread=<thread|none> from=<author>: <text>
-//           The agora CLI owns the cursor, the own-post skip and the wake filter; this file only
-//           queues what it printed and hands it to the idle session, once. It also writes one seen
-//           line per message it admitted (lib.js SEEN_FILE) and keeps an activity record of what the session
-//           is doing (lib.js ACTIVITY_FILE): the evidence the seat's messenger reads.
+//           The agora CLI owns the cursor, the own-post skip, the wake filter and the hop cap; this
+//           file only queues what it printed and hands it to the idle session, once. It also writes
+//           one seen line per message it admitted (lib.js SEEN_FILE), keeps an activity record of
+//           what the session is doing (lib.js ACTIVITY_FILE): the evidence the seat's messenger
+//           reads, and keeps the hop of the latest delivery in the session's wake record (lib.js
+//           WAKE_FILE), so a post the model makes while answering is one hop deeper.
 //   tool    room_post: the model posts to a configured room through the same CLI.
 //   pane    /agora-room opens a pane: the room and who is active, a compose card that states where a
 //           post goes, recent subjects with unread marks, and a thread view that reads as a conversation.
@@ -24,7 +26,7 @@
 import {
   PANE_ID, SUBJECTS_PAGE, TOOL_NAME, COMMAND, ActivityTracker, DeliveryQueue, SeenLog, SucceedKick, activityPath, buildSubjects, ceilingDue, chooseRoom, childEnvFor, contextCeiling, deliveryText,
   isStopReason, jsonLines, paneTree, parseReadOutput, parseWatchOutput, postArgs, receiptText,
-  resolveConfig, seenPath, seenRecord, statusLine, succeedPath, TO_NOBODY, whoRows,
+  resolveConfig, seenPath, seenRecord, statusLine, succeedPath, TO_NOBODY, wakePath, wakeRecord, watchArgs, whoRows,
 } from './lib.js'
 
 const PROJECT_FILE = '.agora-room.json'
@@ -68,6 +70,9 @@ export function register(on, options) {
     const livenessPath = cfg.liveness
       ?? (home ? String(home).replace(/\\/g, '/') + '/.agora/claude-room/' + key + '.json' : '.agora-room/' + key + '.json')
     const seenFile = seenPath({ env, childEnv: cfg.childEnv, home, session: key })
+    // Claude Code queues a submitted prompt behind the running turn, and nothing here says which turn
+    // answers it, so the record holds the hop of the latest delivery until the next one replaces it.
+    const wakeFile = wakePath({ env, childEnv: cfg.childEnv, home, session: key })
 
     if (!cfg.rooms.length) {
       $.ui.log('no room is configured: set AGORA_ROOM, rooms in ' + PROJECT_FILE + ', or the plugin\'s rooms option')
@@ -216,7 +221,7 @@ export function register(on, options) {
       const s = rooms.get(room)
       s.lastTick = stamp()
       if (!s.ready) await ensureStart(room)
-      const r = await run(['watch', room, '--once', '--json', '--wake', cfg.wake])
+      const r = await run(watchArgs(room, cfg.wake))
       const readAt = stamp()
       const { messages, result } = parseWatchOutput(r.stdout, room)
       // Whatever the child printed was already past the saved cursor: queue it even if the exit was not clean.
@@ -257,7 +262,12 @@ export function register(on, options) {
             break // it stays queued; the next tick drains again
           }
           inflight = null
-          if (!reason) { dq.markDelivered(m); await persist(); continue }
+          if (!reason) {
+            dq.markDelivered(m)
+            await persist()
+            if (wakeFile) try { await $.fs.write(wakeFile, JSON.stringify(wakeRecord({ session: key, prior: null, msgs: [m], at: stamp() })) + '\n') } catch (err) { lastError = 'wake record: ' + String(err?.message ?? err) }
+            continue
+          }
           if (isStopReason(reason)) { blocked = true; break } // the user stopped a turn: wait for turn.complete
           dq.drop(m)
           await persist()
