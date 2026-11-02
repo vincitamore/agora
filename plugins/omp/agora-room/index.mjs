@@ -237,17 +237,18 @@ export function createAgoraRoom(pi, deps = {}) {
   pi.on("session_switch", async (/** @type {any} */ _e, /** @type {any} */ ctx) => begin(ctx));
   pi.on("agent_start", async () => { rt?.agentStart(); });
   pi.on("agent_end", async () => { await rt?.agentEnd(); });
-  // Activity evidence: these handlers only count. They return nothing (a returned value would steer the
-  // tool call or rewrite the result) and ignore a subagent's or an advisor's events, which are not this
-  // session's own work.
-  pi.on("tool_call", async (/** @type {any} */ _e, /** @type {any} */ ctx) => { if (ctx?.agent?.kind !== "sub") rt?.noteTool(); });
-  pi.on("tool_result", async (/** @type {any} */ _e, /** @type {any} */ ctx) => { if (ctx?.agent?.kind !== "sub") rt?.noteTool(); });
+  // Activity evidence: these handlers only count, and ignore a subagent's or an advisor's events, which are
+  // not this session's own work. They listen on tool_execution_*, never tool_call/tool_result: OMP turns off
+  // speculative task launch and speculative reads whenever any extension registers a tool_call, tool_result
+  // or tool_approval_* handler, so counting there cost every resident its speculation.
+  pi.on("tool_execution_start", async (/** @type {any} */ _e, /** @type {any} */ ctx) => { if (ctx?.agent?.kind !== "sub") rt?.noteTool(); });
+  pi.on("tool_execution_end", async (/** @type {any} */ _e, /** @type {any} */ ctx) => { if (ctx?.agent?.kind !== "sub") rt?.noteTool(); });
   pi.on("message_update", async (/** @type {any} */ e, /** @type {any} */ ctx) => { if (ctx?.agent?.kind !== "sub" && e?.message?.role === "assistant") rt?.noteOutput(false); });
   pi.on("message_end", async (/** @type {any} */ e, /** @type {any} */ ctx) => {
     if (ctx?.agent?.kind === "sub") return;
     const role = e?.message?.role;
     if (role === "assistant") { rt?.noteOutput(true); rt?.noteUsage(e.message); }
-    else if (role !== "toolResult") rt?.noteEntry(); // a tool result is counted by tool_result
+    else if (role !== "toolResult") rt?.noteEntry(); // a tool result is counted by tool_execution_end
   });
   pi.on("session_shutdown", async () => { rt?.stop(); });
 

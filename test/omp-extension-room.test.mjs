@@ -103,7 +103,7 @@ function stubPi() {
   };
   /** @param {string} ev @param {any} [ctx] @param {Record<string, any>} [payload] */
   const emit = async (ev, ctx, payload = {}) => { for (const h of handlers[ev] ?? []) await h({ type: ev, ...payload }, ctx); };
-  return { pi, tools, sent, emit };
+  return { pi, tools, sent, emit, handlers };
 }
 
 /** A stub `ctx`: idle by default; timers are recorded and run by the test. */
@@ -314,8 +314,8 @@ test("activity: the record follows the session's turns, tool calls and output: a
     assert.deepEqual([rec.turn, rec.since], ["busy", iso(base + 5000)], "a turn change is written at once, not on the next tick");
 
     t = base + 6000;
-    await s.emit("tool_call", s.ctx, { toolName: "bash" });
-    await s.emit("tool_result", s.ctx, { toolName: "bash" });
+    await s.emit("tool_execution_start", s.ctx, { toolName: "bash" });
+    await s.emit("tool_execution_end", s.ctx, { toolName: "bash" });
     assert.equal((await read()).progress, 0, "a tool call waits for the tick: no write of its own");
     t = base + 7000;
     await s.emit("message_update", s.ctx, { message: { role: "assistant" } });
@@ -323,7 +323,7 @@ test("activity: the record follows the session's turns, tool calls and output: a
     await s.emit("message_end", s.ctx, { message: { role: "toolResult" } });
     await s.emit("message_end", s.ctx, { message: { role: "user" } });
     const sub = { ...s.ctx, agent: { kind: "sub", id: "advisor" } };
-    await s.emit("tool_call", sub, { toolName: "bash" });
+    await s.emit("tool_execution_start", sub, { toolName: "bash" });
     await s.emit("message_end", sub, { message: { role: "assistant" } });
     await s.rt.tick();
     rec = await read();
@@ -347,12 +347,21 @@ test("activity: the record follows the session's turns, tool calls and output: a
     s.rt.stop();
 
     const again = await start(r, { env: { AGORA_LABEL: "desk.coding" }, deps: { now: () => t } });
-    await again.emit("tool_call", again.ctx, { toolName: "bash" });
+    await again.emit("tool_execution_start", again.ctx, { toolName: "bash" });
     await again.rt.tick();
     rec = await read();
     assert.deepEqual([rec.progress, rec.turn], [5, "idle"], "a reload continued the counter and did not claim a turn");
     again.rt.stop();
   } finally { await r.cleanup(); }
+});
+
+test("speculation: the extension registers none of the events OMP treats as a veto on speculative launch and reads", async () => {
+  // OMP's speculation host disables speculative task launch and speculative reads while ANY extension
+  // listens on these four events; one handler here costs every resident that loads the extension.
+  const p = stubPi();
+  createAgoraRoom(p.pi, {});
+  const vetoing = ["tool_call", "tool_result", "tool_approval_requested", "tool_approval_resolved"];
+  assert.deepEqual(vetoing.filter((ev) => p.handlers[ev]?.length), []);
 });
 
 test("seen: a record that cannot be written is reported and never stops the watch (red leg: the file is writable)", async () => {
