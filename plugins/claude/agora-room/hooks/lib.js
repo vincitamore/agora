@@ -23,7 +23,7 @@ const ROOM_RE = /^[A-Za-z0-9][^\s\u0000-\u001f]{0,127}$/;
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const ADDR_RE = /^(?:\*|@?[A-Za-z0-9][A-Za-z0-9._/@*-]{0,63})$/;
 
-/** @typedef {{ room: string, id: string, thread: string | null, from: string, text: string, cursor: string | null, ts: string | null, to: string[], title: string | null, signedAs: string | null, authorId?: string, kind?: string, seatLabel?: string, trailers?: Array<{ key: string, value: string }> }} Msg */
+/** @typedef {{ room: string, id: string, thread: string | null, from: string, text: string, cursor: string | null, ts: string | null, to: string[], title: string | null, signedAs: string | null, authorId?: string, kind?: string, seatLabel?: string, trailers?: Array<{ key: string, value: string }>, exposure?: 'public' }} Msg */
 
 // ---- configuration ----
 
@@ -156,6 +156,8 @@ export function normaliseMessage(j, room) {
     signedAs: j.signedAs ?? null,
     ...(typeof j.author?.id === "string" && j.author.id ? { authorId: j.author.id } : {}),
     ...(typeof j.author?.kind === "string" && j.author.kind ? { kind: j.author.kind } : {}),
+    // the CLI marks a message from a room the public can post in: deliveryText always frames it
+    ...(j.exposure === "public" ? { exposure: /** @type {'public'} */ ("public") } : {}),
     ...(Array.isArray(j.trailers) && j.trailers.length ? { trailers: j.trailers.filter((/** @type {any} */ x) => x && typeof x.key === "string").map((/** @type {any} */ x) => ({ key: x.key, value: String(x.value ?? "") })) } : {}),
   };
 }
@@ -217,12 +219,14 @@ export function preambleText(room) {
 }
 
 /**
- * What is submitted to the session for one message: the preamble on its own line, when on, then the
- * message line exactly as formatLine writes it, so a reader that looks for that line still finds it.
- * @param {Pick<Msg, 'room' | 'id' | 'thread' | 'from' | 'text'>} m @param {boolean} [preamble]
+ * What is submitted to the session for one message: the preamble on its own line, then the message
+ * line exactly as formatLine writes it, so a reader that looks for that line still finds it. The
+ * preamble is on unless the session turned it off, and is never off for a message from a room the
+ * public can post in (`exposure: 'public'`): there it is not a setting.
+ * @param {Pick<Msg, 'room' | 'id' | 'thread' | 'from' | 'text' | 'exposure'>} m @param {boolean} [preamble]
  */
 export function deliveryText(m, preamble = true) {
-  return preamble ? `${preambleText(m.room)}\n${formatLine(m)}` : formatLine(m);
+  return preamble || m.exposure === "public" ? `${preambleText(m.room)}\n${formatLine(m)}` : formatLine(m);
 }
 
 // ---- the delivery queue ----

@@ -44,6 +44,7 @@ import { ROOM_MECHANICS_DOC, RESIDENT_SLUG_RE, RUN_FILE, markSuccession, renderR
 import { POSITION_RE, bootEpoch, listRecords, markRestarted, pidAlive, positionOf, roomOfKey, sessionScope } from "./session.mjs";
 import { LINEAGE_RE, counterparts, differentFrom, lineageClash, modelFamily } from "./lineage.mjs";
 import { modelLabel } from "../plugins/omp/agora-room/index.mjs";
+import { exposureRefusal, roomExposure } from "./exposure.mjs";
 import { ACTIVITY_FILE, livenessPath } from "./messenger.mjs";
 
 export const MANIFEST_VERSION = 1;
@@ -51,7 +52,7 @@ export const HARNESSES = Object.freeze(["omp", "claude", "agora"]);
 export const HOSTS = Object.freeze(["tern", "tmux", "none"]);
 export const WAKES = Object.freeze(["all", "addressed", "mine"]);
 const TOP_KEYS = new Set(["version", "models", "vars", "defaults", "residents", "grants"]);
-const ROW_KEYS = new Set(["role", "harness", "model", "thinking", "rooms", "wake", "profile", "append", "workdir", "skills", "host", "env", "args", "preamble", "bearer", "restart", "command", "tenure", "max", "lineage", "context"]);
+const ROW_KEYS = new Set(["role", "harness", "model", "thinking", "rooms", "wake", "profile", "append", "workdir", "skills", "host", "env", "args", "preamble", "deny", "bearer", "restart", "command", "tenure", "max", "lineage", "context"]);
 const REQUIRED = ["role", "harness", "model", "rooms", "profile", "host"];
 /** `standing`: started by `start --all` and kept; `on-demand`: started only when a grant holder wants it. */
 export const TENURES = Object.freeze(["standing", "on-demand"]);
@@ -70,11 +71,21 @@ const VAR_RE = /^[A-Z][A-Z0-9_]*$/;
 const SKILL_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const BEARER_RE = /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/;
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+/** A tool name a manifest may deny: omp's (`bash`, `ast_edit`), Claude Code's (`Bash`) or an MCP tool's (`mcp__server__tool`). A bare name, never a pattern. */
+const TOOL_RE = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,95}$/;
 export const START_LOCK_STALE_MS = 120_000;
 export const STOP_WAIT_MS = 10_000;
 export const TIMER_NAME = "agora-resident-cycle";
 export const LAUNCHD_LABEL = "agora.resident-cycle";
 export const DEFAULT_TIMER_SECONDS = 900;
+
+/**
+ * Claude Code's tools for each tool name a manifest denies. A name not listed passes through as
+ * written (a tool of that harness: `WebFetch`, `mcp__server__tool`). `eval` is omp's code-running
+ * tool and Claude Code has none, so it maps to nothing: there, denying `bash` is what denies running code.
+ * @type {Readonly<Record<string, readonly string[]>>}
+ */
+export const CLAUDE_TOOLS = Object.freeze({ bash: ["Bash"], write: ["Write"], edit: ["Edit", "MultiEdit", "NotebookEdit"], eval: [] });
 
 /** @typedef {{ file: string } | { text: string }} FilePart */
 /**
@@ -85,7 +96,7 @@ export const DEFAULT_TIMER_SECONDS = 900;
  *   skills: { dir: string, names: string[] } | null, host: 'tern' | 'tmux' | 'none',
  *   env: Record<string, string>, args: string[], preamble: 'on' | 'off' | null, bearer: string | null,
  *   restart: string | null, command: string[] | null, tenure: 'standing' | 'on-demand', max: number, lineage: string,
- *   context: { ceiling: number } | null,
+ *   context: { ceiling: number } | null, deny: string[],
  * }} ManifestResident
  */
 /**
@@ -274,12 +285,15 @@ export function validateManifest(raw, file) {
       if (!Number.isInteger(c.ceiling) || /** @type {number} */ (c.ceiling) < 1) bad(`${at}.context.ceiling`, "must be a whole number of tokens, at least 1");
       context = { ceiling: /** @type {number} */ (c.ceiling) };
     }
+    // the tools this resident's harness may not call, by name; absent or empty denies none. A messenger
+    // row runs code and holds no tools.
+    const deny = row.deny !== undefined && !agoraRow ? [...new Set(strList("deny", TOOL_RE))] : [];
 
     residents[slug] = {
       slug, role, harness, model: agoraRow ? MESSENGER_MODEL : str("model"), thinking: agoraRow ? null : optStr("thinking"), rooms: [...new Set(rooms)], wake,
       // a messenger row has no prompt: a profile or an append inherited from defaults is not read
       profile: agoraRow ? "" : resolveIn(str("profile")), append: agoraRow ? [] : strList("append", null).map(resolveIn), workdir, skills: agoraRow ? null : skills, host, env,
-      args: strList("args", null), preamble, bearer, restart: optStr("restart"), command, tenure, max, lineage: /** @type {string} */ (lineage), context,
+      args: strList("args", null), preamble, bearer, restart: optStr("restart"), command, tenure, max, lineage: /** @type {string} */ (lineage), context, deny,
     };
   }
 
@@ -543,7 +557,15 @@ export function planResident(manifest, slug, ctx) {
   const rooms = ctx.room ? [ctx.room] : row.rooms;
   const known = Object.keys(ctx.cfg.rooms ?? {});
   for (const r of rooms) if (!known.includes(r)) throw new AgoraError(`resident ${slug}: room ${JSON.stringify(r)} is not in the agora config (have: ${known.join(", ")})`, EXIT.usage);
+  // a room the public can post in must carry a wakeFrom list before any resident watches it: without
+  // one, any author's text would start a turn on this resident's tools
+  for (const r of rooms) {
+    const unguarded = exposureRefusal(r, /** @type {any} */ (ctx.cfg.rooms[r]));
+    if (unguarded) throw new AgoraError(`resident ${slug}: ${unguarded}`, EXIT.error);
+  }
+  const publicRooms = rooms.filter((r) => roomExposure(/** @type {any} */ (ctx.cfg.rooms[r])).public);
   const messenger = row.harness === "agora";
+  const deny = row.deny;
   const modelKey = messenger ? row.model : ctx.model ?? row.model;
   const model = manifest.models[modelKey] ?? modelKey;
   const signs = bearerName(slug, row.role);
@@ -597,7 +619,8 @@ export function planResident(manifest, slug, ctx) {
       if (row.thinking) argv.push("--thinking", row.thinking);
       if (row.skills?.names.length) argv.push("--skills", row.skills.names.join(","));
     } else {
-      argv = [...prefix, "--system-prompt", ".", "--append-system-prompt-file", promptFile, "--plugin-dir", path.join(ctx.checkout, "plugins", "claude", "agora-room"), "--dangerously-skip-permissions", "--model", model];
+      argv = [...prefix, "--system-prompt", ".", "--append-system-prompt-file", promptFile, "--plugin-dir", path.join(ctx.checkout, "plugins", "claude", "agora-room"),
+        ...(deny.length ? ["--disallowedTools", claudeDenied(deny).join(",")] : []), "--dangerously-skip-permissions", "--model", model];
       if (row.thinking) argv.push("--effort", row.thinking);
     }
     argv.push(...row.args, /** @type {string} */ (prompt));
@@ -628,10 +651,13 @@ export function planResident(manifest, slug, ctx) {
   return {
     type: "resident-plan", resident: slug, role: row.role, harness: row.harness, model, bearer, position: slug,
     rooms, wake: row.wake, host, manifest: manifest.file, dir, workdir,
+    // the tools this start denies the harness, and the rooms whose deliveries are always framed as
+    // input because the public can post in them
+    deny, publicRooms,
     files: row.workdir.files.map((f) => ({ path: path.join(workdir, f.path), parts: f.parts })),
     skills: row.skills ? { dir: row.skills.dir, names: row.skills.names, mode: row.harness === "omp" ? "overlay" : "copy" } : null,
     prompt: messenger ? null : { file: promptFile, profile: row.profile, append: row.append },
-    overlay, overlayText: overlay ? ompOverlay(fwd(path.join(ctx.checkout, "plugins", "omp", "agora-room")), row.skills ? fwd(row.skills.dir) : null) : null,
+    overlay, overlayText: overlay ? ompOverlay(fwd(path.join(ctx.checkout, "plugins", "omp", "agora-room")), row.skills ? fwd(row.skills.dir) : null, deny) : null,
     trust: row.harness === "claude" ? workdir : null,
     vars: manifest.vars, argv, env: harnessEnv, firstPrompt: prompt, hostArgv, hostInfo, runFile, name,
     restart: row.restart,
@@ -726,10 +752,31 @@ export async function cycleMessenger(manifest, slug, ctx, deps = {}) {
     reason: `backstop tick posted ${tick.posted.length} of ${tick.due.length} due; the stream is ${stream}${state.reason ? ` (${state.reason})` : ""}` };
 }
 
-/** The per-run omp settings overlay (JSON strings are YAML strings). @param {string} extension @param {string | null} skillsDir */
-export function ompOverlay(extension, skillsDir) {
+/**
+ * Claude Code's tool names for a deny list (`CLAUDE_TOOLS`), each once, in the order they are named.
+ * @param {readonly string[]} deny
+ */
+export function claudeDenied(deny) {
+  /** @type {string[]} */
+  const out = [];
+  for (const name of deny)
+    for (const tool of Object.hasOwn(CLAUDE_TOOLS, name) ? CLAUDE_TOOLS[name] : [name])
+      if (!out.includes(tool)) out.push(tool);
+  return out;
+}
+
+/**
+ * The per-run omp settings overlay (JSON strings are YAML strings). A denied tool is listed under
+ * `tools.approval` with the value `deny`: omp checks that user policy before the approval mode's
+ * allow, so the list holds under `--approval-mode yolo`, which an unattended session needs because
+ * nobody is there to answer a prompt. The overlay merges into the user's own `tools.approval` entry by
+ * entry, so a tool it does not name keeps whatever policy the user set.
+ * @param {string} extension @param {string | null} skillsDir @param {readonly string[]} [deny]
+ */
+export function ompOverlay(extension, skillsDir, deny = []) {
   let out = `extensions:\n  - ${JSON.stringify(extension)}\n`;
   if (skillsDir) out += `skills:\n  customDirectories:\n    - ${JSON.stringify(skillsDir)}\n`;
+  if (deny.length) out += `tools:\n  approval:\n${deny.map((tool) => `    ${JSON.stringify(tool)}: "deny"\n`).join("")}`;
   return out;
 }
 

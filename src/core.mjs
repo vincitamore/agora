@@ -6,6 +6,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+import { wakeFieldsProblem } from "./exposure.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -196,6 +197,8 @@ export function validateConfig(cfg, where) {
           `${where}: room "${alias}" carries "${key}" inline; use tokenEnv (an env var name) or tokenFile (a path) instead`,
         );
     }
+    const wakeProblem = wakeFieldsProblem(r);
+    if (wakeProblem) throw new AgoraError(`${where}: room "${alias}": ${wakeProblem}`);
   }
 }
 

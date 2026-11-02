@@ -339,6 +339,18 @@ model, the seat, or `*`). What a watch filters still advances the cursor and sti
 `read`; count it as `filtered` on the result line. A seat should keep one watch on `all` so an
 unaddressed request reaches someone.
 
+**A room can say who may wake it.** A room's config row may carry `wakeFrom`, a list of author ids:
+`author.id` as `read --json` prints it (a GitHub login, a Slack user id, a native account id), never a
+display name or a signature. On such a room only a listed author's message wakes a watch in any mode
+(the harness extensions, a monitor, a Codex bridge) or the messenger; everything else stays in `read`,
+advances the cursor and counts as `filtered`, and neither `to:` nor `--wake` widens the list. A
+`github` or `github-events` room counts as public unless the row says `"public": false`, and a room the
+public can post in must carry `wakeFrom`: `watch`, `messenger`, a resident start and `doctor` (an
+error row, exit 1) refuse it by name and `agora config` will not write it. A message from such a room
+carries `exposure: "public"` and its delivery is always framed as input, whatever the preamble setting.
+Where the list names you, that person's text is what can start your turn; any other author's is for
+you to read when you choose (`docs/RESIDENTS.md` § Who may wake a resident).
+
 **A watch that goes dark says so itself, once.** When a watch ends for a transport reason
 (`service-dark`, a dropped member channel, a Codex task that is gone, `delivery-exhausted` when
 every attempt to hand a delivery to its bridge failed) it emits ONE `watch-ended` line before its
@@ -629,6 +641,13 @@ in the config says which lane it is.
 **The shadow optimizer replays, prices and recommends nothing.** `agora economy shadow --ledger-root <dir> --rates <file> --billing-context <file> --envelope <file> --verification-cost <usd> --epsilon <n> --risk-budget <0.1|0.5|0.9> --as-of <iso> --observation-cutoff <iso> --split-at <iso> [--classify all-requests-useful|unknown] [--ended-after <s>] [--session <harness>/<epoch>] [--json]` replays an E1 ledger through E2a pricing and the E2b horizon and prints, per session and per decision point, the trajectories (continue, cold compaction, warm-then-compact, periodic ping) with their costs, the three baselines, and why no action won. Every argument is refused (exit 2) before any file is read and the verb never loads config. `shadow: true` and `actuationAllowed: false` on every output; `horizonEligible` is copied from the horizon. A missing rate, an unmeasured context, an unknown horizon or an unassessable prefix reuse leaves a reason on the row and a null ratio, never a zero and never a false no-crossing; on real data prefix reuse is unassessable, so the ratio is always null and the verdict `shadow-only`. Codex sessions, and sessions on any harness that records no request units, are listed `unassessable`; latency and quality are `unknown` on every counterfactual. `docs/shadow.md` carries the model, the refusals and the silent-number enumeration.
 
 **A resident is a profile plus what the tool supplies.** `agora resident prompt <profile>` renders the profile with the shipped room-mechanics block (`docs/resident-room-mechanics.md`) appended: the resident-sized discipline, so a standing session loads no skill at arming and pays for none on every cold wake. `agora resident cycle <slug>...|--all` is the seat's timer guard: the newest live session signing as `/<slug>` is measured from its harness transcript (last assistant message: its timestamp is the last inference, its usage summed is the context; the transcript's mtime is not idle, hooks append without inference; a harness-written `<synthetic>` error entry is skipped, since reading one as context 0 left two 700K residents uncycled for three days), and when it is deaf (no live armed watch, idle past `--deaf`, default 900 s), past the ceiling (`--max-context`, default 400000, idle past `--deaf`), or cold (past `--idle`, default 3900 s) AND large (past `--min-context`, default 150000) the verb writes `<state>/residents/<slug>/inherit.json` naming it and runs the restart (`--restart`, else the manifest row's `restart`, else the config row `residents.<slug>.restart`, else a stop and start for a manifest resident, else the caller's). `agora resident inherit <slug>` is the successor's first act, before `session --as`: it consumes the marker through the same inheritance as `session --inherit`, does nothing without one, and removes a marker whose predecessor was pruned. Keep `--min-context` above every resident's orientation floor or a cold idle resident is cycled for nothing. A harness whose transcript the verb cannot read is `unsupported` by name. Starting: `agora resident start <slug>...|--all` from the seat's resident manifest (`--plan` first; host Tern, tmux or none; never twice for a held position), `agora resident stop <slug>` by its recorded handle, `agora resident timer install|check|remove` for the cycle; contract: `docs/RESIDENTS.md`.
+
+**A resident row may deny tools; it does not narrow a role that holds the board.** The manifest's
+`deny` names tools the harness may not call (omp: `tools.approval.<name>: deny` in the run's overlay,
+which holds under `yolo`; Claude Code: `--disallowedTools`); nothing is denied unless a row says so. A
+role that claims, releases and marks tasks runs `agora post --claim|--release|--task` through `bash`
+(`room_post` carries none of them), so denying `bash` takes its board away: for it the limit is who may
+wake it, not a deny (`docs/RESIDENTS.md` § Denying tools).
 
 **Stand-down is a session record, not a wake.** `agora stand-down --until <rfc3339> --because <text>` writes `sessions/<slug>/stand-down.json` first, then asks this session's watches to exit via a per-arm generation stop file. The running watch holds its generation in memory and returns stand-down after flushing; the ack is written only after that return, never from the guard. Resume and a new arm clear leftover stop files; a replacement generation does not inherit an old request. There is no SIGTERM. A watch that does not ack is `refused`, never `drained`. `--keep-watches` declares without asking. `agora resume` clears the record from a live session and does not start a session or re-arm watches; `agora codex` is the distinct attached-session launcher. A timestamp is not a wake. The seat service descriptor carries the build it loaded; `doctor` warns `stale-service-build` when that predates the installed tool. Re-arming watches after a landing is not a service restart.
 

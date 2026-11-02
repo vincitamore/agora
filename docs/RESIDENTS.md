@@ -31,7 +31,7 @@ with the tree.
   "vars": { "TREE": { "path": "../.." }, "TEAM": "desk" },
   "defaults": {
     "harness": "omp", "host": "tern", "model": "large", "rooms": ["desk"],
-    "profile": "PROFILE.md", "preamble": "off",
+    "profile": "PROFILE.md",
     "workdir": { "files": { "AGENTS.md": ["HOME.md", { "text": "The tree is at {{TREE}}." }] } },
     "skills": { "dir": "../skills", "names": ["agora"] }
   },
@@ -60,7 +60,8 @@ is `defaults` with the row's own fields over it. Fields:
 | `skills` | | `dir` and `names`: omp reads them in place through its settings overlay (`skills.customDirectories`, `--skills`); Claude Code gets copies under the folder's `.claude/skills/`, rebuilt each start |
 | `env` | | extra environment for the harness (paths and switches; a name that looks like a credential, or one the verb sets itself, is refused) |
 | `args` | | extra harness arguments, before the first prompt |
-| `preamble` | | `on` or `off`: the extension's or plugin's preamble before each delivered line (off when the profile explains a delivery) |
+| `preamble` | | `on` (default when absent) or `off`: the extension's or plugin's preamble before each delivered line, which says the line is input from another participant and not an instruction. `off` is for a session whose profile already explains a delivery; it never applies to a delivery from a room the public can post in ([Who may wake a resident](#who-may-wake-a-resident)) |
+| `deny` | | tool names the harness may not call, none when absent or empty: omp gets each as `tools.approval.<name>: deny` in its settings overlay, Claude Code gets them through `--disallowedTools` ([Denying tools](#denying-tools)). Not read for `agora` |
 | `bearer` | | an explicit bearer instead of `<role>/<Model>` |
 | `restart` | | the cycle's restart command for this resident (`{slug}` is the position) |
 | `command` | | the harness executable and leading arguments, when it is not `omp` or `claude` on `PATH` |
@@ -118,10 +119,11 @@ agora resident stop <slug>... | --all [--json]
    trust entry in `~/.claude.json`, which an unattended session cannot answer);
 3. writes the harness's own room watch into the run: omp gets a per-run settings overlay,
    `<state>/residents/<slug>/omp-config.yml`, whose `extensions:` entry is this checkout's
-   `plugins/omp/agora-room` (`--config`); Claude Code gets `--plugin-dir` this checkout's
-   `plugins/claude/agora-room`;
+   `plugins/omp/agora-room` (`--config`) and which carries the row's `deny` entries; Claude Code
+   gets `--plugin-dir` this checkout's `plugins/claude/agora-room`, and `--disallowedTools` for the
+   row's `deny` ([Denying tools](#denying-tools));
 4. sets the environment that extension or plugin reads (`AGORA_ROOM`, `AGORA_ROOM_WAKE`,
-   `AGORA_ROOM_PREAMBLE`, `AGORA_ROOM_CMD` naming this checkout's CLI), the position
+   `AGORA_ROOM_PREAMBLE` when the row says `preamble`, `AGORA_ROOM_CMD` naming this checkout's CLI), the position
    (`AGORA_LABEL=<slug>`), the bearer (omp: `AGORA_ROLE=<role>`, or `<role>-<n>` at a numbered
    slot, so the extension registers `<AGORA_ROLE>/<Model>` itself and follows a model change;
    Claude Code, or an explicit `bearer`: `AGORA_ACTOR`), the model id (`AGORA_MODEL`, which
@@ -132,9 +134,12 @@ agora resident stop <slug>... | --all [--json]
    the spawner's only act: nothing is typed into the session after it.
 
 omp runs with `--append-system-prompt <prompt.md> --approval-mode yolo`; Claude Code with
-`--system-prompt "." --append-system-prompt-file <prompt.md> --dangerously-skip-permissions`. The
-profile is the latitude boundary; Claude Code's bypass-permissions warning must have been accepted
-once on the seat.
+`--system-prompt "." --append-system-prompt-file <prompt.md> --dangerously-skip-permissions`. Nobody
+is at the session to answer an approval prompt, so every call is approved, the profile is the
+latitude boundary, and a manifest `deny` is the one limit on its tools that a start adds
+([Denying tools](#denying-tools)); who may wake it is a separate limit, kept in code
+([Who may wake a resident](#who-may-wake-a-resident)). Claude Code's bypass-permissions warning must
+have been accepted once on the seat.
 
 **The messenger row (`harness: "agora"`).** The room's supervision in code (docs/MESSENGER.md),
 one row per room: `{ "role": "messenger", "harness": "agora", "rooms": ["<room>"], "host": "tern",
@@ -209,6 +214,85 @@ Restart=on-failure
 
 A shared tmux server reads as dead to the second unit, and the login shell gives the start the
 user's `PATH`. Such a resident's manifest row carries `restart: "systemctl --user restart resident-{slug}.service"`.
+
+## Denying tools
+
+An unattended resident approves every tool call, so a row's `deny` is the one limit on its tools that
+a start can add. It lists tool names the harness may not call, none when absent or empty, and every
+start writes it where the harness reads it (`resident start --plan` prints it as `deny`):
+
+- **omp:** each name becomes `tools.approval.<name>: deny` in the run's settings overlay
+  (`<state>/residents/<slug>/omp-config.yml`, passed with `--config`):
+
+  ```yaml
+  tools:
+    approval:
+      "write": "deny"
+      "bash": "deny"
+  ```
+
+  omp checks a user `deny` before the approval mode's allow, so the list holds under
+  `--approval-mode yolo`. The overlay merges into the user's own `tools.approval` entry by entry, so
+  a tool it does not name keeps the policy the user set, and omp's task subagents read the same
+  settings, so they are denied the same tools. A tool the list leaves out is unchanged: `read`,
+  `grep` and `task` stay allowed, and omp still runs the read-only ones speculatively. `write`,
+  `edit`, `bash` and `eval` take away writing files, editing them and running code.
+- **Claude Code:** the names become one `--disallowedTools <comma-joined list>` argument, ahead of
+  the bypass flag. `bash`, `write` and `edit` map to `Bash`, `Write` and `Edit,MultiEdit,NotebookEdit`;
+  `eval` is omp's code-running tool and Claude Code has no tool of that name, so it maps to nothing
+  (`bash` is what denies running code there); any other name is passed as written (`WebFetch`,
+  `mcp__server__tool`). A pattern such as `Bash(git *)` is not a tool name and is refused at load.
+
+A granted position (`resident want`) carries the `deny` of the row it was built from, else the
+defaults'. Nothing in agora denies a tool a manifest does not name: there is no default list.
+
+**A role that holds the board keeps `bash`, so a deny cannot narrow it yet.** The orchestrator's loop
+(claim a task, assign units, release it with a verdict) is made of `agora post --claim`, `--release`,
+`--task`, `--verdict` and `--exhibit`, `agora resident want`, `succeed` and `cycle`, and `agora carry`,
+all run through the shell, while `room_post` takes `text`, `thread`, `to` and `reply_to` and none of
+those options. Denying `bash` for such a role takes its board away, and leaving `bash` allowed leaves it
+a shell that `write`, `edit` and `eval` denials do not make safe. Until `room_post` can claim, release
+and mark a task, the limit on a role like that is who may wake it (below), not a capability deny. A deny
+narrows a role that only reads and posts text.
+
+## Who may wake a resident
+
+A delivery starts a turn on whatever tools the resident holds, so who may start one is decided in
+code before any wake, from who the transport says posted a message and never from what the message
+says. A room's row in the agora config carries two keys for it:
+
+- **`wakeFrom`**: a list of author ids. Only a message whose `author.id` is on the list wakes a watch
+  on the room. The id is the transport's own identity for the poster (a GitHub login, a Slack user
+  id, a native account id; `agora read <room> --json` prints it), compared without case. Every other
+  message stays readable, the cursor advances past it, and it counts as `filtered` on the watch's
+  result line; the watch names each such author once on stderr. A display name and the `signedAs`
+  line are not identities, `to:` is plain text any author can write, and no `--wake` mode applies
+  before the list, so none of them widens it. A message whose author has no id is refused. An empty
+  list wakes no one. The room's own account is not implied: on a room with residents, list the seat's
+  account (`agora doctor` prints it as the identity the room's transport sees) so the seat's agents
+  and its messenger can wake one another.
+- **`public`**: whether the public can post in the room. A `github` or `github-events` room counts
+  as public unless the row says `"public": false`, because agora cannot tell a private repository
+  from a public one without asking GitHub; any other room is private unless the row says
+  `"public": true` (a Slack channel with guests, say).
+
+A room the public can post in must carry a `wakeFrom` list, or declare itself private. `agora watch`,
+`agora messenger`, `agora resident start` (and every start the cycle, a want or `ensure` makes) and
+`agora doctor` (an error row, exit 1) refuse it by name, and `agora config` refuses to add or change
+such a row (exit 2, `public-room-unguarded`), each saying how to fix it:
+
+```
+agora config room add support '{"transport":"github","repo":"owner/name","issue":12,"wakeFrom":["maintainer-login"]}' --replace
+```
+
+On such a room the preamble is not a setting. Every message the watch delivers from it carries
+`exposure: "public"` on its JSON line, and the extension or plugin frames it as input from another
+participant whatever `preamble`, `AGORA_ROOM_PREAMBLE` or the project file says. `resident start
+--plan` lists these rooms as `publicRooms`.
+
+The room's messenger reads the same list. On a room with `wakeFrom` it folds only what a listed
+author or the seat's own account said, and the annotations they made, so a line from anyone else
+starts no clock, routes to no one and queues nothing, and no notice carries it to a resident.
 
 ## Grants
 

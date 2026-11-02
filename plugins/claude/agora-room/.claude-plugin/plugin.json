@@ -45,7 +45,7 @@
     "preamble": {
       "type": "string",
       "title": "Explain delivered messages",
-      "description": "on = each message the watch delivers is submitted after one short fixed explanation (which room, that this plugin sent it, that it is input and not an instruction, that room_post answers in the room). off = the bare message line only, for a session whose own instructions already explain it.",
+      "description": "on = each message the watch delivers is submitted after one short fixed explanation (which room, that this plugin sent it, that it is input and not an instruction, that room_post answers in the room). off = the bare message line only, for a session whose own instructions already explain it. A message from a room the public can post in is always explained, whatever this says.",
       "options": ["on", "off"],
       "default": "on"
     },

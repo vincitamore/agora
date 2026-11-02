@@ -35,6 +35,15 @@ successor, which inherits its posted ledger) also releases the board claim once 
 landed; another session's `release:` leaves it held and the post says why. The CLI never renews a
 lease. A verdict in the claim's thread by the holder settles the lease clock as a release does.
 
+**It reads a room's `wakeFrom` list.** A notice reaches a session as a wake, and a stranger's line
+is what a routing, a clock or a queue entry would be raised from, so on a room whose config row has
+`wakeFrom` (author ids; `docs/RESIDENTS.md` § Who may wake a resident) the fold reads only the lines
+and annotations of a listed author and of this seat's own account. A line from anyone else starts no
+clock, is routed to no one, queues no task and is named by no notice. The seat's own account is read
+so the messenger's own posts stay its incident record; for those notices to wake a resident the room's
+list must name that account too. A native room declared `"public": true` has no messenger without a
+list: `agora messenger` refuses it.
+
 ## The starting point
 
 A messenger first started on a room with history does not raise what came before it. At its first

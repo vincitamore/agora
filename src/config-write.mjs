@@ -18,6 +18,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { AgoraError, EXIT, configPath, redact, stateDir, validateConfig } from "./core.mjs";
 import { TRANSPORTS } from "./transports/index.mjs";
+import { exposureRefusal } from "./exposure.mjs";
 import { assertResidentSlug, configuredResidents } from "./resident.mjs";
 import { assertRemoteDescriptor, readRemoteDescriptor, resolveSeatIdentity } from "./native-remote.mjs";
 import { readRouteSecret } from "./native-member.mjs";
@@ -512,6 +513,15 @@ export async function editConfig(file, plan, o = {}) {
       configuredResidents(after);
     } catch (e) {
       throw Object.assign(new AgoraError(`config-invalid: ${e instanceof Error ? e.message : String(e)}; nothing was written`), { code: "config-invalid" });
+    }
+    // A row this edit adds or changes may not leave a room the public can post in without a wakeFrom
+    // list. Rows already in the file are not retroactively refused here (an unrelated edit must stay
+    // possible); a watch, a resident start and doctor name them.
+    const roomsBefore = isObject(before?.rooms) ? /** @type {Record<string, unknown>} */ (before?.rooms) : {};
+    for (const [alias, row] of Object.entries(isObject(after.rooms) ? after.rooms : {})) {
+      if (has(roomsBefore, alias) && canonical(roomsBefore[alias]) === canonical(row)) continue;
+      const why = isObject(row) ? exposureRefusal(alias, row) : null;
+      if (why) throw Object.assign(new AgoraError(`public-room-unguarded: ${why}. Nothing was written`, EXIT.usage), { code: "public-room-unguarded" });
     }
     const next = text === null ? `${JSON.stringify(after, null, 2)}\n` : spliceConfig(text, decided.ops, after);
     if (next === text) return { ...base, written: false, noop: "the file already says this", after, diff: "" };

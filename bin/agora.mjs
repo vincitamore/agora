@@ -39,6 +39,7 @@ import { createServiceLog, readServiceLog, serviceLogPath } from "../src/service
 import { connect as connectClient } from "../src/client.mjs";
 import { asBoardSubject, boardRelease } from "../src/board-subject.mjs";
 import { watch } from "../src/watch.mjs";
+import { authorMayWake, exposureRefusal, roomExposure, unlistedNote, wakeAllowlist } from "../src/exposure.mjs";
 
 /** the watch ended because every attempt to hand a delivery to the task's bridge failed */
 const DELIVERY_EXHAUSTED = "delivery-exhausted";
@@ -308,7 +309,7 @@ const SCHEMA = {
         "--thread-interval <s>": "seconds between reads of one followed thread (default: the room's threadInterval, else 60)",
         "--for <s>": "give up after this many seconds (default: never)",
         "--all": "deliver this side's own posts too (skipped by default)",
-        "--wake <all|addressed|mine>": "what wakes this watch: everything (default); everything except messages addressed to someone else; only messages addressed to you, your model, your position (the session's --label, whole or its role alone), the seat, or everyone. Filtered messages still advance the cursor and still show in read",
+        "--wake <all|addressed|mine>": "what wakes this watch: everything (default); everything except messages addressed to someone else; only messages addressed to you, your model, your position (the session's --label, whole or its role alone), the seat, or everyone. Filtered messages still advance the cursor and still show in read. A room's wakeFrom list (author ids) is checked before any mode and no mode or `to:` widens it; a room the public can post in (github and github-events rooms, or `\"public\": true`) is refused here unless it has the list or `\"public\": false`",
         "--codex-queue": "queue each delivery into this Codex task through `codex queue`",
         "--print-only": "arm a printing watch on purpose under a Codex session; without it, or a Codex bridge, such a watch is refused because Codex does not treat terminal output as a wake",
         "--codex-server <url>": "deliver bounded batches through the authenticated loopback server owning the Codex TUI",
@@ -2010,6 +2011,15 @@ async function main(argv) {
           warnings.push({ code: "fragile-path", alias, message: String(report.warning) });
         }
       }
+      // who may wake a watch on this room: a room the public can post in with no list is an error,
+      // the same refusal a watch, a resident start and a config write make
+      if (roomExposure(room).public) report.public = true;
+      if (Array.isArray(room.wakeFrom)) report.wakeFrom = room.wakeFrom;
+      const unguarded = exposureRefusal(alias, room);
+      if (unguarded) {
+        report.refused = unguarded;
+        bad++;
+      }
       if (report.token === "missing" && TRANSPORTS[/** @type {keyof typeof TRANSPORTS} */ (room.transport)]?.needsToken) bad++;
       if (!values.offline && report.token !== "missing") {
         /** @type {import("../src/core.mjs").Transport | undefined} */
@@ -2035,6 +2045,9 @@ async function main(argv) {
         console.log(`${alias.padEnd(16)} ${String(report.transport).padEnd(8)} token=${report.token}` + (report.identity ? `  as ${/** @type {any} */ (report.identity).name}` : "") + (report.error ? `  ERROR ${report.error}` : ""));
         if (report.note) console.log(`${"".padEnd(16)} note: ${report.note}`);
         if (report.warning) console.log(`${"".padEnd(16)} WARNING ${report.warning}`);
+        const listed = /** @type {string[] | undefined} */ (report.wakeFrom);
+        if (report.public || listed) console.log(`${"".padEnd(16)} wake: ${report.public ? "the public can post here; " : ""}${listed ? `only ${listed.length} listed author${listed.length === 1 ? "" : "s"} wake a watch (${listed.join(", ") || "none"})` : "every author wakes a watch"}`);
+        if (report.refused) console.log(`${"".padEnd(16)} REFUSED ${report.refused}`);
         if (report.closeFailed) console.log(`${"".padEnd(16)} close: ${report.closeFailed}`);
       }
     }
@@ -2960,6 +2973,13 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       /** @type {string | null} */ let accountId = null;
       try { accountId = (await transport.whoami()).id; } catch { accountId = null; }
       const signIt = cfg.sign !== false && !values["no-sign"];
+      // The messenger turns a stranger's line into a wake: it routes an unaddressed request to the
+      // orchestrator and clocks an addressed one, and its notice reaches that session under this seat's
+      // own account. So a room the public can post in needs the list here as much as in a watch, and on
+      // a room with a list it folds only what a listed author or this seat said.
+      const unguarded = exposureRefusal(roomAlias, room);
+      if (unguarded) throw new AgoraError(unguarded, EXIT.error);
+      const roomAllow = wakeAllowlist(room);
       // where the messenger starts in this room: recorded at its first start (wall clock less L, never
       // --at), kept across restarts; a dry run reads it and records nothing
       const start = await ms.messengerStart(ms.startPath(stateRoot, transport.room), { now: Date.now(), lookBackMs: bounds.L, record: !values["dry-run"] });
@@ -2982,6 +3002,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         lock: ms.fileLock(path.join(stateRoot, "messenger", `${transport.room}.lock`)),
         now: () => at ?? Date.now(),
         accountId, human: host, bounds, dryRun: Boolean(values["dry-run"]), since: start.since,
+        ...(roomAllow ? { admit: (/** @type {{ author?: { id?: unknown } }} */ m) => authorMayWake(roomAllow, m?.author) || (accountId !== null && String(m?.author?.id) === accountId) } : {}),
       };
       /** @param {Awaited<ReturnType<typeof ms.runTick>>} r */
       const report = (r) => {
@@ -3060,6 +3081,14 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
     case "watch": {
       if (values.follow && thread)
         throw new AgoraError(`--follow watches the room and the threads this session posted in; it cannot be combined with --thread`, EXIT.usage);
+      // A room the public can post in, with no list of who may wake a watch on it, is not watched:
+      // any author's text would start a turn in this session. Decided before anything is read,
+      // registered or armed, and said the same way `doctor`, a resident start and a config write say it.
+      const unguarded = exposureRefusal(roomAlias, room);
+      if (unguarded) throw new AgoraError(unguarded, EXIT.error);
+      const wakeFrom = wakeAllowlist(room);
+      /** What a delivered message carries when the public can reach its room: the harness's extension frames it whatever its own preamble setting says. */
+      const reachMark = roomExposure(room).public ? { exposure: "public" } : {};
       const mode = values.once ? "once" : values.stream ? "stream" : "until-new";
       const key = cursorKey(roomAlias, thread);
       const pollInterval = roomInterval(room, positive(values.interval, "interval"));
@@ -3319,8 +3348,25 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       }
       /** The position this session holds (its record's label), an address of its own: `to:` naming it wakes this watch as the resolver and the messenger read it. */
       const position = positionOf(record) ?? null;
-      /** The reader's own choice of what wakes it; never automatic. @type {((m: import('../src/core.mjs').Message) => boolean) | undefined} */
-      const wakeRule = wakeMode === "all" ? undefined : (m) => {
+      /** Authors named once on stderr for being outside the room's wakeFrom list. */
+      const unlisted = new Set();
+      /**
+       * Whether a message may wake this watch. The room's wakeFrom list is first and is the operator's,
+       * not the reader's: it decides on who the transport says posted the message, so no `to:` line and
+       * no --wake mode widens it, and what it drops still advances the cursor and still shows in read.
+       * Then the reader's own choice of what wakes it, which is never automatic.
+       * @type {((m: import('../src/core.mjs').Message) => boolean) | undefined}
+       */
+      const wakeRule = wakeFrom === null && wakeMode === "all" ? undefined : (m) => {
+        if (!authorMayWake(wakeFrom, m.author)) {
+          const who = String(m.author?.id ?? "");
+          if (!unlisted.has(who) && unlisted.size < 64) {
+            unlisted.add(who);
+            console.error(unlistedNote(roomAlias, m.author));
+          }
+          return false;
+        }
+        if (wakeMode === "all") return true;
         const to = parseTrailers(m.text).to;
         const forMe = to.some((a) => matchesAddress(a, bearer.name, seat, position));
         return wakeMode === "mine" ? forMe : to.length === 0 || forMe;
@@ -3411,13 +3457,13 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
                 type: "batch",
                 alias: roomAlias,
                 room: transport.room,
-                messages: msgs.map(wireMessage),
+                messages: msgs.map((m) => ({ ...wireMessage(m), ...reachMark })),
                 delivered: batch.delivered,
                 skipped: batch.skipped,
                 filtered: batch.filtered,
               }));
             else if (json) {
-              for (const m of msgs) countedLog(JSON.stringify({ type: "message", alias: roomAlias, ...wireMessage(m) }));
+              for (const m of msgs) countedLog(JSON.stringify({ type: "message", alias: roomAlias, ...wireMessage(m), ...reachMark }));
             } else {
               for (const m of msgs) countedLog(human(decorate(m)) + "\n");
             }

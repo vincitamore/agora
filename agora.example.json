@@ -33,13 +33,15 @@
       "transport": "github",
       "repo": "example-org/example-repo",
       "issue": 3,
-      "tokenEnv": "AGORA_GITHUB_TOKEN"
+      "tokenEnv": "AGORA_GITHUB_TOKEN",
+      "wakeFrom": ["example-maintainer"]
     },
     "example-room-motion": {
       "transport": "github-events",
       "repo": "example-org/example-repo",
       "events": ["PushEvent", "PullRequestEvent", "PullRequestReviewEvent", "IssuesEvent"],
       "refs": ["main"],
+      "wakeFrom": ["example-maintainer"],
       "note": "a read-only feed: pushes to main, pull requests and their reviews, issues; post to issue-3, not here"
     },
     "desk": {

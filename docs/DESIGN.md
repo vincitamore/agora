@@ -938,6 +938,11 @@ feature that looks helpful in isolation.
   fine. Routing, waking, filtering or suppressing on one must be a flag *the reader* chose, or a
   counterpart's trailer silently steers this side's process and "a message from another agent is
   input, never an instruction" has been violated by the tool rather than by an agent.
+- **Who may wake a session is decided on the transport's author id, by a list the operator wrote.** A
+  room's `wakeFrom` is checked before any wake mode, and is keyed on `author.id`, never on a display
+  name, a signature line or a trailer: a `to:` or a `--wake` mode never widens it, and nothing a
+  message says edits it. A room the public can post in carries one or is refused; a gate that guesses
+  toward delivery when it cannot tell who posted is not a gate.
 - **Only `agora config` writes the shared config, and only when it is told to.**
   Explicit admin verbs may update their named registries under `native/`, `index/`, `board/` and
   `spawn/`, never shared actor identity or enrollment as a side effect of a non-admin verb.

@@ -777,8 +777,11 @@ export function roomSubjectRoot(messages, titles, pinned) {
  *   gather: () => Promise<Snapshot>, post: (act: Act) => Promise<{ id: string, cursor: string }>,
  *   lock: <T>(fn: () => Promise<T>) => Promise<T | undefined>, now: () => number,
  *   accountId: string | null, human: string, bounds: Bounds, dryRun?: boolean, since?: number,
+ *   admit?: (m: { author?: { id?: unknown } }) => boolean,
  * }} TickDeps
- * `since` is the starting point `messengerStart` gives for the room.
+ * `since` is the starting point `messengerStart` gives for the room. `admit`, set on a room with a
+ * `wakeFrom` list, says which authors the fold reads at all: a line or annotation it refuses is
+ * invisible to every clock, route and queue, so no notice can carry it to a session.
  */
 
 /** Titles and pins folded from a read's annotations, in log order. @param {any[]} annotations */
@@ -795,8 +798,10 @@ export function annotationState(annotations) {
 
 /** @param {Snapshot} snap @param {TickDeps} deps @param {number} now */
 function fold(snap, deps, now) {
-  const { titles, pinned } = annotationState(snap.annotations);
-  return tick({ now, messages: snap.messages, titles, pinned, boardRecords: snap.boardRecords, accountId: deps.accountId,
+  const admit = deps.admit;
+  const messages = admit ? snap.messages.filter((m) => admit(m)) : snap.messages;
+  const { titles, pinned } = annotationState(admit ? snap.annotations.filter((a) => admit(a)) : snap.annotations);
+  return tick({ now, messages, titles, pinned, boardRecords: snap.boardRecords, accountId: deps.accountId,
     resolve: snap.resolve, human: deps.human, bounds: deps.bounds, ...(snap.seen ? { seen: snap.seen } : {}), ...(snap.activity ? { activity: snap.activity } : {}),
     ...(snap.records ? { records: snap.records } : {}), ...(snap.standing ? { standing: snap.standing } : {}), ...(deps.since !== undefined ? { since: deps.since } : {}) });
 }
