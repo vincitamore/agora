@@ -493,7 +493,10 @@ export async function armCarryCapture(dir) {
     // A durable completion receipt makes an unlink failure recoverable without
     // treating an unresolved marker as completed or requiring another write.
     await persist(file + '.complete', path.basename(file));
-    try { await unlink(file); } catch { /* completion receipt is authoritative */ }
+    try {
+      await unlink(file);
+      try { await unlink(file + '.complete'); } catch { /* best-effort cleanup after .pending is gone */ }
+    } catch { /* completion receipt is authoritative */ }
   };
   let failed = false;
   /** @type {string|undefined} */ let batch;
@@ -596,10 +599,12 @@ export async function readCarryEvidence(dir) {
   catch { return { events, issues: ['delivery-coverage-unknown'] }; }
   if (!files.length) issues.push('delivery-coverage-unknown');
   const ids = new Set();
+  const pending = new Set(files.filter(f => f.endsWith('.pending')));
   const completed = new Set();
   for (const file of files.filter(f => f.endsWith('.pending.complete'))) {
+    const target = file.slice(0, -'.complete'.length);
+    if (!pending.has(target)) continue;
     try {
-      const target = file.slice(0, -'.complete'.length);
       if (await readFile(path.join(evidence, file), 'utf8') !== target) throw new Error('invalid completion');
       completed.add(target);
     } catch { issues.push('delivery-coverage-unknown:' + file); }
