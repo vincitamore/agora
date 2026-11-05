@@ -24,8 +24,14 @@
  * Idle is measured from the last ASSISTANT message, never from the transcript's mtime: hooks and
  * monitors append to the file without an inference. A harness whose transcript this module cannot
  * read reports `unsupported`, never a guess.
+ *
+ * A Hermes resident keeps its transcript in a per-profile SQLite store whose schema is Hermes's own, so
+ * it is not read: the agora-room plugin reports the session's turn itself, in
+ * `<state>/sessions/<key>/turn.json` (the last main-loop inference, its context, the turn's state). The
+ * measure is chosen by the position's harness (the manifest row's, else the run record's), never by the
+ * session's source. That record is a claim, as the activity record is: the same trust, no more.
  */
-import { createReadStream, existsSync, readdirSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync, readdirSync } from "node:fs";
 import { readFile, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -41,6 +47,8 @@ export const DEFAULT_MIN_CONTEXT = 150_000;
 export const DEFAULT_MAX_CONTEXT = 400_000; // past this, cycle even warm, between turns
 export const DEFAULT_DEAF_SECONDS = 900; // no live watch and no inference for this long: deaf
 export const ROOM_MECHANICS_DOC = "docs/resident-room-mechanics.md";
+/** The turn record the Hermes agora-room plugin writes in its session's folder. */
+export const TURN_FILE = "turn.json";
 
 /** @param {string} slug */
 export function assertResidentSlug(slug) {
@@ -226,7 +234,7 @@ export async function turnState(file, harness) {
  * The turn of the newest live session holding `position` on this seat: `none` when no live session
  * holds it, `unsupported` when its transcript cannot be read.
  * @param {string} stateRoot @param {string} position
- * @param {{ home?: string, kill?: (pid: number, sig: 0) => void, boot?: number }} [deps]
+ * @param {{ home?: string, kill?: (pid: number, sig: 0) => void, boot?: number, harness?: string | null }} [deps] `harness`: the position's (absent: its run record's)
  * @returns {Promise<{ status: 'none' } | { status: 'unsupported', reason: string, session: string } | { status: 'read', session: string, startedAt: string | null, at: string, turnEnded: boolean }>}
  */
 export async function positionTurn(stateRoot, position, deps = {}) {
@@ -234,6 +242,13 @@ export async function positionTurn(stateRoot, position, deps = {}) {
   if (!live.length) return { status: "none" };
   live.sort((a, b) => String(b.record?.startedAt ?? "").localeCompare(String(a.record?.startedAt ?? "")));
   const s = live[0];
+  // a hermes position's turn is the one its plugin records; its transcript is not read
+  if ((deps.harness === undefined ? runHarness(stateRoot, position) : deps.harness) === "hermes") {
+    const r = await readTurnRecord(stateRoot, s.slug);
+    if (r.status !== "read") return { status: "unsupported", reason: r.reason, session: s.slug };
+    if (typeof r.turn.at !== "string" || typeof r.turn.turnEnded !== "boolean") return { status: "unsupported", reason: `${r.file} holds no turn state`, session: s.slug };
+    return { status: "read", session: s.slug, startedAt: s.record?.startedAt ?? null, at: r.turn.at, turnEnded: r.turn.turnEnded };
+  }
   const t = transcriptFor({ slug: s.slug, source: s.record?.source }, { home: deps.home });
   if (t.status !== "found") return { status: "unsupported", reason: t.reason, session: s.slug };
   const turn = await turnState(t.file, t.harness);
@@ -326,10 +341,58 @@ export async function cycleVerdict({ slug, sessions, measure, now = new Date(), 
   return { ...row, action: "cycle", reason: `cold ${idle}s and context ${m.context} >= ${minContext}` };
 }
 
-/** The default measurement: the harness transcript, or unsupported by name.
- * @param {{ home?: string }} [deps] */
+/**
+ * The harness a position's last start ran, from its run record (`agora resident start` writes it), or null.
+ * @param {string} stateRoot @param {string} slug @returns {string | null}
+ */
+export function runHarness(stateRoot, slug) {
+  try {
+    const rec = JSON.parse(readFileSync(path.join(residentDir(stateRoot, slug), RUN_FILE), "utf8"));
+    return rec?.type === "resident-run" && typeof rec.harness === "string" ? rec.harness : null;
+  } catch { return null; }
+}
+
+/**
+ * A Hermes session's turn record (`<state>/sessions/<key>/turn.json`), or why it cannot be read.
+ * @param {string} stateRoot @param {string} session
+ * @returns {Promise<{ status: 'read', file: string, turn: any } | { status: 'unsupported', reason: string }>}
+ */
+export async function readTurnRecord(stateRoot, session) {
+  const file = path.join(stateRoot, "sessions", session, TURN_FILE);
+  let text;
+  try { text = await readFile(file, "utf8"); } catch { return { status: "unsupported", reason: `the hermes session ${session} has written no turn record (${file}); is the agora-room plugin loaded in its profile?` }; }
+  /** @type {any} */
+  let turn;
+  try { turn = JSON.parse(text); } catch { return { status: "unsupported", reason: `${file} is not JSON` }; }
+  if (turn?.type !== "turn" || turn?.v !== 1) return { status: "unsupported", reason: `${file} is not a turn record` };
+  return { status: "read", file, turn };
+}
+
+/**
+ * Last inference and context from a Hermes session's turn record: the last main-loop provider request
+ * whose usage counted input; context = Hermes's prompt tokens (input + cache read + cache write).
+ * @param {string} stateRoot @param {{ slug: string }} rec
+ */
+export async function measureHermesTurn(stateRoot, rec) {
+  const r = await readTurnRecord(stateRoot, rec.slug);
+  if (r.status !== "read") return r;
+  const t = r.turn;
+  if (typeof t.lastInference !== "string" || !Number.isFinite(Date.parse(t.lastInference)))
+    return { status: /** @type {const} */ ("unsupported"), reason: `${r.file} records no inference with usage yet` };
+  if (!Number.isSafeInteger(t.context) || t.context < 0)
+    return { status: /** @type {const} */ ("unsupported"), reason: `${r.file} records the context as unknown (the provider reported no input)` };
+  const n = (/** @type {unknown} */ v) => (Number.isSafeInteger(v) && /** @type {number} */ (v) >= 0 ? /** @type {number} */ (v) : 0);
+  return { status: /** @type {const} */ ("measured"), lastInference: t.lastInference, context: t.context, uncached: n(t.uncached), cacheRead: n(t.cacheRead), cacheWrite: n(t.cacheWrite), file: r.file };
+}
+
+/** The default measurement: the harness transcript, or for a hermes position its turn record, or unsupported by name.
+ * @param {{ home?: string, stateRoot?: string, harness?: string | null }} [deps] */
 export function transcriptMeasure(deps = {}) {
   return async (/** @type {any} */ rec) => {
+    if (deps.harness === "hermes") {
+      if (!deps.stateRoot) return { status: /** @type {const} */ ("unsupported"), reason: "a hermes session is measured from its turn record, and no state root was given" };
+      return measureHermesTurn(deps.stateRoot, rec);
+    }
     const t = transcriptFor(rec, deps);
     if (t.status !== "found") return t;
     const m = t.harness === "omp" ? await measureOmpTranscript(t.file) : await measureClaudeTranscript(t.file);
@@ -365,10 +428,12 @@ export async function watchEvidence(stateRoot, session, deps = {}) {
  * and judges that request as any other: the session's agora-room watch kicks the timer at its next
  * turn end, and the cycle honours it once no claim holds it.
  * @param {string} stateRoot @param {string} slug
- * @param {{ now?: Date, idleSeconds?: number, minContext?: number, maxContext?: number, ceiling?: number, dryRun?: boolean, deafSeconds?: number, home?: string, kill?: (pid: number, sig: 0) => void, boot?: number }} [opts]
+ * @param {{ now?: Date, idleSeconds?: number, minContext?: number, maxContext?: number, ceiling?: number, dryRun?: boolean, deafSeconds?: number, home?: string, kill?: (pid: number, sig: 0) => void, boot?: number, harness?: string | null }} [opts]
+ *   `harness`: the position's harness (the manifest row's); absent, the run record's
  */
 export async function planCycle(stateRoot, slug, opts = {}) {
   const deps = { kill: opts.kill, boot: opts.boot };
+  const harness = opts.harness ?? runHarness(stateRoot, slug);
   const now = opts.now ?? new Date();
   const sessions = await listRecords(stateRoot, deps);
   // The live watches of the session the verdict will measure (the newest live one for this slug).
@@ -376,7 +441,7 @@ export async function planCycle(stateRoot, slug, opts = {}) {
   live.sort((a, b) => String(b.record?.startedAt ?? "").localeCompare(String(a.record?.startedAt ?? "")));
   const ev = live.length ? await watchEvidence(stateRoot, live[0].slug, { ...deps, now: now.getTime() }) : undefined;
   const watching = ev ? ev.armed + (ev.heard ? 1 : 0) : undefined;
-  const read = transcriptMeasure({ home: opts.home });
+  const read = transcriptMeasure({ home: opts.home, stateRoot, harness });
   /** @type {ReturnType<typeof read> | undefined} */
   let measured;
   const measure = (/** @type {any} */ rec) => (measured ??= read(rec));
@@ -384,7 +449,7 @@ export async function planCycle(stateRoot, slug, opts = {}) {
     const ceiling = typeof request?.ceiling === "number" ? request.ceiling : undefined;
     // a ceiling's request may come mid-task, so any claim the session holds defers it
     const since = ceiling !== undefined ? new Date(0).toISOString() : request?.at ?? "";
-    const succeed = request ? { at: request.at, ceiling, turn: await positionTurn(stateRoot, slug, { home: opts.home, ...deps }), held: live.length ? await claimsSince(live[0].dir, since) : [] } : undefined;
+    const succeed = request ? { at: request.at, ceiling, turn: await positionTurn(stateRoot, slug, { home: opts.home, ...deps, harness }), held: live.length ? await claimsSince(live[0].dir, since) : [] } : undefined;
     return cycleVerdict({ slug, sessions, measure, now, idleSeconds: opts.idleSeconds, minContext: opts.minContext, maxContext: opts.maxContext, ceiling: opts.ceiling, deafSeconds: opts.deafSeconds, watching, activityAt: ev?.activityAt, succeed });
   };
   const verdict = await judge(await readSucceedRequest(stateRoot, slug));

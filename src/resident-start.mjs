@@ -26,6 +26,12 @@
  * a Windows scheduled task, a systemd user timer, or a launchd agent; on Windows also the startup
  * entries that bring Tern and the seat service up at logon. `check` reports and changes nothing.
  *
+ * Harness `hermes` runs `hermes -p <profile> chat --cli` (docs/HERMES-PLUGIN.md): the profile is named in
+ * the row's `command`, the rendered prompt rides HERMES_EPHEMERAL_SYSTEM_PROMPT, the first prompt a file
+ * (`--query-file`), the agora-room plugin is copied into the working folder's `.hermes/plugins` per run,
+ * and AGORA_SESSION is pinned for the run's life (Hermes changes its own session id at compaction).
+ * The profile's config is only read: its enablement of the plugin is checked, never written.
+ *
  * Harness `agora` is the room's messenger (docs/MESSENGER.md): no model and no prompt; the row's
  * program is `agora messenger <room> --stream <args>`, run as the position's own session (it
  * registers itself with its own pid, so liveness and the departure sweep read it like any
@@ -35,7 +41,7 @@
  */
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { cpSync, existsSync, lstatSync, readdirSync, rmdirSync, rmSync, statSync, unlinkSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync, unlinkSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
@@ -48,7 +54,7 @@ import { exposureRefusal, roomExposure } from "./exposure.mjs";
 import { ACTIVITY_FILE, livenessPath } from "./messenger.mjs";
 
 export const MANIFEST_VERSION = 1;
-export const HARNESSES = Object.freeze(["omp", "claude", "agora"]);
+export const HARNESSES = Object.freeze(["omp", "claude", "agora", "hermes"]);
 export const HOSTS = Object.freeze(["tern", "tmux", "none"]);
 export const WAKES = Object.freeze(["all", "addressed", "mine"]);
 const TOP_KEYS = new Set(["version", "models", "vars", "defaults", "residents", "grants"]);
@@ -63,7 +69,7 @@ const NOT_REQUIRED_FOR_AGORA = new Set(["model", "profile"]);
 /** The model a messenger row records when it names none: its bearer is `<role>/Code`. */
 export const MESSENGER_MODEL = "code";
 /** What the verb itself sets for the harness; a manifest may not set these. */
-export const RESERVED_ENV = Object.freeze(["AGORA_CONFIG", "AGORA_STATE", "AGORA_SESSION", "AGORA_LABEL", "AGORA_ACTOR", "AGORA_ROLE", "AGORA_MODEL", "AGORA_ROOM", "AGORA_ROOM_WAKE", "AGORA_ROOM_PREAMBLE", "AGORA_ROOM_CMD", "AGORA_CONTEXT_CEILING"]);
+export const RESERVED_ENV = Object.freeze(["AGORA_CONFIG", "AGORA_STATE", "AGORA_SESSION", "AGORA_LABEL", "AGORA_ACTOR", "AGORA_ROLE", "AGORA_MODEL", "AGORA_ROOM", "AGORA_ROOM_WAKE", "AGORA_ROOM_PREAMBLE", "AGORA_ROOM_CMD", "AGORA_CONTEXT_CEILING", "AGORA_DENY", "HERMES_EPHEMERAL_SYSTEM_PROMPT", "HERMES_ENABLE_PROJECT_PLUGINS"]);
 /** A manifest names paths and switches, never a credential. */
 const SECRET_NAME = /TOKEN|SECRET|PASSW(OR)?D|API_?KEY|PRIVATE_?KEY|CREDENTIAL/i;
 const ROLE_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -87,10 +93,30 @@ export const DEFAULT_TIMER_SECONDS = 900;
  */
 export const CLAUDE_TOOLS = Object.freeze({ bash: ["Bash"], write: ["Write"], edit: ["Edit", "MultiEdit", "NotebookEdit"], eval: [] });
 
+/**
+ * Hermes's tools for each tool name a manifest denies, as `CLAUDE_TOOLS` maps Claude Code's. A name not
+ * listed passes through as written (a Hermes tool name: `browser_exec`, `delegate_task`, `mcp_<server>_<tool>`).
+ * @type {Readonly<Record<string, readonly string[]>>}
+ */
+export const HERMES_TOOLS = Object.freeze({ bash: ["terminal", "process"], write: ["write_file"], edit: ["patch"], eval: ["execute_code"] });
+/**
+ * The interface a hermes resident runs. The classic REPL (`--cli`) is the one that reads
+ * HERMES_EPHEMERAL_SYSTEM_PROMPT and seeds its first turn from `--query-file`; the Ink TUI reads its
+ * system prompt from the profile config only and, measured on Hermes 0.22.6, did not submit the query
+ * file (docs/HERMES-PLUGIN.md, Measured). The plugin's idle-only rule is what makes the REPL safe: an
+ * injection there while a turn runs would cancel it.
+ */
+export const HERMES_INTERFACE = "--cli";
+/** The session source a resident's chat is tagged with: Hermes keeps `tool` sessions out of the user's session lists. */
+export const HERMES_SOURCE = "tool";
+/** The longest rendered prompt a hermes row may carry on Windows, where an environment value holds at most 32,767 characters. */
+export const HERMES_PROMPT_MAX = 32_000;
+/** The plugin's id, as plugins.enabled in a profile names it. */
+export const HERMES_PLUGIN = "agora-room";
 /** @typedef {{ file: string } | { text: string }} FilePart */
 /**
  * @typedef {{
- *   slug: string, role: string, harness: 'omp' | 'claude' | 'agora', model: string, thinking: string | null,
+ *   slug: string, role: string, harness: 'omp' | 'claude' | 'agora' | 'hermes', model: string, thinking: string | null,
  *   rooms: string[], wake: 'all' | 'addressed' | 'mine', profile: string, append: string[],
  *   workdir: { path: string | null, files: Array<{ path: string, parts: FilePart[] }> },
  *   skills: { dir: string, names: string[] } | null, host: 'tern' | 'tmux' | 'none',
@@ -195,7 +221,7 @@ export function validateManifest(raw, file) {
 
     const role = str("role");
     if (!ROLE_RE.test(role)) bad(`${at}.role`, `a role is one segment of lower-case letters, digits, _ and - (${ROLE_RE})`);
-    const harness = /** @type {'omp' | 'claude' | 'agora'} */ (oneOf("harness", HARNESSES, null));
+    const harness = /** @type {'omp' | 'claude' | 'agora' | 'hermes'} */ (oneOf("harness", HARNESSES, null));
     const host = /** @type {'tern' | 'tmux' | 'none'} */ (oneOf("host", HOSTS, null));
     const wake = /** @type {'all' | 'addressed' | 'mine'} */ (oneOf("wake", WAKES, "addressed"));
     const preamble = /** @type {'on' | 'off' | null} */ (oneOf("preamble", ["on", "off"], null));
@@ -526,6 +552,9 @@ export function bearerName(slug, role) {
  */
 export function firstPrompt(p) {
   const owner = p.harness === "omp" ? "extension" : "plugin";
+  // a Hermes plugin's tools are deferred behind tool_search: the prompt names the route to them
+  if (p.harness === "hermes")
+    return `You are the ${p.slug} resident: role ${p.role}, bearer ${p.bearer}, position ${p.slug}. Rooms: ${p.rooms.join(",")} (post only there). Wake: ${p.wake}. The harness's agora-room plugin owns your watch: arm none. Its tools room_post and room_read are reached through tool_search, tool_describe and tool_call. Run the arming sequence in your profile now, then report in one line.`;
   return `You are the ${p.slug} resident: role ${p.role}, bearer ${p.bearer}, position ${p.slug}. Rooms: ${p.rooms.join(",")} (post only there). Wake: ${p.wake}. The harness's agora-room ${owner} owns your watch: arm none. Run the arming sequence in your profile now, then report in one line.`;
 }
 
@@ -538,7 +567,7 @@ export function runFilePath(stateRoot, slug) {
  * @typedef {{
  *   cfg: { path?: string, rooms: Record<string, unknown> }, stateRoot: string, checkout: string, entry: string, node: string,
  *   room?: string, host?: string, model?: string,
- *   platform?: string, env?: Record<string, string | undefined>, exists?: (p: string) => boolean, home?: string,
+ *   platform?: string, env?: Record<string, string | undefined>, exists?: (p: string) => boolean, home?: string, now?: () => Date,
  * }} PlanContext
  */
 
@@ -574,6 +603,7 @@ export function planResident(manifest, slug, ctx) {
   const workdir = row.workdir.path ?? path.join(dir, "work");
   const promptFile = path.join(dir, "prompt.md");
   const overlay = row.harness === "omp" ? path.join(dir, "omp-config.yml") : null;
+  const hermes = row.harness === "hermes";
   const fwd = (/** @type {string} */ p) => p.replace(/\\/g, "/");
 
   /** @type {Record<string, string>} */
@@ -600,8 +630,16 @@ export function planResident(manifest, slug, ctx) {
   // carries the slot for a numbered slot); an explicit bearer, and every Claude Code session, signs
   // through AGORA_ACTOR.
   if (!messenger) {
-    if (row.harness === "omp" && row.bearer === null) harnessEnv.AGORA_ROLE = signs;
+    if ((row.harness === "omp" || hermes) && row.bearer === null) harnessEnv.AGORA_ROLE = signs;
     else harnessEnv.AGORA_ACTOR = bearer;
+  }
+  // Hermes rebinds its own session id at every compaction, so the launcher pins the agora key for the
+  // run's life: the plugin, the model's shell and every agora child sign under it. The deny list is the
+  // plugin's pre_tool_call block, and the plugin is a project plugin of the working folder.
+  if (hermes) {
+    harnessEnv.AGORA_SESSION = hermesSessionKey(slug, ctx.now?.() ?? new Date());
+    if (deny.length) harnessEnv.AGORA_DENY = hermesDenied(deny).join(",");
+    harnessEnv.HERMES_ENABLE_PROJECT_PLUGINS = "1";
   }
 
   const prompt = messenger ? null : firstPrompt({ slug, role: row.role, bearer, rooms, wake: row.wake, harness: row.harness });
@@ -614,7 +652,12 @@ export function planResident(manifest, slug, ctx) {
     if (!exe) throw new AgoraError(`resident ${slug}: ${exeName} is not on PATH; install ${row.harness} or set "command" in the manifest`, EXIT.error);
     if (platform === "win32" && /\.(cmd|bat)$/i.test(exe)) throw new AgoraError(`resident ${slug}: ${exe} is a batch shim, which cannot be started without a shell; set "command" in the manifest to the executable it runs`, EXIT.error);
     const prefix = [exe, ...(row.command ? row.command.slice(1) : [])];
-    if (row.harness === "omp") {
+    if (hermes) {
+      if (!hermesProfileOf(prefix)) throw new AgoraError(`resident ${slug}: a hermes row names its profile in "command" (["hermes", "-p", "<profile>"]); a resident never runs on the default profile, which is the desktop's`, EXIT.error);
+      argv = [...prefix, "chat", HERMES_INTERFACE, "--yolo", "--source", HERMES_SOURCE, "--query-file", path.join(dir, "first-prompt.txt")];
+      if (row.thinking) argv.push("--reasoning", row.thinking);
+      if (row.skills?.names.length) argv.push("--skills", row.skills.names.join(","));
+    } else if (row.harness === "omp") {
       argv = [...prefix, "--append-system-prompt", promptFile, "--config", /** @type {string} */ (overlay), "--approval-mode", "yolo", "--model", model];
       if (row.thinking) argv.push("--thinking", row.thinking);
       if (row.skills?.names.length) argv.push("--skills", row.skills.names.join(","));
@@ -623,7 +666,8 @@ export function planResident(manifest, slug, ctx) {
         ...(deny.length ? ["--disallowedTools", claudeDenied(deny).join(",")] : []), "--dangerously-skip-permissions", "--model", model];
       if (row.thinking) argv.push("--effort", row.thinking);
     }
-    argv.push(...row.args, /** @type {string} */ (prompt));
+    // hermes reads its first prompt from the file prepare writes; the others take it as the last argument
+    argv.push(...row.args, ...(hermes ? [] : [/** @type {string} */ (prompt)]));
   }
 
   const runFile = runFilePath(ctx.stateRoot, slug);
@@ -655,12 +699,14 @@ export function planResident(manifest, slug, ctx) {
     // input because the public can post in them
     deny, publicRooms,
     files: row.workdir.files.map((f) => ({ path: path.join(workdir, f.path), parts: f.parts })),
-    skills: row.skills ? { dir: row.skills.dir, names: row.skills.names, mode: row.harness === "omp" ? "overlay" : "copy" } : null,
+    skills: row.skills ? { dir: row.skills.dir, names: row.skills.names, mode: row.harness === "omp" ? "overlay" : hermes ? "preload" : "copy" } : null,
     prompt: messenger ? null : { file: promptFile, profile: row.profile, append: row.append },
     overlay, overlayText: overlay ? ompOverlay(fwd(path.join(ctx.checkout, "plugins", "omp", "agora-room")), row.skills ? fwd(row.skills.dir) : null, deny) : null,
     trust: row.harness === "claude" ? workdir : null,
     vars: manifest.vars, argv, env: harnessEnv, firstPrompt: prompt, hostArgv, hostInfo, runFile, name,
     restart: row.restart,
+    // a hermes row: its profile's home (read, never written), the per-run plugin copy, the first-prompt file
+    hermes: hermes ? hermesPlan(/** @type {string} */ (hermesProfileOf(argv)), { env, platform, home: ctx.home }, { checkout: ctx.checkout, workdir, dir, platform }) : null,
     // where the messenger's stream keeps its liveness (docs/MESSENGER.md); null for a model harness
     liveness: messenger ? livenessPath(ctx.stateRoot, slug, rooms[0]) : null,
     // the family this start runs and the positions the manifest's lineage rules bind it against
@@ -780,6 +826,180 @@ export function ompOverlay(extension, skillsDir, deny = []) {
   return out;
 }
 
+/**
+ * Hermes's tool names for a deny list (`HERMES_TOOLS`), each once, in the order they are named.
+ * @param {readonly string[]} deny
+ */
+export function hermesDenied(deny) {
+  /** @type {string[]} */
+  const out = [];
+  for (const name of deny)
+    for (const tool of Object.hasOwn(HERMES_TOOLS, name) ? HERMES_TOOLS[name] : [name])
+      if (!out.includes(tool)) out.push(tool);
+  return out;
+}
+
+/**
+ * The agora key a hermes run signs under: `hermes-<position>-<launch stamp>`, new at each launch (a
+ * start at a vacated position is a succession, as for omp) and fixed for the run's life.
+ * @param {string} slug @param {Date} at
+ */
+export function hermesSessionKey(slug, at) {
+  return `hermes-${slug}-${at.getTime().toString(36)}`;
+}
+
+/** The profile a hermes argv names (`-p <name>`, `--profile <name>`, `--profile=<name>`), or null. @param {readonly string[]} argv */
+export function hermesProfileOf(argv) {
+  for (let i = 1; i < argv.length; i++) {
+    if ((argv[i] === "-p" || argv[i] === "--profile") && argv[i + 1]) return argv[i + 1];
+    if (argv[i].startsWith("--profile=")) return argv[i].slice("--profile=".length) || null;
+  }
+  return null;
+}
+
+/**
+ * Where a Hermes profile lives: `%LOCALAPPDATA%/hermes` on Windows, `~/.hermes` elsewhere, and a named
+ * profile under its `profiles/` (the `default` profile is the root itself).
+ * @param {string} profile @param {{ env?: Record<string, string | undefined>, platform?: string, home?: string }} deps
+ */
+export function hermesHome(profile, deps = {}) {
+  const env = deps.env ?? process.env;
+  const win = (deps.platform ?? process.platform) === "win32";
+  const p = win ? path.win32 : path.posix;
+  const userHome = deps.home ?? env.USERPROFILE ?? env.HOME ?? homedir();
+  const root = win ? p.join(env.LOCALAPPDATA ?? p.join(userHome, "AppData", "Local"), "hermes") : p.join(env.HOME ?? userHome, ".hermes");
+  return profile === "default" ? root : p.join(root, "profiles", profile);
+}
+
+/**
+ * The hermes part of a plan.
+ * @param {string} profile @param {{ env?: Record<string, string | undefined>, platform?: string, home?: string }} where
+ * @param {{ checkout: string, workdir: string, dir: string, platform: string }} p
+ */
+function hermesPlan(profile, where, p) {
+  const home = hermesHome(profile, where);
+  return {
+    profile, home, config: path.join(home, "config.yaml"), interface: HERMES_INTERFACE,
+    plugin: { from: path.join(p.checkout, "plugins", "hermes", "agora-room"), to: path.join(p.workdir, ".hermes", "plugins", HERMES_PLUGIN) },
+    firstPromptFile: path.join(p.dir, "first-prompt.txt"), promptMax: p.platform === "win32" ? HERMES_PROMPT_MAX : null,
+  };
+}
+
+/**
+ * The block-style YAML a Hermes config.yaml is written in, read into plain objects: mappings, `- item`
+ * lists and flow lists of scalars, comments dropped, a block scalar (`|`, `>`) kept as its first line.
+ * Enough to read the few keys a plan checks; null when the text is not that.
+ * @param {string} text @returns {any}
+ */
+export function readSimpleYaml(text) {
+  /** @type {Array<{ indent: number, text: string }>} */
+  const lines = [];
+  for (const raw of String(text).replace(/\r\n?/g, "\n").split("\n")) {
+    const noComment = raw.replace(/(^|\s)#.*$/, "");
+    if (!noComment.trim()) continue;
+    lines.push({ indent: noComment.length - noComment.trimStart().length, text: noComment.trim() });
+  }
+  /** @param {string} s @returns {any} */
+  const scalar = (s) => {
+    const t = s.trim();
+    if (/^(['"]).*\1$/.test(t)) return t.slice(1, -1);
+    if (t === "true") return true;
+    if (t === "false") return false;
+    if (t === "null" || t === "~" || t === "") return null;
+    if (/^-?\d+$/.test(t)) return Number(t);
+    if (t.startsWith("[") && t.endsWith("]")) return t.slice(1, -1).split(",").map((x) => x.trim()).filter(Boolean).map(scalar);
+    if (t === "{}") return {};
+    return t;
+  };
+  let i = 0;
+  /** @param {number} indent @returns {any} */
+  const block = (indent) => {
+    if (i >= lines.length || lines[i].indent < indent) return null;
+    const at = lines[i].indent;
+    if (lines[i].text.startsWith("- ") || lines[i].text === "-") {
+      /** @type {any[]} */
+      const list = [];
+      while (i < lines.length && lines[i].indent === at && (lines[i].text.startsWith("- ") || lines[i].text === "-")) {
+        const item = lines[i].text.slice(1).trim();
+        i++;
+        if (item && !/^[^'"\s][^:]*:(\s|$)/.test(item)) list.push(scalar(item));
+        else { while (i < lines.length && lines[i].indent > at) i++; list.push(item || null); }
+      }
+      return list;
+    }
+    /** @type {Record<string, any>} */
+    const map = {};
+    while (i < lines.length && lines[i].indent === at) {
+      const m = /^("[^"]*"|'[^']*'|[^:]+?):(?:\s+(.*))?$/.exec(lines[i].text);
+      i++;
+      if (!m) { while (i < lines.length && lines[i].indent > at) i++; continue; }
+      const key = String(scalar(m[1]));
+      const rest = m[2] === undefined ? "" : m[2].trim();
+      if (rest === "|" || rest === ">" || rest === "|-" || rest === ">-") {
+        const first = i < lines.length && lines[i].indent > at ? lines[i].text : "";
+        while (i < lines.length && lines[i].indent > at) i++;
+        map[key] = first;
+      } else if (rest) map[key] = scalar(rest);
+      else if (i < lines.length && (lines[i].indent > at || (lines[i].indent === at && lines[i].text.startsWith("- ")))) map[key] = block(lines[i].indent);
+      else map[key] = null;
+    }
+    return map;
+  };
+  try { const doc = block(0); return doc && typeof doc === "object" && !Array.isArray(doc) ? doc : null; } catch { return null; }
+}
+
+/**
+ * What a hermes start needs of its profile and its prompt, read and never written. `refusals` stop the
+ * start by name; `warnings` are printed. The profile is the truth for the model: the launcher passes
+ * no `-m`, so a row naming another model than the profile pins is refused.
+ * @param {ResidentPlan} plan @param {{ checkout: string, read?: (file: string) => string | null }} deps
+ * @returns {Promise<{ refusals: string[], warnings: string[], promptChars: number | null, profileModel: string | null }>}
+ */
+export async function hermesChecks(plan, deps) {
+  /** @type {string[]} */ const refusals = [];
+  /** @type {string[]} */ const warnings = [];
+  const h = plan.hermes;
+  if (!h) return { refusals, warnings, promptChars: null, profileModel: null };
+  const read = deps.read ?? ((/** @type {string} */ f) => { try { return readFileSync(f, "utf8"); } catch { return null; } });
+  const text = read(h.config);
+  /** @type {any} */
+  let cfg = null;
+  if (text === null) refusals.push(`the Hermes profile ${h.profile} has no config at ${h.config} (hermes profile create ${h.profile})`);
+  else {
+    cfg = readSimpleYaml(text);
+    if (!cfg) warnings.push(`${h.config} could not be read as YAML: the profile's model and plugin enablement were not checked`);
+  }
+  const profileModel = cfg && typeof cfg.model === "object" && cfg.model ? (typeof cfg.model.default === "string" ? cfg.model.default : null) : typeof cfg?.model === "string" ? cfg.model : null;
+  if (cfg) {
+    const plugins = cfg.plugins && typeof cfg.plugins === "object" ? cfg.plugins : {};
+    const list = (/** @type {unknown} */ v) => (Array.isArray(v) ? v.map(String) : []);
+    if (!list(plugins.enabled).includes(HERMES_PLUGIN))
+      refusals.push(`the Hermes profile ${h.profile} does not enable the ${HERMES_PLUGIN} plugin, so nothing would wake the resident: hermes -p ${h.profile} plugins enable ${HERMES_PLUGIN}`);
+    if (list(plugins.disabled).includes(HERMES_PLUGIN)) refusals.push(`the Hermes profile ${h.profile} lists ${HERMES_PLUGIN} in plugins.disabled, which wins over plugins.enabled`);
+    if (list(plugins.enabled).includes("lampstand"))
+      warnings.push(`the Hermes profile ${h.profile} enables lampstand: a lampstand room listen on this session would race the resident's cursor; bring no resident chat into a room through lampstand`);
+    if (cfg.hooks && typeof cfg.hooks === "object" && Object.keys(cfg.hooks).length)
+      warnings.push(`the Hermes profile ${h.profile} declares shell hooks (${Object.keys(cfg.hooks).join(", ")}); an unapproved one stops the chat at a y/N prompt before its first turn, and a stop gate turns a resident's turn into a maintenance turn`);
+    const comp = cfg.compression && typeof cfg.compression === "object" ? cfg.compression : {};
+    if (comp.threshold_tokens === undefined || comp.threshold_tokens === null)
+      warnings.push(`the Hermes profile ${h.profile} sets no compression.threshold_tokens: Hermes compacts at its own fraction of the window, not at the house's ~150K`);
+    if (profileModel && profileModel !== plan.model)
+      refusals.push(`the Hermes profile ${h.profile} pins model ${profileModel}, and the row names ${plan.model}: the launcher passes no -m, so the profile is the model's one source; make them agree`);
+    if (!profileModel) warnings.push(`the Hermes profile ${h.profile} names no model.default: the row's model ${plan.model} is recorded, not enforced`);
+  }
+  if (!existsSync(path.join(h.plugin.from, "plugin.yaml"))) refusals.push(`this checkout has no Hermes plugin at ${h.plugin.from}`);
+  /** @type {number | null} */
+  let promptChars = null;
+  if (plan.prompt) {
+    try {
+      promptChars = (await renderPrompt(plan, deps.checkout)).length;
+      if (h.promptMax !== null && promptChars > h.promptMax)
+        refusals.push(`the rendered prompt is ${promptChars} characters; HERMES_EPHEMERAL_SYSTEM_PROMPT carries it on Windows, where an environment value holds at most 32,767, so a hermes row's prompt is held to ${h.promptMax}; shorten the profile or its appends (it is never cut)`);
+    } catch (e) { refusals.push(/** @type {Error} */ (e).message); }
+  }
+  return { refusals, warnings, promptChars, profileModel };
+}
+
 /** What --plan prints: the plan without the file parts' internals. @param {ResidentPlan} plan */
 export function planView(plan) {
   const { vars: _v, overlayText: _o, files, ...rest } = plan;
@@ -823,30 +1043,61 @@ export async function trustClaudeFolder(folder, home) {
   return true;
 }
 
+/** @param {ResidentPlan} plan @param {string} f @param {string} what */
+async function readPart(plan, f, what) {
+  try { return await readFile(f, "utf8"); }
+  catch (e) { throw new AgoraError(`resident ${plan.resident}: cannot read ${what} ${f}: ${/** @type {any} */ (e).code ?? /** @type {any} */ (e).message}`, EXIT.error); }
+}
+
+/**
+ * The rendered prompt: the profile with the room-mechanics block, then each appended file, LF endings.
+ * @param {ResidentPlan} plan @param {string} checkout
+ */
+export async function renderPrompt(plan, checkout) {
+  if (!plan.prompt) return "";
+  const block = await readPart(plan, path.join(checkout, ROOM_MECHANICS_DOC), "the room-mechanics block");
+  const parts = [renderResidentPrompt(await readPart(plan, plan.prompt.profile, "the profile"), block)];
+  for (const f of plan.prompt.append) parts.push(await readPart(plan, f, "an appended file"));
+  return joinParts(parts);
+}
+
 /**
  * Write what the plan names: the rendered prompt, the omp overlay, the working folder's files, the
- * skill copies (Claude Code) and the folder's trust entry (Claude Code).
+ * skill copies (Claude Code), the folder's trust entry (Claude Code), and for hermes the first-prompt
+ * file and the plugin copy. Returns what the harness's environment gains at this start: for hermes,
+ * the rendered prompt in HERMES_EPHEMERAL_SYSTEM_PROMPT (Hermes has no file form of it).
  * @param {ResidentPlan} plan @param {{ checkout: string, home?: string }} deps
+ * @returns {Promise<{ env: Record<string, string> }>}
  */
 export async function prepareRun(plan, deps) {
   await mkdir(plan.dir, { recursive: true });
-  const read = async (/** @type {string} */ f, /** @type {string} */ what) => {
-    try { return await readFile(f, "utf8"); }
-    catch (e) { throw new AgoraError(`resident ${plan.resident}: cannot read ${what} ${f}: ${/** @type {any} */ (e).code ?? /** @type {any} */ (e).message}`, EXIT.error); }
-  };
+  /** @type {Record<string, string>} */
+  const env = {};
   // a messenger row has no prompt: nothing to render
   if (plan.prompt) {
-    const block = await read(path.join(deps.checkout, ROOM_MECHANICS_DOC), "the room-mechanics block");
-    const parts = [renderResidentPrompt(await read(plan.prompt.profile, "the profile"), block)];
-    for (const f of plan.prompt.append) parts.push(await read(f, "an appended file"));
-    await writeFileAtomic(plan.prompt.file, joinParts(parts));
+    const text = await renderPrompt(plan, deps.checkout);
+    await writeFileAtomic(plan.prompt.file, text);
+    if (plan.hermes) {
+      if (plan.hermes.promptMax !== null && text.length > plan.hermes.promptMax)
+        throw new AgoraError(`resident ${plan.resident}: the rendered prompt is ${text.length} characters; HERMES_EPHEMERAL_SYSTEM_PROMPT carries it on Windows, where an environment value holds at most 32,767, so a hermes row's prompt is held to ${plan.hermes.promptMax}; shorten the profile or its appends (it is never cut)`, EXIT.error);
+      env.HERMES_EPHEMERAL_SYSTEM_PROMPT = text;
+    }
+  }
+  if (plan.hermes) {
+    await writeFileAtomic(plan.hermes.firstPromptFile, `${plan.firstPrompt}\n`);
+    // the plugin is copied whole each start (a directory link is not always traversable on Windows, and
+    // a copy cannot move under a running session when the checkout changes branch)
+    const into = plan.hermes.plugin.to;
+    if (existsSync(into)) removeEntry(into);
+    await mkdir(path.dirname(into), { recursive: true });
+    cpSync(plan.hermes.plugin.from, into, { recursive: true, dereference: true, filter: (src) => !/[\\/]__pycache__([\\/]|$)/.test(src) });
   }
   if (plan.overlay && plan.overlayText) await writeFileAtomic(plan.overlay, plan.overlayText);
 
   await mkdir(plan.workdir, { recursive: true });
   for (const f of plan.files) {
     const texts = [];
-    for (const p of f.parts) texts.push(substituteVars("file" in p ? await read(p.file, "a working-folder part") : p.text, plan.vars));
+    for (const p of f.parts) texts.push(substituteVars("file" in p ? await readPart(plan, p.file, "a working-folder part") : p.text, plan.vars));
     await writeFileAtomic(f.path, joinParts(texts));
   }
   if (plan.skills && plan.skills.mode === "copy") {
@@ -862,6 +1113,7 @@ export async function prepareRun(plan, deps) {
     }
   }
   if (plan.trust && (await trustClaudeFolder(plan.trust, deps.home ?? homedir()))) console.error(`agora: trusted ${plan.trust} in ~/.claude.json`);
+  return { env };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -887,9 +1139,9 @@ export const runCommand = (argv, opts = {}) => new Promise((resolve) => {
 });
 
 /**
- * @typedef {{ type: 'resident-run', id: string, resident: string, host: 'tern' | 'tmux' | 'none', startedAt: string,
+ * @typedef {{ type: 'resident-run', id: string, resident: string, harness?: string, host: 'tern' | 'tmux' | 'none', startedAt: string,
  *   model?: string, hostInfo: Record<string, string>, handle: Record<string, unknown> | null, pid?: number, pidBoot?: number,
- *   exec: { argv: string[], env: Record<string, string>, cwd: string } }} RunRecord
+ *   exec: { argv: string[], env: Record<string, string>, cwd: string, clear?: string[] } }} RunRecord
  */
 
 /**
@@ -1099,7 +1351,7 @@ async function takeLock(dir) {
  */
 export function runForeground(exec, onPid) {
   return new Promise((resolve) => {
-    const child = spawn(exec.argv[0], exec.argv.slice(1), { cwd: exec.cwd, env: { ...process.env, ...exec.env }, stdio: "inherit", shell: false });
+    const child = spawn(exec.argv[0], exec.argv.slice(1), { cwd: exec.cwd, env: inheritedEnv(exec), stdio: "inherit", shell: false });
     const ignore = () => {};
     const forward = (/** @type {NodeJS.Signals} */ sig) => { try { child.kill(sig); } catch { /* gone */ } };
     const onTerm = () => forward("SIGTERM");
@@ -1122,6 +1374,17 @@ export function runForeground(exec, onPid) {
 }
 
 /**
+ * The harness's environment: this process's, less the prefixes the run clears, then the run's own.
+ * @param {{ env: Record<string, string>, clear?: string[] }} exec
+ */
+export function inheritedEnv(exec) {
+  /** @type {Record<string, string | undefined>} */
+  const base = { ...process.env };
+  for (const k of Object.keys(base)) if ((exec.clear ?? []).some((pre) => k.toUpperCase().startsWith(pre))) delete base[k];
+  return { ...base, ...exec.env };
+}
+
+/**
  * `start <slug> --run <file>`: the host's program. Runs the recorded harness in this terminal,
  * records its pid (and the boot it belongs to) beside the run record, and exits with its code.
  * @param {string} file @param {string} slug
@@ -1135,7 +1398,7 @@ export async function execRun(file, slug) {
 }
 
 /**
- * @typedef {{ run?: Runner, kill?: (pid: number, sig?: any) => void, boot?: number, home?: string, checkout: string, now?: () => Date }} StartDeps
+ * @typedef {{ run?: Runner, kill?: (pid: number, sig?: any) => void, boot?: number, home?: string, checkout: string, now?: () => Date, read?: (file: string) => string | null }} StartDeps
  */
 
 /**
@@ -1166,13 +1429,23 @@ export async function startResident(plan, stateRoot, deps) {
     const clash = lineageClash({ slug: plan.resident, model: plan.model }, await modelsInForce(stateRoot, plan.lineage.against, { kill: deps.kill, boot: deps.boot }));
     if (clash) return { row: { ...base, action: "refused", reason: clash } };
     // a messenger row runs as its position's own session key, so it has nothing to inherit
+    // a hermes row whose profile does not enable the plugin, pins another model, or whose prompt cannot
+    // ride the environment is refused by name before anything is written
+    if (plan.hermes) {
+      const checks = await hermesChecks(plan, { checkout: deps.checkout, read: deps.read });
+      if (checks.warnings.length) base.warnings = checks.warnings;
+      if (checks.refusals.length) return { row: { ...base, action: "refused", reason: checks.refusals.join("; ") } };
+    }
     const succession = plan.harness === "agora" ? null : await markSuccession(stateRoot, plan.resident, { kill: deps.kill, boot: deps.boot });
     if (succession) base.inherit = { from: succession.from, by: succession.by, at: succession.at };
-    await prepareRun(plan, { checkout: deps.checkout, home: deps.home });
+    const prepared = await prepareRun(plan, { checkout: deps.checkout, home: deps.home });
     /** @type {RunRecord} */
     const run = {
-      type: "resident-run", id: randomUUID(), resident: plan.resident, host: plan.host, startedAt: (deps.now?.() ?? new Date()).toISOString(),
-      model: plan.model, hostInfo: plan.hostInfo, handle: null, exec: { argv: plan.argv, env: plan.env, cwd: plan.workdir },
+      type: "resident-run", id: randomUUID(), resident: plan.resident, harness: plan.harness, host: plan.host, startedAt: (deps.now?.() ?? new Date()).toISOString(),
+      model: plan.model, hostInfo: plan.hostInfo, handle: null,
+      // a hermes run starts from an environment of its own: the caller's AGORA_* and HERMES_* (a launch
+      // from inside another agent's session carries its key, bearer and Hermes home) are not inherited
+      exec: { argv: plan.argv, env: { ...plan.env, ...prepared.env }, cwd: plan.workdir, ...(plan.hermes ? { clear: ["AGORA_", "HERMES_"] } : {}) },
     };
     await writeFileAtomic(plan.runFile, JSON.stringify(run) + "\n");
     if (plan.host === "none") {

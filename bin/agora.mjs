@@ -1874,7 +1874,9 @@ async function main(argv) {
       if (values.plan) {
         for (const p of plans) {
           const st = await rs.residentState(stateRoot, p.resident);
-          const view = { ...rs.planView(p), state: st.running ? "running" : "would-start", ...(st.reason ? { reason: st.reason } : {}) };
+          // a hermes row's profile and prompt are read now, as the start would read them
+          const checks = p.hermes ? await rs.hermesChecks(p, { checkout: projectRoot }) : null;
+          const view = { ...rs.planView(p), state: st.running ? "running" : checks?.refusals.length ? "would-refuse" : "would-start", ...(st.reason ? { reason: st.reason } : {}), ...(checks ? { checks } : {}) };
           if (json) { console.log(JSON.stringify(view)); continue; }
           console.log(`${p.resident}: ${view.state}${st.reason ? ` (${st.reason})` : ""}`);
           console.log(`  ${p.harness} ${p.model} as ${p.bearer}, position ${p.position}, rooms ${p.rooms.join(",")} (wake ${p.wake}), host ${p.host}`);
@@ -1882,6 +1884,12 @@ async function main(argv) {
           if (p.liveness) console.log(`  liveness ${p.liveness}`);
           if (p.skills) console.log(`  skills   ${p.skills.names.join(", ")} from ${p.skills.dir} (${p.skills.mode})`);
           if (p.trust) console.log(`  trusts   ${p.trust} in ~/.claude.json`);
+          if (p.hermes && checks) {
+            console.log(`  hermes   profile ${p.hermes.profile} at ${p.hermes.home} (${p.hermes.interface}); plugin copied to ${p.hermes.plugin.to}`);
+            console.log(`  prompt   ${checks.promptChars ?? "?"} characters in HERMES_EPHEMERAL_SYSTEM_PROMPT${p.hermes.promptMax !== null ? ` (at most ${p.hermes.promptMax})` : ""}; first prompt ${p.hermes.firstPromptFile}`);
+            for (const r of checks.refusals) console.log(`  refuses  ${r}`);
+            for (const w of checks.warnings) console.log(`  warns    ${w}`);
+          }
           console.log(`  cwd      ${p.workdir}`);
           console.log(`  env      ${Object.entries(p.env).map(([k, v]) => `${k}=${v}`).join("\n           ")}`);
           console.log(`  runs     ${JSON.stringify(p.argv)}`);
@@ -1893,6 +1901,7 @@ async function main(argv) {
       for (const p of plans) {
         try {
           const { row, exec } = await rs.startResident(p, stateRoot, { checkout: projectRoot });
+          if (!json && Array.isArray(row.warnings)) for (const w of row.warnings) console.error(`agora: ${p.resident}: warning: ${w}`);
           if (exec) {
             if (json) console.log(JSON.stringify(row));
             console.error(`agora: ${rowLine(row)}`);
@@ -1943,7 +1952,7 @@ async function main(argv) {
           continue;
         }
         // a manifest row's own context ceiling: past it the cycle asks a succession at its next idle
-        const row = /** @type {any} */ (await planCycle(stateRoot, slug, { idleSeconds, minContext, maxContext, deafSeconds, ceiling: manifest?.residents[slug]?.context?.ceiling, dryRun: Boolean(values["dry-run"]) }));
+        const row = /** @type {any} */ (await planCycle(stateRoot, slug, { idleSeconds, minContext, maxContext, deafSeconds, ceiling: manifest?.residents[slug]?.context?.ceiling, harness: manifest?.residents[slug]?.harness, dryRun: Boolean(values["dry-run"]) }));
         // a request the session that holds the position now outlived was honoured: clear it
         if (row.stale && !values["dry-run"]) await removeSucceedRequest(stateRoot, slug);
         if (row.action === "cycle") {
