@@ -88,6 +88,35 @@ test("session key: a harness value that is not a key is skipped; a credential-sh
   assert.match(warned[1], /HARNESS_SESSION_ID.*skipped/);
 });
 
+test("session key: a Hermes session id (local-<64 hex>) keys itself; past 128 characters it is skipped", () => {
+  /** @type {string[]} */
+  const warned = [];
+  const hermesId = `local-${"0123456789abcdef".repeat(4)}`;
+  assert.equal(hermesId.length, 70);
+  assert.deepEqual(resolveSession(cfg, { HERMES_SESSION_ID: hermesId }, (l) => warned.push(l)), {
+    slug: `hermes-${hermesId}`, source: "HERMES_SESSION_ID", explicit: false,
+  });
+  assert.equal(warned.length, 0, "no skipped warning for a Hermes id");
+  // a value one past the bound is not a key
+  const long = "a".repeat(129);
+  assert.deepEqual(resolveSession(cfg, { HERMES_SESSION_ID: long }, (l) => warned.push(l)), { slug: "default", source: "default", explicit: false });
+  assert.equal(warned.length, 1);
+  assert.match(warned[0], /HERMES_SESSION_ID is set but its value is not a session key.*skipped/);
+  // a value that fits but whose tagged slug would not is skipped too: the slug is the directory name
+  warned.length = 0;
+  assert.deepEqual(resolveSession(cfg, { HERMES_SESSION_ID: "b".repeat(125) }, (l) => warned.push(l)), { slug: "default", source: "default", explicit: false });
+  assert.equal(warned.length, 1);
+  // an explicit key of 70 characters is accepted as it is
+  assert.deepEqual(resolveSession(cfg, { AGORA_SESSION: hermesId }), { slug: hermesId, source: "AGORA_SESSION", explicit: true });
+  // the raw Hermes id in AGORA_SESSION beside HERMES_SESSION_ID names the same session
+  assert.deepEqual(resolveSession(cfg, { AGORA_SESSION: hermesId, HERMES_SESSION_ID: hermesId }), {
+    slug: `hermes-${hermesId}`, source: "AGORA_SESSION (HERMES_SESSION_ID)", explicit: true,
+  });
+  assert.equal(sessionDir("/state", { slug: `hermes-${hermesId}`, source: "HERMES_SESSION_ID", explicit: false }), path.join("/state", "sessions", `hermes-${hermesId}`));
+  assert.throws(() => resolveSession(cfg, { AGORA_SESSION: "c".repeat(129) }), /AGORA_SESSION must match/);
+  assert.deepEqual(resolveSession(cfg, { AGORA_SESSION: "c".repeat(128) }), { slug: "c".repeat(128), source: "AGORA_SESSION", explicit: true });
+});
+
 test("a session key is one safe directory name: `.` and `..` are refused, and no recursive remove runs outside sessions/", async () => {
   const usage = (/** @type {unknown} */ e) => e instanceof AgoraError && e.exitCode === 2;
   for (const bad of ["..", "."]) {

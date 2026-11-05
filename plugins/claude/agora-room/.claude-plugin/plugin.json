@@ -15,7 +15,7 @@
     "session": {
       "type": "string",
       "title": "Agora session key",
-      "description": "The agora session key the watch and the room_post tool use (letters, digits, dot, dash, underscore; up to 64). Empty: claude-<first 8 of the Claude session id>, a new key each session. Use a stable key to resume from the saved cursor."
+      "description": "The agora session key the watch and the room_post tool use (letters, digits, dot, dash, underscore; up to 128). Empty: claude-<first 8 of the Claude session id>, a new key each session. Use a stable key to resume from the saved cursor."
     },
     "wake": {
       "type": "string",

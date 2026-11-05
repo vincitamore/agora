@@ -94,7 +94,9 @@ test("child environment: the watch and the tool share a session key, the pane ha
   assert.deepEqual(childEnvFor(cfg), { AGORA_CONFIG: "/c.json", AGORA_SESSION: "k", AGORA_ACTOR: "Model/role" });
   assert.deepEqual(childEnvFor(cfg, { pane: true, as: "Human" }), { AGORA_CONFIG: "/c.json", AGORA_SESSION: "k-pane", AGORA_ACTOR: "Human" });
   assert.deepEqual(childEnvFor({ ...cfg, actor: null }), { AGORA_CONFIG: "/c.json", AGORA_SESSION: "k" });
-  assert.equal(paneSessionKey("x".repeat(64)).length, 62, "within the 64-character session key limit");
+  assert.equal(paneSessionKey("x".repeat(64)).length, 62, "within the session key bound");
+  // the pane key keeps its 57-character prefix, so a session key that fit before keeps its pane key
+  assert.equal(paneSessionKey("x".repeat(128)).length, 62, "a key at the 128-character bound gives the same 62-character pane key");
 });
 
 // ---- the CLI's output ----

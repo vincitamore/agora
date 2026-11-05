@@ -19,11 +19,13 @@ import { modelFamily } from "./lineage.mjs";
  */
 
 /**
- * A session key is one safe directory name. `.` and `..` match every other rule and are not names:
- * `path.join` normalises them away, so a key of `..` resolves the session directory to the state
- * root itself and `session --forget` deletes every session's cursors, ledgers and records.
+ * A session key is one safe directory name, at most 128 characters. `.` and `..` match every other
+ * rule and are not names: `path.join` normalises them away, so a key of `..` resolves the session
+ * directory to the state root itself and `session --forget` deletes every session's cursors, ledgers
+ * and records. The bound fits a Hermes session id (`local-<64 hex>`, 70 characters) with its tag, and
+ * keeps `<state>/sessions/<key>/<record>` far below the Windows 260-character path limit.
  */
-export const SESSION_RE = /^(?!\.\.?$)[A-Za-z0-9._-]{1,64}$/;
+export const SESSION_RE = /^(?!\.\.?$)[A-Za-z0-9._-]{1,128}$/;
 /** A bearer is a path: model, then optionally what this session is for. `Grace`, `Grace/watch`, `Bea/design`. */
 export const BEARER_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}(?:\/[A-Za-z0-9][A-Za-z0-9._-]{0,31})*$/;
 export const BEARER_MAX = 64;
@@ -64,7 +66,7 @@ export function resolveSession(cfg, env, warn = () => {}) {
     // it names the same session, so it resolves to the same tagged slug.
     for (const varName of from) {
       if (SECRET_NAME.test(varName)) continue;
-      if (env[varName] !== undefined && env[varName] !== "" && env[varName] === explicit && SESSION_RE.test(explicit))
+      if (env[varName] !== undefined && env[varName] !== "" && env[varName] === explicit && SESSION_RE.test(`${sessionTag(varName)}-${explicit}`))
         return { slug: `${sessionTag(varName)}-${explicit}`, source: `AGORA_SESSION (${varName})`, explicit: true };
     }
     return { slug: explicit, source: "AGORA_SESSION", explicit: true };
@@ -76,11 +78,13 @@ export function resolveSession(cfg, env, warn = () => {}) {
     }
     const value = env[varName];
     if (value === undefined || value === "") continue;
-    if (!SESSION_RE.test(value)) {
+    // The slug is the tagged value, and it is the directory name: both must be a key.
+    const slug = `${sessionTag(varName)}-${value}`;
+    if (!SESSION_RE.test(value) || !SESSION_RE.test(slug)) {
       warn(`${varName} is set but its value is not a session key (${SESSION_RE}); skipped`);
       continue;
     }
-    return { slug: `${sessionTag(varName)}-${value}`, source: varName, explicit: false };
+    return { slug, source: varName, explicit: false };
   }
   return { slug: "default", source: "default", explicit: false };
 }

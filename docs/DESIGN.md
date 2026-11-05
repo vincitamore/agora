@@ -118,7 +118,7 @@ silently selecting different rooms in different verbs.
 
 A **session** is the unit of state, and it is not the bearer. The session key is:
 
-    AGORA_SESSION                                    if set; [A-Za-z0-9._-]{1,64} or exit 2
+    AGORA_SESSION                                    if set; [A-Za-z0-9._-]{1,128} or exit 2
     the first set variable from config session.from  key is <tag>-<value>
     "default"                                        when the harness supplies none
 

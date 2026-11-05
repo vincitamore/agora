@@ -18,7 +18,7 @@ export const MAX_POST_CHARS = 20000;
 export const DELIVERED_KEEP = 500;
 
 /** A session key is one safe directory name (src/session.mjs SESSION_RE). */
-export const SESSION_RE = /^(?!\.\.?$)[A-Za-z0-9._-]{1,64}$/;
+export const SESSION_RE = /^(?!\.\.?$)[A-Za-z0-9._-]{1,128}$/;
 const ROOM_RE = /^[A-Za-z0-9][^\s\u0000-\u001f]{0,127}$/;
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const ADDR_RE = /^(?:\*|@?[A-Za-z0-9][A-Za-z0-9._/@*-]{0,63})$/;
