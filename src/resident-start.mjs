@@ -28,9 +28,11 @@
  *
  * Harness `hermes` runs `hermes -p <profile> chat --cli` (docs/HERMES-PLUGIN.md): the profile is named in
  * the row's `command`, the rendered prompt rides HERMES_EPHEMERAL_SYSTEM_PROMPT, the first prompt a file
- * (`--query-file`), the agora-room plugin is copied into the working folder's `.hermes/plugins` per run,
- * and AGORA_SESSION is pinned for the run's life (Hermes changes its own session id at compaction).
- * The profile's config is only read: its enablement of the plugin is checked, never written.
+ * (`--query-file`), and AGORA_SESSION is pinned for the run's life (Hermes changes its own session id at
+ * compaction). Hermes runs every CLI session in its profile's gateway process, so the plugin is the copy
+ * installed in the profile (`<profile>/plugins/agora-room`) and it is configured per session by the
+ * `.agora-room.json` the start writes in the working folder, not by the harness's environment. The
+ * profile is only read: its install and enablement of the plugin are checked, never written.
  *
  * Harness `agora` is the room's messenger (docs/MESSENGER.md): no model and no prompt; the row's
  * program is `agora messenger <room> --stream <args>`, run as the position's own session (it
@@ -41,7 +43,7 @@
  */
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { cpSync, existsSync, lstatSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync, unlinkSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
@@ -100,11 +102,10 @@ export const CLAUDE_TOOLS = Object.freeze({ bash: ["Bash"], write: ["Write"], ed
  */
 export const HERMES_TOOLS = Object.freeze({ bash: ["terminal", "process"], write: ["write_file"], edit: ["patch"], eval: ["execute_code"] });
 /**
- * The interface a hermes resident runs. The classic REPL (`--cli`) is the one that reads
- * HERMES_EPHEMERAL_SYSTEM_PROMPT and seeds its first turn from `--query-file`; the Ink TUI reads its
- * system prompt from the profile config only and, measured on Hermes 0.22.6, did not submit the query
- * file (docs/HERMES-PLUGIN.md, Measured). The plugin's idle-only rule is what makes the REPL safe: an
- * injection there while a turn runs would cancel it.
+ * The interface a hermes resident runs. The classic REPL (`--cli`) is the one measured to carry
+ * HERMES_EPHEMERAL_SYSTEM_PROMPT and seed its first turn from `--query-file`; under the Ink TUI the same
+ * probe showed neither (docs/HERMES-PLUGIN.md, Measured). The plugin's idle-only rule keeps an injection
+ * from landing in a running turn.
  */
 export const HERMES_INTERFACE = "--cli";
 /** The session source a resident's chat is tagged with: Hermes keeps `tool` sessions out of the user's session lists. */
@@ -113,6 +114,34 @@ export const HERMES_SOURCE = "tool";
 export const HERMES_PROMPT_MAX = 32_000;
 /** The plugin's id, as plugins.enabled in a profile names it. */
 export const HERMES_PLUGIN = "agora-room";
+/** The per-session configuration the agora-room plugin reads from its session's working folder. */
+export const HERMES_ROOM_FILE = ".agora-room.json";
+/** The plan's AGORA_* names that are fields of the room file; every other AGORA_* name rides its `env`. */
+const ROOM_FILE_FIELDS = Object.freeze({ AGORA_ROOM: "rooms", AGORA_SESSION: "session", AGORA_ROOM_WAKE: "wake", AGORA_ACTOR: "actor", AGORA_ROLE: "role",
+  AGORA_MODEL: "model", AGORA_DENY: "deny", AGORA_ROOM_CMD: "command", AGORA_CONTEXT_CEILING: "ceiling", AGORA_ROOM_MODEL_LABEL: "modelLabel",
+  AGORA_ROOM_PREAMBLE: "preamble", AGORA_ROOM_WATCH: "watch", AGORA_ROOM_INTERVAL_MS: "intervalMs", AGORA_ROOM_LIVENESS: "liveness" });
+
+/**
+ * The room file of a hermes plan: the plan's AGORA_* environment as the plugin's per-session settings
+ * (the gateway that runs the session never sees the harness's environment). `pid` is added at spawn.
+ * @param {Record<string, string>} env @returns {Record<string, unknown>}
+ */
+export function hermesRoomFile(env) {
+  /** @type {Record<string, unknown>} */
+  const out = { v: 1, by: "agora resident start" };
+  /** @type {Record<string, string>} */
+  const rest = {};
+  for (const [k, v] of Object.entries(env)) {
+    if (!k.startsWith("AGORA_")) continue;
+    const field = /** @type {Record<string, string>} */ (ROOM_FILE_FIELDS)[k];
+    if (!field) { rest[k] = v; continue; }
+    if (field === "command") { try { out.command = JSON.parse(v); } catch { out.command = v; } }
+    else if (field === "ceiling" || field === "intervalMs") out[field] = Number(v);
+    else out[field] = v;
+  }
+  out.env = rest;
+  return out;
+}
 /** @typedef {{ file: string } | { text: string }} FilePart */
 /**
  * @typedef {{
@@ -639,7 +668,6 @@ export function planResident(manifest, slug, ctx) {
   if (hermes) {
     harnessEnv.AGORA_SESSION = hermesSessionKey(slug, ctx.now?.() ?? new Date());
     if (deny.length) harnessEnv.AGORA_DENY = hermesDenied(deny).join(",");
-    harnessEnv.HERMES_ENABLE_PROJECT_PLUGINS = "1";
   }
 
   const prompt = messenger ? null : firstPrompt({ slug, role: row.role, bearer, rooms, wake: row.wake, harness: row.harness });
@@ -880,7 +908,8 @@ function hermesPlan(profile, where, p) {
   const home = hermesHome(profile, where);
   return {
     profile, home, config: path.join(home, "config.yaml"), interface: HERMES_INTERFACE,
-    plugin: { from: path.join(p.checkout, "plugins", "hermes", "agora-room"), to: path.join(p.workdir, ".hermes", "plugins", HERMES_PLUGIN) },
+    plugin: { from: path.join(p.checkout, "plugins", "hermes", "agora-room"), installed: path.join(home, "plugins", HERMES_PLUGIN) },
+    roomFile: path.join(p.workdir, HERMES_ROOM_FILE),
     firstPromptFile: path.join(p.dir, "first-prompt.txt"), promptMax: p.platform === "win32" ? HERMES_PROMPT_MAX : null,
   };
 }
@@ -988,6 +1017,17 @@ export async function hermesChecks(plan, deps) {
     if (!profileModel) warnings.push(`the Hermes profile ${h.profile} names no model.default: the row's model ${plan.model} is recorded, not enforced`);
   }
   if (!existsSync(path.join(h.plugin.from, "plugin.yaml"))) refusals.push(`this checkout has no Hermes plugin at ${h.plugin.from}`);
+  // Hermes's gateway loads plugins from the profile at its own start, never from the working folder
+  const installed = read(path.join(h.plugin.installed, "room.py"));
+  if (installed === null)
+    refusals.push(`the Hermes profile ${h.profile} has no ${HERMES_PLUGIN} plugin at ${h.plugin.installed}: copy ${h.plugin.from} there (docs/HERMES-PLUGIN.md, Install)`);
+  else if (installed !== read(path.join(h.plugin.from, "room.py")))
+    warnings.push(`the ${HERMES_PLUGIN} plugin in the Hermes profile ${h.profile} (${h.plugin.installed}) differs from this checkout's; copy it again, then restart the profile's gateway (hermes -p ${h.profile} gateway restart)`);
+  if (cfg) {
+    const entry = cfg.plugins?.entries?.[HERMES_PLUGIN];
+    if (!(entry && typeof entry === "object" && (entry.allow_gateway_injection === true || entry.allow_gateway_injection === "true")))
+      refusals.push(`the Hermes profile ${h.profile} does not let ${HERMES_PLUGIN} inject into a gateway session, so no room line would reach the resident: hermes -p ${h.profile} config set plugins.entries.${HERMES_PLUGIN}.allow_gateway_injection true`);
+  }
   /** @type {number | null} */
   let promptChars = null;
   if (plan.prompt) {
@@ -1085,12 +1125,8 @@ export async function prepareRun(plan, deps) {
   }
   if (plan.hermes) {
     await writeFileAtomic(plan.hermes.firstPromptFile, `${plan.firstPrompt}\n`);
-    // the plugin is copied whole each start (a directory link is not always traversable on Windows, and
-    // a copy cannot move under a running session when the checkout changes branch)
-    const into = plan.hermes.plugin.to;
-    if (existsSync(into)) removeEntry(into);
-    await mkdir(path.dirname(into), { recursive: true });
-    cpSync(plan.hermes.plugin.from, into, { recursive: true, dereference: true, filter: (src) => !/[\\/]__pycache__([\\/]|$)/.test(src) });
+    await mkdir(path.dirname(plan.hermes.roomFile), { recursive: true });
+    await writeFileAtomic(plan.hermes.roomFile, `${JSON.stringify(hermesRoomFile(plan.env), null, 2)}\n`);
   }
   if (plan.overlay && plan.overlayText) await writeFileAtomic(plan.overlay, plan.overlayText);
 
@@ -1141,7 +1177,7 @@ export const runCommand = (argv, opts = {}) => new Promise((resolve) => {
 /**
  * @typedef {{ type: 'resident-run', id: string, resident: string, harness?: string, host: 'tern' | 'tmux' | 'none', startedAt: string,
  *   model?: string, hostInfo: Record<string, string>, handle: Record<string, unknown> | null, pid?: number, pidBoot?: number,
- *   exec: { argv: string[], env: Record<string, string>, cwd: string, clear?: string[] } }} RunRecord
+ *   exec: { argv: string[], env: Record<string, string>, cwd: string, clear?: string[], roomFile?: string } }} RunRecord
  */
 
 /**
@@ -1352,6 +1388,8 @@ async function takeLock(dir) {
 export function runForeground(exec, onPid) {
   return new Promise((resolve) => {
     const child = spawn(exec.argv[0], exec.argv.slice(1), { cwd: exec.cwd, env: inheritedEnv(exec), stdio: "inherit", shell: false });
+    // a hermes session's plugin runs in the profile's gateway, so the room file names the process whose life is the session's
+    if (exec.roomFile) child.on("spawn", () => { if (child.pid) writeRoomPid(/** @type {string} */ (exec.roomFile), child.pid); });
     const ignore = () => {};
     const forward = (/** @type {NodeJS.Signals} */ sig) => { try { child.kill(sig); } catch { /* gone */ } };
     const onTerm = () => forward("SIGTERM");
@@ -1371,6 +1409,15 @@ export function runForeground(exec, onPid) {
     child.on("spawn", () => { if (child.pid && onPid) pidWrite = Promise.resolve(onPid(child.pid)).catch(() => {}); });
     child.on("exit", (code, signal) => done(code ?? (signal ? 128 : EXIT.error)));
   });
+}
+
+/** Add the spawned harness's pid to a hermes room file (best effort: the plugin then keys liveness to the gateway's).
+ * @param {string} file @param {number} pid */
+export function writeRoomPid(file, pid) {
+  try {
+    const doc = JSON.parse(readFileSync(file, "utf8"));
+    writeFileSync(file, `${JSON.stringify({ ...doc, pid }, null, 2)}\n`);
+  } catch (e) { console.error(`agora: could not record pid ${pid} in ${file}: ${/** @type {Error} */ (e).message}`); }
 }
 
 /**
@@ -1445,7 +1492,7 @@ export async function startResident(plan, stateRoot, deps) {
       model: plan.model, hostInfo: plan.hostInfo, handle: null,
       // a hermes run starts from an environment of its own: the caller's AGORA_* and HERMES_* (a launch
       // from inside another agent's session carries its key, bearer and Hermes home) are not inherited
-      exec: { argv: plan.argv, env: { ...plan.env, ...prepared.env }, cwd: plan.workdir, ...(plan.hermes ? { clear: ["AGORA_", "HERMES_"] } : {}) },
+      exec: { argv: plan.argv, env: { ...plan.env, ...prepared.env }, cwd: plan.workdir, ...(plan.hermes ? { clear: ["AGORA_", "HERMES_"], roomFile: plan.hermes.roomFile } : {}) },
     };
     await writeFileAtomic(plan.runFile, JSON.stringify(run) + "\n");
     if (plan.host === "none") {

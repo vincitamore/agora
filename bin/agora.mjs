@@ -1885,7 +1885,7 @@ async function main(argv) {
           if (p.skills) console.log(`  skills   ${p.skills.names.join(", ")} from ${p.skills.dir} (${p.skills.mode})`);
           if (p.trust) console.log(`  trusts   ${p.trust} in ~/.claude.json`);
           if (p.hermes && checks) {
-            console.log(`  hermes   profile ${p.hermes.profile} at ${p.hermes.home} (${p.hermes.interface}); plugin copied to ${p.hermes.plugin.to}`);
+            console.log(`  hermes   profile ${p.hermes.profile} at ${p.hermes.home} (${p.hermes.interface}); plugin ${p.hermes.plugin.installed}; room file ${p.hermes.roomFile}`);
             console.log(`  prompt   ${checks.promptChars ?? "?"} characters in HERMES_EPHEMERAL_SYSTEM_PROMPT${p.hermes.promptMax !== null ? ` (at most ${p.hermes.promptMax})` : ""}; first prompt ${p.hermes.firstPromptFile}`);
             for (const r of checks.refusals) console.log(`  refuses  ${r}`);
             for (const w of checks.warnings) console.log(`  warns    ${w}`);

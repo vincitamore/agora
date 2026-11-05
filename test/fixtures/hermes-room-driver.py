@@ -35,12 +35,16 @@ class FakeContext:
         self.tools: dict[str, dict] = {}
         self.sent: list[dict] = []
         self.accept = True
+        self.cwd = ""
 
     def register_hook(self, name, fn):
         self.hooks.setdefault(name, []).append(fn)
 
     def register_tool(self, name, toolset, schema, handler, description=""):
         self.tools[name] = {"toolset": toolset, "schema": schema, "handler": handler, "description": description}
+
+    def session_cwd(self):
+        return self.cwd
 
     def inject_message(self, content, role="user", *, session_key=None, origin=None):
         self.sent.append({"content": content, "session_key": session_key, "accepted": self.accept})
@@ -73,6 +77,19 @@ def answer(req: dict) -> dict:
         if "accept" in req:
             ctx.accept = bool(req["accept"])
         return {}
+    if op == "gateway":
+        # the plugin as the Hermes gateway hosts it: no classic CLI owns the process, each call names its session's folder
+        ctx._manager = type("Manager", (), {"_cli_ref": None})()
+        ctx.cwd = req["cwd"]
+        r = pkg.register.sessions.for_call(req.get("kw") or {})
+        if req.get("route"):
+            r.route_key = req["route"]
+        r.learn_session((req.get("kw") or {}).get("session_id"))
+        return {"session": r.session, "rooms": r.cfg["rooms"], "actor": r.cfg["actor"], "deny": r.cfg["deny"], "pid": r.pid, "ownerPid": r.cfg["ownerPid"],
+                "stateRoot": r.cfg["stateRoot"], "residents": len(pkg.register.sessions.by_key), "isDefault": r is pkg.register.sessions.default}
+    if op == "gateway-tool":
+        ctx.cwd = req["cwd"]
+        return {"result": json.loads(ctx.tools[req["name"]]["handler"](req.get("args") or {}, session_id=req.get("session_id")))}
     if op == "arm":
         return {"armed": resident.arm()}
     if op == "hook":

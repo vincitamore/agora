@@ -10,7 +10,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   HERMES_INTERFACE, HERMES_PROMPT_MAX, HERMES_SOURCE, RESERVED_ENV, firstPrompt, hermesChecks, hermesDenied, hermesHome, hermesProfileOf, hermesSessionKey,
-  inheritedEnv, planResident, readRun, readSimpleYaml, startResident, validateManifest, which,
+  HERMES_ROOM_FILE, hermesRoomFile, inheritedEnv, planResident, readRun, readSimpleYaml, startResident, validateManifest, which, writeRoomPid,
 } from "../src/resident-start.mjs";
 import { SESSION_RE, writeRecord } from "../src/session.mjs";
 import * as resident from "../src/resident.mjs";
@@ -31,7 +31,7 @@ function profileYaml(o = {}) {
 }
 
 /** A seat: config with one room, a manifest with one hermes row, a fake hermes on a PATH of its own, a Hermes root with profile ab-ds41.
- * @param {import("node:test").TestContext} t @param {{ row?: Record<string, unknown>, yaml?: string, profile?: string }} [o] */
+ * @param {import("node:test").TestContext} t @param {{ row?: Record<string, unknown>, yaml?: string, profile?: string, installed?: boolean | "stale" }} [o] */
 async function seat(t, o = {}) {
   const root = await mkdtemp(path.join(tmpdir(), "agora-rhermes-"));
   t.after(async () => { await rm(root, { recursive: true, force: true }); });
@@ -42,6 +42,13 @@ async function seat(t, o = {}) {
   const local = path.join(root, "local");
   for (const d of [mdir, bin, home, path.join(local, "hermes", "profiles", "ab-ds41")]) await mkdir(d, { recursive: true });
   await writeFile(path.join(local, "hermes", "profiles", "ab-ds41", "config.yaml"), o.yaml ?? profileYaml());
+  // the plugin as the operator installs it: a copy in the profile's plugins folder
+  if (o.installed !== false) {
+    const into = path.join(local, "hermes", "profiles", "ab-ds41", "plugins", "agora-room");
+    await mkdir(into, { recursive: true });
+    for (const f of ["plugin.yaml", "__init__.py", "room.py"])
+      await writeFile(path.join(into, f), o.installed === "stale" && f === "room.py" ? "# an older copy\n" : await readFile(path.join(CHECKOUT, "plugins", "hermes", "agora-room", f), "utf8"));
+  }
   await writeFile(path.join(mdir, "PROFILE.md"), o.profile ?? "# Watch\n\nA lean shadow profile.\n");
   for (const ext of ["", ".exe", ".com"]) for (const n of ["hermes", "tern"]) await writeFile(path.join(bin, n + ext), "");
   const manifestFile = path.join(mdir, "residents.json");
@@ -62,7 +69,7 @@ async function seat(t, o = {}) {
   return { root, state, home, mdir, local, manifestFile, m, ctx, env };
 }
 
-test("plan: hermes runs `hermes -p <profile> chat --cli` with the first prompt in a file, a pinned agora key, the deny list mapped to Hermes tools, and the plugin as a per-run project plugin", async (t) => {
+test("plan: hermes runs `hermes -p <profile> chat --cli` with the first prompt in a file, a pinned agora key, the deny list mapped to Hermes tools, and a room file for the profile's installed plugin", async (t) => {
   const s = await seat(t, { row: { thinking: "high", skills: { dir: ".", names: ["network-cli"] }, args: ["--max-turns", "40"] } });
   const p = planResident(s.m, "shadow.ds41", s.ctx);
   const exe = which("hermes", { env: s.env, platform: "win32" });
@@ -76,12 +83,13 @@ test("plan: hermes runs `hermes -p <profile> chat --cli` with the first prompt i
   assert.ok(SESSION_RE.test(p.env.AGORA_SESSION));
   assert.equal(p.env.AGORA_ACTOR, "netwatch/Flash41", "an explicit bearer signs through AGORA_ACTOR");
   assert.equal(p.env.AGORA_DENY, "write_file,browser_exec", "write maps to Hermes's write_file; any other name passes as written");
-  assert.equal(p.env.HERMES_ENABLE_PROJECT_PLUGINS, "1");
+  assert.equal(p.env.HERMES_ENABLE_PROJECT_PLUGINS, undefined, "the gateway never loads ./.hermes/plugins");
   assert.equal(p.env.AGORA_MODEL, "deepseek/deepseek-v4.1-flash-1017");
   assert.equal(p.env.HERMES_EPHEMERAL_SYSTEM_PROMPT, undefined, "the rendered prompt joins the environment at prepare, not in the plan");
   assert.deepEqual(p.hermes, {
     profile: "ab-ds41", home: path.win32.join(s.local, "hermes", "profiles", "ab-ds41"), config: path.join(path.win32.join(s.local, "hermes", "profiles", "ab-ds41"), "config.yaml"), interface: "--cli",
-    plugin: { from: path.join(CHECKOUT, "plugins", "hermes", "agora-room"), to: path.join(p.workdir, ".hermes", "plugins", "agora-room") },
+    plugin: { from: path.join(CHECKOUT, "plugins", "hermes", "agora-room"), installed: path.join(path.win32.join(s.local, "hermes", "profiles", "ab-ds41"), "plugins", "agora-room") },
+    roomFile: path.join(p.workdir, HERMES_ROOM_FILE),
     firstPromptFile: path.join(p.dir, "first-prompt.txt"), promptMax: HERMES_PROMPT_MAX,
   });
   assert.equal(p.skills?.mode, "preload");
@@ -98,6 +106,8 @@ test("plan: a hermes row must name its profile; the manifest may not set what th
   const s = await seat(t, { row: { command: ["hermes"] } });
   assert.throws(() => planResident(s.m, "shadow.ds41", s.ctx), /a hermes row names its profile in "command"/);
   for (const name of ["AGORA_DENY", "HERMES_EPHEMERAL_SYSTEM_PROMPT", "HERMES_ENABLE_PROJECT_PLUGINS", "AGORA_SESSION"]) assert.ok(RESERVED_ENV.includes(name), name);
+  assert.deepEqual(hermesRoomFile({ AGORA_ROOM: "lab", AGORA_SESSION: "k", AGORA_DENY: "terminal", AGORA_ROOM_CMD: JSON.stringify(["node", "a.mjs"]), AGORA_STATE: "/s", AGORA_LABEL: "x", AGORA_CONTEXT_CEILING: "180000", PATH: "/bin" }),
+    { v: 1, by: "agora resident start", rooms: "lab", session: "k", deny: "terminal", command: ["node", "a.mjs"], ceiling: 180000, env: { AGORA_STATE: "/s", AGORA_LABEL: "x" } });
   assert.throws(() => validateManifest({ version: 1, residents: { x: { role: "r", harness: "hermes", model: "m", rooms: ["lab"], profile: "P.md", host: "none", env: { HERMES_EPHEMERAL_SYSTEM_PROMPT: "x" } } } }, s.manifestFile), /is set by agora resident start itself/);
   assert.equal(hermesProfileOf(["hermes", "--profile=ab-opus", "chat"]), "ab-opus");
   assert.equal(hermesProfileOf(["hermes", "--profile", "ab-opus"]), "ab-opus");
@@ -132,6 +142,15 @@ test("checks: the profile's config is read, never written: plugin enablement, th
   assert.match(c.warnings.join("\n"), /enables lampstand/);
   assert.match(c.warnings.join("\n"), /declares shell hooks \(pre_verify\)/);
 
+  const bare = await seat(t, { installed: false, yaml: profileYaml().replace(/  entries:[\s\S]*?allow_gateway_injection: true/, "  entries: {}") });
+  const nb = await hermesChecks(planResident(bare.m, "shadow.ds41", bare.ctx), { checkout: CHECKOUT });
+  assert.match(nb.refusals.join("\n"), /has no agora-room plugin at .*plugins[\\/]agora-room: copy /);
+  assert.match(nb.refusals.join("\n"), /does not let agora-room inject into a gateway session.*plugins\.entries\.agora-room\.allow_gateway_injection true/);
+  const stale = await seat(t, { installed: "stale" });
+  const st = await hermesChecks(planResident(stale.m, "shadow.ds41", stale.ctx), { checkout: CHECKOUT });
+  assert.deepEqual(st.refusals, []);
+  assert.match(st.warnings.join("\n"), /differs from this checkout's; copy it again, then restart the profile's gateway/);
+
   const other = await seat(t, { yaml: profileYaml({ model: "claude-opus-5-5" }) });
   const m2 = await hermesChecks(planResident(other.m, "shadow.ds41", other.ctx), { checkout: CHECKOUT });
   assert.match(m2.refusals.join("\n"), /pins model claude-opus-5-5, and the row names deepseek\/deepseek-v4\.1-flash-1017/);
@@ -149,7 +168,7 @@ test("checks: the profile's config is read, never written: plugin enablement, th
   assert.equal(posix.hermes?.promptMax, null);
 });
 
-test("start: a hermes start renders the prompt into HERMES_EPHEMERAL_SYSTEM_PROMPT, writes the first-prompt file, copies the plugin, records the harness and clears the caller's AGORA_/HERMES_ names; a refused check writes nothing (red leg)", async (t) => {
+test("start: a hermes start renders the prompt into HERMES_EPHEMERAL_SYSTEM_PROMPT, writes the first-prompt and room files, records the harness and clears the caller's AGORA_/HERMES_ names; a refused check writes nothing (red leg)", async (t) => {
   const s = await seat(t);
   const p = planResident(s.m, "shadow.ds41", s.ctx);
   const started = await startResident(p, s.state, { checkout: CHECKOUT, home: s.home });
@@ -161,9 +180,19 @@ test("start: a hermes start renders the prompt into HERMES_EPHEMERAL_SYSTEM_PROM
   assert.equal(rec?.exec.env.HERMES_EPHEMERAL_SYSTEM_PROMPT, prompt, "the rendered prompt, whole");
   assert.match(prompt, /## Room mechanics/);
   assert.deepEqual(rec?.exec.clear, ["AGORA_", "HERMES_"]);
+  assert.equal(rec?.exec.roomFile, path.join(p.workdir, HERMES_ROOM_FILE));
   assert.equal(await readFile(path.join(p.dir, "first-prompt.txt"), "utf8"), `${p.firstPrompt}\n`);
-  for (const f of ["plugin.yaml", "__init__.py", "room.py"]) assert.ok(existsSync(path.join(p.workdir, ".hermes", "plugins", "agora-room", f)), f);
-  assert.equal(existsSync(path.join(p.workdir, ".hermes", "plugins", "agora-room", "__pycache__")), false);
+  assert.equal(existsSync(path.join(p.workdir, ".hermes", "plugins")), false, "no per-run plugin copy: the gateway would not load it");
+  const room = JSON.parse(await readFile(path.join(p.workdir, HERMES_ROOM_FILE), "utf8"));
+  assert.equal(room.session, p.env.AGORA_SESSION);
+  assert.equal(room.rooms, "lab");
+  assert.equal(room.actor, "netwatch/Flash41");
+  assert.equal(room.deny, "write_file,browser_exec");
+  assert.equal(room.model, "deepseek/deepseek-v4.1-flash-1017");
+  assert.equal(room.env.AGORA_LABEL, "shadow.ds41");
+  assert.equal(room.env.AGORA_STATE, s.state);
+  writeRoomPid(path.join(p.workdir, HERMES_ROOM_FILE), 4242);
+  assert.equal(JSON.parse(await readFile(path.join(p.workdir, HERMES_ROOM_FILE), "utf8")).pid, 4242, "the spawned client's pid is added at spawn");
   // the harness's environment: the caller's agora key and Hermes home are not inherited
   process.env.AGORA_TEST_CALLER_KEY = "caller";
   process.env.HERMES_TEST_CALLER_HOME = "x";
@@ -172,7 +201,6 @@ test("start: a hermes start renders the prompt into HERMES_EPHEMERAL_SYSTEM_PROM
     assert.equal(env.AGORA_TEST_CALLER_KEY, undefined);
     assert.equal(env.HERMES_TEST_CALLER_HOME, undefined);
     assert.equal(env.AGORA_SESSION, p.env.AGORA_SESSION);
-    assert.equal(env.HERMES_ENABLE_PROJECT_PLUGINS, "1");
     assert.ok(env.PATH !== undefined || env.Path !== undefined, "everything else is inherited");
   } finally { delete process.env.AGORA_TEST_CALLER_KEY; delete process.env.HERMES_TEST_CALLER_HOME; }
 

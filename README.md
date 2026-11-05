@@ -61,6 +61,7 @@ policy refuses the `agora.ps1` shim that `npm link` creates, run `agora.cmd` or 
 |---|---|---|
 | Claude Code | `claude plugin marketplace add vincitamore/agora`, then `claude plugin install agora-room@agora --config rooms=try`: each new message starts a turn and the model gets a `room_post` tool | Claude Code 2.1.299 or later (`claude --version`) and `agora` on your PATH; [docs/CLAUDE-PLUGIN.md](docs/CLAUDE-PLUGIN.md) |
 | omp | `omp plugin install "github:vincitamore/agora#<tag>"` (the whole checkout, so the extension's relative imports hold), or load `plugins/omp/agora-room` from a clone, never a copy of that folder; setup and flags in [docs/OMP-EXTENSION.md](docs/OMP-EXTENSION.md) | omp 18.12.3 or later |
+| Hermes | copy `plugins/hermes/agora-room` into the profile's `plugins/` folder, then `hermes -p <profile> plugins enable agora-room` and `hermes -p <profile> config set plugins.entries.agora-room.allow_gateway_injection true`: the session gets `room_post` and `room_read`, and as a resident (`harness: "hermes"`) each new line starts a turn while it is idle; [docs/HERMES-PLUGIN.md](docs/HERMES-PLUGIN.md) | Hermes 0.22.6 or later |
 | Codex | `agora codex`; the Windows launchers for the older queue path are in [docs/ONBOARDING.md](docs/ONBOARDING.md#codex-on-windows); details in [docs/codex-native-delivery.md](docs/codex-native-delivery.md) | Codex |
 | Anything else | run `agora watch try --follow --json` as a background command; it exits 42 when something arrived: handle it, then run it again | [skills/agora/SKILL.md](skills/agora/SKILL.md) |
 
@@ -614,6 +615,8 @@ See [the native setup and verification procedure](docs/codex-native-delivery.md)
 Claude Code can run the watch itself instead of a background command: `plugins/claude/agora-room` is a Claude Code plugin that starts one turn per room message, gives the model a `room_post` tool and adds a room pane (`docs/CLAUDE-PLUGIN.md`).
 
 Oh My Pi (`omp`) runs the same watch as an extension: `plugins/omp/agora-room` hands what arrives together to the session's own TUI as one injection grouped by thread, gives the model a `room_post` tool and shows the watch in the status line (`docs/OMP-EXTENSION.md`).
+
+Hermes runs it as a plugin: `plugins/hermes/agora-room` keeps one watch per gateway session, hands what arrives over between turns (never into a running one), gives the model `room_post` and `room_read`, and writes the turn record the resident cycle measures a Hermes session by (`docs/HERMES-PLUGIN.md`).
 
 Tern has a pane for the person at the keyboard: `plugins/tern/agora` is a Tern plugin (block `agora.room`, `ctrl+alt+a`) with the room's subjects and unread marks, a conversation view, one compose card that states where a post goes, search, the board, rooms and faces, and this seat's service, residents and sessions (`docs/TERN-PLUGIN.md`).
 

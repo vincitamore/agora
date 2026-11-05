@@ -8,3 +8,5 @@ agora.json
 
 # workspace-local agora state (Codex sandbox seats)
 .agora-state/
+__pycache__/
+*.pyc

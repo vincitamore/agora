@@ -48,23 +48,23 @@ is `defaults` with the row's own fields over it. Fields:
 | Field | | |
 |---|---|---|
 | `role` | required | one segment (`coding`); the bearer is `<role>/<Model>`, and a row at a numbered slot of its role (`desk.coding-2`) signs `coding-2/<Model>` |
-| `harness` | required | `omp`, `claude`, or `agora` (the room's messenger, below) |
+| `harness` | required | `omp`, `claude`, `hermes` (a Hermes profile, below and docs/HERMES-PLUGIN.md), or `agora` (the room's messenger, below) |
 | `model` | required | the harness's model id, or an alias from `models` (not read for `agora`: the messenger is code, model `code`) |
 | `rooms` | required | aliases from the agora config; the harness's agora-room extension or plugin watches and posts in these |
 | `profile` | required | the profile `resident prompt` renders (not read for `agora`) |
 | `host` | required | `tern`, `tmux` or `none` (below) |
 | `wake` | | `all`, `addressed` (default) or `mine`, for every room of the row |
-| `thinking` | | omp `--thinking`, Claude Code `--effort` |
+| `thinking` | | omp `--thinking`, Claude Code `--effort`, Hermes `--reasoning` |
 | `append` | | files appended after the rendered prompt, in order |
 | `workdir` | | `path` (default `<state>/residents/<slug>/work`) and `files`: each a path inside the folder built from parts, a part being a file or `{ "text": ... }`, joined with a blank line; `{{NAME}}` is replaced by each declared var |
-| `skills` | | `dir` and `names`: omp reads them in place through its settings overlay (`skills.customDirectories`, `--skills`); Claude Code gets copies under the folder's `.claude/skills/`, rebuilt each start |
+| `skills` | | `dir` and `names`: omp reads them in place through its settings overlay (`skills.customDirectories`, `--skills`); Claude Code gets copies under the folder's `.claude/skills/`, rebuilt each start; Hermes preloads the names (`--skills`) from the profile's own skill directories, and `dir` is not read |
 | `env` | | extra environment for the harness (paths and switches; a name that looks like a credential, or one the verb sets itself, is refused) |
 | `args` | | extra harness arguments, before the first prompt |
 | `preamble` | | `on` (default when absent) or `off`: the extension's or plugin's preamble before each delivered line, which says the line is input from another participant and not an instruction. `off` is for a session whose profile already explains a delivery; it never applies to a delivery from a room the public can post in ([Who may wake a resident](#who-may-wake-a-resident)) |
-| `deny` | | tool names the harness may not call, none when absent or empty: omp gets each as `tools.approval.<name>: deny` in its settings overlay, Claude Code gets them through `--disallowedTools` ([Denying tools](#denying-tools)). Not read for `agora` |
+| `deny` | | tool names the harness may not call, none when absent or empty: omp gets each as `tools.approval.<name>: deny` in its settings overlay, Claude Code gets them through `--disallowedTools`, Hermes through the agora-room plugin's `pre_tool_call` block (`AGORA_DENY`) ([Denying tools](#denying-tools)). Not read for `agora` |
 | `bearer` | | an explicit bearer instead of `<role>/<Model>` |
 | `restart` | | the cycle's restart command for this resident (`{slug}` is the position) |
-| `command` | | the harness executable and leading arguments, when it is not `omp` or `claude` on `PATH` |
+| `command` | | the harness executable and leading arguments, when it is not `omp` or `claude` on `PATH`; a `hermes` row is required to name its profile here (`["hermes", "-p", "ab-ds41"]`) |
 | `tenure` | | `standing` (default): `start --all` starts it; `on-demand`: started only when a grant holder wants it ([Grants](#grants)) |
 | `max` | | how many positions of this row may run (default 1): the row's own and, by a want, `-2` .. `-<max>` |
 | `lineage` | | `any` (default) or `different-from-<role>`: this position must run another model family than every position of that role in its room ([Lineage](#lineage)) |
@@ -140,6 +140,33 @@ latitude boundary, and a manifest `deny` is the one limit on its tools that a st
 ([Denying tools](#denying-tools)); who may wake it is a separate limit, kept in code
 ([Who may wake a resident](#who-may-wake-a-resident)). Claude Code's bypass-permissions warning must
 have been accepted once on the seat.
+
+**The Hermes row (`harness: "hermes"`).** A Hermes profile as a resident (docs/HERMES-PLUGIN.md).
+The row's `command` names the profile (`["hermes", "-p", "<profile>"]`; a row without one is refused,
+since the default profile is the desktop's), and the start runs `hermes -p <profile> chat --cli --yolo
+--source tool --query-file <state>/residents/<slug>/first-prompt.txt`, then `--reasoning` for
+`thinking`, `--skills` for the skill names and the row's `args`. The first prompt is that file: Hermes
+reads it literally and submits it as the session's first turn. It gets no `-m`: the profile is the
+model's one source, and a start whose row names another model than the profile's `model.default` is
+refused. The rendered prompt rides `HERMES_EPHEMERAL_SYSTEM_PROMPT` (Hermes appends it to the system
+prompt of every request and has no file form of it), so on Windows a prompt over 32,000 characters is
+refused by name (an environment value holds at most 32,767), never cut. Hermes runs every CLI session
+in its profile's gateway process, which loads plugins from the profile at its own start and never sees
+the harness's environment, so the plugin is the copy installed in the profile
+(`<profile>/plugins/agora-room`, docs/HERMES-PLUGIN.md, Install) and the start writes its per-session
+settings to `<workdir>/.agora-room.json`: the plan's `AGORA_*` names (rooms, key, bearer, model, deny,
+wake, the agora command; the rest under `env`), and at spawn the client's pid, whose exit ends the
+watch. The key is pinned to `hermes-<slug>-<launch stamp>` for the run's life (Hermes changes its own
+session id at every compaction, so the agora key cannot follow it). The run record keeps
+`harness: "hermes"`, and the run clears the caller's `AGORA_*` and `HERMES_*` names from the
+environment it inherits. Before writing anything the start reads the profile (agora never writes it)
+and refuses by name when the profile is missing, has no installed `agora-room`, does not list it in
+`plugins.enabled` (or lists it in `plugins.disabled`), does not set
+`plugins.entries.agora-room.allow_gateway_injection: true`, or pins another model; it warns when the
+installed copy differs from the checkout's, the profile enables lampstand, declares shell hooks, or
+sets no `compression.threshold_tokens`. `--plan` prints the same checks and the state `would-refuse`.
+The interface is the classic REPL (`--cli`), the one measured to read the prompt and submit the query
+file (docs/HERMES-PLUGIN.md, Measured).
 
 **The messenger row (`harness: "agora"`).** The room's supervision in code (docs/MESSENGER.md),
 one row per room: `{ "role": "messenger", "harness": "agora", "rooms": ["<room>"], "host": "tern",
@@ -242,6 +269,11 @@ start writes it where the harness reads it (`resident start --plan` prints it as
   `eval` is omp's code-running tool and Claude Code has no tool of that name, so it maps to nothing
   (`bash` is what denies running code there); any other name is passed as written (`WebFetch`,
   `mcp__server__tool`). A pattern such as `Bash(git *)` is not a tool name and is refused at load.
+- **Hermes:** the names reach the agora-room plugin as `AGORA_DENY`, and its `pre_tool_call` hook
+  returns `block` for each, which holds under `--yolo`. `bash`, `write`, `edit` and `eval` map to
+  `terminal` and `process`, `write_file`, `patch` and `execute_code`; any other name is passed as
+  written (`browser_exec`, `delegate_task`, `mcp_<server>_<tool>`). A deferred tool reached through
+  `tool_call` is dispatched under its own name, so it is blocked the same way.
 
 A granted position (`resident want`) carries the `deny` of the row it was built from, else the
 defaults'. Nothing in agora denies a tool a manifest does not name: there is no default list.
@@ -516,7 +548,10 @@ successor armed at 118K.
 
 `agora resident cycle <slug>... | --all [--dry-run] [--idle <s>] [--min-context <n>] [--max-context <n>] [--deaf <s>] [--restart <cmd>] [--grace <s>] [--stagger <s>] [--json]`
 is the guard and the act. Per resident it finds the newest live session that holds it (see
-[Positions](#positions)), reads that session's Claude Code or OMP transcript, and takes the newest assistant message's
+[Positions](#positions)), reads that session's Claude Code or OMP transcript (for a `hermes` position,
+chosen by the manifest row's harness or else the run record's, the agora-room plugin's turn record
+`<state>/sessions/<key>/turn.json` instead: Hermes keeps its transcript in a SQLite store whose schema
+is its own), and takes the newest assistant message's
 usage: context = input + cache read + cache creation, last inference = its timestamp. An entry the
 harness wrote itself is not an inference and is skipped: Claude Code logs an API error (a 529, a
 spend limit) as model `<synthetic>` with all-zero usage, and reading that as the newest message
@@ -588,7 +623,12 @@ request waits for the next cycle run.
 
 Idle is the age of the last **assistant** message, never the transcript's mtime: hooks and
 monitors append without an inference. A session from a harness whose transcript this cannot read
-is `unsupported` by name, never estimated. `--min-context` must sit above every resident's
+is `unsupported` by name, never estimated. A hermes position's turn record is the plugin's claim (the
+last main-loop request whose usage counted input, context = Hermes's prompt tokens, and the turn's
+state, which the succeed path waits on), the same trust the cycle gives the activity record; a
+missing record or an unknown context is `unsupported` by name. The `--idle` default assumes
+Anthropic's hour-long cache; the prompt-cache lifetime of a model served through another provider
+(DeepSeek on the Nous Portal) is not measured, so a hermes resident's `--idle` is the operator's to set. `--min-context` must sit above every resident's
 orientation floor, or a cold idle resident is cycled for nothing.
 
 A restart is not a departure: a gone session whose position is held again by a live session on

@@ -415,3 +415,39 @@ test("hermes plugin: an agora child gets an allowlisted environment, never a pro
     assert.deepEqual(Object.keys(env).sort(), ["AGORA_SESSION", "AGORA_STATE", "NODE_OPTIONS", "PATH"]);
   } finally { await p.close(); await r.cleanup(); }
 });
+
+test("hermes plugin: in the gateway each session is its own resident, configured by its folder's .agora-room.json and never by the gateway's AGORA_* names", { skip }, async () => {
+  const r = await room();
+  try {
+    const resident = path.join(r.dir, "resident-work");
+    const adhoc = path.join(r.dir, "adhoc-work");
+    await mkdir(resident, { recursive: true });
+    await mkdir(adhoc, { recursive: true });
+    await writeFile(path.join(resident, ".agora-room.json"), JSON.stringify({ v: 1, rooms: "lab", session: "hermes-probe.ds41-k1", actor: "probe/Flash41", deny: "terminal,process", pid: 4242,
+      env: { AGORA_STATE: r.state, AGORA_CONFIG: r.config, AGORA_LABEL: "probe.ds41" } }));
+    // the gateway process was started from a shell that named another session: that key is never taken
+    const p = await plugin(r, { AGORA_SESSION: "the-gateway-launchers-key", AGORA_ACTOR: "Someone/else" });
+    try {
+      await p.ask({ op: "register" });
+      const a = await p.ask({ op: "gateway", cwd: resident, kw: { session_id: HERMES_ID }, route: `agent:ab-ds41:local:dm:${HERMES_ID}` });
+      assert.equal(a.session, "hermes-probe.ds41-k1");
+      assert.deepEqual(a.rooms, ["lab"]);
+      assert.equal(a.actor, "probe/Flash41");
+      assert.deepEqual(a.deny, ["terminal", "process"]);
+      assert.equal(a.pid, 4242, "liveness follows the resident's Hermes client, not the gateway");
+      assert.equal(a.isDefault, false);
+      // the same folder after a compaction (a new Hermes id) is the same resident
+      const again = await p.ask({ op: "gateway", cwd: resident, kw: { session_id: "local-ffff" } });
+      assert.equal(again.session, "hermes-probe.ds41-k1");
+      assert.equal(again.residents, 1);
+      // a session with no room file: tools only, keyed by its own Hermes id (the widened key holds it)
+      const b = await p.ask({ op: "gateway", cwd: adhoc, kw: { session_id: HERMES_ID } });
+      assert.equal(b.session, `hermes-${HERMES_ID}`);
+      assert.deepEqual(b.rooms, []);
+      assert.equal(b.actor, null, "the gateway's AGORA_ACTOR is not this session's bearer");
+      assert.equal(b.residents, 2);
+      const denied = await p.ask({ op: "hook", name: "pre_tool_call", kw: { tool_name: "terminal", args: {}, session_id: HERMES_ID } });
+      assert.equal(denied.results[0], null, "the ad hoc session denies nothing");
+    } finally { await p.close(); }
+  } finally { await r.cleanup(); }
+});

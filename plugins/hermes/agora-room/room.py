@@ -599,6 +599,33 @@ def choose_room(rooms: list[str], asked: Any) -> tuple[str | None, str | None]:
 # ---- configuration -------------------------------------------------------------------------------------------------
 
 
+def pid_alive(pid: int) -> bool:
+    """Whether a process is running, without signalling it (os.kill on Windows terminates)."""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        handle = kernel.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.get_last_error() == 5  # access denied: it exists
+        try:
+            code = wintypes.DWORD()
+            ok = kernel.GetExitCodeProcess(handle, ctypes.byref(code))
+            return bool(ok) and code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def checkout_bin() -> Path | None:
     """The CLI of the agora checkout this plugin sits in (plugins/hermes/agora-room), when it sits in one."""
     candidate = Path(__file__).resolve().parent.parent.parent.parent / "bin" / "agora.mjs"
@@ -676,10 +703,12 @@ def resolve_config(env: Mapping[str, str], file: Mapping[str, Any] | None, home:
         "actor": None if actor is None else str(actor).strip(),
         "role": None if role is None else str(role).strip(),
         "modelLabel": None if label is None else str(label).strip(),
-        "model": first(env.get("AGORA_MODEL")),
+        "model": first(env.get("AGORA_MODEL"), f.get("model")),
         "liveness": None if liveness is None else str(liveness),
         "position": None if position is None else str(position).strip(),
-        "ceiling": context_ceiling(env.get("AGORA_CONTEXT_CEILING")),
+        "ceiling": context_ceiling(first(env.get("AGORA_CONTEXT_CEILING"), f.get("ceiling"))),
+        # the process whose life is the session's: a resident's Hermes client, when the plugin runs in the gateway
+        "ownerPid": f.get("pid") if isinstance(f.get("pid"), int) and not isinstance(f.get("pid"), bool) and f.get("pid") > 0 else None,
         "deny": deny,
         "childEnv": child_env,
         "stateRoot": state_root(env, child_env, home),
@@ -787,10 +816,13 @@ class Resident:
         self.cfg = resolve_config(self.env, file if isinstance(file, dict) else None, self.home)
         if file_problem:
             self.cfg["problems"].append(file_problem)
+        if pid is None and self.cfg["ownerPid"]:
+            self.pid = self.cfg["ownerPid"]
         self.rooms: dict[str, dict] = {r: {"ready": False, "cursor": None, "lastRead": None, "lastTick": None, "lastError": None, "polls": 0}
                                        for r in self.cfg["rooms"]}
         self.session: str | None = self.cfg["session"]
         self.hermes_session: str | None = None  # the Hermes session id an injection is routed by; it changes at compaction
+        self.route_key: str | None = None  # the gateway's route key for the session (HERMES_SESSION_KEY), preferred when known
         self.model: str | None = self.cfg["model"]
         self.provider: str | None = None
         self.registered_key: str | None = None
@@ -1191,7 +1223,7 @@ class Resident:
         # the wake record is written before the turn can start, so a post the model makes in it is one hop deeper
         self.record_wake(fresh)
         try:
-            ok = bool(self._inject and self._inject(batch["text"], self.hermes_session))
+            ok = bool(self._inject and self._inject(batch["text"], self.route_key or self.hermes_session))
             why = None if ok else "the host did not take the injection"
         except Exception as error:  # noqa: BLE001
             ok, why = False, f"inject_message raised: {error}"
@@ -1259,6 +1291,12 @@ class Resident:
 
     def _loop(self) -> None:
         while not self.stopped:
+            owner = self.cfg["ownerPid"]
+            if owner and not pid_alive(owner):
+                # the resident's Hermes client has exited; the gateway that hosts this plugin lives on
+                self.note(f"process {owner} has exited; the watch stops")
+                self.stop()
+                return
             try:
                 if self.armed or self.arm():
                     self.tick()
