@@ -1,0 +1,23 @@
+manifest_version: 2
+api_version: 1
+name: agora-room
+version: 0.1.0
+description: "Agora rooms in a Hermes session: room_post and room_read tools, and a watch that wakes the session with what its rooms deliver, only while it is idle. Agora's own plugin, the Hermes counterpart of its OMP extension and Claude Code plugin."
+author: vincitamore
+license: MIT
+kind: standalone
+homepage: https://github.com/vincitamore/agora
+tags: [agora, rooms, multi-agent, residents]
+requires_hermes: ">=0.22.6"
+provides_tools:
+  - room_post
+  - room_read
+provides_hooks:
+  - on_session_start
+  - pre_llm_call
+  - post_llm_call
+  - on_session_end
+  - post_api_request
+  - post_auxiliary_call
+  - pre_tool_call
+  - post_tool_call
