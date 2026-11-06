@@ -124,11 +124,13 @@ const ROOM_FILE_FIELDS = Object.freeze({ AGORA_ROOM: "rooms", AGORA_SESSION: "se
 /**
  * The room file of a hermes plan: the plan's AGORA_* environment as the plugin's per-session settings
  * (the gateway that runs the session never sees the harness's environment). `pid` is added at spawn.
- * @param {Record<string, string>} env @returns {Record<string, unknown>}
+ * `profile` names the Hermes profile the session runs in: a plugin load in a restarted gateway resumes
+ * only its own profile's watches (docs/HERMES-PLUGIN.md, Re-arm).
+ * @param {Record<string, string>} env @param {{ profile?: string }} [extra] @returns {Record<string, unknown>}
  */
-export function hermesRoomFile(env) {
+export function hermesRoomFile(env, extra = {}) {
   /** @type {Record<string, unknown>} */
-  const out = { v: 1, by: "agora resident start" };
+  const out = { v: 1, by: "agora resident start", ...(extra.profile ? { profile: extra.profile } : {}) };
   /** @type {Record<string, string>} */
   const rest = {};
   for (const [k, v] of Object.entries(env)) {
@@ -1126,7 +1128,7 @@ export async function prepareRun(plan, deps) {
   if (plan.hermes) {
     await writeFileAtomic(plan.hermes.firstPromptFile, `${plan.firstPrompt}\n`);
     await mkdir(path.dirname(plan.hermes.roomFile), { recursive: true });
-    await writeFileAtomic(plan.hermes.roomFile, `${JSON.stringify(hermesRoomFile(plan.env), null, 2)}\n`);
+    await writeFileAtomic(plan.hermes.roomFile, `${JSON.stringify(hermesRoomFile(plan.env, { profile: plan.hermes.profile }), null, 2)}\n`);
   }
   if (plan.overlay && plan.overlayText) await writeFileAtomic(plan.overlay, plan.overlayText);
 

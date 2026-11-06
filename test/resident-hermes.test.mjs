@@ -186,6 +186,8 @@ test("start: a hermes start renders the prompt into HERMES_EPHEMERAL_SYSTEM_PROM
   const room = JSON.parse(await readFile(path.join(p.workdir, HERMES_ROOM_FILE), "utf8"));
   assert.equal(room.session, p.env.AGORA_SESSION);
   assert.equal(room.rooms, "lab");
+  assert.equal(room.profile, p.hermes?.profile, "the profile the session runs in: a restarted gateway re-arms only its own profile's watches");
+  assert.ok(room.profile, "a hermes start always names its profile");
   assert.equal(room.actor, "netwatch/Flash41");
   assert.equal(room.deny, "write_file,browser_exec");
   assert.equal(room.model, "deepseek/deepseek-v4.1-flash-1017");
