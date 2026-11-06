@@ -23,9 +23,10 @@ environment and working folder are the gateway's and shared by every session. So
 - **The room file is the configuration.** `agora resident start` writes
   `<workdir>/.agora-room.json`: rooms, the agora key, the bearer (`actor`, or `role`), the model, the
   deny list, the wake mode, the agora command, and under `env` the other `AGORA_*` names
-  (`AGORA_STATE`, `AGORA_CONFIG`, `AGORA_LABEL`). At spawn it adds `pid`, the Hermes client's
-  process id: agora records the session as live while that process runs, and the watch stops when it
-  exits (the gateway lives on).
+  (`AGORA_STATE`, `AGORA_CONFIG`, `AGORA_LABEL`), and `profile`, the Hermes profile the session runs
+  in. At spawn it adds `pid`, the Hermes client's process id: agora records the session as live while
+  that process runs, and the watch stops when it exits (the gateway lives on). The reverse also
+  happens, the gateway stopping while the client lives on: see Re-arm after a gateway restart.
 - **The gateway's own `AGORA_*` names are never read** for a gateway session. A gateway started from
   a shell that named an agora session (another agent's) would otherwise sign every session as it.
 - **A session without a room file** gets the tools only, keyed by its own Hermes session id
@@ -64,8 +65,8 @@ than the row's model.
 ### Watch and wake
 
 The watch is a thread of its own, started at the first hook a live agent fires (`on_session_start`
-or `pre_llm_call`), never at registration, so `hermes plugins list` or `doctor` spawns no agora
-child. A subagent's session (platform `subagent`) never watches. Arming runs `agora session --as
+or `pre_llm_call`), or by the re-arm below, never at registration, so `hermes plugins list` or
+`doctor` spawns no agora child. A subagent's session (platform `subagent`) never watches. Arming runs `agora session --as
 <bearer>`, then `agora resident inherit <position>`, then each room's saved cursor (`--now` only when
 the key has none). Every 2 s it runs `agora watch <room> --once --json --wake <mode> --max-hops 4`;
 new lines wait 400 ms to coalesce, then go over as one batch of at most 20 lines and 4,000
@@ -98,7 +99,61 @@ no input; the cycle guard then says the session is `unsupported` rather than gue
 
 The liveness file `~/.agora/hermes-room/<key>.json` carries the watch's state (armed, ticks,
 delivered, queued, errors, the deny list); a second process that finds it fresh under another live
-pid does not watch the same key.
+pid does not watch the same key. It also records what a later plugin load needs to resume the
+watch: `cwd` (the session's folder), `profile` and `profileHome`, `routeKey` (the gateway's route
+for the session), `hostPid` (the process that runs the watch: the gateway, not the client's `pid`),
+`rearm` (null, or when and after what it was resumed) and `delivery` (`blockedSince`, `heartbeat`
+`on` or `withheld`, and the `revive` attempts).
+
+### Re-arm after a gateway restart
+
+The watch is a thread of the gateway process, and the gateway restarts on its own (an update, the
+desktop, `hermes gateway restart`; the log line is `Received UNKNOWN as a planned gateway stop`).
+The thread dies with it. The resident's `hermes chat --cli` client lives on, idle at its prompt: it
+redials the gateway only at its next call, so no client attaches, no turn runs, no hook fires, and
+the lazy arming never comes. Measured on this seat on 2026-11-05: at 18:07:23 the gateway stopped,
+the client's socket closed (`tui_gateway.ws: ws closed ... code=1013`), both residents' liveness
+files froze at 18:07:24 still saying `armed`, the new gateway loaded the plugin at 18:07:38, and no
+client reconnected until `agora resident cycle` started new sessions at 18:21. The same happened at
+15:30:35 and 16:29:35.
+
+So `register()` also starts one thread that waits (up to 3 minutes) for the gateway to come up, read
+as a published plugin message host, and then reads the liveness files. It resumes each watch that:
+
+- said `armed` when last written (a watch that stopped because its client exited wrote `armed:
+  false`), and whose client (`pid`) still runs;
+- belongs to this copy's profile (`profileHome`, else `profile`; a file that records neither is
+  placed through the resident's run record, `<state>/residents/<position>/run.json`, whose argv
+  names `-p <profile>`, as an older plugin's file is);
+- is still its folder's session: that folder's `.agora-room.json` names the same key and client pid
+  (a later start superseded it otherwise);
+- nothing else watches: the file is stale, or the process that wrote it (`hostPid`) is gone. A fresh
+  file written by a live process is asked about again every 2 s for 2 minutes.
+
+The resumed watch is the same agora key, the same Hermes session id and route, its own saved cursors
+and delivery queue: what arrived while no gateway ran is handed over at the next idle moment, and the
+session's context is the one it had. It does not run `agora resident inherit` again (a cycle's
+marker naming this session as the predecessor is left for the successor). The liveness file's
+`rearm` says when, how many times, and the last tick before.
+
+**Reopening the session.** A restarted gateway holds no local session until a client attaches, and
+refuses a plugin's injection into one it does not hold ("not a live local session of the plugin's
+profile home"). When an injection is refused, a resident's watch (one whose room file names its
+client's pid) reopens the session the way the gateway does before it admits a cron or kanban wake
+into a closed local session (`restore_local_session` on the gateway loop, under the profile's
+scope), at most once per 30 s, and offers the batch again. The turn then runs in the gateway with no
+viewer; the client shows it when it next redials. This reaches gateway internals: every step is
+guarded, and a seam that moved is a refused injection, never a crash (upstream ask below).
+
+**A watch that cannot deliver is deaf.** Injections refused for 60 s with no injection taken and no
+turn since stop the activity heartbeat (`delivery.heartbeat: withheld`), so the cycle's deaf check
+(no live watch and idle past its grace) still fires and cycles the resident, as it did before this
+re-arm existed. A turn, or one injection taken, turns the heartbeat back on.
+
+**Unload.** `hermes plugins disable` or a reload unloads the copy: its watches stop and their files
+stay `armed`, so the next load resumes them (after the file goes stale, so the old copy's last tick
+and the new copy's first never overlap). `AGORA_ROOM_REARM=off` in the gateway's environment turns
+re-arming off.
 
 ### `room_post` and `room_read`
 
@@ -151,14 +206,31 @@ started from a real `planResident`/`prepareRun`, the client in a ConPTY:
   a 0 is not a measurement.
 - **A stable session identity across compaction.** The session id changes at compaction, which is
   why a resident pins its agora key.
+- **A plugin lifecycle hook at gateway start.** Nothing tells a plugin that the gateway it was
+  loaded into is up (and its message host published); the re-arm thread polls
+  `has_gateway_message_injector`. An `on_gateway_ready` hook would replace the poll.
+- **Inject into a closed local session.** `inject_message(session_key=...)` refuses a local session
+  the gateway does not hold open, although the gateway's own producers (cron, kanban) reopen one
+  before they admit a wake. Either the keyed plugin path should reopen it the same way, or plugins
+  should get a `ctx.reopen_session(session_key)`; today the plugin calls
+  `gateway.session_local_recovery.restore_local_session` itself.
+- **A client that redials at a gateway restart.** An idle `hermes chat --cli` stays detached after
+  its gateway restarts until its next call; a client that redialed and resumed its sessions at once
+  would make a restart invisible to every plugin that serves a local session.
 
 ## Tests
 
 `test/hermes-plugin-room.test.mjs` drives the plugin through its own `register(ctx)` with a fake
 context (test/fixtures/hermes-room-driver.py) against a temp room: the batch against the OMP
-extension's, the records, the hop, idle-only delivery, the deny block, the tools, the key, and the
-gateway's per-session residents. It is skipped without Python 3.10 or later (`AGORA_TEST_PYTHON`
-names one). `test/resident-hermes.test.mjs` covers the launcher's hermes row and the cycle's measure.
+extension's, the records, the hop, idle-only delivery, the deny block, the tools, the key, the
+gateway's per-session residents, and the re-arm: a watch whose gateway died is resumed by the next
+load with its session, route and cursor and no second inherit; a dead client, another profile, a
+superseded folder and an unarmed watch are left alone and a fresh file is asked about again; an
+older plugin's file is placed through the run record; a refused injection reopens the session
+through faked gateway internals; a watch that cannot deliver withholds its heartbeat; an unload
+leaves its files armed for the next load. It is skipped without Python 3.10 or later
+(`AGORA_TEST_PYTHON` names one). `test/resident-hermes.test.mjs` covers the launcher's hermes row
+(the room file names its profile) and the cycle's measure.
 
 ## Uninstall
 

@@ -5,7 +5,7 @@
 // (AGORA_TEST_PYTHON names one).
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFile, execFileSync, spawn } from "node:child_process";
+import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -448,6 +448,234 @@ test("hermes plugin: in the gateway each session is its own resident, configured
       assert.equal(b.residents, 2);
       const denied = await p.ask({ op: "hook", name: "pre_tool_call", kw: { tool_name: "terminal", args: {}, session_id: HERMES_ID } });
       assert.equal(denied.results[0], null, "the ad hoc session denies nothing");
+    } finally { await p.close(); }
+  } finally { await r.cleanup(); }
+});
+
+/** A pid that ran and is gone: a child spawned and waited for. */
+function deadPid() {
+  const pid = spawnSync(process.execPath, ["-e", ""], { windowsHide: true }).pid;
+  assert.ok(pid, "a child ran");
+  return /** @type {number} */ (pid);
+}
+
+/**
+ * A resident's folder as `agora resident start` leaves it: the room file naming its key and its client's pid.
+ * @param {Awaited<ReturnType<typeof room>>} r @param {string} name @param {Record<string, unknown>} fields
+ */
+async function residentFolder(r, name, fields) {
+  const dir = path.join(r.dir, name);
+  await mkdir(dir, { recursive: true });
+  await writeFile(path.join(dir, ".agora-room.json"), JSON.stringify({ v: 1, rooms: "lab", actor: "probe/Flash", wake: "all",
+    env: { AGORA_STATE: r.state, AGORA_CONFIG: r.config }, ...fields }));
+  return dir;
+}
+
+test("hermes plugin: a plugin load in a restarted gateway resumes a live resident's watch: same agora key, Hermes session, route and cursor, no inherit, marked re-armed", { skip }, async () => {
+  const r = await room();
+  try {
+    const profileHome = path.join(r.dir, "hermes", "profiles", "shadow-x");
+    const route = `agent:shadow-x:local:dm:${HERMES_ID}`;
+    // the resident's client is this test process: alive throughout, as the real client outlives the gateway
+    const work = await residentFolder(r, "rearm-work", { session: "hermes-probe.rearm-k1", pid: process.pid, profile: "shadow-x",
+      env: { AGORA_STATE: r.state, AGORA_CONFIG: r.config, AGORA_LABEL: "probe.rearm" } });
+    // the first gateway: the watch armed at the session's first hook, delivered one line, then the gateway died
+    const old = await plugin(r);
+    let liveness;
+    try {
+      await old.ask({ op: "register", gateway: true, profile: "shadow-x", profileHome });
+      await old.ask({ op: "gateway", cwd: work, kw: { session_id: HERMES_ID }, route });
+      await old.ask({ op: "keyed", cwd: work, do: "arm" });
+      await old.ask({ op: "keyed", cwd: work, do: "tick" });
+      await r.say("before the restart");
+      const k = await old.ask({ op: "keyed", cwd: work, do: "tick" });
+      assert.deepEqual(texts(k.sent), ["before the restart"]);
+      liveness = /** @type {string} */ (k.liveness);
+    } finally { await old.close(); }
+    const before = JSON.parse(await readFile(liveness, "utf8"));
+    assert.equal(before.armed, true, "a gateway that dies runs no stop: its file still says armed");
+    assert.equal(before.cwd, work);
+    assert.equal(before.profile, "shadow-x");
+    assert.equal(before.profileHome, profileHome);
+    assert.equal(before.routeKey, route);
+    assert.equal(typeof before.hostPid, "number");
+    assert.equal(before.rearm, null);
+    // a cycle meanwhile named this session the predecessor of its successor: a re-arm must not consume that
+    const marker = await writeInheritMarker(r.state, "probe.rearm", { from: "hermes-probe.rearm-k1", by: "cycle" });
+    await r.say("while no gateway ran");
+
+    const next = await plugin(r);
+    try {
+      await next.ask({ op: "register", gateway: true, profile: "shadow-x", profileHome });
+      const pass = await next.ask({ op: "rearm" });
+      assert.deepEqual(pass.rearmed, ["hermes-probe.rearm-k1"], JSON.stringify(pass));
+      assert.equal(pass.residents, 1);
+      let k = await next.ask({ op: "keyed", cwd: work, do: "arm" });
+      assert.equal(k.state.hermesSession, HERMES_ID, "the same Hermes session");
+      assert.equal(k.state.routeKey, route, "and its route");
+      assert.equal(k.state.rearm.count, 1);
+      assert.equal(k.state.rearm.lastTickBefore, before.rooms[0].lastTick);
+      assert.equal(k.state.inherit?.reason ?? null, before.inherit?.reason ?? null, "the first arming's inheritance is kept, not run again");
+      const left = await readFile(path.join(r.state, "residents", "probe.rearm", "inherit.json"), "utf8").catch(() => null);
+      assert.ok(left && JSON.parse(left).at === marker.at, "the successor's marker is left for the successor");
+      k = await next.ask({ op: "keyed", cwd: work, do: "tick" });
+      assert.deepEqual(texts(k.sent), ["while no gateway ran"], "resumed at its own cursor: the outage's line, nothing twice");
+      assert.equal(k.sent[0].session_key, route);
+      // the session's next hook reaches the re-armed watch, not a second one
+      const h = await next.ask({ op: "gateway", cwd: work, kw: { session_id: HERMES_ID } });
+      assert.equal(h.residents, 1);
+      const after = JSON.parse(await readFile(liveness, "utf8"));
+      assert.equal(after.rearm.count, 1);
+      assert.equal(after.rearm.by, "plugin-load");
+      assert.ok(Date.parse(after.rooms[0].lastTick) > Date.parse(before.rooms[0].lastTick), "the watch ticks again");
+      // a second pass finds it watched here, and re-arms nothing twice
+      assert.deepEqual((await next.ask({ op: "rearm" })).rearmed, []);
+    } finally { await next.close(); }
+  } finally { await r.cleanup(); }
+});
+
+test("hermes plugin: re-arm ignores a dead client, another profile, a superseded folder and an unarmed watch, and waits on a fresh file", { skip }, async () => {
+  const r = await room();
+  try {
+    const mine = path.join(r.dir, "hermes", "profiles", "shadow-x");
+    const theirs = path.join(r.dir, "hermes", "profiles", "shadow-y");
+    const dir = path.join(r.home, ".agora", "hermes-room");
+    await mkdir(dir, { recursive: true });
+    const stale = new Date(Date.now() - 10 * 60000).toISOString();
+    const gone = deadPid();
+    /** @param {string} session @param {Record<string, unknown>} doc @param {Record<string, unknown>} [file] */
+    const status = async (session, doc, file = {}) => {
+      const cwd = await residentFolder(r, `w-${session}`, { session, pid: process.pid, ...file });
+      await writeFile(path.join(dir, `${session}.json`), JSON.stringify({ plugin: "agora-room", harness: "hermes", session, pid: process.pid,
+        watch: true, armed: true, intervalMs: 2000, rooms: [{ room: "lab", lastTick: stale }], updatedAt: stale, cwd, profile: "shadow-x",
+        profileHome: mine, hostPid: gone, ...doc }));
+    };
+    await status("k-live", {});
+    await status("k-dead-client", { pid: gone }, { pid: gone });
+    await status("k-other-profile", { profile: "shadow-y", profileHome: theirs });
+    await status("k-superseded", {}, { session: "k-successor" });
+    await status("k-stopped", { armed: false });
+    await status("k-fresh", { updatedAt: new Date().toISOString(), hostPid: process.pid });
+    const p = await plugin(r);
+    try {
+      await p.ask({ op: "register", gateway: true, profile: "shadow-x", profileHome: mine });
+      const pass = await p.ask({ op: "rearm" });
+      assert.deepEqual(pass.rearmed, ["k-live"]);
+      assert.deepEqual(pass.pending, ["k-fresh"], "a file another live process wrote moments ago may still be watched: asked again later");
+      const why = Object.fromEntries(pass.skipped.map((/** @type {any} */ s) => [s.file.replace(/\.json$/, ""), s.reason]));
+      assert.match(why["k-dead-client"], /not running/);
+      assert.match(why["k-other-profile"], /another profile/);
+      assert.match(why["k-superseded"], /superseded/);
+      assert.match(why["k-stopped"], /not armed/);
+      // the other profile's own load takes its own, and only that
+      const q = await plugin(r);
+      try {
+        await q.ask({ op: "register", gateway: true, profile: "shadow-y", profileHome: theirs });
+        assert.deepEqual((await q.ask({ op: "rearm" })).rearmed, ["k-other-profile"]);
+      } finally { await q.close(); }
+    } finally { await p.close(); }
+  } finally { await r.cleanup(); }
+});
+
+test("hermes plugin: a liveness file an older plugin wrote (no folder, no profile) is placed through the resident's run record", { skip }, async () => {
+  const r = await room();
+  try {
+    const mine = path.join(r.dir, "hermes", "profiles", "shadow-x");
+    const work = await residentFolder(r, "legacy-work", { session: "k-legacy", pid: process.pid });
+    const runDir = path.join(r.state, "residents", "probe.legacy");
+    await mkdir(runDir, { recursive: true });
+    await writeFile(path.join(runDir, "run.json"), JSON.stringify({ type: "resident-run", resident: "probe.legacy", harness: "hermes",
+      exec: { argv: ["hermes", "-p", "shadow-x", "chat", "--cli"], cwd: work, roomFile: path.join(work, ".agora-room.json") } }));
+    const dir = path.join(r.home, ".agora", "hermes-room");
+    await mkdir(dir, { recursive: true });
+    const stale = new Date(Date.now() - 10 * 60000).toISOString();
+    await writeFile(path.join(dir, "k-legacy.json"), JSON.stringify({ plugin: "agora-room", harness: "hermes", session: "k-legacy", hermesSession: HERMES_ID,
+      pid: process.pid, watch: true, armed: true, intervalMs: 2000, rooms: [{ room: "lab", lastTick: stale }], updatedAt: stale,
+      inherit: { position: "probe.legacy", inherited: true }, seen: { path: `${r.state.replace(/\\/g, "/")}/sessions/k-legacy/seen.jsonl` } }));
+    const p = await plugin(r);
+    try {
+      await p.ask({ op: "register", gateway: true, profile: "shadow-y", profileHome: path.join(r.dir, "hermes", "profiles", "shadow-y") });
+      assert.deepEqual((await p.ask({ op: "rearm" })).rearmed, [], "the run record's -p names another profile");
+      await p.ask({ op: "register", gateway: true, profile: "shadow-x", profileHome: mine });
+      const pass = await p.ask({ op: "rearm" });
+      assert.deepEqual(pass.rearmed, ["k-legacy"], JSON.stringify(pass));
+      const k = await p.ask({ op: "keyed", cwd: work, do: "flush" });
+      assert.equal(k.state.hermesSession, HERMES_ID);
+      const after = JSON.parse(await readFile(k.liveness, "utf8"));
+      assert.equal(after.cwd, work, "the file now records its folder");
+      assert.equal(after.profile, "shadow-x");
+    } finally { await p.close(); }
+  } finally { await r.cleanup(); }
+});
+
+test("hermes plugin: an injection the restarted gateway refuses reopens the resident's session once and is taken; a watch that still cannot deliver withholds its heartbeat", { skip }, async () => {
+  const r = await room();
+  try {
+    const profileHome = path.join(r.dir, "hermes", "profiles", "shadow-x");
+    const route = `agent:shadow-x:local:dm:${HERMES_ID}`;
+    const work = await residentFolder(r, "revive-work", { session: "hermes-probe.revive-k1", pid: process.pid, profile: "shadow-x" });
+    const p = await plugin(r);
+    try {
+      await p.ask({ op: "register", gateway: true, profile: "shadow-x", profileHome });
+      await p.ask({ op: "fake-gateway", profile: "shadow-x", profileHome, restorable: [HERMES_ID] });
+      await p.ask({ op: "gateway", cwd: work, kw: { session_id: HERMES_ID }, route });
+      await p.ask({ op: "keyed", cwd: work, do: "arm" });
+      await p.ask({ op: "keyed", cwd: work, do: "tick" });
+      await r.say("to a closed session");
+      let k = await p.ask({ op: "keyed", cwd: work, do: "tick" });
+      assert.deepEqual(k.sent.map((/** @type {any} */ s) => s.accepted), [false, true], "refused, reopened, then taken");
+      assert.deepEqual(texts(k.sent.filter((/** @type {any} */ s) => s.accepted)), ["to a closed session"]);
+      assert.deepEqual((await p.ask({ op: "authority" })).restored, [HERMES_ID]);
+      assert.equal(k.state.revive.reopened, 1);
+      assert.equal(k.state.delivering, true);
+      assert.equal(k.state.blockedSince, null);
+
+      // the gateway closes it again and can no longer reopen it: the watch reads on, and says it is deaf
+      await p.ask({ op: "authority", close: true, restorable: [] });
+      await p.ask({ op: "keyed", cwd: work, values: { defer_after_ms: 0, blocked_deaf_ms: 0, revive_every_ms: 0 } });
+      await r.say("nobody can take this");
+      k = await p.ask({ op: "keyed", cwd: work, do: "tick" });
+      assert.equal(k.state.queued, 1, "kept for when it can be handed over");
+      assert.equal(k.state.delivering, false);
+      assert.match(String(k.state.revive.lastError), /could not reopen/);
+      const status = JSON.parse(await readFile(k.liveness, "utf8"));
+      assert.equal(status.delivery.heartbeat, "withheld", "the liveness file says why the heartbeat stopped");
+      const activity = path.join(r.sessionDir("hermes-probe.revive-k1"), ACTIVITY_FILE);
+      const heartbeat = JSON.parse(await readFile(activity, "utf8")).updatedAt;
+      await new Promise((res) => setTimeout(res, 20));
+      await p.ask({ op: "hook", name: "post_tool_call", kw: { session_id: HERMES_ID } }); // dirties the record
+      await p.ask({ op: "keyed", cwd: work, do: "tick" });
+      assert.equal(JSON.parse(await readFile(activity, "utf8")).updatedAt, heartbeat, "no heartbeat while it cannot deliver: the cycle's deaf check fires");
+      // a turn (the client came back and spoke) proves the session is served again
+      await p.ask({ op: "hook", name: "pre_llm_call", kw: { session_id: HERMES_ID, model: "m" } });
+      k = await p.ask({ op: "keyed", cwd: work });
+      assert.equal(k.state.delivering, true);
+    } finally { await p.close(); }
+  } finally { await r.cleanup(); }
+});
+
+test("hermes plugin: an unload stops the copy's watches and leaves their files armed, so the next load resumes them", { skip }, async () => {
+  const r = await room();
+  try {
+    const profileHome = path.join(r.dir, "hermes", "profiles", "shadow-x");
+    const work = await residentFolder(r, "unload-work", { session: "hermes-probe.unload-k1", pid: process.pid, profile: "shadow-x" });
+    const p = await plugin(r);
+    try {
+      await p.ask({ op: "register", gateway: true, profile: "shadow-x", profileHome });
+      await p.ask({ op: "gateway", cwd: work, kw: { session_id: HERMES_ID }, route: `agent:shadow-x:local:dm:${HERMES_ID}` });
+      await p.ask({ op: "keyed", cwd: work, do: "arm" });
+      await p.ask({ op: "keyed", cwd: work, do: "tick" });
+      await p.ask({ op: "unload" });
+      const k = await p.ask({ op: "keyed", cwd: work });
+      assert.equal(k.state.stopped, true);
+      const doc = JSON.parse(await readFile(k.liveness, "utf8"));
+      assert.equal(doc.armed, true, "an unload is not a deliberate stop");
+      // the reloaded copy in the same process: the file is fresh and was written by this process, so it waits
+      await p.ask({ op: "register", gateway: true, profile: "shadow-x", profileHome });
+      let pass = await p.ask({ op: "rearm" });
+      assert.deepEqual(pass.pending, ["hermes-probe.unload-k1"]);
+      pass = await p.ask({ op: "rearm", now_ms: Date.now() + 60000 });
+      assert.deepEqual(pass.rearmed, ["hermes-probe.unload-k1"], "once the old copy's file goes stale, the new copy resumes it");
     } finally { await p.close(); }
   } finally { await r.cleanup(); }
 });

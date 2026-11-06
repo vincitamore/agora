@@ -18,6 +18,11 @@
   deny     AGORA_DENY names Hermes tools a pre_tool_call hook blocks; a block holds under --yolo.
   inherit  a session started at a position (AGORA_LABEL) runs `agora resident inherit <position>` before
            its first read, so a successor resumes its predecessor's cursors and never the room head.
+  re-arm   the watch runs in the Hermes gateway, so it dies with the gateway while the resident's client lives
+           on, idle, firing no hook. A plugin load in a gateway resumes, from the liveness files, each watch of
+           its own profile whose client still runs (rearm_candidates), under the same session and cursors, and
+           a refused injection into a local session the new gateway has not reopened revives it once (revive).
+           A watch that cannot deliver stops its activity heartbeat, so the cycle's deaf check still fires.
 
 Pure standard library. Hermes-independent: __init__.py binds it to a PluginContext; the tests drive it with
 a fake host. No token is read, stored or passed: every agora child gets an allowlisted environment.
@@ -64,6 +69,17 @@ DEFER_AFTER_MS = 30000
 # A turn whose end never reached the plugin (no post_llm_call, no on_session_end) and no hook event for this
 # long is taken as over. Long, because an injection into a running classic-CLI turn cancels it.
 BUSY_STALE_MS = 3600000
+# Injections refused this long with no turn and no injection taken since: the watch reads the room and cannot hand
+# it over, which is deaf. Its activity heartbeat stops, so the cycle's deaf check sees it as one.
+BLOCKED_DEAF_MS = 60000
+# At most one attempt to reopen the session in the gateway per this long (Resident.revive).
+REVIVE_EVERY_MS = 30000
+# A plugin load in a gateway waits this long for the gateway to come up, then re-arms for this long (retrying a
+# watch whose liveness file another live watch may still be writing).
+REARM_WAIT_S = 180.0
+REARM_WINDOW_S = 120.0
+REARM_RETRY_S = 2.0
+STATUS_DIR = ".agora/hermes-room"
 READ_LIMIT_DEFAULT = 20
 READ_LIMIT_MAX = 100
 SUBAGENT = "subagent"
@@ -730,6 +746,124 @@ def child_environment(base: Mapping[str, str], extra: Mapping[str, str]) -> dict
     return out
 
 
+# ---- re-arming after the host went away ----------------------------------------------------------------------------
+
+
+def home_of(env: Mapping[str, str]) -> str:
+    return (env.get("USERPROFILE") or env.get("HOME") or str(Path.home())).replace("\\", "/").rstrip("/")
+
+
+def same_path(a: str, b: str) -> bool:
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
+def profile_of_argv(argv: Any) -> str | None:
+    """The profile a hermes argv names (`-p <name>`, `--profile <name>`, `--profile=<name>`), as the launcher reads it."""
+    items = [str(a) for a in argv] if isinstance(argv, list) else []
+    for i, a in enumerate(items):
+        if a in ("-p", "--profile") and i + 1 < len(items) and items[i + 1]:
+            return items[i + 1]
+        if a.startswith("--profile=") and len(a) > len("--profile="):
+            return a[len("--profile="):]
+    return None
+
+
+def legacy_location(doc: Mapping[str, Any]) -> tuple[str | None, str | None]:
+    """(working folder, profile) of a liveness file an older plugin wrote, which records neither: read from the
+    resident's run record (<state>/residents/<position>/run.json, found through the file's seen path and position)."""
+    seen = doc.get("seen") if isinstance(doc.get("seen"), Mapping) else {}
+    inherit = doc.get("inherit") if isinstance(doc.get("inherit"), Mapping) else {}
+    seen_path, position = seen.get("path"), inherit.get("position")
+    if not isinstance(seen_path, str) or not isinstance(position, str) or not POSITION_RE.match(position):
+        return None, None
+    m = re.match(r"^(.*)/sessions/[^/]+/" + re.escape(SEEN_FILE) + r"$", seen_path.replace("\\", "/"))
+    if not m:
+        return None, None
+    try:
+        run = json.loads((Path(m.group(1)) / "residents" / position / "run.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None, None
+    ex = run.get("exec") if isinstance(run, dict) and run.get("harness") == HARNESS else None
+    if not isinstance(ex, dict):
+        return None, None
+    cwd = str(Path(ex["roomFile"]).parent) if isinstance(ex.get("roomFile"), str) and ex["roomFile"] else ex.get("cwd")
+    return (cwd if isinstance(cwd, str) and cwd else None), profile_of_argv(ex.get("argv"))
+
+
+def rearm_candidates(home: str, *, profile: str | None, profile_home: str | None, host_pid: int, now_ms: int,
+                     alive: Callable[[int], bool] = pid_alive) -> dict:
+    """The watches a plugin load in a gateway resumes, read from the liveness files under <home>/.agora/hermes-room.
+
+    `ready`: armed when last written, the resident's Hermes client still running, its folder's room file naming the
+    same session and client, this plugin's profile, and nothing else watching it (its liveness file is stale, or
+    the process that wrote it is gone). `pending`: all that but the file is fresh, so a watch may still be running
+    (in this process, before an unload stopped it, or elsewhere); the caller asks again. `skipped`: why not, by file.
+    """
+    out: dict[str, list[dict]] = {"ready": [], "pending": [], "skipped": []}
+    try:
+        files = sorted(p for p in Path(home, STATUS_DIR).glob("*.json") if not p.name.endswith(".queue.json"))
+    except OSError:
+        return out
+    for f in files:
+        def skip(why: str, _f: Path = f) -> None:
+            out["skipped"].append({"file": str(_f), "reason": why})
+
+        try:
+            doc = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            skip("not readable JSON")
+            continue
+        if not isinstance(doc, dict) or doc.get("plugin") != PLUGIN or doc.get("harness") != HARNESS:
+            skip("not an agora-room liveness file")
+            continue
+        session = doc.get("session")
+        if not isinstance(session, str) or not SESSION_RE.match(session) or f.stem != session:
+            skip("names no session key, or another than its file name")
+            continue
+        if doc.get("watch") is False or doc.get("armed") is not True:
+            skip("its watch was not armed when it was last written (stopped, refused or never armed)")
+            continue
+        owner = doc.get("pid")
+        if not isinstance(owner, int) or isinstance(owner, bool) or owner <= 0 or not alive(owner):
+            skip(f"its Hermes client (pid {owner}) is not running")
+            continue
+        cwd, prof, prof_home, legacy = doc.get("cwd"), doc.get("profile"), doc.get("profileHome"), False
+        if not isinstance(cwd, str) or not cwd:
+            cwd, named = legacy_location(doc)
+            prof, legacy = prof or named, True
+        if not cwd:
+            skip("records no working folder, and no run record names one")
+            continue
+        try:
+            room_file = json.loads((Path(cwd) / PROJECT_FILE).read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            skip(f"its folder {cwd} holds no readable {PROJECT_FILE}")
+            continue
+        if not isinstance(room_file, dict) or room_file.get("session") != session or room_file.get("pid") != owner:
+            skip(f"the {PROJECT_FILE} in {cwd} names another session or client: a later start superseded it")
+            continue
+        prof = prof or (room_file.get("profile") if isinstance(room_file.get("profile"), str) else None)
+        if isinstance(prof_home, str) and prof_home and profile_home:
+            mine = same_path(prof_home, profile_home)
+        elif isinstance(prof, str) and prof and profile:
+            mine = prof == profile
+        else:
+            skip("records no profile, so it cannot be told to be this profile's")
+            continue
+        if not mine:
+            skip(f"belongs to another profile ({prof_home or prof})")
+            continue
+        at = parse_iso(doc.get("updatedAt"))
+        interval = doc.get("intervalMs") if isinstance(doc.get("intervalMs"), int) and doc["intervalMs"] > 0 else DEFAULT_INTERVAL_MS
+        fresh = at is not None and now_ms - at <= 3 * interval + 10000
+        writer = doc.get("hostPid")
+        if fresh and isinstance(writer, int) and not isinstance(writer, bool) and writer != host_pid and not alive(writer):
+            fresh = False  # the process that ran it is gone, however recent its last write
+        row = {"file": str(f), "session": session, "cwd": cwd, "doc": doc, "legacy": legacy}
+        (out["pending"] if fresh else out["ready"]).append(row)
+    return out
+
+
 def run_cli(command: list[str], args: list[str], env: Mapping[str, str], timeout: float) -> tuple[int, str, str]:
     """Run the CLI with no shell; a child that does not finish in time is killed. (-1 = could not start, -2 = killed.)"""
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
@@ -786,6 +920,8 @@ class Resident:
 
     `inject(text, session_key) -> bool` hands text to the session as a turn (PluginContext.inject_message).
     `schedule(fn, ms)` runs fn later (a timer thread by default; the tests run it themselves).
+    `revive(route_key, hermes_session) -> (error | None, route_key | None)` reopens the session in the host when an
+    injection was refused because the host does not hold it (a gateway that restarted while the client sat idle).
     """
 
     def __init__(self, *, env: Mapping[str, str] | None = None, cwd: str | None = None, home: str | None = None,
@@ -793,7 +929,10 @@ class Resident:
                  run: Callable[[list[str], float], tuple[int, str, str]] | None = None,
                  schedule: Callable[[Callable[[], Any], int], Any] | None = None, pid: int | None = None,
                  poll_timeout: float = POLL_TIMEOUT_S, post_timeout: float = POST_TIMEOUT_S, defer_after_ms: int = DEFER_AFTER_MS,
-                 busy_stale_ms: int = BUSY_STALE_MS, set_process_env: bool = False) -> None:
+                 busy_stale_ms: int = BUSY_STALE_MS, set_process_env: bool = False,
+                 revive: Callable[[str | None, str | None], tuple[str | None, str | None]] | None = None,
+                 profile: str | None = None, profile_home: str | None = None, blocked_deaf_ms: int = BLOCKED_DEAF_MS,
+                 revive_every_ms: int = REVIVE_EVERY_MS) -> None:
         self.env = dict(os.environ if env is None else env)
         self.cwd = cwd or os.getcwd()
         self.home = (home or self.env.get("USERPROFILE") or self.env.get("HOME") or str(Path.home())).replace("\\", "/").rstrip("/")
@@ -860,6 +999,15 @@ class Resident:
         self.drain_pending = False
         self._thread: threading.Thread | None = None
         self.owner_refused: str | None = None
+        # where this watch runs and for whom: what a later plugin load needs to resume it (rearm_candidates)
+        self.host_pid = os.getpid()
+        self.profile, self.profile_home = profile, profile_home
+        self._revive = revive
+        self.blocked_deaf_ms, self.revive_every_ms = blocked_deaf_ms, revive_every_ms
+        self.rearmed: dict | None = None  # set when this watch resumed one a host that went away was running
+        self.blocked_since: int | None = None  # first refused injection since the last taken one or turn
+        self.revival: dict = {"attempts": 0, "reopened": 0, "lastError": None, "at": None}
+        self._revived_at: int | None = None
 
     # ---- paths ----
 
@@ -977,10 +1125,19 @@ class Resident:
         except OSError:
             pass  # the room is the record
 
+    def delivering(self) -> bool:
+        """False once injections have been refused for `blocked_deaf_ms` with no injection taken and no turn since: the
+        watch reads the room and cannot hand it over. Its heartbeat then stops, so the cycle sees a deaf session."""
+        return self.blocked_since is None or self.now() - self.blocked_since < self.blocked_deaf_ms
+
     def write_activity(self, force: bool) -> None:
         path = self.session_file(ACTIVITY_FILE)
         if not self.cfg["watch"] or not path or (not force and not self.activity.due()):
             return
+        if not self.delivering():
+            self.activity_state["withheld"] = True
+            return
+        self.activity_state.pop("withheld", None)
         try:
             write_text(path, json.dumps(self.activity.take(self.session or "", self.cfg["position"], self.cfg["intervalMs"]), indent=1) + "\n")
             self.activity_state["written"] += 1
@@ -1050,6 +1207,11 @@ class Resident:
             "activity": {"path": self.session_file(ACTIVITY_FILE), **self.activity_state},
             "usage": {"path": self.session_file(USAGE_FILE), **self.usage_state},
             "notices": self.notices[-10:], "updatedAt": iso(self.now()),
+            # what a plugin load in a restarted gateway needs to resume this watch (rearm_candidates)
+            "cwd": self.cwd, "profile": self.profile, "profileHome": self.profile_home, "routeKey": self.route_key,
+            "hostPid": self.host_pid, "rearm": self.rearmed,
+            "delivery": {"blockedSince": iso(self.blocked_since), "heartbeat": "withheld" if not self.delivering() else "on",
+                         "revive": dict(self.revival)},
         }
         try:
             write_text(path, json.dumps(doc, indent=1))
@@ -1092,6 +1254,25 @@ class Resident:
         s["cursor"] = None if not h or h.get("cursor") is None else str(h["cursor"])
         s["ready"] = True
 
+    def adopt(self, doc: Mapping[str, Any], by: str = "plugin-load") -> None:
+        """Resume the watch a host that went away was running for this session (its liveness file `doc`): the same
+        Hermes session and route, no inheritance (its cursors are its own already), marked so the file says so."""
+        with self.lock:
+            if isinstance(doc.get("hermesSession"), str) and doc["hermesSession"]:
+                self.hermes_session = doc["hermesSession"]
+            if isinstance(doc.get("routeKey"), str) and doc["routeKey"]:
+                self.route_key = doc["routeKey"]
+            if isinstance(doc.get("inherit"), dict):
+                self.inherited = dict(doc["inherit"])
+            raw_prior = doc.get("rearm")
+            prior: Mapping[str, Any] = raw_prior if isinstance(raw_prior, dict) else {}
+            ticks: list[str] = [s["lastTick"] for s in doc.get("rooms") or [] if isinstance(s, dict) and isinstance(s.get("lastTick"), str)]
+            self.rearmed = {"at": iso(self.now()), "by": by, "count": int(prior.get("count") or 0) + 1,
+                            "lastTickBefore": max(ticks) if ticks else None, "hostPidBefore": doc.get("hostPid"),
+                            "updatedAtBefore": doc.get("updatedAt")}
+            self.notices.append(f"re-armed at {self.rearmed['at']} ({by}): the process that ran this watch went away "
+                                f"(last tick {self.rearmed['lastTickBefore']}); same session, same cursors")
+
     def arm(self) -> bool:
         """Register, inherit, clear a stale wake record, then the starting point of each room. Once; True when armed."""
         with self.lock:
@@ -1105,7 +1286,10 @@ class Resident:
             self.armed = True
             self._resume()
         self.register()
-        self.inherit()
+        if self.rearmed is None:
+            # a resumed watch already took its place at its first arming; inheriting again would consume a marker a
+            # cycle wrote for this session's successor
+            self.inherit()
         self.clear_wake()  # a wake record left by a run that ended mid-turn belongs to no turn of this one
         if self.cfg["watch"]:
             for room in self.cfg["rooms"]:
@@ -1212,6 +1396,38 @@ class Resident:
     def in_transcript(self, m: Mapping[str, Any]) -> bool:
         return False  # Hermes gives a plugin no read of the transcript: a message that may have been sent is sent again
 
+    def _offer(self, text: str) -> tuple[bool, str | None]:
+        try:
+            ok = bool(self._inject and self._inject(text, self.route_key or self.hermes_session))
+            return ok, None if ok else "the host did not take the injection"
+        except Exception as error:  # noqa: BLE001
+            return False, f"inject_message raised: {error}"
+
+    def revive_once(self) -> bool:
+        """After a refused injection: ask the host to reopen this resident's session (a gateway that restarted holds
+        no local session until a client attaches, and an idle client does not). Only for a resident (a launched
+        client whose life is the session's), at most once per `revive_every_ms`. True when the host reopened it."""
+        if self._revive is None or not self.cfg["ownerPid"] or not (self.route_key or self.hermes_session):
+            return False
+        now = self.now()
+        if self._revived_at is not None and now - self._revived_at < self.revive_every_ms:
+            return False
+        self._revived_at = now
+        self.revival["attempts"] += 1
+        self.revival["at"] = iso(now)
+        try:
+            error, route = self._revive(self.route_key, self.hermes_session)
+        except Exception as e:  # noqa: BLE001 - a host seam that moved is a refusal, never a dead watch
+            error, route = f"revive raised: {type(e).__name__}: {e}", None
+        if error:
+            self.revival["lastError"] = str(error)[:300]
+            return False
+        self.revival["reopened"] += 1
+        self.revival["lastError"] = None
+        if route:
+            self.route_key = route
+        return True
+
     def inject(self, msgs: list[dict]) -> bool:
         fresh = [m for m in msgs if not (m.get("maybeSent") and self.in_transcript(m))]
         if not fresh:
@@ -1222,13 +1438,13 @@ class Resident:
         prior_hop = self.turn_hop
         # the wake record is written before the turn can start, so a post the model makes in it is one hop deeper
         self.record_wake(fresh)
-        try:
-            ok = bool(self._inject and self._inject(batch["text"], self.route_key or self.hermes_session))
-            why = None if ok else "the host did not take the injection"
-        except Exception as error:  # noqa: BLE001
-            ok, why = False, f"inject_message raised: {error}"
+        ok, why = self._offer(batch["text"])
+        if not ok and self.revive_once():
+            ok, why = self._offer(batch["text"])
         if not ok:
             self.refused += 1
+            if self.blocked_since is None:
+                self.blocked_since = self.now()
             self.note(f"{why}; {len(fresh)} message(s) stay queued")
             self.inflight = []
             if prior_hop is None:
@@ -1237,6 +1453,7 @@ class Resident:
                 self.turn_hop = prior_hop
             self.persist()
             return False
+        self.blocked_since = None
         for m in fresh:
             self.dq.mark_delivered(m)
         self.inflight = []
@@ -1316,6 +1533,15 @@ class Resident:
         self.armed = False
         self.flush()
 
+    def halt(self) -> None:
+        """Stop this watch for a plugin unload: the thread ends, the queue is kept, and the liveness file still says
+        armed, so the next load of the plugin (a reload, a restarted gateway) resumes it as it would after a crash."""
+        with self.lock:
+            if self.stopped:
+                return
+            self.stopped = True
+        self.persist()
+
     # ---- the turn, from Hermes's hooks ----
 
     def turn_start(self, **kw: Any) -> None:
@@ -1328,6 +1554,7 @@ class Resident:
             self.busy = True
             self.turn_open = True
             self.awaiting = None
+            self.blocked_since = None  # a turn: the host serves this session again
             self.last_event = self.now()
             self.turn.update({"turn": "busy", "turnEnded": False, "at": iso(self.now()), "turnStartedAt": iso(self.now()), "toolCalls": None})
             started = self.activity.turn_start()
@@ -1510,4 +1737,7 @@ class Resident:
                 "inherit": self.inherited, "lastError": self.last_error, "errors": self.errors, "notices": self.notices,
                 "turn": dict(self.turn), "turnHop": self.turn_hop, "ownerRefused": self.owner_refused,
                 "rooms": {r: dict(s) for r, s in self.rooms.items()}, "succeedKick": {"kickedFor": self.kick.kicked_for, "notice": self.kick.notice},
-                "ceiling": {"ceiling": self.cfg["ceiling"], "asked": self.ceiling_asked}}
+                "ceiling": {"ceiling": self.cfg["ceiling"], "asked": self.ceiling_asked},
+                "rearm": self.rearmed, "blockedSince": self.blocked_since, "delivering": self.delivering(),
+                "revive": dict(self.revival), "routeKey": self.route_key, "cwd": self.cwd, "profile": self.profile,
+                "stopped": self.stopped}
