@@ -189,6 +189,30 @@ class Sessions:
         return "dir:" + os.path.normcase(os.path.abspath(cwd))
 
     @staticmethod
+    def folder_ident(cwd: str) -> tuple[str | None, int | None]:
+        """(session, pid) the folder's .agora-room.json names now; (None, None) when it names neither."""
+        try:
+            f = json.loads((Path(cwd) / PROJECT_FILE).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None, None
+        if not isinstance(f, dict):
+            return None, None
+        session = f.get("session")
+        pid = f.get("pid")
+        return (str(session) if session else None,
+                pid if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 else None)
+
+    def stale(self, r: Resident, cwd: str) -> bool:
+        """A folder's watch that must not be reused: it stopped (its owner exited), or the folder now configures another
+        session or owner. One gateway hosts every resident start of a profile (Hermes >= 0.23), so a restarted resident
+        meets the watch its predecessor left: reusing it kept the dead session's key and owner pid, and the new session
+        was never watched (2026-11-06, both shadow arms deaf after a restart)."""
+        if r.stopped:
+            return True
+        session, pid = self.folder_ident(cwd)
+        return (session is not None and session != r.cfg["session"]) or (pid is not None and pid != r.cfg["ownerPid"])
+
+    @staticmethod
     def gateway_env() -> dict:
         # the gateway's own AGORA_* names belong to whoever started it, never to a session
         return {k: v for k, v in os.environ.items() if not k.upper().startswith("AGORA_")}
@@ -207,11 +231,16 @@ class Sessions:
             key = self.dir_key(cwd)
         else:
             key = "session:" + (route or sid or "unknown")
+        old = None
         with self.lock:
             r = self.by_key.get(key)
+            if r is not None and key.startswith("dir:") and self.stale(r, cwd):
+                old, r = r, None
             if r is None:
                 r = self.make(env=self.gateway_env(), cwd=cwd, set_process_env=False)
                 self.by_key[key] = r
+        if old is not None:
+            old.stop()
         if route:
             r.route_key = route
         return r
@@ -222,11 +251,16 @@ class Sessions:
         """Resume one ready candidate of room.rearm_candidates as this process's watch for its folder. None when this
         process already watches that folder, or the folder no longer configures that session."""
         key = self.dir_key(row["cwd"])
+        old = None
         with self.lock:
             if self.unloaded:
                 return None
             r = self.by_key.get(key)
-            if r is not None and (r.armed or r._thread is not None or r.stopped):
+            if r is not None and self.stale(r, row["cwd"]):
+                old, r = r, None
+                if not old.stopped:
+                    old.stop()  # its own lock, never this one: safe to hold self.lock
+            if r is not None and (r.armed or r._thread is not None):
                 return None
             if r is None:
                 r = self.make(env=self.gateway_env(), cwd=row["cwd"], set_process_env=False)

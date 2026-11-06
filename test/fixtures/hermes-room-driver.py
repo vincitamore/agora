@@ -184,6 +184,8 @@ def answer(req: dict) -> dict:
             run_timers()
         elif do == "flush":
             r.flush()
+        elif do == "stop":
+            r.stop()
         return {"state": r.state(), "sent": ctx.sent, "liveness": r.liveness_path}
     if op == "set":
         for k, v in (req.get("values") or {}).items():

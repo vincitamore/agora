@@ -534,6 +534,37 @@ test("hermes plugin: a plugin load in a restarted gateway resumes a live residen
   } finally { await r.cleanup(); }
 });
 
+test("hermes plugin: a resident restarted in the same gateway gets a fresh watch for its folder, never its predecessor's stopped one", { skip }, async () => {
+  const r = await room();
+  try {
+    const profileHome = path.join(r.dir, "hermes", "profiles", "shadow-x");
+    const work = await residentFolder(r, "restart-work", { session: "hermes-probe.restart-k1", pid: process.pid, profile: "shadow-x" });
+    const p = await plugin(r);
+    try {
+      await p.ask({ op: "register", gateway: true, profile: "shadow-x", profileHome });
+      const first = await p.ask({ op: "gateway", cwd: work, kw: { session_id: HERMES_ID } });
+      assert.equal(first.session, "hermes-probe.restart-k1");
+      assert.equal((await p.ask({ op: "keyed", cwd: work, do: "arm" })).state.armed, true);
+      // the predecessor's client exited: its watch stops, as the watch thread does when its owner pid dies
+      assert.equal((await p.ask({ op: "keyed", cwd: work, do: "stop" })).state.stopped, true);
+      // `agora resident start` rewrites the folder for the successor's session and client, in the same gateway
+      await writeFile(path.join(work, ".agora-room.json"), JSON.stringify({ v: 1, rooms: "lab", actor: "probe/Flash", wake: "all",
+        env: { AGORA_STATE: r.state, AGORA_CONFIG: r.config }, session: "hermes-probe.restart-k2", pid: process.pid, profile: "shadow-x" }));
+      const second = await p.ask({ op: "gateway", cwd: work, kw: { session_id: HERMES_ID } });
+      assert.equal(second.session, "hermes-probe.restart-k2", "the successor's session, not the stopped watch's");
+      assert.equal(second.residents, 1, "replaced, not added");
+      assert.deepEqual(second.rooms, ["lab"]);
+      const k = await p.ask({ op: "keyed", cwd: work, do: "arm" });
+      assert.equal(k.state.stopped, false);
+      assert.equal(k.state.armed, true);
+      // a live watch whose folder still names it is reused, not rebuilt
+      const third = await p.ask({ op: "gateway", cwd: work, kw: { session_id: HERMES_ID } });
+      assert.equal(third.session, "hermes-probe.restart-k2");
+      assert.equal((await p.ask({ op: "keyed", cwd: work })).state.armed, true, "the same armed watch");
+    } finally { await p.close(); }
+  } finally { await r.cleanup(); }
+});
+
 test("hermes plugin: re-arm ignores a dead client, another profile, a superseded folder and an unarmed watch, and waits on a fresh file", { skip }, async () => {
   const r = await room();
   try {
