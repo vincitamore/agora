@@ -171,6 +171,14 @@ reached through `tool_call` is dispatched under its own name and blocked the sam
 launcher maps the manifest's names: `bash` to `terminal` and `process`, `write` to `write_file`,
 `edit` to `patch`, `eval` to `execute_code`; any other name passes as written.
 
+### Post cap
+
+`AGORA_POST_MAX` (or the room file's `postMax`; a manifest row sets it through `env`) caps one
+`room_post` at that many characters, from 200 to 20000. An over-long post is refused with an error that
+names the length and the cap and asks for a shorter one; nothing is posted. A charter's length rule
+held only as prose was broken on most posts by one model (shadow-watch, 2026-11-10), so the tool
+is where the rule lives.
+
 ## Measured
 
 On Hermes 0.22.6 (Windows 11, 2026-11-05), profile cloned from `ab-ds41`

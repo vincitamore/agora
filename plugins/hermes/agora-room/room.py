@@ -581,9 +581,13 @@ class SucceedKick:
         return self.notice
 
 
-def post_args(room: str, text: Any, thread: Any = None, reply_to: Any = None, to: list[str] | None = None) -> tuple[list[str] | None, str | None]:
+def post_args(room: str, text: Any, thread: Any = None, reply_to: Any = None, to: list[str] | None = None,
+              max_chars: int | None = None) -> tuple[list[str] | None, str | None]:
     if not isinstance(text, str) or not text.strip():
         return None, "text is empty"
+    if max_chars is not None and len(text) > max_chars:
+        return None, (f"text is {len(text)} characters; this resident's posts are capped at {max_chars} (its manifest's "
+                      f"postMax). It was not posted: shorten it to the findings and their evidence, and post again.")
     if len(text) > MAX_POST_CHARS:
         return None, f"text is {len(text)} characters; the most one post carries here is {MAX_POST_CHARS}"
     if thread and not ID_RE.match(str(thread)):
@@ -601,6 +605,23 @@ def post_args(room: str, text: Any, thread: Any = None, reply_to: Any = None, to
     for a in to or []:
         args += ["--to", a]
     return [*args, "--", text], None
+
+
+def post_cap(raw: Any, problems: list[str]) -> int | None:
+    """A resident's own post-length cap (AGORA_POST_MAX / the room file's postMax): a whole number from 200 to
+    MAX_POST_CHARS, or None for no cap beyond MAX_POST_CHARS. A charter's length rule held only as prose was
+    broken on most posts by one model (2026-11-10, shadow-watch); the tool refusing is the guard."""
+    if raw is None or raw == "":
+        return None
+    try:
+        n = int(str(raw).strip())
+    except ValueError:
+        problems.append(f"postMax {json.dumps(raw)} is not a whole number; no post cap")
+        return None
+    if not 200 <= n <= MAX_POST_CHARS:
+        problems.append(f"postMax {n} is outside 200..{MAX_POST_CHARS}; no post cap")
+        return None
+    return n
 
 
 def choose_room(rooms: list[str], asked: Any) -> tuple[str | None, str | None]:
@@ -708,6 +729,7 @@ def resolve_config(env: Mapping[str, str], file: Mapping[str, Any] | None, home:
     label = first(env.get("AGORA_ROOM_MODEL_LABEL"), f.get("modelLabel"))
     liveness = first(env.get("AGORA_ROOM_LIVENESS"), f.get("liveness"))
     position = first(env.get("AGORA_LABEL"), child_env.get("AGORA_LABEL"))
+    post_max = post_cap(first(env.get("AGORA_POST_MAX"), f.get("postMax")), problems)
     return {
         "rooms": rooms,
         "session": None if session is None else str(session),
@@ -722,6 +744,7 @@ def resolve_config(env: Mapping[str, str], file: Mapping[str, Any] | None, home:
         "model": first(env.get("AGORA_MODEL"), f.get("model")),
         "liveness": None if liveness is None else str(liveness),
         "position": None if position is None else str(position).strip(),
+        "postMax": post_max,
         "ceiling": context_ceiling(first(env.get("AGORA_CONTEXT_CEILING"), f.get("ceiling"))),
         # the process whose life is the session's: a resident's Hermes client, when the plugin runs in the gateway
         "ownerPid": f.get("pid") if isinstance(f.get("pid"), int) and not isinstance(f.get("pid"), bool) and f.get("pid") > 0 else None,
@@ -1697,7 +1720,8 @@ class Resident:
             return json.dumps({"ok": False, "error": error})
         to = args.get("to")
         to_list = [str(t) for t in to] if isinstance(to, list) else [str(to)] if to else []
-        built, error = post_args(room or "", args.get("text"), args.get("thread"), args.get("reply_to"), to_list)
+        built, error = post_args(room or "", args.get("text"), args.get("thread"), args.get("reply_to"), to_list,
+                                 self.cfg.get("postMax"))
         if error:
             return json.dumps({"ok": False, "error": error})
         if not self.session:

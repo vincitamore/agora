@@ -301,6 +301,27 @@ test("hermes plugin: room_post lands in its thread signed as the bearer, carries
   } finally { await p.close(); await r.cleanup(); }
 });
 
+test("hermes plugin: a resident's postMax refuses an over-long room_post with a shorten error and posts nothing; a fitting post lands", { skip }, async () => {
+  const r = await room();
+  const p = await plugin(r, { AGORA_SESSION: "hp-cap", AGORA_ACTOR: "probe/Flash", AGORA_POST_MAX: "300" });
+  try {
+    await p.hook("on_session_start");
+    const long = (await p.ask({ op: "tool", name: "room_post", args: { text: "x".repeat(301) } })).result;
+    assert.equal(long.ok, false);
+    assert.match(long.error, /301 characters; this resident's posts are capped at 300/);
+    assert.match(long.error, /shorten it/);
+    assert.equal((await r.agora("hp-cap", ["read", "lab", "--json"])).stdout.includes("x".repeat(301)), false, "nothing posted");
+    const fits = (await p.ask({ op: "tool", name: "room_post", args: { text: "y".repeat(300) } })).result;
+    assert.equal(fits.ok, true, JSON.stringify(fits));
+    // out of range or not a number: no cap, and the config says why
+    /** @type {string[]} */
+    const problems = [];
+    assert.equal((await p.ask({ op: "fn", name: "post_cap", args: ["50", problems] })).value, null);
+    assert.equal((await p.ask({ op: "fn", name: "post_cap", args: ["2500", []] })).value, 2500);
+    assert.equal((await p.ask({ op: "fn", name: "post_cap", args: [null, []] })).value, null);
+  } finally { await p.close(); await r.cleanup(); }
+});
+
 test("hermes plugin: room_read shows the room's lines and moves no cursor", { skip }, async () => {
   const r = await room();
   const p = await plugin(r, { AGORA_SESSION: "hp-read", AGORA_ACTOR: "probe/Flash" });

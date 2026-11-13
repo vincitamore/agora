@@ -108,6 +108,7 @@ test("plan: a hermes row must name its profile; the manifest may not set what th
   for (const name of ["AGORA_DENY", "HERMES_EPHEMERAL_SYSTEM_PROMPT", "HERMES_ENABLE_PROJECT_PLUGINS", "AGORA_SESSION"]) assert.ok(RESERVED_ENV.includes(name), name);
   assert.deepEqual(hermesRoomFile({ AGORA_ROOM: "lab", AGORA_SESSION: "k", AGORA_DENY: "terminal", AGORA_ROOM_CMD: JSON.stringify(["node", "a.mjs"]), AGORA_STATE: "/s", AGORA_LABEL: "x", AGORA_CONTEXT_CEILING: "180000", PATH: "/bin" }),
     { v: 1, by: "agora resident start", rooms: "lab", session: "k", deny: "terminal", command: ["node", "a.mjs"], ceiling: 180000, env: { AGORA_STATE: "/s", AGORA_LABEL: "x" } });
+  assert.equal(hermesRoomFile({ AGORA_POST_MAX: "2500" }).postMax, "2500", "a row's env AGORA_POST_MAX rides the room file as postMax");
   assert.throws(() => validateManifest({ version: 1, residents: { x: { role: "r", harness: "hermes", model: "m", rooms: ["lab"], profile: "P.md", host: "none", env: { HERMES_EPHEMERAL_SYSTEM_PROMPT: "x" } } } }, s.manifestFile), /is set by agora resident start itself/);
   assert.equal(hermesProfileOf(["hermes", "--profile=ab-opus", "chat"]), "ab-opus");
   assert.equal(hermesProfileOf(["hermes", "--profile", "ab-opus"]), "ab-opus");

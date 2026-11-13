@@ -119,7 +119,8 @@ export const HERMES_ROOM_FILE = ".agora-room.json";
 /** The plan's AGORA_* names that are fields of the room file; every other AGORA_* name rides its `env`. */
 const ROOM_FILE_FIELDS = Object.freeze({ AGORA_ROOM: "rooms", AGORA_SESSION: "session", AGORA_ROOM_WAKE: "wake", AGORA_ACTOR: "actor", AGORA_ROLE: "role",
   AGORA_MODEL: "model", AGORA_DENY: "deny", AGORA_ROOM_CMD: "command", AGORA_CONTEXT_CEILING: "ceiling", AGORA_ROOM_MODEL_LABEL: "modelLabel",
-  AGORA_ROOM_PREAMBLE: "preamble", AGORA_ROOM_WATCH: "watch", AGORA_ROOM_INTERVAL_MS: "intervalMs", AGORA_ROOM_LIVENESS: "liveness" });
+  AGORA_ROOM_PREAMBLE: "preamble", AGORA_ROOM_WATCH: "watch", AGORA_ROOM_INTERVAL_MS: "intervalMs", AGORA_ROOM_LIVENESS: "liveness",
+  AGORA_POST_MAX: "postMax" });
 
 /**
  * The room file of a hermes plan: the plan's AGORA_* environment as the plugin's per-session settings
