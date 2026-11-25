@@ -5,7 +5,7 @@ The checkout carries six gzip capsules (40,687,216 bytes combined), their hashes
 the pinned upstream revision and build flags, and the BSD-3-Clause license.
 Node expands only the selected target into Agora state. No Go, OpenSSH, package
 download or global Tailcat installation is required.
-Agora's Node 22+ runtime is the native-transfer execution environment. Invoking these
+Agora's Node 22.13+ runtime is the native-transfer execution environment. Invoking these
 verbs through Bun delegates to Node automatically; it does not substitute Bun's HTTP/IPC behavior.
 
 On each participating seat:

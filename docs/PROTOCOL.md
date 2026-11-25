@@ -163,9 +163,9 @@ file ready; a lost response must reconcile the original operation; a redacted
 search/read response must contain no nested original body. Syntax-only tests do
 not replace those consumer or physical cross-seat acceptance tests.
 
-## Wave 1: native consumer boundaries
+## Native consumer boundaries
 
-The new modules export named JSDoc DTO types as well as validators. Consumer
+The consumer boundary modules export named JSDoc DTO types as well as validators. Consumer
 imports stay within `src/protocol/`, never back through a service implementation.
 
 | Module | Primary consumer exports |
@@ -195,8 +195,8 @@ A legacy attachment remains without a synthesized lifetime.
    remains a distinct path, never silently upgraded.
 3. Validate request kind and scope before room open: open can itself scan,
    recover or acquire ownership. Checking only before append is too late.
-4. P1 rechecks current route/grant authority at serialized effect commit, after
-   buffering. P2 supplies live owned resources, not authority minted by a DTO.
+4. The room store rechecks current route/grant authority at serialized effect commit, after
+   buffering. The route/resource owner supplies live owned resources, not authority minted by a DTO.
 5. Validate response and expected host/room/epoch before ledger, archive,
    subscription or cursor mutation.
 
@@ -268,7 +268,7 @@ The producer must return **every** committed message event in that scanned
 interval, without wake/own-post/author filtering. `limit` bounds scanned event
 records, not returned messages. An empty advancing page is valid only when the
 scanned interval contains no message event. These completeness obligations are
-tested against P1's typed store truth, not proved by adding another count from
+tested against the native room store's typed truth, not proved by adding another count from
 the same host. A bounded tail read reports the actual predecessor of its tail,
 never coverage of the omitted prefix.
 
@@ -303,7 +303,7 @@ must reject replay before updating its accepted timing; the pure evaluator does
 not store renewal history. Sender `renewedAt` is descriptive, never an expiry
 clock. The accepted renewal must match; disconnect or elapsed time of 45000 ms
 returns `dark`. Freshness and route presence never admit a wake or prove process
-death. P4 selects an authenticated recipient-bound subscriber before a freshly
+death. The wake router selects an authenticated recipient-bound subscriber before a freshly
 admitted pane; unknown handoff reconciles the same delivery ID, not an independent
 second write. Those mechanisms remain consumer work.
 
@@ -311,7 +311,7 @@ second write. Those mechanisms remain consumer work.
 `validateDeliveryRange`, `assertDeliveredCoverageContext`, `coversDeliveredRange`.
 The record is `{recipient:RegistrationRef,service:ServiceRef,
 coverage:NativeReadCoverage,progressId,admissionId}`. It composes the **unchanged**
-native scan grammar but asserts a different event: P1/P4's authenticated progress
+native scan grammar but asserts a different event: the store/wake progress
 owner handed that contiguous interval to this recipient under this admission.
 A scan alone, saved/manual cursor, or `gapFree:true` flag is not this record;
 validation cannot prove the asserted event. No read-to-delivered conversion is

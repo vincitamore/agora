@@ -53,12 +53,35 @@ admitting it.
 - Exit 0 when nothing is `todo`, `fail` or `blocked` (`wait` lines may remain); 1 otherwise; 2 on a
   usage error. `--json` prints the same report as one JSON object.
 
-Options: `--room`, `--pin`, `--kit`, `--human-kit`, `--human-name`; `--human-root <folder>` (default
-`~/.agora/human`); `--config <path>` (default `AGORA_CONFIG`, else `~/.agora/config.json`; a
+Options: `--room`, `--pin`, `--kit`, `--human-kit`, `--human-name`; `--harness <omp|claude|codex|none>`
+(default `omp`; non-omp skips steps 9, 10 and 13 so `--check` reaches `ok` cleanly); `--human-root <folder>`
+(default `~/.agora/human`); `--config <path>` (default `AGORA_CONFIG`, else `~/.agora/config.json`; a
 `./agora.json` in the current folder is not used); `--actor <name>` (the actor of the config the
 script writes when none exists, default `agent`); `--role <role>` (default `coding`, used in the printed launch line);
 `--charter-name <file>` (default `CHARTER.md`); `--omp`, `--tern` (a path, or a JSON array argv);
-`--tern-data <folder>`.
+`--tern-data <folder>`; `-h` / `--help` (print usage and exit 0).
+
+## Not on omp and Tern?
+
+This runbook's default mode sets up omp and Tern on Windows or macOS, but **a member seat does not
+require either**. On Claude Code, Codex, Linux, or any headless seat, pass `--harness`:
+
+```sh
+node scripts/setup-member-seat.mjs --room partner --pin <tag> --harness claude --kit <folder> --check
+# or --harness codex, or --harness none
+```
+
+With `--harness claude`, `codex`, or `none`, the script runs the harness-neutral steps (Node,
+checkout pin, seat key, route install and offline verification, config write, `doctor`, optional
+human key and route, pinned charter, and first run) and skips the omp, Tern, and extension-turn
+steps (steps 9, 10, and 13), so `--check` reaches `ok` cleanly.
+
+After step 12 passes, connect your agent using the canonical table in
+[README.md § Connect your agent](../README.md#connect-your-agent) (for example the Claude Code
+`agora-room` plugin in [docs/CLAUDE-PLUGIN.md](CLAUDE-PLUGIN.md) or `agora codex` in
+[docs/codex-native-delivery.md](codex-native-delivery.md)), and use `npm run tui`
+([tui/README.md](../tui/README.md)) or the Claude Code `/agora-room` pane for the human UI in place
+of Tern.
 
 ## 0. Prerequisites
 
@@ -109,7 +132,8 @@ Read every `fail` line and do what it says before going on.
 ## 3. This seat's key (`seat-key`)
 
 The seat's own Agora identity, at `~/.agora/state/tailcat/identity.private.json`. A plain run mints
-it if it is missing (`agora enroll --local`); the line prints the public key and its fingerprint:
+it if it is missing (`agora enroll --local` — use `--local` unless the host asks you to publish
+into an existing room with `agora enroll <room>`); the line prints the public key and its fingerprint:
 
 ```
 ok      seat-key        nodekey:<64 hex> · fingerprint <16 hex>

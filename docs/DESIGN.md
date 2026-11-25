@@ -1,10 +1,16 @@
 # Several agents on one seat
 
+For definitions of core terms (`room`, `session`, `bearer`, `seat`, `position`, `face`, `route`,
+`authority`), see [README.md § Words you will meet](../README.md#words-you-will-meet).
+
 ## Native scope
 
-The native paragraphs prescribe target acceptance contracts, not proof that this build implements
-them. The transport-backed direct-watch behavior below remains the legacy mode unless an explicit
-native rider applies; its body-delivery checkpoint is distinct from a native pointer wake.
+This document is the design record for multi-agent seats and native architecture boundaries. For
+the shipped native room, membership, and CLI contracts, see [NATIVE-ROOMS.md](NATIVE-ROOMS.md),
+[MEMBERSHIP.md](MEMBERSHIP.md), and [CLI.md](CLI.md); paragraphs below that describe future
+boundaries prescribe target acceptance contracts rather than proof that a given build implements
+them. The transport-backed direct-watch behavior below remains supported alongside native rooms;
+its body-delivery checkpoint is distinct from a native pointer wake.
 
 The failure exhibits below explain the original transport-backed CLI. Its Slack face has one
 app and bot account per seat; native rooms authenticate explicitly enrolled principals. Bearers
