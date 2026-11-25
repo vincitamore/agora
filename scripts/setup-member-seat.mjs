@@ -30,11 +30,14 @@
  *   --config <path>         this seat's agora config (default AGORA_CONFIG, else ~/.agora/config.json)
  *   --actor <name>          actor.name of the config written when none exists (default "agent")
  *   --role <role>           the role of the first omp session, for the printed launch line (default coding)
+ *   --harness <name>        agent harness on this seat: omp (default), claude, codex, or none
+ *                           (non-omp skips the omp, Tern, and extension-turn steps so --check reaches ok)
  *   --charter-name <name>   the file name of the charter the host pinned in the room (default CHARTER.md)
  *   --omp <path|json argv>  how to run omp (default: omp on PATH)
  *   --tern <path|json argv> how to run tern (default: tern on PATH)
  *   --tern-data <folder>    the agora plugin's data folder in Tern (default: derived, see the guide)
  *   --json                  one JSON report on stdout
+ *   -h, --help              print this help and exit 0
  */
 
 import { spawn } from "node:child_process";
@@ -79,7 +82,7 @@ const PROBE_ALIAS = "member-seat-setup-probe";
  * @typedef {{
  *   apply: boolean, room: string, pin?: string, kit?: string, humanKit?: string, humanName?: string,
  *   humanRoot: string, humanState: string, humanConfig: string, configPath: string, configIsDefault: boolean,
- *   stateRoot: string, stateFromEnv?: string, actor: string, role: string, charterName: string,
+ *   stateRoot: string, stateFromEnv?: string, actor: string, role: string, harness: "omp" | "claude" | "codex" | "none", charterName: string,
  *   omp?: string[], tern?: string[], ternData?: string, setupDir: string, deps: Deps,
  * }} Ctx
  */
@@ -837,6 +840,37 @@ export function ternDataDir(c, pluginDir) {
 
 // ---------------------------------------------------------------- the run
 
+const HARNESSES = new Set(["omp", "claude", "codex", "none"]);
+const OMP_ONLY_STEPS = new Set(["omp", "tern", "extension-turn"]);
+
+export function helpText() {
+  return [
+    "usage: node scripts/setup-member-seat.mjs --room <alias> --pin <tag> [options]",
+    "",
+    "Set up a member seat joining another seat's native room (docs/MEMBER-SEAT.md).",
+    "Run with --check first to inspect every step without modifying files.",
+    "",
+    "Options:",
+    "  --room <alias>          room alias on this seat (required)",
+    "  --pin <tag|sha>         agora release both seats run (required for a green run)",
+    "  --check                 report each step's state without writing files",
+    "  --harness <name>        omp (default), claude, codex, or none (non-omp skips omp/Tern steps)",
+    "  --kit <folder>          unzipped route kit the host sent for this seat's key",
+    "  --human-kit <folder>    unzipped route kit the host sent for the human's key",
+    "  --human-name <name>     name the human route posts under (checked against that kit)",
+    "  --human-root <folder>   human's own agora folder (default ~/.agora/human)",
+    "  --config <path>         this seat's agora config (default AGORA_CONFIG, else ~/.agora/config.json)",
+    "  --actor <name>          actor.name written when creating a new config (default \"agent\")",
+    "  --role <role>           role of the first omp session (default \"coding\")",
+    "  --charter-name <name>   charter attachment filename (default CHARTER.md)",
+    "  --omp <path|json argv>  how to run omp (default: omp on PATH)",
+    "  --tern <path|json argv> how to run tern (default: tern on PATH)",
+    "  --tern-data <folder>    agora plugin data folder in Tern",
+    "  --json                  print one JSON report on stdout",
+    "  -h, --help              show this help and exit 0",
+  ].join("\n");
+}
+
 /** @param {string} message */
 function usage(message) { return Object.assign(new Error(message), { exitCode: 2 }); }
 
@@ -851,6 +885,7 @@ export async function setup(argv, overrides = {}) {
   const { values } = parseArgs({
     args: argv,
     options: {
+      help: { type: "boolean", short: "h", default: false },
       check: { type: "boolean", default: false },
       json: { type: "boolean", default: false },
       room: { type: "string" },
@@ -862,6 +897,7 @@ export async function setup(argv, overrides = {}) {
       config: { type: "string" },
       actor: { type: "string" },
       role: { type: "string" },
+      harness: { type: "string" },
       "charter-name": { type: "string" },
       omp: { type: "string" },
       tern: { type: "string" },
@@ -869,6 +905,9 @@ export async function setup(argv, overrides = {}) {
     },
     strict: true,
   });
+  const harnessRaw = (values.harness ?? "omp").trim().toLowerCase();
+  if (!HARNESSES.has(harnessRaw)) throw usage(`--harness must be one of omp, claude, codex, none (got ${JSON.stringify(values.harness)})`);
+  const harness = /** @type {"omp" | "claude" | "codex" | "none"} */ (harnessRaw);
   const env = overrides.env ?? process.env;
   /** @type {Deps} */
   const deps = { home: os.homedir(), env, exec: execNoShell, agora: defaultAgora(env), now: () => new Date(), ...overrides };
@@ -890,7 +929,7 @@ export async function setup(argv, overrides = {}) {
     humanRoot, humanState: path.join(humanRoot, "state"), humanConfig: path.join(humanRoot, "config.json"),
     configPath, configIsDefault: samePath(configPath, path.join(home, ".agora", "config.json")),
     stateRoot, ...(stateFromEnv ? { stateFromEnv } : {}),
-    actor: values.actor ?? "agent", role: values.role ?? "coding", charterName: values["charter-name"] ?? "CHARTER.md",
+    actor: values.actor ?? "agent", role: values.role ?? "coding", harness, charterName: values["charter-name"] ?? "CHARTER.md",
     omp: argvOption(values.omp), tern: argvOption(values.tern),
     ternData: values["tern-data"] ? expand(values["tern-data"], home) : undefined,
     setupDir: path.join(home, ".agora", "member-seat"), deps,
@@ -900,7 +939,8 @@ export async function setup(argv, overrides = {}) {
   const shared = {};
   /** @type {StepResult[]} */
   const results = [];
-  for (const step of STEPS) {
+  const activeSteps = harness === "omp" ? STEPS : STEPS.filter((st) => !OMP_ONLY_STEPS.has(st.id));
+  for (const step of activeSteps) {
     const blockers = step.needs.filter((id) => results.find((r) => r.id === id)?.state !== "ok");
     if (blockers.length) {
       results.push({ id: step.id, title: step.title, state: "blocked", detail: `after ${blockers.join(", ")}`, changed: false, changes: [], notes: [] });
@@ -924,7 +964,7 @@ export async function setup(argv, overrides = {}) {
   const sha = (await deps.exec(["git", "-C", ROOT, "rev-parse", "HEAD"], { env, timeoutMs: 30_000 })).stdout.trim();
   const count = (/** @type {State} */ s) => results.filter((r) => r.state === s).length;
   return {
-    type: "member-seat-setup", mode: c.apply ? "apply" : "check", room: c.room, checkout: ROOT, head: sha || null,
+    type: "member-seat-setup", mode: c.apply ? "apply" : "check", room: c.room, harness: c.harness, checkout: ROOT, head: sha || null,
     config: c.configPath, state: c.stateRoot, human: c.humanRoot,
     ok: count("todo") + count("fail") + count("blocked") === 0,
     changed: results.some((r) => r.changed),
@@ -939,7 +979,8 @@ async function guarded(f) {
 
 /** @param {Awaited<ReturnType<typeof setup>>} report */
 export function formatReport(report) {
-  const lines = [`member seat ${report.mode} · room ${report.room} · agora ${report.checkout}${report.head ? ` at ${report.head.slice(0, 12)}` : ""}`];
+  const harnessTag = report.harness && report.harness !== "omp" ? ` · harness ${report.harness}` : "";
+  const lines = [`member seat ${report.mode} · room ${report.room}${harnessTag} · agora ${report.checkout}${report.head ? ` at ${report.head.slice(0, 12)}` : ""}`];
   for (const r of report.steps) {
     lines.push(`${r.state.padEnd(7)} ${r.id.padEnd(15)} ${r.detail}${r.changed ? "  [changed]" : ""}`);
     for (const l of [...r.changes, ...r.notes]) lines.push(`        ${l}`);
@@ -952,13 +993,18 @@ export function formatReport(report) {
 const invokedDirectly = process.argv[1] !== undefined && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (invokedDirectly) {
   const argv = process.argv.slice(2);
-  setup(argv)
-    .then((report) => {
-      console.log(argv.includes("--json") ? JSON.stringify(report, null, 2) : formatReport(report));
-      process.exitCode = report.ok ? 0 : 1;
-    })
-    .catch((e) => {
-      console.error(`setup-member-seat: ${e instanceof Error ? e.message : String(e)}`);
-      process.exitCode = typeof e?.exitCode === "number" ? e.exitCode : 1;
-    });
+  if (argv.includes("--help") || argv.includes("-h")) {
+    console.log(helpText());
+    process.exitCode = 0;
+  } else {
+    setup(argv)
+      .then((report) => {
+        console.log(argv.includes("--json") ? JSON.stringify(report, null, 2) : formatReport(report));
+        process.exitCode = report.ok ? 0 : 1;
+      })
+      .catch((e) => {
+        console.error(`setup-member-seat: ${e instanceof Error ? e.message : String(e)}`);
+        process.exitCode = typeof e?.exitCode === "number" ? e.exitCode : 1;
+      });
+  }
 }

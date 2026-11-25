@@ -22,6 +22,8 @@ export interface RoomStore {
   rooms: RoomInfo[];
   alias: string | undefined;
   messages: Message[];
+  /** True once the first read for the selected room has settled (success or failure). */
+  loaded: boolean;
   horizon: Horizon | undefined;
   /** An ordinary failure of a read, redacted. Faults from a client with outcomes go to `fault`. */
   error: string | undefined;
@@ -54,6 +56,7 @@ export function RoomStoreProvider({ client, initialAlias, children }: { client: 
   const [rooms, setRooms] = useState<RoomInfo[]>([]);
   const [alias, setAlias] = useState<string | undefined>(initialAlias);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [loaded, setLoaded] = useState(false);
   const [horizon, setHorizon] = useState<Horizon | undefined>(undefined);
   const [error, setError] = useState<string | undefined>(undefined);
   const [fault, setFault] = useState<RoomFault | undefined>(undefined);
@@ -136,6 +139,7 @@ export function RoomStoreProvider({ client, initialAlias, children }: { client: 
       if (e instanceof RoomFaultError) setFault({ kind: e.kind, reason: shown(e.reason) });
       else setError(shownError(e));
     } finally {
+      setLoaded(true);
       inflight.current = false;
     }
   }, [client, alias]);
@@ -159,6 +163,7 @@ export function RoomStoreProvider({ client, initialAlias, children }: { client: 
       dropSubscription();
       setAlias(next);
       setMessages([]);
+      setLoaded(false);
       setHorizon(undefined);
       setFault(undefined);
       setError(undefined);
@@ -174,8 +179,8 @@ export function RoomStoreProvider({ client, initialAlias, children }: { client: 
   }, []);
 
   const value = useMemo<RoomStore>(
-    () => ({ client, actor, rooms, alias, messages, horizon, error, fault, live, peers, peersError, selectRoom, refresh, poll, refreshPeers, jump, requestJump, clearJump, actorEpoch, setActor }),
-    [client, actor, rooms, alias, messages, horizon, error, fault, live, peers, peersError, selectRoom, refresh, poll, refreshPeers, jump, requestJump, clearJump, actorEpoch, setActor],
+    () => ({ client, actor, rooms, alias, messages, loaded, horizon, error, fault, live, peers, peersError, selectRoom, refresh, poll, refreshPeers, jump, requestJump, clearJump, actorEpoch, setActor }),
+    [client, actor, rooms, alias, messages, loaded, horizon, error, fault, live, peers, peersError, selectRoom, refresh, poll, refreshPeers, jump, requestJump, clearJump, actorEpoch, setActor],
   );
 
   return <RoomStoreContext.Provider value={value}>{children}</RoomStoreContext.Provider>;

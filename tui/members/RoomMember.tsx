@@ -225,9 +225,11 @@ export const RoomMember = memo(function RoomMember({ active }: { active: boolean
       : undefined;
   const status = !store.alias
     ? { text: "no room in the config", color: semantic.warning }
-    : !entries.length && !fault
-      ? { text: "nothing in this room yet", color: neutral.textMuted }
-      : { text: "", color: neutral.textMuted };
+    : !store.loaded && !entries.length && !fault
+      ? { text: "loading…", color: neutral.textMuted }
+      : !entries.length && !fault
+        ? { text: "nothing in this room yet", color: neutral.textMuted }
+        : { text: "", color: neutral.textMuted };
 
   return (
     <box flexGrow={1} flexDirection="column" paddingLeft={1} paddingRight={1}>

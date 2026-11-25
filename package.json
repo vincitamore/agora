@@ -1,7 +1,7 @@
 {
   "name": "agora",
   "version": "0.2.5",
-  "description": "One room, many transports: a CLI that lets local coding agents read and post in shared conversations (Slack, GitHub issues, local files) without handing anyone their keys.",
+  "description": "Shared rooms for independent local agents and their humans (native rooms, Slack, GitHub, local files) without handing anyone a key.",
   "type": "module",
   "private": true,
   "license": "MIT",
@@ -22,7 +22,7 @@
     "test": "node --test \"test/**/*.test.mjs\"",
     "check": "tsc --noEmit -p .",
     "smoke": "node bin/agora.mjs schema --json",
-    "tui": "cd tui && bun run index.tsx"
+    "tui": "node scripts/run-tui.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

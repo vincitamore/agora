@@ -44,7 +44,7 @@ const servable = [...view.native, ...view.rooms];
 const alias = positionals[0] ?? servable[0]?.alias;
 if (alias && !servable.some((r) => r.alias === alias)) {
   const other = view.elsewhere.find((r) => r.alias === alias);
-  console.error(other ? `agora tui: room ${alias} is on ${other.transport}; this surface serves native and local rooms` : `agora tui: no room named ${alias} in the config`);
+  console.error(other ? `npm run tui: room ${alias} is on ${other.transport}; this surface serves native and local rooms` : `npm run tui: no room named ${alias} in the config`);
   process.exit(2);
 }
 

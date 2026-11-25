@@ -456,3 +456,26 @@ test("Tern: an installed copy fails by name; a link to another checkout is relin
   assert.deepEqual(JSON.parse(await readFile(s.paths.ternJson, "utf8")), { rooms: ["home", "partner"], room: "home", intervalMs: 9000 });
   assert.deepEqual((await s.ternCalls()).map((a) => a.slice(0, 2).join(" ")).filter((v) => v !== "plugin dir"), ["plugin unlink", "plugin link", "plugin list"]);
 });
+
+test("--help prints usage and exits 0; --harness claude|codex|none skips omp, tern, and extension-turn so --check reaches ok", { timeout: 120_000 }, async (t) => {
+  const help = await execNoShell([process.execPath, path.join(ROOT, "scripts", "setup-member-seat.mjs"), "--help"]);
+  assert.equal(help.code, 0, help.stderr);
+  assert.match(help.stdout, /usage: node scripts\/setup-member-seat\.mjs/);
+  assert.match(help.stdout, /--harness <name>/);
+
+  const s = await memberSeat(t);
+  await assert.rejects(s.run(["--pin", HEAD, "--harness", "bogus"]), /--harness must be one of omp, claude, codex, none/);
+
+  const seatKey = await s.key(s.paths.state);
+  const humanKey = await s.key(s.paths.humanState);
+  const kits = await hostKits(s.home, { seatKey, humanKey, humanName: "Ada" });
+  const r = await s.run(["--pin", HEAD, "--harness", "claude", "--kit", /** @type {string} */ (kits.seat), "--human-kit", /** @type {string} */ (kits.human)]);
+  assert.equal(r.harness, "claude");
+  assert.equal(r.ok, true, formatReport(r));
+  assert.deepEqual(
+    r.steps.map((x) => x.id),
+    ["node", "checkout", "seat-key", "route", "config", "doctor", "human-key", "human-route", "charter", "first-run"],
+  );
+  const check = await s.run(["--pin", HEAD, "--harness", "none", "--check"]);
+  assert.equal(check.ok, true, formatReport(check));
+});

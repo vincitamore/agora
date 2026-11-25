@@ -5,19 +5,21 @@ import { chmod, copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { tmp } from "./helpers.mjs";
 
 const runFile = promisify(execFile);
 const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const win32 = process.platform === "win32";
 const sourceLauncher = path.join(repoRoot, "scripts", win32 ? "start-codex-watch.ps1" : "start-codex-watch.sh");
+const hasPwsh = !win32 || spawnSync("pwsh.exe", ["--version"], { stdio: "ignore", windowsHide: true }).status === 0;
+const skipWinPwsh = win32 && !hasPwsh ? "needs PowerShell 7 (pwsh.exe)" : false;
 
 // The launcher's --wake / -Wake reaches the watch it arms. Tested on the wire: a fake agora
 // records the argv it was started with, so a launcher that drops or ignores the option reddens
 // the assertion on the recorded array, not on the launcher's own output.
 test("Codex launcher passes --wake through to the armed watch and refuses an unknown mode", {
-  skip: process.platform === "darwin" ? "the launchd lifecycle has its own opt-in integration cell" : false,
+  skip: process.platform === "darwin" ? "the launchd lifecycle has its own opt-in integration cell" : skipWinPwsh,
   timeout: 60_000,
 }, async (t) => {
   const fixture = await tmp();

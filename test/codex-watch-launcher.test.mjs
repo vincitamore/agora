@@ -7,16 +7,18 @@ import { constants } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { tmp } from "./helpers.mjs";
 
 const runFile = promisify(execFile);
 const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const launcher = path.join(repoRoot, "scripts", "start-codex-watch.sh");
 const powershellLauncher = path.join(repoRoot, "scripts", "start-codex-watch.ps1");
+const hasPwsh = process.platform !== "win32" || spawnSync("pwsh.exe", ["--version"], { stdio: "ignore", windowsHide: true }).status === 0;
+const skipWinPwsh = process.platform === "win32" && !hasPwsh ? "needs PowerShell 7 (pwsh.exe)" : false;
 
 test("Codex launcher waits beyond the old ten-second clock for the subscribed armed receipt", {
-  skip: process.platform === "darwin" ? "the launchd lifecycle has its own opt-in integration cell" : false,
+  skip: process.platform === "darwin" ? "the launchd lifecycle has its own opt-in integration cell" : skipWinPwsh,
   timeout: 90_000, // the fixture alone crosses 10 s by design; arm, stop and the timeout path each start a cold pwsh
 }, async (t) => {
   const fixture = await tmp();
@@ -169,7 +171,7 @@ test("Codex POSIX launcher gives macOS to launchd without weakening Linux detach
 });
 
 test("watch launcher recovers the managed server after Codex filters the TUI environment", {
-  skip: process.platform === "darwin" ? "covered by the opt-in launchd lifecycle on macOS" : false,
+  skip: process.platform === "darwin" ? "covered by the opt-in launchd lifecycle on macOS" : skipWinPwsh,
   timeout: 90_000,
 }, async (t) => {
   const fixture = await tmp();
@@ -255,7 +257,7 @@ process.on("SIGTERM", stop); process.on("SIGINT", stop); setInterval(() => {}, 1
 });
 
 test("managed Codex launchers refuse legacy queue fallback when the attachment is lost", {
-  skip: process.platform === "darwin" ? "covered by the opt-in launchd lifecycle on macOS" : false,
+  skip: process.platform === "darwin" ? "covered by the opt-in launchd lifecycle on macOS" : skipWinPwsh,
 }, async (t) => {
   const fixture = await tmp();
   const state = path.join(fixture.dir, "state");
