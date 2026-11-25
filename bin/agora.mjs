@@ -8,7 +8,7 @@ import { parseArgs } from "node:util";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { copyFile, readFile } from "node:fs/promises";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -19,9 +19,11 @@ import {
   configPath,
   cursorKey,
   fragilePath,
+  hasSecretShape,
   loadConfig,
   resolvePath,
   redact,
+  roomConfigProblem,
   roomInterval,
   roomNumber,
   roomPollBudget,
@@ -99,7 +101,7 @@ import { codexServerStatus, launchAttachedCodex } from "../src/codex-launch.mjs"
 import { buildLabel, buildPredates, cacheTtls, clearWatchMode, installedBuild, touchWatchMode, watchModeSentinel, watchModuleDelta } from "../src/harness.mjs";
 import { SERVICE_DARK, ServiceDarkError, openNativeSubscription, serviceDescriptorStatus, validateNativeRoomId } from "../src/wake/subscriber.mjs";
 import { openRemoteSubscription } from "../src/native-remote.mjs";
-import { configVerb, verifiedRemoteRow } from "../src/config-write.mjs";
+import { configVerb, initVerb, verifiedRemoteRow } from "../src/config-write.mjs";
 import { closeServiceRoute, createServiceRoom, openServiceRoute, runService, serviceRouteState,
   seatAccountId, seatLabel, serviceStatus, startService, startServiceAtLogon, stopService, readServiceStart,
   readAuthorityInput, writeAuthorityOutput, generateSeatAuthority, publicSeatAuthority, prepareSeatAuthorityEnrollment,
@@ -153,7 +155,7 @@ const projectRoot = fileURLToPath(new URL("../", import.meta.url));
 const SCHEMA = {
   name: "agora",
   version,
-  description: "One room, many transports: local agents read and post in shared conversations.",
+  description: "Shared rooms for independent local agents and their humans (native rooms, Slack, GitHub, local files) without handing anyone a key.",
   config: "AGORA_CONFIG, ./agora.json, or ~/.agora/config.json; state under AGORA_STATE, else the config's state, else ~/.agora/state, in sessions/<session>/; the session key from AGORA_SESSION, else the first set variable in session.from, else default; the bearer from --as, AGORA_ACTOR, or actor.name",
   exit: { ok: 0, error: 1, usage: 2, fired: 42 },
   // The rules whose violation cannot be taken back, carried on the tool's own machine-readable
@@ -167,13 +169,27 @@ const SCHEMA = {
     "The room is the wire, not the record. Anything that binds lands where it lives: the pull request, the issue, your own notes.",
     "Register this session before your first post: agora session --as <Model>/<role>.",
   ],
-  global: { "--config <path>": "config file", "--json": "machine-readable output (NDJSON for messages)", "--as <bearer>": "sign this call as this bearer (a path like Grace or Grace/watch)" },
+  global: { "--config <path>": "config file", "--json": "machine-readable output (NDJSON for messages)", "--as <bearer>": "sign this call as this bearer (a path like Grace or Grace/watch)", "--version / -v": "print version and exit" },
   transports: TRANSPORTS,
   verbs: {
-    rooms: { args: [], options: {}, does: "list configured rooms" },
-    config: {
-      args: ["show | room add <alias> <row-json>|--from-descriptor <path> | room remove <alias> | resident add <slug> [<row-json>] | resident remove <slug> | set <key> <json> [<key> <json> ...] | unset <key> [...]"],
+    init: {
+      args: [],
       options: {
+        "--name <name>": "default actor name (default: Ada)",
+        "--kind <agent|human>": "default actor kind (default: agent)",
+        "--room <alias>": "starter local room alias (default: try)",
+        "--path <file>": "starter local room file (default: ~/.agora/<room>.ndjson)",
+        "--force": "overwrite actor and rooms in an existing config (keeps a backup)",
+        "--dry-run": "print the diff and write nothing",
+      },
+      does: "create a starter local-room config with no CLI JSON quoting required",
+    },
+    help: { args: ["[verb]"], options: {}, does: "print grouped help or one verb's options" },
+    rooms: { args: [], options: {}, does: "list configured rooms (with resolved local file path and line count)" },
+    config: {
+      args: ["show | room add <alias> <row-json>|--from-file <path|->|--from-descriptor <path> | room remove <alias> | resident add <slug> [<row-json>|--from-file <path|->] | resident remove <slug> | set <key> <json> [<key> <json> ...] | set [<key>] --from-file <path|-> | unset <key> [...]"],
+      options: {
+        "--from-file <path|->": "read the JSON argument from a UTF-8 file or stdin (-), avoiding shell quoting issues",
         "--from-descriptor <path>": "with room add: verify this route descriptor as room add-remote does and write its native-remote row",
         "--replace": "with room add or resident add: replace a different row under the same name (without it a conflicting row is refused)",
         "--force": "with room remove: remove a native room's row though this seat still hosts the room (agora service room delete retires the room itself)",
@@ -644,6 +660,11 @@ const OPTIONS = /** @type {const} */ ({
   hours: { type: "string" },
   grace: { type: "string" },
   "from-descriptor": { type: "string" },
+  "from-file": { type: "string" },
+  name: { type: "string" },
+  kind: { type: "string" },
+  path: { type: "string" },
+  version: { type: "boolean", short: "v", default: false },
   replace: { type: "boolean", default: false },
   bounds: { type: "string" },
   at: { type: "string" },
@@ -914,15 +935,60 @@ function trailerEntries(values) {
  */
 const WITHDRAWAL_LABEL = /withdraw|withdrawn|retract|retraction|corrected|correction|reversed/i;
 
-/** The whole surface, or one verb's block with the globals under it. @param {string} [only] */
+const VERB_GROUPS = /** @type {const} */ ([
+  ["Everyday", ["init", "doctor", "rooms", "config", "join", "read", "post", "watch", "cursor", "who", "carry", "session", "whoami", "help"]],
+  ["Native rooms", ["service", "room", "board", "contest", "break", "resolve", "faces", "edit", "withdraw", "pin", "unpin", "title", "attachment", "authority", "enroll", "share", "fetch"]],
+  ["Residents & orchestration", ["resident", "messenger", "codex", "spawn", "stand-down", "resume"]],
+  ["Usage & inspection", ["usage", "usage-sessions", "economy", "export-record", "schema"]],
+]);
+
+/** Compact landing card printed when `agora` is run with no arguments. */
+function startHere() {
+  return [
+    `agora ${version}: ${SCHEMA.description}`,
+    "",
+    "Start here:",
+    "  agora init                       create a starter local-room config (~/.agora/config.json)",
+    "  agora doctor                     check config, rooms, and identity",
+    "  agora join <room> --as <Model>   register this session and preview recent messages",
+    "  agora post <room> \"message\"      post to a room",
+    "  agora read <room>                read messages from a room",
+    "  agora watch <room>               wait for new messages (exit 42 when something arrives)",
+    "  agora rooms                      list configured rooms",
+    "",
+    "More: agora --help | agora help <verb> | agora --version | agora schema --json",
+  ].join("\n");
+}
+
+/** The whole surface (grouped), or one verb's block with the globals under it. @param {string} [only] */
 function usage(only) {
-  const verbs = only ? [[only, SCHEMA.verbs[/** @type {keyof typeof SCHEMA.verbs} */ (only)]]] : Object.entries(SCHEMA.verbs);
   const lines = [`agora ${version}: ${SCHEMA.description}`, "", "usage: agora <verb> [args] [options]", ""];
-  for (const [verb, v] of /** @type {Array<[string, { args: string[], options: Record<string, string>, does: string }]>} */ (verbs)) {
-    lines.push(`  ${verb} ${v.args.join(" ")}  ${v.does}`);
+  /** @param {string} verb @param {{ args: string[], options: Record<string, string>, does: string }} v */
+  const pushVerb = (verb, v) => {
+    lines.push(`  ${verb}${v.args.length ? ` ${v.args.join(" ")}` : ""}  ${v.does}`);
     for (const [opt, doc] of Object.entries(v.options)) lines.push(`      ${opt.padEnd(20)} ${doc}`);
+  };
+  if (only) {
+    pushVerb(only, /** @type {any} */ (SCHEMA.verbs)[only]);
+  } else {
+    const shown = new Set();
+    for (const [group, names] of VERB_GROUPS) {
+      lines.push(`${group}:`);
+      for (const verb of names) {
+        if (!(verb in SCHEMA.verbs)) continue;
+        shown.add(verb);
+        pushVerb(verb, /** @type {any} */ (SCHEMA.verbs)[verb]);
+      }
+      lines.push("");
+    }
+    const restVerbs = Object.entries(SCHEMA.verbs).filter(([k]) => !shown.has(k));
+    if (restVerbs.length) {
+      lines.push("Other:");
+      for (const [verb, v] of /** @type {Array<[string, any]>} */ (restVerbs)) pushVerb(verb, v);
+      lines.push("");
+    }
   }
-  lines.push("", "global: --config <path>   --json   --as <bearer>", `config: ${SCHEMA.config}`);
+  lines.push("global: --config <path>   --json   --as <bearer>   --version (-v)   --help (-h)", `config: ${SCHEMA.config}`);
   lines.push("", "PROTOCOL:", ...SCHEMA.protocol.map((line) => `  - ${line}`));
   return lines.join("\n");
 }
@@ -1127,12 +1193,25 @@ async function main(argv) {
       child.once('close',code=>resolve(code??EXIT.error));
     });
   }
+  if (values.version && !verb) {
+    console.log(`agora ${version}`);
+    return EXIT.ok;
+  }
   if (!verb) {
-    console.log(usage());
+    console.log(values.help ? usage() : startHere());
     return values.help ? EXIT.ok : EXIT.usage;
   }
   // named before the room check, or every misspelled verb typed without a room reads as a missing room
   if (!(verb in SCHEMA.verbs)) throw new AgoraError(`unknown verb "${verb}" (have: ${Object.keys(SCHEMA.verbs).join(", ")})`, EXIT.usage);
+  if (verb === "help") {
+    if (roomAlias !== undefined) {
+      if (!(roomAlias in SCHEMA.verbs)) throw new AgoraError(`unknown verb "${roomAlias}" (have: ${Object.keys(SCHEMA.verbs).join(", ")})`, EXIT.usage);
+      console.log(usage(roomAlias));
+    } else {
+      console.log(usage());
+    }
+    return EXIT.ok;
+  }
   if (values.help) {
     console.log(usage(verb));
     return EXIT.ok;
@@ -1143,6 +1222,8 @@ async function main(argv) {
   }
 
   runArgumentPreflights({ verb, roomAlias, rest, values, env: process.env });
+
+  if (verb === "init") return await initVerb({ values });
 
   // Writes the shared config itself: reads no config before its own arguments are refused, and
   // loads no session, so it registers nothing on the seat.
@@ -1268,6 +1349,12 @@ async function main(argv) {
   /** Register this session: write the record with the bearer and position given, and say so (on stderr when stdout carries messages). */
   async function register(toStderr = false) {
     if (values.as === undefined) throw new AgoraError(`${verb} needs --as <bearer> (a path like Grace or Grace/watch)`, EXIT.usage);
+    if (session.source === "default" && record?.bearer && record.bearer !== bearer.name && !values.force) {
+      throw new AgoraError(
+        `session "default" is already registered as ${record.bearer}; give each terminal its own session label so they do not overwrite each other (POSIX: AGORA_SESSION=<label> agora ${verb} ..., PowerShell: $env:AGORA_SESSION="<label>"; agora ${verb} ...), or pass --force to replace it`,
+        EXIT.usage,
+      );
+    }
     // the position: --label, then the launcher's AGORA_LABEL; neither keeps the record's own
     const label = resolveLabel({ label: values.label, env: process.env });
     // a bearer already held by a live session on this seat is two lines in the room nobody can tell
@@ -1396,6 +1483,9 @@ async function main(argv) {
   if (verb === "session") {
     if (values.list) {
       const rows = await listRecords(stateRoot);
+      if (rows.length && !json) {
+        console.log(`  ${"BEARER".padEnd(18)} ${"SESSION".padEnd(30)} STATE   PID`);
+      }
       for (const r of rows) {
         const scope = await sessionScope(r.dir);
         if (json) console.log(JSON.stringify({ type: "session", slug: r.slug, state: r.state, ...(r.record ?? {}), rooms: scope.rooms, armed: scope.armed, here: r.slug === session.slug }));
@@ -1434,6 +1524,19 @@ async function main(argv) {
     if (values.forget) {
       await removeSession(sdir);
       console.log(json ? JSON.stringify({ slug: session.slug, removed: true }) : `forgot session ${session.slug}: its record, cursors and ledger are gone`);
+      return EXIT.ok;
+    }
+    if (values.as === undefined && values.label === undefined && values.model === undefined) {
+      const scope = await sessionScope(sdir);
+      if (json) {
+        console.log(JSON.stringify({ type: "session", slug: session.slug, source: session.source, registered: Boolean(record), bearer: bearer.name, bearerSource: bearer.source, ...(record ?? {}), rooms: scope.rooms, armed: scope.armed, dir: sdir }));
+      } else {
+        console.log(`session ${session.slug} (from ${session.source})`);
+        console.log(`bearer  ${bearer.name} (${cfg.actor.kind}, from ${bearer.source})${record ? "" : "  [unregistered]"}`);
+        if (record?.label) console.log(`label   ${record.label}`);
+        console.log(await scopeLine(sdir));
+        if (!record && cfg.actor.kind !== "human") console.log(`hint: run \`agora session --as <Model>/<role>\` to register this session`);
+      }
       return EXIT.ok;
     }
     await register();
@@ -1992,13 +2095,34 @@ async function main(argv) {
     throw new AgoraError(`agora resident takes prompt, start, stop, timer, cycle or inherit, not ${JSON.stringify(action)}`, EXIT.usage);
   }
 
+  /** Inspect a local room's resolved file on disk without modifying it. @param {string} rawPath */
+  function localFileStatus(rawPath) {
+    const resolved = resolvePath(rawPath);
+    const relative = !rawPath.trim().startsWith("~") && !path.isAbsolute(rawPath.trim());
+    if (!existsSync(resolved)) return { resolved, relative, exists: false, lines: 0 };
+    try {
+      const count = readFileSync(resolved, "utf8").split(/\r?\n/).filter((l) => l.trim()).length;
+      return { resolved, relative, exists: true, lines: count };
+    } catch {
+      return { resolved, relative, exists: true, lines: null };
+    }
+  }
+
   if (verb === "rooms") {
+    if (roomAlias !== undefined || rest.length) {
+      const hint = roomAlias === "add" || roomAlias === "remove"
+        ? ` (to modify rooms, use \`agora config room ${roomAlias} ...\`)`
+        : "";
+      throw new AgoraError(`rooms takes no arguments${hint}`, EXIT.usage);
+    }
     for (const [alias, room] of Object.entries(cfg.rooms)) {
-      const where = room.transport === "github" ? `${room.repo}#${room.issue}` : room.transport === "github-events" ? `${room.repo ?? (room.org ? `org:${room.org}` : `user:${room.user}`)} events${Array.isArray(room.events) ? ` [${room.events.join(", ")}]` : ""}${Array.isArray(room.refs) ? ` refs ${room.refs.join(", ")}` : ""}` : room.transport === "slack" ? String(room.channel) : String(room.path ?? "");
+      const localInfo = room.transport === "local" && typeof room.path === "string" ? localFileStatus(room.path) : undefined;
+      const where = room.transport === "github" ? `${room.repo}#${room.issue}` : room.transport === "github-events" ? `${room.repo ?? (room.org ? `org:${room.org}` : `user:${room.user}`)} events${Array.isArray(room.events) ? ` [${room.events.join(", ")}]` : ""}${Array.isArray(room.refs) ? ` refs ${room.refs.join(", ")}` : ""}` : room.transport === "slack" ? String(room.channel) : localInfo ? localInfo.resolved : String(room.path ?? "");
       const note = typeof room.note === "string" ? room.note : undefined;
-      if (json) console.log(JSON.stringify({ alias, transport: room.transport, room: where, ...(note ? { note } : {}) }));
+      if (json) console.log(JSON.stringify({ alias, transport: room.transport, room: where, ...(localInfo ? { exists: localInfo.exists, lines: localInfo.lines, ...(localInfo.relative ? { relative: true } : {}) } : {}), ...(note ? { note } : {}) }));
       else {
-        console.log(`${alias.padEnd(16)} ${room.transport.padEnd(8)} ${where}`);
+        const statusTail = localInfo ? ` (${localInfo.exists ? `exists, ${localInfo.lines ?? "?"} line${localInfo.lines === 1 ? "" : "s"}` : "absent"})` : "";
+        console.log(`${alias.padEnd(16)} ${room.transport.padEnd(8)} ${where}${statusTail}`);
         if (note) console.log(`${"".padEnd(16)} note: ${note}`);
       }
     }
@@ -2007,17 +2131,33 @@ async function main(argv) {
 
   if (verb === "doctor") {
     let bad = 0;
-    const runtime = await tailcatDoctor({ stateRoot, repair: values["repair-tailcat"] });
+    const roomEntries = Object.entries(cfg.rooms);
+    const hasNative = roomEntries.some(([, r]) => r.transport === "native" || r.transport === "native-remote");
+    const needsTailcat = Boolean(values["repair-tailcat"]) || roomEntries.some(([, r]) => r.transport === "native-remote");
+    const runtime = await tailcatDoctor({ stateRoot, repair: values["repair-tailcat"], extract: needsTailcat });
     if (json) console.log(JSON.stringify(runtime));
-    else console.log(`tailcat ${runtime.status}${"target" in runtime ? ` ${runtime.target} (${runtime.source})` : `: ${runtime.error}`}`);
     /** Every warning `doctor` can raise, typed under --json so an agent can self-check what the human path prints. @type {Array<{ code: string, message: string, alias?: string }>} */
     const warnings = [];
-    for (const [alias, room] of Object.entries(cfg.rooms)) {
+    /** @type {Array<{ alias: string, report: Record<string, unknown>, localInfo?: ReturnType<typeof localFileStatus>, tokenHint?: string }>} */
+    const roomReports = [];
+    for (const [alias, room] of roomEntries) {
       /** @type {Record<string, unknown>} */
       const report = { type: "room", alias, transport: room.transport, token: await tokenSource(room) };
       if (typeof room.note === "string") report.note = room.note;
+      let localInfo;
       if (room.transport === "local" && typeof room.path === "string") {
-        const why = fragilePath(room.path) ?? fragilePath(resolvePath(room.path));
+        localInfo = localFileStatus(room.path);
+        report.resolvedPath = localInfo.resolved;
+        report.exists = localInfo.exists;
+        report.lines = localInfo.lines;
+        if (localInfo.relative) {
+          warnings.push({
+            code: "relative-path",
+            alias,
+            message: `room "${alias}" uses a relative local path (${JSON.stringify(room.path)}), which resolves to a different file in every directory; re-add it or use an absolute / ~/ path`,
+          });
+        }
+        const why = fragilePath(room.path) ?? fragilePath(localInfo.resolved);
         if (why) {
           report.warning = `this room's file sits behind ${why}: a local room there loses lines silently, because every surviving line still parses and every id is still unique. Every writer must reach it through the same native filesystem.`;
           warnings.push({ code: "fragile-path", alias, message: String(report.warning) });
@@ -2032,8 +2172,22 @@ async function main(argv) {
         report.refused = unguarded;
         bad++;
       }
-      if (report.token === "missing" && TRANSPORTS[/** @type {keyof typeof TRANSPORTS} */ (room.transport)]?.needsToken) bad++;
-      if (!values.offline && report.token !== "missing") {
+      let tokenHint;
+      if (report.token === "missing" && TRANSPORTS[/** @type {keyof typeof TRANSPORTS} */ (room.transport)]?.needsToken) {
+        bad++;
+        tokenHint = typeof room.tokenFile === "string"
+          ? `expected tokenFile ${room.tokenFile}`
+          : typeof room.tokenEnv === "string"
+            ? `expected tokenEnv ${room.tokenEnv}`
+            : "neither tokenFile nor tokenEnv is set";
+        report.tokenExpected = tokenHint;
+      }
+      const rowProblem = roomConfigProblem(alias, room);
+      if (rowProblem) {
+        report.error = rowProblem;
+        bad++;
+      }
+      if (!values.offline && report.token !== "missing" && !rowProblem) {
         /** @type {import("../src/core.mjs").Transport | undefined} */
         let t;
         try {
@@ -2043,25 +2197,12 @@ async function main(argv) {
           report.error = redact(e instanceof Error ? e.message : String(e));
           bad++;
         } finally {
-          // Closed per room rather than at the end, so probing ten rooms never holds ten channels
-          // open at once. `whoami` on a native-remote room dials a real one.
           await t?.close?.();
-          // Read AFTER the close and BEFORE the row is printed, which is the whole reason doctor
-          // can carry this at all: a one-shot verb's teardown normally happens with nowhere left to
-          // report to, and here there is somewhere.
           if (t?.closeFailed) report.closeFailed = t.closeFailed;
         }
       }
       if (json) console.log(JSON.stringify(report));
-      else {
-        console.log(`${alias.padEnd(16)} ${String(report.transport).padEnd(8)} token=${report.token}` + (report.identity ? `  as ${/** @type {any} */ (report.identity).name}` : "") + (report.error ? `  ERROR ${report.error}` : ""));
-        if (report.note) console.log(`${"".padEnd(16)} note: ${report.note}`);
-        if (report.warning) console.log(`${"".padEnd(16)} WARNING ${report.warning}`);
-        const listed = /** @type {string[] | undefined} */ (report.wakeFrom);
-        if (report.public || listed) console.log(`${"".padEnd(16)} wake: ${report.public ? "the public can post here; " : ""}${listed ? `only ${listed.length} listed author${listed.length === 1 ? "" : "s"} wake a watch (${listed.join(", ") || "none"})` : "every author wakes a watch"}`);
-        if (report.refused) console.log(`${"".padEnd(16)} REFUSED ${report.refused}`);
-        if (report.closeFailed) console.log(`${"".padEnd(16)} close: ${report.closeFailed}`);
-      }
+      roomReports.push({ alias, report, localInfo, tokenHint });
     }
     /** @type {{ type: string, thread: string | null, threadSource: string | null, binary: string | null, binaryError: string | null, sandbox: { CODEX_SANDBOX: string | null, CODEX_SANDBOX_NETWORK_DISABLED: string | null } }} */
     const codexReport = {
@@ -2081,26 +2222,9 @@ async function main(argv) {
       codexReport.binaryError = redact(e instanceof Error ? e.message : String(e));
     }
     if (json) console.log(JSON.stringify(codexReport));
-    else {
-      console.log(`\ncodex  thread=${codexReport.thread ?? "missing"}${codexReport.threadSource ? ` (from ${codexReport.threadSource})` : ""}`);
-      console.log(`       binary=${codexReport.binary ?? `unavailable (${codexReport.binaryError})`}`);
-      console.log(`       CODEX_SANDBOX=${codexReport.sandbox.CODEX_SANDBOX ?? "unset"}  CODEX_SANDBOX_NETWORK_DISABLED=${codexReport.sandbox.CODEX_SANDBOX_NETWORK_DISABLED ?? "unset"}`);
-    }
-    // What the harness charges this seat for a wake that lands past the window, read off settings
-    // and environment at the call and stored nowhere. A TTL that was not read is reported unknown:
-    // the tool never asserts a number it did not see, and an unknown one raises nothing.
     const caches = cacheTtls(process.env, process.cwd());
     if (json) for (const c of caches) console.log(JSON.stringify({ type: "cache", harness: c.harness, ttl: c.ttl, value: c.value, source: c.source, label: c.label }));
-    else {
-      console.log("");
-      for (const c of caches) console.log(`cache  ${c.harness.padEnd(12)} prompt cache ttl=${c.label}`);
-    }
-    // The armed registrations this seat is actually paying for; a pid that is gone is a leftover.
     const armedHere = (await listArmed(stateRoot)).filter((a) => armedAlive(a.armed));
-    // The seat service is a seat resource, not a session: named by its descriptor's public fields
-    // (never the secret) and by whether the pid it names still answers. A native subscriber is a
-    // live watch on that service, listed with the build it loaded like every other watch; it is
-    // left out of the poll arithmetic because the service pushes and it reads nothing on a cadence.
     const native = await serviceDescriptorStatus(stateRoot);
     const subscribersHere = armedHere.filter((a) => a.armed.subscriber);
     const serviceLog = readServiceLog(stateRoot, { last: 5 });
@@ -2109,12 +2233,6 @@ async function main(argv) {
       for (const l of serviceLog) console.log(JSON.stringify({ type: "service-log", ...l }));
       for (const a of subscribersHere)
         console.log(JSON.stringify({ type: "subscriber", session: a.slug, room: a.armed.room, key: a.key, pid: a.armed.pid, wake: a.armed.wake ?? "all", mode: a.armed.mode ?? null, build: a.armed.build ?? null, buildLabel: buildLabel(a.armed.build), since: a.armed.since ?? null, startedAt: a.armed.startedAt }));
-    } else {
-      console.log(`\nnative  service ${native.present ? `descriptor ${native.descriptor}  pid ${native.pid ?? "unknown"} ${native.pidAlive === undefined ? "" : native.pidAlive ? "(answers)" : "(gone)"}  seat ${native.seatLabel} account ${native.accountId} boot ${native.bootEpoch} build ${buildLabel(native.build)}` : `absent (${native.error})`}`);
-      for (const a of subscribersHere)
-        console.log(`        subscriber ${a.slug} ${a.armed.room} pid ${a.armed.pid} wake ${a.armed.wake ?? "all"} build ${buildLabel(a.armed.build)}`);
-      console.log(`        log ${serviceLogPath(stateRoot)}${serviceLog.length ? `, the last ${serviceLog.length}:` : " (no warnings)"}`);
-      for (const l of serviceLog) console.log(`          ${l.ts} ${l.level}${l.room ? ` ${l.room}` : ""} ${l.message}`);
     }
     if (native.present) {
       const older = buildPredates(native.build, build);
@@ -2129,8 +2247,6 @@ async function main(argv) {
           message: `seat service pid ${native.pid ?? "unknown"} recorded no build identity; restart it once so freshness becomes measurable`,
         });
       }
-      // A grant the record admits that this run could not bring back is a member whose kit is
-      // failing right now; it is named here so the host sees it before the member reports it.
       if (native.pidAlive) {
         try {
           const routeState = await serviceRouteState(stateRoot);
@@ -2141,7 +2257,6 @@ async function main(argv) {
     }
     const downs = await listStandDowns(stateRoot);
     if (json) for (const d of downs) console.log(JSON.stringify({ type: "stand-down", ...d.rec }));
-    else for (const d of downs) console.log(`stand-down  ${d.slug} until ${d.rec.until}: ${d.rec.because}`);
 
     const rows = await listRecords(stateRoot);
     const live = rows.filter((r) => r.record && r.state !== "gone");
@@ -2158,9 +2273,6 @@ async function main(argv) {
     for (const r of rows)
       warnings.push(...await watchBuildWarnings(r.dir, r.slug));
 
-    // A resident bearer pays for its context, not for the room: a wake that lands past the prompt
-    // cache TTL re-reads the whole conversation cold. So the three preflights, all derived from
-    // what was read above and nothing else.
     if (armedHere.length)
       for (const c of caches)
         if (c.ttl === 300)
@@ -2168,9 +2280,6 @@ async function main(argv) {
             code: "cache-ttl",
             message: `${armedHere.length} watch${armedHere.length === 1 ? " is" : "es are"} armed on this seat and ${c.harness}'s prompt cache TTL is ${c.value} (read from ${c.source}); every wake that lands past that window pays a cold read of the whole context. Set promptCacheTtl: "1h" and re-arm.`,
           });
-    // The cost curve peaks AT the TTL: inside the window each poll keeps the prefix warm for free,
-    // well past it the cold reads are rare, and at it every poll pays one. Silent when no TTL was
-    // read -- a cadence cannot be near a number nobody has.
     for (const a of armedHere) {
       const r = cfg.rooms[a.armed.room];
       if (!r) continue;
@@ -2178,7 +2287,6 @@ async function main(argv) {
       const ti = Number(a.armed.threadInterval);
       /** @type {Array<[string, number]>} */
       const cadences = [["room interval", roomInterval(r, Number.isFinite(iv) && iv > 0 ? iv : undefined)]];
-      // the thread interval is a cadence this watch pays only when it follows threads
       if (a.armed.follow) cadences.push(["thread interval", roomThreadInterval(r, Number.isFinite(ti) && ti > 0 ? ti : undefined)]);
       for (const c of caches)
         if (typeof c.ttl === "number")
@@ -2190,8 +2298,6 @@ async function main(argv) {
                 message: `watch pid ${a.armed.pid} for ${a.slug}/${a.key} has a ${what} of ${seconds}s against ${c.harness}'s prompt cache TTL of ${c.ttl}s (${c.value}, read from ${c.source}); the cost curve peaks at the TTL, where every poll pays a cold read. Poll well inside the window or well past it.`,
               });
     }
-    // One thin bearer per seat holds the watch on `all`. Where every live watch in a room is
-    // narrowed, an unaddressed request in that room wakes nobody here and nobody is told.
     /** @type {Map<string, string[]>} */
     const wakesByRoom = new Map();
     for (const a of armedHere) wakesByRoom.set(a.armed.room, [...(wakesByRoom.get(a.armed.room) ?? []), a.armed.wake ?? "all"]);
@@ -2204,8 +2310,6 @@ async function main(argv) {
         });
 
     if (json) {
-      // everything the human path prints, typed: an agent told to take its session and bearer from
-      // doctor is on this path, and until now this path carried neither
       console.log(JSON.stringify({
         type: "identity",
         config: cfg.path,
@@ -2223,8 +2327,32 @@ async function main(argv) {
         const scope = await sessionScope(r.dir);
         console.log(JSON.stringify({ type: "session", slug: r.slug, state: r.state, ...(r.record ?? {}), rooms: scope.rooms, armed: scope.armed, here: r.slug === session.slug }));
       }
+      for (const w of warnings) {
+        const note = /** @type {any} */ (w).kind === "note";
+        console.log(JSON.stringify({ type: note ? "note" : "warning", code: w.code, ...(w.alias ? { alias: w.alias } : {}), message: w.message }));
+      }
     } else {
-      console.log(`config  ${cfg.path}\nstate   ${sdir}\nbuild   ${buildLabel(build)}\nsession ${session.slug} (from ${session.source})${record ? "" : "  (unregistered: run `agora session --as <bearer>`)"}\nbearer  ${bearer.name} (${cfg.actor.kind}, from ${bearer.source})`);
+      // Problems and warnings first, so nothing important sits buried below optional integrations.
+      const topWarnings = warnings.filter((w) => w.code !== "fragile-path");
+      if (topWarnings.length) {
+        for (const w of topWarnings) {
+          const note = /** @type {any} */ (w).kind === "note";
+          console.log(`${note ? "NOTE" : "WARNING"} ${w.message}`);
+        }
+        console.log("");
+      }
+      for (const { alias, report, localInfo, tokenHint } of roomReports) {
+        const localDetail = localInfo ? `  ${localInfo.resolved} (${localInfo.exists ? `exists, ${localInfo.lines ?? "?"} line${localInfo.lines === 1 ? "" : "s"}` : "absent"})` : "";
+        const tokText = `token=${report.token}${tokenHint ? ` (${tokenHint})` : ""}`;
+        console.log(`${alias.padEnd(16)} ${String(report.transport).padEnd(8)} ${tokText}` + localDetail + (report.identity ? `  as ${/** @type {any} */ (report.identity).name}` : "") + (report.error ? `  ERROR ${report.error}` : ""));
+        if (report.note) console.log(`${"".padEnd(16)} note: ${report.note}`);
+        if (report.warning) console.log(`${"".padEnd(16)} WARNING ${report.warning}`);
+        const listed = /** @type {string[] | undefined} */ (report.wakeFrom);
+        if (report.public || listed) console.log(`${"".padEnd(16)} wake: ${report.public ? "the public can post here; " : ""}${listed ? `only ${listed.length} listed author${listed.length === 1 ? "" : "s"} wake a watch (${listed.join(", ") || "none"})` : "every author wakes a watch"}`);
+        if (report.refused) console.log(`${"".padEnd(16)} REFUSED ${report.refused}`);
+        if (report.closeFailed) console.log(`${"".padEnd(16)} close: ${report.closeFailed}`);
+      }
+      console.log(`\nconfig  ${cfg.path}\nstate   ${sdir}\nbuild   ${buildLabel(build)}\nsession ${session.slug} (from ${session.source})${record || cfg.actor.kind === "human" ? "" : "  (unregistered: run `agora session --as <bearer>`)"}\nbearer  ${bearer.name} (${cfg.actor.kind}, from ${bearer.source})`);
       for (const line of envPrefix(session, bearer)) console.log(line);
       const usual = usualWake(bearer.name, positionOf(record));
       if (usual) console.log(`usual --wake for role ${usual.role} is ${usual.wake} (not applied)`);
@@ -2235,11 +2363,42 @@ async function main(argv) {
           console.log(await scopeLine(r.dir));
         }
       }
-    }
-    for (const w of warnings) {
-      const note = /** @type {any} */ (w).kind === "note";
-      if (json) console.log(JSON.stringify({ type: note ? "note" : "warning", code: w.code, ...(w.alias ? { alias: w.alias } : {}), message: w.message }));
-      else if (w.code !== "fragile-path") console.log(`${note ? "NOTE" : "WARNING"} ${w.message}`);
+      for (const d of downs) console.log(`stand-down  ${d.slug} until ${d.rec.until}: ${d.rec.because}`);
+
+      // Active/configured integrations print full lines; unconfigured optional ones fold into one quiet line.
+      /** @type {string[]} */
+      const unconfigured = [];
+      if (needsTailcat || runtime.status !== "bundled") {
+        console.log(`\ntailcat ${runtime.status}${"target" in runtime ? ` ${runtime.target} (${runtime.source})` : `: ${runtime.error}`}`);
+      } else {
+        unconfigured.push(`tailcat (bundled ${runtime.target}, extracts on first remote room or transfer)`);
+      }
+      if (hasNative || native.present || subscribersHere.length || serviceLog.length) {
+        console.log(`native  service ${native.present ? `descriptor ${native.descriptor}  pid ${native.pid ?? "unknown"} ${native.pidAlive === undefined ? "" : native.pidAlive ? "(answers)" : "(gone)"}  seat ${native.seatLabel} account ${native.accountId} boot ${native.bootEpoch} build ${buildLabel(native.build)}` : `absent (${native.error})`}`);
+        for (const a of subscribersHere)
+          console.log(`        subscriber ${a.slug} ${a.armed.room} pid ${a.armed.pid} wake ${a.armed.wake ?? "all"} build ${buildLabel(a.armed.build)}`);
+        console.log(`        log ${serviceLogPath(stateRoot)}${serviceLog.length ? `, the last ${serviceLog.length}:` : " (no warnings)"}`);
+        for (const l of serviceLog) console.log(`          ${l.ts} ${l.level}${l.room ? ` ${l.room}` : ""} ${l.message}`);
+      } else {
+        unconfigured.push("native service");
+      }
+      if (codexReport.thread || codexReport.binary || codexReport.sandbox.CODEX_SANDBOX) {
+        console.log(`codex   thread=${codexReport.thread ?? "missing"}${codexReport.threadSource ? ` (from ${codexReport.threadSource})` : ""}  binary=${codexReport.binary ?? `unavailable (${codexReport.binaryError})`}`);
+        if (codexReport.sandbox.CODEX_SANDBOX || codexReport.sandbox.CODEX_SANDBOX_NETWORK_DISABLED)
+          console.log(`        CODEX_SANDBOX=${codexReport.sandbox.CODEX_SANDBOX ?? "unset"}  CODEX_SANDBOX_NETWORK_DISABLED=${codexReport.sandbox.CODEX_SANDBOX_NETWORK_DISABLED ?? "unset"}`);
+      } else {
+        unconfigured.push("Codex");
+      }
+      const knownCaches = caches.filter((c) => c.ttl !== null && c.ttl !== undefined);
+      if (knownCaches.length || armedHere.length) {
+        for (const c of (armedHere.length ? caches : knownCaches))
+          console.log(`cache  ${c.harness.padEnd(12)} prompt cache ttl=${c.label}`);
+      } else {
+        unconfigured.push("harness prompt caches");
+      }
+      if (unconfigured.length) {
+        console.log(`\noptional (not configured; fine unless you use them): ${unconfigured.join(", ")}`);
+      }
     }
     for (const [kind, r] of await pollRates(cfg, stateRoot)) {
       const rate = Math.round(r.rate * 10) / 10;
@@ -2271,6 +2430,9 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         }
         if (over) console.log(`WARNING this seat reads ${kind} ~${rate} times a minute against a budget of ${r.budget}; raise the intervals or follow fewer threads.`);
       }
+    }
+    if (!json) {
+      console.log(`\ndoctor: ${bad ? `${bad} error${bad === 1 ? "" : "s"}` : "ok"}${warnings.length ? ` (${warnings.length} warning${warnings.length === 1 ? "" : "s"})` : ""}`);
     }
     return bad ? EXIT.error : EXIT.ok;
   }
@@ -2747,7 +2909,8 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       // stdout stays pure: a read that printed nothing is otherwise indistinguishable from a read
       // of the wrong room, a --since past everything, or a room that is genuinely quiet
       const scannedPast = scanned && values.since && scanned !== (msgs.length ? msgs[msgs.length - 1].cursor : values.since);
-      console.error(`agora: read ${msgs.length} message${msgs.length === 1 ? "" : "s"} from ${roomAlias} (${transport.kind})${thread ? ` thread ${thread}` : ""} since ${values.since ?? "the start"}${gap ? `; the walk did not reach that cursor (${gap.reason}, deepest reached ${gap.oldestFetched ?? "nothing"}), so nothing is printed rather than a partial window -- re-run with --pages above ${gap.pages}` : ""}${scannedPast ? `; the host scanned the room through ${scanned}, and the thread has nothing more before it (go on with --since ${scanned})` : ""}`);
+      const localZeroHint = msgs.length === 0 && room.transport === "local" ? ` [${transport.room}]` : "";
+      console.error(`agora: read ${msgs.length} message${msgs.length === 1 ? "" : "s"} from ${roomAlias} (${transport.kind})${localZeroHint}${thread ? ` thread ${thread}` : ""} since ${values.since ?? "the start"}${gap ? `; the walk did not reach that cursor (${gap.reason}, deepest reached ${gap.oldestFetched ?? "nothing"}), so nothing is printed rather than a partial window -- re-run with --pages above ${gap.pages}` : ""}${scannedPast ? `; the host scanned the room through ${scanned}, and the thread has nothing more before it (go on with --since ${scanned})` : ""}`);
       return EXIT.ok;
     }
     case "post": {
@@ -2779,6 +2942,25 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         text = await readStdin();
       }
       if (!text.trim()) throw new AgoraError(`nothing to post (give text, --file, or --stdin)`, EXIT.usage);
+      if (hasSecretShape(text))
+        throw new AgoraError(`refused: message text contains a credential shape (such as a Slack or GitHub token); keys never enter rooms`, EXIT.usage);
+      // Only refuse raw body-text trailers when no CLI trailer flags were supplied: when flags
+      // supply entries, `withTrailers(unsigned, entries)` appends a blank line and the explicit
+      // trailer block after the body, so body lines are never parsed as protocol trailers.
+      if (!entries.length) {
+        const rawBodyTrimmed = text.replace(/\s+$/, "");
+        const bodyTrailers = parseTrailers(rawBodyTrimmed);
+        if (bodyTrailers.trailers.length) {
+          const keys = [...new Set(bodyTrailers.trailers.map((t) => t.key))];
+          const FLAG_FOR = new Set(["to", "re", "withdraws", "claim", "release", "verdict", "exhibit", "because", "task"]);
+          const hints = [...new Set(keys.map((k) => FLAG_FOR.has(k) ? `--${k}` : k === "ack" ? "--fyi" : "--trailer"))];
+          const flagHint = hints.includes("--trailer") ? hints.join(" / ") : `${hints.join(" / ")} or --trailer`;
+          throw new AgoraError(
+            `refused: message text ends in trailer lines (${keys.join(", ")}); pass them with flags (${flagHint}), or indent the lines if they are plain prose`,
+            EXIT.usage,
+          );
+        }
+      }
       // The face choice is a native room's: elsewhere the post is already where its readers are.
       // The names are checked against the room's policy record before the post so that a name the
       // seat can decide on without any call (no such face, no audience, off) is a refused row the
@@ -2821,7 +3003,7 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       const codexWarning = codexSpawnWarning(process.env);
       if (codexWarning) console.error(`agora: WARNING ${codexWarning}`);
       await identity();
-      if (!record)
+      if (!record && cfg.actor.kind !== "human")
         console.error(`agora: this session is unregistered and is signing as "${bearer.name}" (from ${bearer.source}); run \`agora session --as <Model>/<role>\` so the room can tell your sessions apart`);
       /** @type {string[]} */
       let pieces = [assembled];
@@ -2838,8 +3020,8 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         });
       }
       let boardIntent;
+      const claims = entries.filter((t) => t.key === "claim");
       if ((room.transport === "native" || room.transport === "native-remote") && typeof transport.board === "function") {
-        const claims = entries.filter((t) => t.key === "claim");
         const leaseSeconds = num(values.lease, "lease");
         // The board can commit before post() returns (or even starts). Keep this
         // operation unknown until all pieces have durable commitment evidence.
@@ -2847,6 +3029,25 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
         for (const c of claims)
           await transport.board({ action: "claim", subject: asBoardSubject(c.value),
             ...(leaseSeconds ? { leaseMs: leaseSeconds * 1000 } : {}) });
+      } else if (claims.length) {
+        console.error(`agora: claim recorded; ${room.transport} rooms have no board lock, so nothing stops a second claimant (\`agora carry ${roomAlias}\` lists claims)`);
+        try {
+          const recent = await transport.read({ limit: 200 });
+          /** @type {Map<string, { holder: string, cursor: string }>} */
+          const activeClaims = new Map();
+          for (const m of recent) {
+            const who = m.signedAs ?? m.author.name;
+            for (const t of parseTrailers(m.text).trailers) {
+              if (t.key === "claim") activeClaims.set(t.value, { holder: who, cursor: m.cursor });
+              else if (t.key === "release") activeClaims.delete(t.value);
+            }
+          }
+          for (const c of claims) {
+            const existing = activeClaims.get(c.value);
+            if (existing && existing.holder !== bearer.name)
+              console.error(`agora: WARNING "${c.value}" is already claimed by ${existing.holder} (cursor ${existing.cursor})`);
+          }
+        } catch { /* advisory warning only */ }
       }
       /** @type {import('../src/core.mjs').PostResult | undefined} */
       let last;
@@ -3307,6 +3508,8 @@ seat poll rate  ~${rate} reads/min on ${kind} (budget ${r.budget}, ${r.watches} 
       const watchMode = mode === "once" ? null : watchModeSentinel(process.env, process.cwd());
       if ((await touchWatchMode(watchMode)) === "created")
         console.error(`agora: watch-mode sentinel ${watchMode?.sentinel} (the stop hook stays quiet while this watch runs)`);
+      if (!json && mode !== "once" && !subscription && process.stderr.isTTY)
+        console.error(`agora: watching ${roomAlias}${thread ? ` thread ${thread}` : ""} every ${interval}s; Ctrl+C to stop`);
       const generation = randomUUID();
       await clearWatchStop(sdir, key);
       await writeArmed(sdir, key, {

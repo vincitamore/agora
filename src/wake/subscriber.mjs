@@ -79,7 +79,7 @@ export async function readServiceDescriptor(stateRoot) {
     raw = await readFile(file, "utf8");
   } catch (e) {
     const code = /** @type {NodeJS.ErrnoException} */ (e).code;
-    if (code === "ENOENT" || code === "ENOTDIR") throw new ServiceDarkError(`no seat service descriptor at ${file}; the native service is not running on this seat`);
+    if (code === "ENOENT" || code === "ENOTDIR") throw new ServiceDarkError(`no seat service descriptor at ${file}; the native service is not running on this seat (start it with: agora service start)`);
     throw new ServiceDarkError(`seat service descriptor ${file} cannot be read (${code ?? String(e)})`);
   }
   /** @type {any} */

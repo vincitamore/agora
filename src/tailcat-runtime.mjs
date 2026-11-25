@@ -151,8 +151,26 @@ export async function resolveTailcatBinary(options) {
   return { path: executable, target, source: 'bundle', sha256: entry.sha256, tag: lock.source.tag };
 }
 
-/** @param {Parameters<typeof resolveTailcatBinary>[0]} options */
+/** @param {Parameters<typeof resolveTailcatBinary>[0] & { extract?: boolean }} options */
 export async function tailcatDoctor(options) {
-  try { return { type: 'tailcat', status: 'verified', ...await resolveTailcatBinary(options) }; }
+  try {
+    if (options.extract === false && !options.repair && !(options.override ?? process.env.AGORA_TAILCAT)) {
+      const target = tailcatTarget(options.platform ?? process.platform, options.arch ?? process.arch);
+      const vendor = options.vendorDir ?? defaultVendor;
+      const lock = await readTailcatLock(vendor);
+      const entry = lock.targets[target];
+      const capsule = await regularBytes(path.join(vendor, entry.path), MAX_CAPSULE);
+      if (capsule.length !== entry.capsuleSize || sha256(capsule) !== entry.capsuleSha256)
+        throw new AgoraError(`Tailcat capsule checksum mismatch (${target}). Restore vendor/tailcat from a trusted checkout and run agora doctor --offline.`);
+      const executable = path.join(path.resolve(options.stateRoot), 'bin', 'tailcat', entry.sha256, target.startsWith('windows-') ? 'tailcat.exe' : 'tailcat');
+      let cached;
+      try { cached = await regularBytes(executable, MAX_BINARY); }
+      catch (e) { if (/** @type {NodeJS.ErrnoException} */ (e).code !== 'ENOENT') throw e; }
+      if (cached && cached.length === entry.size && sha256(cached) === entry.sha256)
+        return { type: 'tailcat', status: 'verified', path: executable, target, source: 'bundle', sha256: entry.sha256, tag: lock.source.tag };
+      return { type: 'tailcat', status: 'bundled', path: executable, target, source: 'bundle', sha256: entry.sha256, tag: lock.source.tag };
+    }
+    return { type: 'tailcat', status: 'verified', ...await resolveTailcatBinary(options) };
+  }
   catch (e) { return { type: 'tailcat', status: 'unavailable', error: e instanceof Error ? e.message : 'Tailcat unavailable; run agora doctor --offline.' }; }
 }

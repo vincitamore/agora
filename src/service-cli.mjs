@@ -195,6 +195,7 @@ export async function statusServiceRouteAct(root, operationId) {
 
 /** @param {string} root */
 export async function seatAccountId(root) {
+  await mkdir(path.resolve(root), { recursive: true, mode: 0o700 });
   const physicalRoot = await realpath(path.resolve(root));
   const key = process.platform === "win32" ? physicalRoot.toLowerCase() : physicalRoot;
   return createHash("sha256").update(key).digest("hex").slice(0, 32);

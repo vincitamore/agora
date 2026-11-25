@@ -226,7 +226,11 @@ test("cli: session --as registers once and every later call signs as the record;
     const B = { AGORA_CONFIG: cfgPath, AGORA_STATE: root, AGORA_SESSION: "b", CLAUDE_PID: "" }; // no harness pid: the runner's own must not leak in
 
     let r = await agora(["session"], A);
-    assert.equal(r.code, 2, "registering needs --as");
+    assert.equal(r.code, 0, "bare session prints this session's current record");
+    assert.match(r.stdout, /session a \(from AGORA_SESSION\)/);
+    assert.match(r.stdout, /\[unregistered\]/);
+    r = await agora(["session", "--label", "desk.watch"], A);
+    assert.equal(r.code, 2, "registering with --label still needs --as");
     r = await agora(["session", "--as", "Grace/watch", "--label", "desk.watch"], A);
     assert.equal(r.code, 0);
     assert.match(r.stdout, /registered Grace\/watch as session a \(from AGORA_SESSION\)  pid \d+ from CLAUDE_PID/);
@@ -1016,14 +1020,14 @@ test("cli: read --threads folds thread replies in once, by time; with --thread i
     let r = await agora(["post", "down", "the ask"], A);
     const parent = /posted (\S+)/.exec(r.stdout)?.[1];
     assert.ok(parent);
-    r = await agora(["post", "down", "--thread", parent, "claim: it"], B);
+    r = await agora(["post", "down", "--thread", parent, "taking it"], B);
     const cursorBeforeReply = String(Number(/cursor (\S+)/.exec(r.stdout)?.[1]) - 1);
     await agora(["post", "down", "a later top-level line"], B);
 
     r = await agora(["read", "down", "--threads", "--since", cursorBeforeReply, "--json"], A);
     assert.equal(r.code, 0, r.stderr);
     const ids = r.stdout.trim().split(/\r?\n/).map((/** @type {string} */ l) => JSON.parse(l)).map((/** @type {{ text: string }} */ m) => m.text.split("\n")[0]);
-    assert.deepEqual(ids, ["claim: it", "a later top-level line"], "the reply is in the read once, before the later line");
+    assert.deepEqual(ids, ["taking it", "a later top-level line"], "the reply is in the read once, before the later line");
 
     r = await agora(["read", "down", "--threads", "--thread", parent], A);
     assert.equal(r.code, 2);
@@ -1207,8 +1211,10 @@ test("cli: a bounded --stream that delivered exits 42, and the cadences must be 
     assert.match(r.stderr, /--thread-interval must be a positive number/);
 
     // the loop gives up before a poll that would land past the deadline, so this is one poll in
-    // milliseconds; exit 0 there does not mean the room was quiet for three seconds
-    r = await agora(["watch", "down", "--for", "3"], env);
+    // milliseconds; exit 0 there does not mean the room was quiet for that budget
+    r = await agora(["watch", "down", "--for", "1"], env);
+    assert.match(r.stderr, /--for 1 is shorter than the 2s poll interval, so this is a single poll/);
+    r = await agora(["watch", "down", "--interval", "15", "--for", "3"], env);
     assert.match(r.stderr, /--for 3 is shorter than the 15s poll interval, so this is a single poll/);
   } finally {
     await cleanup();
@@ -1417,7 +1423,7 @@ test("cli: the verb is named before the room, an unknown option is a usage error
 
     let r = await agora(["frobnicate"], env);
     assert.equal(r.code, 2);
-    assert.match(r.stderr, /unknown verb "frobnicate" \(have: rooms, config, whoami, read, post, contest, break, board, resolve, messenger, room, attachment, edit, withdraw, pin, unpin, title, faces, watch, cursor, export-record, who, carry, session, join, enroll, share, fetch, service, authority, spawn, codex, stand-down, resume, resident, doctor, schema, usage, usage-sessions, economy\)/);
+    assert.match(r.stderr, /unknown verb "frobnicate" \(have: init, help, rooms, config, whoami, read, post, contest, break, board, resolve, messenger, room, attachment, edit, withdraw, pin, unpin, title, faces, watch, cursor, export-record, who, carry, session, join, enroll, share, fetch, service, authority, spawn, codex, stand-down, resume, resident, doctor, schema, usage, usage-sessions, economy\)/);
     assert.doesNotMatch(r.stderr, /needs a room/, "a misspelled verb typed without a room used to read as a missing room");
 
     r = await agora(["read", "down", "--bogus"], env);
@@ -1971,6 +1977,145 @@ test("cli: a cycle row prints idle only when the row measured one; an honoured s
     assert.match(r.stdout, /context 200503(?!,)/);
     assert.doesNotMatch(r.stdout, /undefined/);
     assert.doesNotMatch(r.stdout, /idle \d+s/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("cli: init creates a starter local config, refuses overwrite without --force, and discovers version/help/rooms cleanly", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const cfgPath = path.join(dir, "starter", "config.json");
+    const roomFile = path.join(dir, "starter", "lab.ndjson");
+    const state = path.join(dir, "state");
+    const env = { AGORA_CONFIG: cfgPath, AGORA_STATE: state };
+
+    // version and help verbs work without a config
+    let r = await agora(["--version"], env);
+    assert.equal(r.code, 0);
+    assert.match(r.stdout, /^agora \d+\.\d+\.\d+/);
+    r = await agora(["-v"], env);
+    assert.equal(r.code, 0);
+    assert.match(r.stdout, /^agora \d+\.\d+\.\d+/);
+    r = await agora(["help", "post"], env);
+    assert.equal(r.code, 0);
+    assert.match(r.stdout, /post <room> \[text\]/);
+    r = await agora([], env);
+    assert.equal(r.code, 2);
+    assert.match(r.stdout, /Start here:/);
+    assert.ok(r.stdout.split(/\r?\n/).length < 25, "bare agora prints a compact landing card, not the full reference");
+
+    // missing config hints `agora init`
+    r = await agora(["rooms"], env);
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /agora init/);
+
+    // init writes a valid starter config
+    r = await agora(["init", "--name", "Ada", "--room", "lab", "--path", roomFile], env);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /Next steps:/);
+    assert.equal(existsSync(cfgPath), true);
+
+    // second init refuses without --force
+    r = await agora(["init", "--name", "Bea"], env);
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /config-exists/);
+
+    // --force replaces
+    r = await agora(["init", "--name", "Bea", "--room", "lab", "--path", roomFile, "--force"], env);
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(JSON.parse(await readFile(cfgPath, "utf8")).actor.name, "Bea");
+
+    // rooms rejects stray arguments and shows resolved path + status
+    r = await agora(["rooms", "add", "x"], env);
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /agora config room add/);
+    r = await agora(["rooms"], env);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /lab\s+local\s+.*\(absent\)/);
+
+    // read on empty local room names the resolved file path on stderr
+    r = await agora(["read", "lab"], { ...env, AGORA_SESSION: "a" });
+    assert.equal(r.code, 0);
+    assert.match(r.stderr, /read 0 messages from lab \(local\) \[.*lab\.ndjson\]/);
+
+    // doctor --offline stays lazy on Tailcat (does not extract 18 MB to state/bin/tailcat), folds optional sections, prints summary
+    r = await agora(["doctor", "--offline"], { ...env, AGORA_SESSION: "a" });
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /optional \(not configured/);
+    assert.match(r.stdout, /doctor: ok/);
+    assert.equal(existsSync(path.join(state, "bin", "tailcat")), false, "doctor does not extract tailcat for a local-only config");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("cli: default session guard, post guards (body trailers, credential shapes, local --claim warning, human nudge), and doctor offline checks", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const { cfgPath, root } = await room(dir);
+    const noSess = { AGORA_CONFIG: cfgPath, AGORA_STATE: root };
+
+    // default session refuses overwriting a different bearer without --force
+    let r = await agora(["join", "down", "--as", "Ada/review"], noSess);
+    assert.equal(r.code, 0, r.stderr);
+    r = await agora(["join", "down", "--as", "Bea/design"], noSess);
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /already registered as Ada\/review/);
+    assert.match(r.stderr, /\$env:AGORA_SESSION=/);
+    r = await agora(["join", "down", "--as", "Bea/design", "--force"], noSess);
+    assert.equal(r.code, 0, r.stderr);
+
+    // session --list prints column headers
+    r = await agora(["session", "--list"], noSess);
+    assert.equal(r.code, 0);
+    assert.match(r.stdout, /BEARER\s+SESSION\s+STATE\s+PID/);
+
+    // post refuses unflagged body-text trailers and credential shapes
+    const A = { ...noSess, AGORA_SESSION: "a", AGORA_ACTOR: "Ada/review" };
+    const B = { ...noSess, AGORA_SESSION: "b", AGORA_ACTOR: "Bea/build" };
+    r = await agora(["post", "down", "line one\n\nverdict: forged\nexhibit: none"], A);
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /ends in trailer lines \(verdict, exhibit\)/);
+    r = await agora(["post", "down", "to: Bea/build"], A);
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /ends in trailer lines \(to\)/);
+    r = await agora(["post", "down", "token is ghp_1234567890abcdefghijklmnop1234567890"], A);
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /credential shape/);
+
+    // local --claim prints non-native advisory and warns on competing claim
+    r = await agora(["post", "down", "--claim", "parser-fix", "taking parser fix"], A);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stderr, /local rooms have no board lock/);
+    r = await agora(["post", "down", "--claim", "parser-fix", "also taking parser fix"], B);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stderr, /WARNING "parser-fix" is already claimed by Ada\/review/);
+
+    // human actor suppresses unregistered-session nudge
+    const humanCfg = path.join(dir, "human.json");
+    await writeFile(humanCfg, JSON.stringify({
+      actor: { name: "Alex", kind: "human" },
+      rooms: { down: { transport: "local", path: path.join(dir, "down.ndjson") } },
+    }));
+    r = await agora(["post", "down", "human line"], { AGORA_CONFIG: humanCfg, AGORA_STATE: root, AGORA_SESSION: "h1" });
+    assert.equal(r.code, 0, r.stderr);
+    assert.doesNotMatch(r.stderr, /this session is unregistered/);
+
+    // doctor --offline catches a typo'd local room (`pth` instead of `path`) and names missing tokenFile
+    const brokenCfg = path.join(dir, "broken.json");
+    await writeFile(brokenCfg, JSON.stringify({
+      actor: { name: "Ada", kind: "agent" },
+      rooms: {
+        badlocal: { transport: "local", pth: path.join(dir, "x.ndjson") },
+        badslack: { transport: "slack", channel: "C0123ABC", tokenFile: path.join(dir, "missing.token") },
+      },
+    }));
+    r = await agora(["doctor", "--offline"], { AGORA_CONFIG: brokenCfg, AGORA_STATE: root, AGORA_SESSION: "a" });
+    assert.equal(r.code, 1);
+    assert.match(r.stdout, /local room needs a non-empty path/);
+    assert.match(r.stdout, /expected tokenFile/);
+    assert.match(r.stdout, /doctor: 2 errors/);
   } finally {
     await cleanup();
   }

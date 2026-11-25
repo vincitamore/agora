@@ -16,7 +16,7 @@ import { copyFile, mkdir, open, readFile, realpath, rename, rm, stat, chmod } fr
 import { constants, existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import { AgoraError, EXIT, configPath, redact, stateDir, validateConfig } from "./core.mjs";
+import { AgoraError, EXIT, configPath, expandHome, redact, stateDir, validateConfig } from "./core.mjs";
 import { TRANSPORTS } from "./transports/index.mjs";
 import { exposureRefusal } from "./exposure.mjs";
 import { assertResidentSlug, configuredResidents } from "./resident.mjs";
@@ -556,22 +556,78 @@ export async function verifiedRemoteRow(file, stateRoot) {
   return { row: { transport: "native-remote", descriptor: file }, descriptor };
 }
 
-/** @param {string} alias @param {unknown} row */
+/** @param {string} alias @param {unknown} row @returns {{ row: Record<string, unknown>, notes: string[] }} */
 function checkRoomRow(alias, row) {
   if (!isObject(row)) throw new AgoraError(`the row for room "${alias}" must be a JSON object`, EXIT.usage);
   const transport = row.transport;
   if (typeof transport !== "string" || !(transport in TRANSPORTS))
     throw new AgoraError(`the row for room "${alias}" needs a transport, one of ${Object.keys(TRANSPORTS).join(", ")}${typeof transport === "string" ? ` (not "${transport}")` : ""}`, EXIT.usage);
+  if (transport === "local" && (typeof row.path !== "string" || !row.path.trim()))
+    throw new AgoraError(`a local room row needs path, e.g. "~/.agora/${alias}.ndjson"`, EXIT.usage);
+  if (transport === "slack" && (typeof row.channel !== "string" || !/^[CGD][A-Z0-9]+$/.test(row.channel)))
+    throw new AgoraError(`a slack room row needs channel, the channel ID (such as C0123ABCDEF, not a #name)`, EXIT.usage);
+  if (transport === "github") {
+    if (typeof row.repo !== "string" || !/^[^/\s]+\/[^/\s]+$/.test(row.repo))
+      throw new AgoraError(`a github room row needs repo ("owner/name")`, EXIT.usage);
+    if (!Number.isInteger(row.issue) || Number(row.issue) < 1)
+      throw new AgoraError(`a github room row needs a positive integer issue number`, EXIT.usage);
+  }
+  if (transport === "github-events") {
+    const hasTarget = (typeof row.repo === "string" && row.repo.trim()) || (typeof row.org === "string" && row.org.trim()) || (typeof row.user === "string" && row.user.trim());
+    if (!hasTarget) throw new AgoraError(`a github-events room row needs repo, org, or user`, EXIT.usage);
+  }
   if (transport === "native" && !/^[a-f0-9]{32}$/.test(String(row.roomId ?? "")))
     throw new AgoraError(`a native room row needs roomId, the 32-hex id agora service room create printed`, EXIT.usage);
   if (transport === "native-remote" && (typeof row.descriptor !== "string" || !row.descriptor.trim()))
     throw new AgoraError(`a native-remote room row needs descriptor, the path of the route descriptor (agora config room add <alias> --from-descriptor <path> verifies it)`, EXIT.usage);
+  /** @type {string[]} */
+  const notes = [];
+  let normalized = row;
+  if (transport === "local" && typeof row.path === "string") {
+    const rawPath = row.path.trim();
+    if (!rawPath.startsWith("~") && !path.isAbsolute(rawPath)) {
+      const abs = path.resolve(rawPath);
+      normalized = { ...row, path: abs };
+      notes.push(`resolved relative local room path ${JSON.stringify(rawPath)} to ${abs} so "${alias}" points to one file from every directory`);
+    }
+  }
+  if (typeof row.tokenFile === "string" && row.tokenFile.trim()) {
+    const resolved = expandHome(row.tokenFile);
+    if (!existsSync(resolved))
+      notes.push(`note: tokenFile ${row.tokenFile} (${resolved}) does not exist yet; create it before running online commands`);
+  }
+  return { row: normalized, notes };
 }
 
 /** @param {string} raw @param {string} what */
 function parseJsonArg(raw, what) {
   try { return JSON.parse(raw); }
-  catch (e) { throw new AgoraError(`${what} is not JSON (${e instanceof Error ? e.message : String(e)}); quote it for your shell, e.g. '{"transport":"local","path":"room.jsonl"}'`, EXIT.usage); }
+  catch (e) {
+    const trimmed = raw.trim();
+    const looksQuoteStripped = /^\{\s*[A-Za-z_]\w*\s*:/.test(trimmed) || /^'\{/.test(trimmed);
+    const hint = looksQuoteStripped
+      ? `your shell appears to have stripped double quotes (common in Windows PowerShell 5.1 and cmd.exe). In PowerShell 5.1 escape inner quotes: '{\\"transport\\":\\"local\\",\\"path\\":\\"~/.agora/room.ndjson\\"}'; in cmd.exe use outer double quotes: "{\\"transport\\":\\"local\\",\\"path\\":\\"~/.agora/room.ndjson\\"}"; or pass --from-file <path> (or --from-file - for stdin)`
+      : `pass valid JSON or --from-file <path> (or --from-file - for stdin); on POSIX quote with single quotes, on Windows PowerShell 5.1 escape inner double quotes`;
+    throw new AgoraError(`${what} is not JSON (${e instanceof Error ? e.message : String(e)}); ${hint}`, EXIT.usage);
+  }
+}
+
+/** Read a JSON payload from a file path or `-` (stdin). @param {string} fromFile @param {string} what */
+async function readJsonFromFile(fromFile, what) {
+  const src = fromFile.trim();
+  if (!src) throw new AgoraError(`--from-file needs a file path or - for stdin`, EXIT.usage);
+  let raw;
+  if (src === "-") {
+    if (process.stdin.isTTY) throw new AgoraError(`--from-file - reads stdin, but stdin is a terminal; pipe JSON or pass a file path`, EXIT.usage);
+    const chunks = [];
+    for await (const c of process.stdin) chunks.push(typeof c === "string" ? Buffer.from(c) : c);
+    raw = Buffer.concat(chunks).toString("utf8");
+  } else {
+    try { raw = await readFile(expandHome(src), "utf8"); }
+    catch (e) { throw new AgoraError(`--from-file ${src}: ${e instanceof Error ? e.message : String(e)}`); }
+  }
+  // Strip UTF-8 BOM if present (common from Windows PowerShell Set-Content)
+  return parseJsonArg(raw.replace(/^\uFEFF/, ""), `${what} (from ${src})`);
 }
 
 /** The state root a plan reads (a hosted native room, a seat identity): as every verb resolves it. @param {Record<string, unknown> | null} before */
@@ -579,7 +635,7 @@ const stateOf = (before) => stateDir(/** @type {any} */ (before ?? {}));
 
 // ---------------------------------------------------------------- the verb
 
-const USAGE = "agora config show | room add <alias> <row-json> | room add <alias> --from-descriptor <path> | room remove <alias> | resident add <slug> [<row-json>] | resident remove <slug> | set <key> <json> [<key> <json> ...] | unset <key> [...]";
+const USAGE = "agora config show | room add <alias> <row-json>|--from-file <path|->|--from-descriptor <path> | room remove <alias> | resident add <slug> [<row-json>|--from-file <path|->] | resident remove <slug> | set <key> <json> [<key> <json> ...] | set [<key>] --from-file <path|-> | unset <key> [...]";
 
 /**
  * @param {{ sub: string | undefined, rest: string[], values: Record<string, unknown>, out?: (line: string) => void, err?: (line: string) => void, lockWaitMs?: number, now?: () => Date }} a
@@ -594,11 +650,15 @@ export async function configVerb(a) {
   const replace = Boolean(values.replace);
   const force = Boolean(values.force);
   const fromDescriptor = values["from-descriptor"] === undefined ? undefined : String(values["from-descriptor"]);
+  const fromFile = values["from-file"] === undefined ? undefined : String(values["from-file"]);
   const usage = (/** @type {string} */ m) => new AgoraError(`${m} (${USAGE})`, EXIT.usage);
   const file = configPath(values.config === undefined ? undefined : String(values.config));
   const [kind, name, rowRaw, ...extra] = rest;
 
   if (fromDescriptor !== undefined && !(sub === "room" && kind === "add")) throw usage("--from-descriptor goes with config room add");
+  if (fromFile !== undefined && !((sub === "room" && kind === "add") || (sub === "resident" && kind === "add") || sub === "set"))
+    throw usage("--from-file goes with config set, config room add, or config resident add");
+  if (fromDescriptor !== undefined && fromFile !== undefined) throw usage("--from-descriptor and --from-file cannot be combined");
   if (replace && !(kind === "add" && (sub === "room" || sub === "resident"))) throw usage("--replace goes with config room add or config resident add");
   if (force && !(sub === "room" && kind === "remove")) throw usage("--force goes with config room remove");
 
@@ -639,16 +699,20 @@ export async function configVerb(a) {
   if (sub === "room" && kind === "add") {
     if (name === undefined) throw usage("config room add needs <alias>");
     if (!ALIAS_RE.test(name)) throw usage("a room alias starts with a letter or digit and carries letters, digits, dot, underscore or hyphen");
-    if (extra.length || (fromDescriptor !== undefined && rowRaw !== undefined)) throw usage("config room add takes <alias> and one of <row-json> or --from-descriptor <path>");
-    if (fromDescriptor === undefined && rowRaw === undefined) throw usage("config room add needs <row-json> or --from-descriptor <path>");
+    if (extra.length || ((fromDescriptor !== undefined || fromFile !== undefined) && rowRaw !== undefined))
+      throw usage("config room add takes <alias> and one of <row-json>, --from-file <path|->, or --from-descriptor <path>");
+    if (fromDescriptor === undefined && fromFile === undefined && rowRaw === undefined)
+      throw usage("config room add needs <row-json>, --from-file <path|->, or --from-descriptor <path>");
     if (fromDescriptor !== undefined && !fromDescriptor.trim()) throw usage("--from-descriptor needs a path");
-    const given = rowRaw === undefined ? undefined : parseJsonArg(rowRaw, "the room row");
-    if (given !== undefined) checkRoomRow(name, given);
+    const rawGiven = fromFile !== undefined
+      ? await readJsonFromFile(fromFile, "the room row")
+      : rowRaw === undefined ? undefined : parseJsonArg(rowRaw, "the room row");
+    const checked = rawGiven !== undefined ? checkRoomRow(name, rawGiven) : undefined;
     action = "room-add";
     plan = async (before) => {
       /** @type {string[]} */
-      const notes = [];
-      let row = given;
+      const notes = [...(checked?.notes ?? [])];
+      let row = checked?.row;
       if (fromDescriptor !== undefined) {
         const verified = await verifiedRemoteRow(path.resolve(fromDescriptor), stateOf(before));
         row = verified.row;
@@ -687,9 +751,12 @@ export async function configVerb(a) {
       };
     };
   } else if (sub === "resident" && kind === "add") {
-    if (name === undefined || extra.length) throw usage("config resident add takes <slug> and an optional <row-json>");
+    if (name === undefined || extra.length || (fromFile !== undefined && rowRaw !== undefined))
+      throw usage("config resident add takes <slug> and an optional <row-json> or --from-file <path|->");
     assertResidentSlug(name);
-    const row = rowRaw === undefined ? {} : parseJsonArg(rowRaw, "the resident row");
+    const row = fromFile !== undefined
+      ? await readJsonFromFile(fromFile, "the resident row")
+      : rowRaw === undefined ? {} : parseJsonArg(rowRaw, "the resident row");
     if (!isObject(row)) throw usage("a resident row is a JSON object, e.g. '{\"restart\":\"systemctl --user restart resident-{slug}.service\"}'");
     if (row.restart !== undefined && typeof row.restart !== "string") throw usage("a resident row's restart is a command string ({slug} is the resident)");
     action = "resident-add";
@@ -710,26 +777,56 @@ export async function configVerb(a) {
       ? { ops: [{ path: ["residents", name] }] }
       : { noop: `no resident "${name}" in the config; nothing to remove` };
   } else if (sub === "set") {
-    if (rest.length < 2 || rest.length % 2) throw usage("config set takes <key> <json> pairs");
     /** @type {[string, unknown][]} */
     const pairs = [];
-    for (let i = 0; i < rest.length; i += 2) {
-      const key = rest[i];
+    /** @type {string[]} */
+    const roomNotes = [];
+    if (fromFile !== undefined) {
+      if (rest.length > 1) throw usage("config set with --from-file takes either no key (a JSON object of keys) or one <key>");
+      const loaded = await readJsonFromFile(fromFile, rest.length === 1 ? `the value for ${rest[0]}` : "the config patch");
+      if (rest.length === 1) {
+        pairs.push([rest[0], loaded]);
+      } else {
+        if (!isObject(loaded) || Object.keys(loaded).length === 0)
+          throw usage("--from-file with config set (no key) expects a non-empty JSON object of top-level config keys");
+        for (const [k, v] of Object.entries(loaded)) pairs.push([k, v]);
+      }
+    } else {
+      if (rest.length < 2 || rest.length % 2) throw usage("config set takes <key> <json> pairs (or --from-file <path|->)");
+      for (let i = 0; i < rest.length; i += 2) {
+        const key = rest[i];
+        if (pairs.some(([k]) => k === key)) throw usage(`"${key}" is given twice`);
+        pairs.push([key, parseJsonArg(rest[i + 1], `the value for ${key}`)]);
+      }
+    }
+    /** @type {[string, unknown][]} */
+    const validatedPairs = [];
+    for (const [key, rawValue] of pairs) {
       if (!(key in CONFIG_KEYS)) throw usage(`"${key}" is not a config key agora reads (have: ${Object.keys(CONFIG_KEYS).join(", ")})`);
-      if (pairs.some(([k]) => k === key)) throw usage(`"${key}" is given twice`);
-      const value = parseJsonArg(rest[i + 1], `the value for ${key}`);
       const want = CONFIG_KEYS[/** @type {keyof typeof CONFIG_KEYS} */ (key)];
-      const got = value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
-      if (got !== want) throw usage(`${key} takes a JSON ${want}, not ${got === "string" ? `a string (${JSON.stringify(value)})` : `${got === "array" || got === "object" ? "an" : "a"} ${got}`}`);
-      pairs.push([key, value]);
+      const got = rawValue === null ? "null" : Array.isArray(rawValue) ? "array" : typeof rawValue;
+      if (got !== want) throw usage(`${key} takes a JSON ${want}, not ${got === "string" ? `a string (${JSON.stringify(rawValue)})` : `${got === "array" || got === "object" ? "an" : "a"} ${got}`}`);
+      let value = rawValue;
+      if (key === "rooms" && isObject(rawValue)) {
+        /** @type {Record<string, unknown>} */
+        const normalizedRooms = {};
+        for (const [alias, row] of Object.entries(rawValue)) {
+          if (!ALIAS_RE.test(alias)) throw usage(`room alias "${alias}" must start with a letter or digit and carry letters, digits, dot, underscore or hyphen`);
+          const c = checkRoomRow(alias, row);
+          normalizedRooms[alias] = c.row;
+          roomNotes.push(...c.notes);
+        }
+        value = normalizedRooms;
+      }
+      validatedPairs.push([key, value]);
     }
     action = "set";
-    plan = (before) => {
-      const changed = pairs.filter(([k, v]) => !has(before, k) || canonical(/** @type {any} */ (before)[k]) !== canonical(v));
-      if (!changed.length) return { noop: `${pairs.map(([k]) => k).join(", ")} already ${pairs.length === 1 ? "has" : "have"} this value` };
+    plan = async (before) => {
+      const changed = validatedPairs.filter(([k, v]) => !has(before, k) || canonical(/** @type {any} */ (before)[k]) !== canonical(v));
+      if (!changed.length) return { noop: `${validatedPairs.map(([k]) => k).join(", ")} already ${validatedPairs.length === 1 ? "has" : "have"} this value` };
       /** @type {string[]} */
-      const notes = [];
-      if (changed.some(([k]) => k === "actor"))
+      const notes = [...roomNotes];
+      if (before !== null && changed.some(([k]) => k === "actor"))
         notes.push("actor.name is the signature of every session on this seat that registered no bearer (agora session --as): their next posts sign as the new name");
       return { ops: changed.map(([k, v]) => /** @type {Op} */ ({ path: [k], value: v })), notes };
     };
@@ -757,5 +854,58 @@ export async function configVerb(a) {
   if (r.noop) { out(`${r.noop}: nothing written`); return EXIT.ok; }
   out(r.withheld ? `the file before holds a credential inline at ${r.withheld.join(", ")}, so no diff is printed` : r.diff);
   out(r.dryRun ? "dry run: nothing written" : `wrote ${r.path}${r.backup ? `; the file before is kept as ${r.backup}` : ""}`);
+  return EXIT.ok;
+}
+
+/**
+ * Create a starter local-room config with no CLI JSON quoting required (`agora init`).
+ * Refuses to overwrite an existing config unless `--force` is given.
+ * @param {{ values: Record<string, unknown>, out?: (line: string) => void, lockWaitMs?: number, now?: () => Date }} a
+ * @returns {Promise<number>}
+ */
+export async function initVerb(a) {
+  const out = a.out ?? ((/** @type {string} */ l) => { console.log(l); });
+  const { values } = a;
+  const json = Boolean(values.json);
+  const dryRun = Boolean(values["dry-run"]);
+  const force = Boolean(values.force);
+  const name = values.name === undefined ? "Ada" : String(values.name).trim();
+  const kind = values.kind === undefined ? "agent" : String(values.kind).trim();
+  const room = values.room === undefined ? "try" : String(values.room).trim();
+  const rawRoomPath = values.path === undefined ? `~/.agora/${room}.ndjson` : String(values.path).trim();
+  if (!name) throw new AgoraError("init: --name must not be empty", EXIT.usage);
+  if (kind !== "agent" && kind !== "human") throw new AgoraError(`init: --kind must be "agent" or "human", not ${JSON.stringify(kind)}`, EXIT.usage);
+  if (!ALIAS_RE.test(room)) throw new AgoraError("init: --room alias must start with a letter or digit and carry letters, digits, dot, underscore or hyphen", EXIT.usage);
+  if (!rawRoomPath) throw new AgoraError("init: --path must not be empty", EXIT.usage);
+  const checked = checkRoomRow(room, { transport: "local", path: rawRoomPath });
+  const file = configPath(values.config === undefined ? undefined : String(values.config));
+  const actor = { name, kind };
+  const rooms = { [room]: checked.row };
+  const r = await editConfig(file, (before) => {
+    if (before !== null && !force)
+      throw Object.assign(new AgoraError(`config-exists: ${file} already exists; nothing was written. Use \`agora config show\` to view it, \`agora config room add\` to add a room, or \`agora init --force\` to replace actor and rooms`), { code: "config-exists" });
+    return {
+      ops: [{ path: ["actor"], value: actor }, { path: ["rooms"], value: rooms }],
+      notes: checked.notes,
+    };
+  }, { dryRun, lockWaitMs: a.lockWaitMs, now: a.now });
+  if (json) {
+    out(JSON.stringify({ type: "init", path: r.path, written: r.written, dryRun: r.dryRun, actor, room, roomPath: checked.row.path, ...(r.backup ? { backup: r.backup } : {}), diff: r.diff, notes: r.notes }));
+    return EXIT.ok;
+  }
+  out(`config ${r.path}${r.existed ? "" : " (new file)"}`);
+  for (const n of r.notes) out(n);
+  if (r.diff) out(r.diff);
+  if (r.dryRun) {
+    out("dry run: nothing written");
+  } else {
+    out(`wrote ${r.path}${r.backup ? `; the file before is kept as ${r.backup}` : ""}`);
+    out("");
+    out("Next steps:");
+    out(`  agora doctor`);
+    out(`  AGORA_SESSION=a agora join ${room} --as ${name}/review`);
+    out(`  AGORA_SESSION=a agora post ${room} "hello from agora"`);
+    out(`  AGORA_SESSION=a agora read ${room}`);
+  }
   return EXIT.ok;
 }

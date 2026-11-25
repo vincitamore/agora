@@ -48,6 +48,17 @@ export function localTransport(room, { actor, now = () => new Date() }) {
       if (!Number.isInteger(start) || start < 0) throw new AgoraError(`bad cursor "${since}" for a local room`);
       if (start > all.length)
         throw new AgoraError(`local room: cursor ${start} exceeds ${all.length} available records; the log may be truncated, replaced, or missing; restore it or use a new room alias`);
+      // Resolve a numeric cursor passed to --thread (e.g. --thread 1) to that record's message id.
+      let targetThread = thread;
+      if (targetThread && /^[1-9]\d*$/.test(targetThread)) {
+        const idx = Number(targetThread) - 1;
+        if (idx >= 0 && idx < all.length) {
+          try {
+            const targetRec = JSON.parse(all[idx]);
+            if (targetRec?.id) targetThread = String(targetRec.thread ?? targetRec.id);
+          } catch { /* handled below if in unread range */ }
+        }
+      }
       /** @type {import('../core.mjs').Message[]} */
       const out = [];
       for (let i = start; i < all.length; i++) {
@@ -60,7 +71,7 @@ export function localTransport(room, { actor, now = () => new Date() }) {
           // Do not include its contents: room text may contain private data.
           throw new AgoraError(`local room: invalid JSON at record ${i + 1}; no batch delivered; restore an intact log before resuming`);
         }
-        if (thread && rec.thread !== thread) continue;
+        if (targetThread && rec.id !== targetThread && rec.thread !== targetThread) continue;
         out.push({
           id: String(rec.id),
           room: file,
@@ -80,9 +91,34 @@ export function localTransport(room, { actor, now = () => new Date() }) {
       return since ? out.slice(0, limit) : out.slice(-limit);
     },
     async post(text, { thread } = {}) {
+      let resolvedThread = thread;
+      if (resolvedThread !== undefined) {
+        const existing = await lines();
+        /** @type {Record<string, any> | undefined} */
+        let target;
+        if (/^[1-9]\d*$/.test(resolvedThread)) {
+          const idx = Number(resolvedThread) - 1;
+          if (idx >= 0 && idx < existing.length) {
+            try { target = JSON.parse(existing[idx]); } catch { /* ignore */ }
+          }
+        }
+        if (!target) {
+          for (const l of existing) {
+            try {
+              const rec = JSON.parse(l);
+              if (String(rec?.id) === resolvedThread) { target = rec; break; }
+            } catch { /* ignore */ }
+          }
+        }
+        if (!target || !target.id)
+          throw new AgoraError(`thread-root-unknown: no message ${JSON.stringify(resolvedThread)} in local room ${file}; pass a message id or cursor from \`agora read\``);
+        if (target.thread)
+          throw new AgoraError(`thread-root-not-top-level: ${JSON.stringify(resolvedThread)} is a reply in thread ${target.thread}, not a thread root; pass --thread ${target.thread}`);
+        resolvedThread = String(target.id);
+      }
       await mkdir(path.dirname(file), { recursive: true });
       const id = `${now().getTime().toString(36)}-${randomBytes(3).toString("hex")}`;
-      const rec = { id, thread, author: { id: actor.name, name: actor.name, kind: actor.kind }, text, ts: now().toISOString() };
+      const rec = { id, thread: resolvedThread, author: { id: actor.name, name: actor.name, kind: actor.kind }, text, ts: now().toISOString() };
       await appendFile(file, JSON.stringify(rec) + "\n", "utf8");
       // Other writers can append before our read completes. The tail count then belongs to
       // somebody else's post; returning it would skip peers when resumed with `since`.

@@ -1,0 +1,41 @@
+{
+  "actor": {
+    "name": "Ada",
+    "kind": "agent"
+  },
+  "sign": true,
+  "state": "~/.agora/state",
+  "rooms": {
+    "shared": {
+      "transport": "slack",
+      "channel": "C0123ABCDEF",
+      "tokenFile": "~/.agora/slack-bot.token",
+      "interval": 15,
+      "threadInterval": 60,
+      "followCap": 8,
+      "followIdleMinutes": 60,
+      "pollBudget": 40,
+      "note": "cross-party: requests, exhibits, verdicts, questions for the human"
+    },
+    "issue-3": {
+      "transport": "github",
+      "repo": "example-org/example-repo",
+      "issue": 3,
+      "tokenEnv": "AGORA_GITHUB_TOKEN",
+      "wakeFrom": ["example-maintainer"]
+    },
+    "repo-events": {
+      "transport": "github-events",
+      "repo": "example-org/example-repo",
+      "events": ["PushEvent", "PullRequestEvent", "PullRequestReviewEvent", "IssuesEvent"],
+      "refs": ["main"],
+      "wakeFrom": ["example-maintainer"],
+      "note": "a read-only feed: pushes to main, pull requests and their reviews, issues; post to issue-3, not here"
+    },
+    "desk": {
+      "transport": "local",
+      "path": "~/.agora/desk.ndjson",
+      "note": "desk-local: sequencing among our own sessions; what the other side must act on goes to the shared room"
+    }
+  }
+}

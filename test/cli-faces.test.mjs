@@ -490,15 +490,26 @@ test("the post-time options are a native room's: --face on a slack room, --face 
 test("no credential shape reaches stdout, stderr, the policy record or the face record log", async (t) => {
   const { env, root, policyFile } = await fixture(t);
   await agora(["room", "faces", "nat", "--add", "slack", "--disable", "slack"], env);
-  const r = await agora(["post", "nat", `the token is ${TOKENISH}`, "--face", "slack", "--json"], env);
-  assert.equal(r.code, 0, r.stderr);
-  const outputs = r.stdout + r.stderr + (await readFile(policyFile, "utf8")) + (await readFile(faceRecordsPath(root, ROOM), "utf8"));
+  // First layer: CLI `post` refuses credential shapes before anything enters the room.
+  for (const leak of [TOKENISH, "ghp_1234567890abcdefghijklmnop1234567890"]) {
+    const refused = await agora(["post", "nat", `the token is ${leak}`, "--face", "slack", "--json"], env);
+    assert.equal(refused.code, 2, "CLI post refuses credential shapes");
+    assert.match(refused.stderr, /credential shape/);
+    assert.doesNotMatch(refused.stdout + refused.stderr, /xoxb-1234567890|ghp_1234567890/);
+  }
+  // Second layer: even if a message carrying a credential shape enters through the transport
+  // directly, policy records, face records, and `agora faces` never print the secret.
+  const direct = nativeTransport({ transport: "native", roomId: ROOM }, { actor: { name: "seat", kind: "agent" }, stateRoot: root });
+  const posted = await direct.post(`the token is ${TOKENISH}`, { face: ["slack"] });
+  await direct.close?.();
+  const id = posted.id;
+  await appendFaceRecord(root, ROOM, { originId: id, cursor: posted.cursor, transport: "slack", status: "refused", code: "disabled", reason: "disabled", attempt: 0, at: "2026-09-05T12:00:00.000Z" });
+  const outputs = (await readFile(policyFile, "utf8")) + (await readFile(faceRecordsPath(root, ROOM), "utf8"));
   assert.doesNotMatch(outputs, /xoxb-1234567890/, "the row carries the reason, the record carries the reason, and neither carries the body");
   const s = await agora(["faces", "nat", "--for", `${EPOCH}:1`], env);
   assert.doesNotMatch(s.stdout + s.stderr, /xoxb-1234567890/);
 
   // a row whose reason a transport error stamped with a credential shape is redacted on the way out
-  const id = JSON.parse(r.stdout).id;
   await appendFaceRecord(root, ROOM, { originId: id, transport: "slack", status: "unknown", code: "lost-response", reason: `unknown: fetch failed for ${TOKENISH}; the request may have landed`, attempt: 1, at: "2026-09-05T12:00:00.000Z", pendingAt: "2026-09-05T12:00:00.000Z" });
   for (const args of [["faces", "nat", "--for", id], ["faces", "nat", "--for", id, "--json"], ["faces", "nat", "--unknown"], ["faces", "nat", "--unknown", "--json"]]) {
     const u = await agora(args, env);

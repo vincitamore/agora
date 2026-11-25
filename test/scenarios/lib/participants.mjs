@@ -88,7 +88,7 @@ export class Agent {
   /**
    * Post through the CLI. The text travels in a file, so no body is ever read as a flag.
    * @param {string} text
-   * @param {{ to?: string[], re?: string, thread?: string, claim?: string, room?: string }} [opts]
+   * @param {{ to?: string[], re?: string, thread?: string, claim?: string, room?: string, trailers?: Array<{ key: string, value: string }> }} [opts]
    * @returns {Promise<{ id: string, cursor: string, stderr: string, warnings: string[] }>}
    */
   async post(text, opts = {}) {
@@ -99,6 +99,7 @@ export class Agent {
     if (opts.re) args.push("--re", opts.re);
     if (opts.thread) args.push("--thread", opts.thread);
     if (opts.claim) args.push("--claim", opts.claim);
+    for (const tr of opts.trailers ?? []) args.push("--trailer", `${tr.key}: ${tr.value}`);
     const r = await this.ok(args);
     await rm(file, { force: true });
     const receipt = JSON.parse(r.stdout.trim().split(/\r?\n/).pop() ?? "{}");

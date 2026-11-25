@@ -29,7 +29,15 @@ test("local room: post, read, since, thread filter", async () => {
     assert.deepEqual(after.map((m) => m.id), [c.id]);
 
     const inThread = await t.read({ thread: a.id });
-    assert.deepEqual(inThread.map((m) => m.text), ["reply"]);
+    assert.deepEqual(inThread.map((m) => m.text), ["first", "reply"]);
+    const byCursor = await t.read({ thread: "1" });
+    assert.deepEqual(byCursor.map((m) => m.text), ["first", "reply"]);
+    const replyByCursor = await t.post("reply two", { thread: "1" });
+    assert.equal(replyByCursor.cursor, "4");
+    const inThreadAfter = await t.read({ thread: a.id });
+    assert.deepEqual(inThreadAfter.map((m) => m.text), ["first", "reply", "reply two"]);
+    await assert.rejects(t.post("orphan", { thread: "no-such-id" }), /thread-root-unknown/);
+    await assert.rejects(t.post("nested", { thread: b.id }), /thread-root-not-top-level/);
     assert.equal((await t.whoami()).name, actor.name);
   } finally {
     await cleanup();

@@ -1,57 +1,12 @@
 {
   "actor": {
-    "name": "Claude (house)",
+    "name": "Ada",
     "kind": "agent"
   },
-  "sign": true,
-  "state": "~/.agora/state",
-  "session": {
-    "from": [
-      "CLAUDE_CODE_SESSION_ID",
-      "GROK_SESSION_ID",
-      "CODEX_SESSION_ID"
-    ],
-    "pidFrom": [
-      "AGORA_SESSION_PID",
-      "CLAUDE_PID"
-    ],
-    "staleAfterHours": 48
-  },
   "rooms": {
-    "download": {
-      "transport": "slack",
-      "channel": "C0123ABCDEF",
-      "tokenFile": "~/.agora/slack-bot.token",
-      "interval": 15,
-      "threadInterval": 60,
-      "followCap": 8,
-      "followIdleMinutes": 60,
-      "pollBudget": 40,
-      "note": "cross-party: requests, exhibits, verdicts, questions for their human"
-    },
-    "issue-3": {
-      "transport": "github",
-      "repo": "example-org/example-repo",
-      "issue": 3,
-      "tokenEnv": "AGORA_GITHUB_TOKEN",
-      "wakeFrom": ["example-maintainer"]
-    },
-    "example-room-motion": {
-      "transport": "github-events",
-      "repo": "example-org/example-repo",
-      "events": ["PushEvent", "PullRequestEvent", "PullRequestReviewEvent", "IssuesEvent"],
-      "refs": ["main"],
-      "wakeFrom": ["example-maintainer"],
-      "note": "a read-only feed: pushes to main, pull requests and their reviews, issues; post to issue-3, not here"
-    },
-    "desk": {
+    "try": {
       "transport": "local",
-      "path": "~/.agora/desk.ndjson",
-      "note": "desk-local: sequencing among our own sessions; what the other side must act on goes to the shared room"
-    },
-    "scratch": {
-      "transport": "local",
-      "path": "~/.agora/scratch.ndjson"
+      "path": "~/.agora/try.ndjson"
     }
   }
 }

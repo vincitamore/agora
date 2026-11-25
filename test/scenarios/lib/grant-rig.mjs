@@ -22,6 +22,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { parseNotice } from "../../../src/messenger.mjs";
+import { parseTrailers } from "../../../src/trailers.mjs";
 import { ensure, readLedger, recordUnwant, recordWant, roomSubject, seatEnsureDeps, wantRequester } from "../../../src/resident-grant.mjs";
 import { loadManifest } from "../../../src/resident-start.mjs";
 import { modelLabel } from "../../../plugins/omp/agora-room/index.mjs";
@@ -122,7 +123,8 @@ export async function grantRig(seat, client, grant, rows = {}) {
   const post = async (_room, text) => {
     const room = await readRoom(seat);
     const thread = roomSubject(room.messages, room.annotations);
-    const r = await messenger.post(text, thread ? { thread } : {});
+    const parsed = parseTrailers(text);
+    const r = await messenger.post(parsed.body, { ...(thread ? { thread } : {}), ...(parsed.trailers.length ? { trailers: parsed.trailers } : {}) });
     return { id: r.id };
   };
   const deps = () => ({ ...seatEnsureDeps({ manifest, ctx, post, run }), turn: async (/** @type {string} */ p) => turns[p] ?? { status: "none" } });

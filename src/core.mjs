@@ -170,6 +170,36 @@ export function configPath(explicit) {
 }
 
 /**
+ * Per-transport required field check for a room row. Used by `agora config` at write time and by
+ * `agora doctor` (including `--offline`) so a typo'd or incomplete room row is caught before first
+ * use, while `validateConfig` stays permissive on existing files so one broken room never blocks
+ * unrelated rooms in the same config.
+ * @param {string} alias @param {Record<string, unknown>} r
+ * @returns {string | undefined}
+ */
+export function roomConfigProblem(alias, r) {
+  if (r.transport === "local" && (typeof r.path !== "string" || !r.path.trim()))
+    return `room "${alias}": local room needs a non-empty path`;
+  if (r.transport === "slack" && (typeof r.channel !== "string" || !/^[CGD][A-Z0-9]+$/.test(r.channel)))
+    return `room "${alias}": slack room needs a channel id (such as C0123ABCDEF, not a #name)`;
+  if (r.transport === "github") {
+    if (typeof r.repo !== "string" || !/^[^/\s]+\/[^/\s]+$/.test(r.repo))
+      return `room "${alias}": github room needs repo ("owner/name")`;
+    if (!Number.isInteger(r.issue) || Number(r.issue) < 1)
+      return `room "${alias}": github room needs a positive integer issue number`;
+  }
+  if (r.transport === "github-events") {
+    const hasTarget = (typeof r.repo === "string" && r.repo.trim()) || (typeof r.org === "string" && r.org.trim()) || (typeof r.user === "string" && r.user.trim());
+    if (!hasTarget) return `room "${alias}": github-events room needs repo, org, or user`;
+  }
+  if (r.transport === "native" && !/^[a-f0-9]{32}$/.test(String(r.roomId ?? "")))
+    return `room "${alias}": native room needs a 32-hex roomId`;
+  if (r.transport === "native-remote" && (typeof r.descriptor !== "string" || !r.descriptor.trim()))
+    return `room "${alias}": native-remote room needs a descriptor path`;
+  return undefined;
+}
+
+/**
  * The config carries references to secrets (an env var name, a file path), never a secret.
  * @param {unknown} cfg @param {string} where
  * @returns {asserts cfg is Config}
@@ -209,7 +239,7 @@ export async function loadConfig(explicit) {
   try {
     raw = await readFile(p, "utf8");
   } catch {
-    throw new AgoraError(`no config at ${p} (set AGORA_CONFIG, or write ./agora.json or ~/.agora/config.json)`);
+    throw new AgoraError(`no config at ${p} (run \`agora init\` to create a starter local config, set AGORA_CONFIG, or write ./agora.json or ~/.agora/config.json)`);
   }
   /** @type {unknown} */
   let cfg;
@@ -287,6 +317,15 @@ const SECRET_PATTERNS = [
   /gh[pousr]_[A-Za-z0-9]{16,}/g,
   /github_pat_[A-Za-z0-9_]+/g,
 ];
+
+/** True when `s` carries a recognized credential shape (xoxb-/ghp_/github_pat_). @param {string} s */
+export function hasSecretShape(s) {
+  for (const re of SECRET_PATTERNS) {
+    re.lastIndex = 0;
+    if (re.test(s)) return true;
+  }
+  return false;
+}
 
 /** Strip anything that looks like a credential before it reaches a log or a room. @param {string} s */
 export function redact(s) {
@@ -446,7 +485,7 @@ export function roomNumber(room, field, fallback) {
  */
 export function roomInterval(room, override) {
   if (override !== undefined) return override;
-  return roomNumber(room, "interval", room.transport === "github" ? 300 : room.transport === "github-events" ? 60 : 15);
+  return roomNumber(room, "interval", room.transport === "github" ? 300 : room.transport === "github-events" ? 60 : room.transport === "local" ? 2 : 15);
 }
 
 /** Seconds between reads of one followed thread. @param {RoomConfig} room @param {number} [override] */

@@ -162,7 +162,7 @@ function failure(verb, r) {
   return `agora ${verb} failed (${String(r.code)})${last ? `: ${cut(redact(last), 200)}` : ""}`;
 }
 
-// ---- the seat's human (the record `agora tui` keeps) ----
+// ---- the seat's human (the record the terminal UI keeps) ----
 
 /** @param {string} stateRoot @returns {{ name: string, kind: "human", needsName: boolean }} */
 export function readHuman(stateRoot) {
@@ -942,7 +942,7 @@ export async function postFromPane({ pc, room, text, thread = null, replyTo = nu
   const addressees = typedTo.length ? [] : to.filter(Boolean);
   const answers = replyTo && !typed.trailers.some((t) => t.key === "re") ? replyTo : null;
 
-  if (pc.post.command) return cliPost({ argv: pc.post.command, env: childEnv(env, pc.post.env), room, body, thread, replyTo: answers, addressees, typedTo, run });
+  if (pc.post.command) return cliPost({ argv: pc.post.command, env: childEnv(env, pc.post.env), room, body: typed.trailers.length ? typed.body : body, typedTrailers: typed.trailers, thread, replyTo: answers, addressees, typedTo, run });
 
   const rc = cfg.rooms[room];
   const human = readHuman(stateRoot);
@@ -975,14 +975,15 @@ export async function postFromPane({ pc, room, text, thread = null, replyTo = nu
   } catch (e) {
     return { ok: false, error: said(e) };
   }
-  return cliPost({ argv: [...configCli(pc)], env: childEnv(env), room, body, thread, replyTo: answers, addressees, typedTo, run, as: human.name });
+  return cliPost({ argv: [...configCli(pc)], env: childEnv(env), room, body: typed.trailers.length ? typed.body : body, typedTrailers: typed.trailers, thread, replyTo: answers, addressees, typedTo, run, as: human.name });
 }
 
-/** @param {{ argv: string[], env: Record<string, string>, room: string, body: string, thread: string | null, replyTo: string | null, addressees: string[], typedTo: string[], run: Run, as?: string }} o */
-async function cliPost({ argv, env, room, body, thread, replyTo, addressees, typedTo, run, as }) {
+/** @param {{ argv: string[], env: Record<string, string>, room: string, body: string, typedTrailers?: { key: string, value: string }[], thread: string | null, replyTo: string | null, addressees: string[], typedTo: string[], run: Run, as?: string }} o */
+async function cliPost({ argv, env, room, body, typedTrailers = [], thread, replyTo, addressees, typedTo, run, as }) {
   const built = postArgs({ room, text: body, thread, replyTo, to: addressees });
   if (!built.ok) return { ok: false, error: built.error };
-  const tail = as ? [...built.args.slice(0, -2), "--as", as, ...built.args.slice(-2)] : built.args;
+  const trailerFlags = typedTrailers.flatMap((t) => ["--trailer", `${t.key}: ${t.value}`]);
+  const tail = [...built.args.slice(0, -2), ...trailerFlags, ...(as ? ["--as", as] : []), ...built.args.slice(-2)];
   const r = await run([...argv, ...tail], { env });
   if (r.code !== 0) return { ok: false, error: failure("post", r) };
   const lines = jsonLines(r.stdout);

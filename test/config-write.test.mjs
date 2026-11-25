@@ -5,7 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, realpath, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { tmp } from "./helpers.mjs";
@@ -35,7 +35,7 @@ const REALISTIC = `{
     "actor": { "name": "Grace", "kind": "human" },
     "sign": true,
     "rooms": {
-        "home": {"transport":"local","path":"home.jsonl"},
+        "home": {"transport":"local","path":"~/home.jsonl"},
         "desk": {"transport":"slack","channel":"C0123ABC","tokenFile":"~/.agora/slack.token"}
     }
 }
@@ -46,7 +46,8 @@ async function seat(dir, text = REALISTIC) {
   const file = path.join(dir, "agora.json");
   const state = path.join(dir, "state");
   await writeFile(file, text);
-  return { file, state, env: { AGORA_CONFIG: file, AGORA_STATE: state } };
+  const canon = await realpath(file);
+  return { file: canon, state, env: { AGORA_CONFIG: canon, AGORA_STATE: state } };
 }
 
 /** @param {string} dir */
@@ -93,16 +94,16 @@ test("config room add writes the row: the file named, a unified diff, a backup, 
   const { dir, cleanup } = await tmp();
   try {
     const s = await seat(dir);
-    const r = await agora(["config", "room", "add", "notes", '{"transport":"local","path":"notes.jsonl"}'], s.env);
+    const r = await agora(["config", "room", "add", "notes", '{"transport":"local","path":"~/notes.jsonl"}'], s.env);
     assert.equal(r.code, 0, r.stderr);
     const lines = r.stdout.split(/\r?\n/);
     assert.equal(lines[0], `config ${s.file}`);
     assert.ok(lines.includes(`--- ${s.file} (before)`) && lines.includes(`+++ ${s.file} (after)`), r.stdout);
     assert.ok(lines.some((l) => /^@@ -\d+,\d+ \+\d+,\d+ @@$/.test(l)), r.stdout);
-    assert.ok(lines.includes(`+        "notes": {"transport":"local","path":"notes.jsonl"}`), r.stdout);
+    assert.ok(lines.includes(`+        "notes": {"transport":"local","path":"~/notes.jsonl"}`), r.stdout);
     const text = await readFile(s.file, "utf8");
     // the new row takes its siblings' one-line shape; every other byte is the operator's
-    assert.equal(text, REALISTIC.replace(`"tokenFile":"~/.agora/slack.token"}`, `"tokenFile":"~/.agora/slack.token"},\n        "notes": {"transport":"local","path":"notes.jsonl"}`));
+    assert.equal(text, REALISTIC.replace(`"tokenFile":"~/.agora/slack.token"}`, `"tokenFile":"~/.agora/slack.token"},\n        "notes": {"transport":"local","path":"~/notes.jsonl"}`));
     const kept = await backups(dir);
     assert.equal(kept.length, 1);
     assert.match(String(r.stdout), new RegExp(`the file before is kept as .*${kept[0].replace(/[.]/g, "\\.")}`));
@@ -119,24 +120,24 @@ test("an identical row is a no-op that says so; a conflicting row is refused wit
   try {
     const s = await seat(dir);
     // the same row with its keys in another order is the same row
-    const same = await agora(["config", "room", "add", "home", '{"path":"home.jsonl","transport":"local"}'], s.env);
+    const same = await agora(["config", "room", "add", "home", '{"path":"~/home.jsonl","transport":"local"}'], s.env);
     assert.equal(same.code, 0, same.stderr);
     assert.match(same.stdout, /rooms\.home is already this row: nothing written/);
     assert.equal(await readFile(s.file, "utf8"), REALISTIC);
     assert.deepEqual(await backups(dir), []);
 
-    const conflict = await agora(["config", "room", "add", "home", '{"transport":"local","path":"other.jsonl"}'], s.env);
+    const conflict = await agora(["config", "room", "add", "home", '{"transport":"local","path":"~/other.jsonl"}'], s.env);
     assert.equal(conflict.code, 1);
     assert.match(conflict.stderr, /room-conflict: rooms\.home is already a local room with another row .*--replace/);
     assert.equal(await readFile(s.file, "utf8"), REALISTIC);
 
-    const replaced = await agora(["config", "room", "add", "home", '{"transport":"local","path":"other.jsonl"}', "--replace", "--json"], s.env);
+    const replaced = await agora(["config", "room", "add", "home", '{"transport":"local","path":"~/other.jsonl"}', "--replace", "--json"], s.env);
     assert.equal(replaced.code, 0, replaced.stderr);
     const out = JSON.parse(replaced.stdout);
     assert.equal(out.written, true);
-    assert.deepEqual(out.before.rooms.home, { transport: "local", path: "home.jsonl" });
-    assert.deepEqual(out.after.rooms.home, { transport: "local", path: "other.jsonl" });
-    assert.equal(await readFile(s.file, "utf8"), REALISTIC.replace('"path":"home.jsonl"', '"path":"other.jsonl"'));
+    assert.deepEqual(out.before.rooms.home, { transport: "local", path: "~/home.jsonl" });
+    assert.deepEqual(out.after.rooms.home, { transport: "local", path: "~/other.jsonl" });
+    assert.equal(await readFile(s.file, "utf8"), REALISTIC.replace('"path":"~/home.jsonl"', '"path":"~/other.jsonl"'));
   } finally { await cleanup(); }
 });
 
@@ -274,9 +275,10 @@ test("a config that does not exist yet is created by one set of actor and rooms,
     assert.equal(half.code, 1, "an actor alone is not a config");
     assert.match(half.stderr, /rooms must name at least one room/);
     assert.equal(existsSync(file), false);
-    const r = await agora(["config", "set", "actor", '{"name":"Lin","kind":"agent"}', "rooms", '{"home":{"transport":"local","path":"h.jsonl"}}'], { AGORA_CONFIG: file });
+    const r = await agora(["config", "set", "actor", '{"name":"Lin","kind":"agent"}', "rooms", '{"home":{"transport":"local","path":"~/h.jsonl"}}'], { AGORA_CONFIG: file });
     assert.equal(r.code, 0, r.stderr);
-    assert.deepEqual(JSON.parse(await readFile(file, "utf8")), { actor: { name: "Lin", kind: "agent" }, rooms: { home: { transport: "local", path: "h.jsonl" } } });
+    assert.doesNotMatch(r.stdout, /their next posts sign as the new name/, "first-time creation does not print the existing-sessions actor warning");
+    assert.deepEqual(JSON.parse(await readFile(file, "utf8")), { actor: { name: "Lin", kind: "agent" }, rooms: { home: { transport: "local", path: "~/h.jsonl" } } });
     if (process.platform !== "win32") assert.equal((await stat(file)).mode & 0o777, 0o600);
 
     // the reader's resolution: ./agora.json in the working directory when AGORA_CONFIG is unset
@@ -390,4 +392,50 @@ test("CONFIG_KEYS is the set of top-level keys agora reads, and no more", () => 
     ["actor", "object"], ["rooms", "object"], ["state", "string"], ["sign", "boolean"],
     ["session", "object"], ["residents", "object"], ["residentManifest", "string"],
   ]);
+});
+
+test("relative local path resolves to absolute on write; per-transport validation, --from-file (BOM), and quote-stripped hints work", async () => {
+  const { dir, cleanup } = await tmp();
+  try {
+    const s = await seat(dir);
+    const work = path.join(dir, "cwd");
+    await mkdir(work, { recursive: true });
+    const workCanon = await realpath(work);
+
+    // relative local path is resolved against cwd at write time with a note
+    let r = await agora(["config", "room", "add", "rel", '{"transport":"local","path":"rel.jsonl"}'], s.env, { cwd: workCanon });
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /resolved relative local room path "rel\.jsonl"/);
+    assert.equal(JSON.parse(await readFile(s.file, "utf8")).rooms.rel.path, path.join(workCanon, "rel.jsonl"));
+
+    // per-transport required keys refused at write time
+    for (const [row, rx] of /** @type {[string, RegExp][]} */ ([
+      ['{"transport":"local","pth":"x.jsonl"}', /local room row needs path/],
+      ['{"transport":"slack","tokenFile":"x.token"}', /slack room row needs channel/],
+      ['{"transport":"slack","channel":"general","tokenFile":"x.token"}', /slack room row needs channel/],
+      ['{"transport":"github","repo":"o/r"}', /github room row needs a positive integer issue/],
+    ])) {
+      r = await agora(["config", "room", "add", "bad", row], s.env);
+      assert.equal(r.code, 2, `${row}: ${r.stderr}`);
+      assert.match(r.stderr, rx);
+    }
+
+    // absent tokenFile emits a warning note
+    r = await agora(["config", "room", "add", "slk", `{"transport":"slack","channel":"C01234567","tokenFile":${JSON.stringify(path.join(dir, "nope.token"))}}`], s.env);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /does not exist yet/);
+
+    // quote-stripped PowerShell 5.1 / cmd.exe input gets a specific working hint
+    r = await agora(["config", "room", "add", "ps", "{transport:local,path:room.jsonl}"], s.env);
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /stripped double quotes/);
+    assert.match(r.stderr, /--from-file/);
+
+    // --from-file reads JSON (including UTF-8 BOM from PowerShell Set-Content)
+    const rowFile = path.join(dir, "row.json");
+    await writeFile(rowFile, `\uFEFF{"transport":"local","path":"~/bom.jsonl"}\n`);
+    r = await agora(["config", "room", "add", "bom", "--from-file", rowFile], s.env);
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(JSON.parse(await readFile(s.file, "utf8")).rooms.bom.path, "~/bom.jsonl");
+  } finally { await cleanup(); }
 });

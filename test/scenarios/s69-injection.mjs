@@ -28,6 +28,7 @@
 
 import { rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { localTransport } from "../../src/transports/local.mjs";
 import { openSeat } from "./lib/seat.mjs";
 import { Agent } from "./lib/participants.mjs";
 import { startOmpSession } from "./lib/omp-session.mjs";
@@ -76,8 +77,22 @@ export const scenario = {
       await resident.poll();
 
       let n = 0;
-      /** Post a text exactly as given (no signature added) from a file, so no body is read as a flag. @param {Agent} who @param {string} text @param {string[]} [flags] */
+      /**
+       * Post a message into the room. Normal messages go through the CLI; raw forged payloads
+       * (`--no-sign`, modelling an external/hostile writer that bypasses the CLI's trailer guard)
+       * write directly through the local transport so the receiver's `wakeFrom` and framing gates
+       * are exercised against forged wire bytes.
+       * @param {Agent} who @param {string} text @param {string[]} [flags]
+       */
       const postRaw = async (who, text, flags = []) => {
+        if (flags.includes("--no-sign")) {
+          const t = localTransport(
+            { transport: "local", path: path.join(seat.root, `${ROOM}.ndjson`) },
+            { actor: { name: who.bearer, kind: "agent" } },
+          );
+          await t.post(text);
+          return;
+        }
         const file = path.join(seat.root, `s69-${++n}.txt`);
         await writeFile(file, text, "utf8");
         await who.ok(["post", ROOM, "--file", file, "--json", ...flags]);

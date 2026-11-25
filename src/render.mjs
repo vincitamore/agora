@@ -52,14 +52,15 @@ export function trailerLine(m) {
   return parts.length ? `  → ${parts.join(" · ")}\n` : "";
 }
 
-/** The header the CLI prints above a message: who, as whom, where, at which cursor. @param {ReturnType<typeof decorate>} m */
+/** The header the CLI prints above a message: who, as whom, where, id, and cursor. @param {ReturnType<typeof decorate>} m */
 export function headerLine(m) {
   const named = m.signedAs && m.signedAs !== m.author.name ? `${m.author.name} as ${m.signedAs}` : m.author.name;
   // the app client a native message was submitted through: what its connection declared, shown as
   // attribution beside the name and never in place of it
   const who = m.via ? `${named} · via ${m.via}` : named;
   const where = m.thread ? `  thread ${m.thread}` : "";
-  return `[${m.ts}] ${who} (${m.author.kind})${where}  cursor ${m.cursor}`;
+  const idPart = m.id && m.id !== m.cursor ? `  id ${m.id}` : "";
+  return `[${m.ts}] ${who} (${m.author.kind})${where}  cursor ${m.cursor}${idPart}`;
 }
 
 /** The attachment block under a body, or an empty string. @param {ReturnType<typeof decorate>} m */
